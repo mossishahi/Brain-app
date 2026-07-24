@@ -595,3 +595,19 @@ export const departmentsCatalogSchema = z
   .strict();
 
 export type DepartmentsCatalog = z.infer<typeof departmentsCatalogSchema>;
+
+/**
+ * Per-epistemic-act reviewing rubric: what a good vs. bad chain-of-thought
+ * step looks like for that act. Bound into the commentor/judge skills as
+ * `actGuidance` via a dynamic reference (`catalog.actGuidance.guidance[input.type]`)
+ * so the same two review skills adapt their sense of "good step" across all
+ * acts without forking into per-act skill files.
+ */
+export const actGuidanceCatalogSchema = z
+  .object({
+    version: semver,
+    guidance: z.record(z.string().min(1), z.string().min(1)),
+  })
+  .strict();
+
+export type ActGuidanceCatalog = z.infer<typeof actGuidanceCatalogSchema>;

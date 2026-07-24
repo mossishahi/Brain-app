@@ -27,8 +27,8 @@
   --text-dim: #9a9a9a;
   --accent: #6ea0ff;
   --ok: #2e9e6b;
-  /* Completed pipeline strokes: deliberately darker than the --ok check mark. */
-  --ok-dark: #1e7a4c;
+  /* Completed pipeline strokes: deliberately much darker than the --ok check mark. */
+  --ok-dark: #14532d;
   --warn: #d99a2b;
   --bad: #d5484d;
 }
