@@ -140,6 +140,19 @@ function registryHost(url: string | undefined): string {
   }
 }
 
+function registryPageUrl(url: string | undefined): string | undefined {
+  if (!url) return undefined;
+  try {
+    const parsed = new URL(url);
+    parsed.pathname = parsed.pathname.replace(/\/mcp\/?$/, "/");
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return undefined;
+  }
+}
+
 function modelDisplay(settings: ServerSettings | null): {
   model: string;
   profile?: string;
@@ -268,6 +281,7 @@ export function SubmissionBox({
   );
   const [registryConnected, setRegistryConnected] = useState(false);
   const [registryTarget, setRegistryTarget] = useState("Brain Registry");
+  const [registryPage, setRegistryPage] = useState<string | undefined>();
   const ref = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -307,16 +321,16 @@ export function SubmissionBox({
       try {
         const health = await getHealth();
         if (!live) return;
+        const endpoint =
+          health.contentRegistry.url ?? settings?.contentRegistry.url;
         setRegistryConnected(health.contentRegistry.running);
-        setRegistryTarget(
-          registryHost(
-            health.contentRegistry.url ?? settings?.contentRegistry.url,
-          ),
-        );
+        setRegistryTarget(registryHost(endpoint));
+        setRegistryPage(registryPageUrl(endpoint));
       } catch {
         if (!live) return;
         setRegistryConnected(false);
         setRegistryTarget(registryHost(settings?.contentRegistry.url));
+        setRegistryPage(registryPageUrl(settings?.contentRegistry.url));
       }
     };
     void refresh();
@@ -616,10 +630,13 @@ export function SubmissionBox({
                 )}
                 <DownOutlined aria-hidden />
               </button>
-              <span
+              <a
                 className={`registry-indicator ${
                   registryConnected ? "connected" : "disconnected"
                 }`}
+                href={registryPage}
+                target="_blank"
+                rel="noreferrer"
                 data-tooltip={
                   registryConnected
                     ? `connected to ${registryTarget}`
@@ -630,11 +647,12 @@ export function SubmissionBox({
                     ? `Connected to Brain Registry at ${registryTarget}`
                     : `Could not connect to Brain Registry at ${registryTarget}`
                 }
-                role="status"
-                tabIndex={0}
+                onClick={(event) => {
+                  if (!registryPage) event.preventDefault();
+                }}
               >
                 <LuBrain aria-hidden />
-              </span>
+              </a>
               <button
                 type="button"
                 className="send-btn"
