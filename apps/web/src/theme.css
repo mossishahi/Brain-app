@@ -1129,7 +1129,6 @@ button.server-file-name {
   width: 20px;
   height: 20px;
   margin-left: -5px;
-  cursor: help;
   transition: color 140ms ease, transform 140ms ease;
 }
 
