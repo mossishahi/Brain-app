@@ -27,6 +27,8 @@
   --text-dim: #9a9a9a;
   --accent: #6ea0ff;
   --ok: #2e9e6b;
+  /* Completed pipeline strokes: deliberately darker than the --ok check mark. */
+  --ok-dark: #1e7a4c;
   --warn: #d99a2b;
   --bad: #d5484d;
 }
@@ -1624,8 +1626,12 @@ button.server-file-name {
   background: color-mix(in srgb, #86efac 60%, transparent);
 }
 
+:root[data-theme="dark"] .node-completed > .node-rect {
+  stroke: var(--ok-dark);
+}
+
 :root[data-theme="dark"] .connector-done {
-  stroke: #1e7a4c;
+  stroke: var(--ok-dark);
   stroke-width: 1.4;
 }
 

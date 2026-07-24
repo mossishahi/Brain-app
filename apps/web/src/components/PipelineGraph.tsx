@@ -42,6 +42,8 @@ function statusClass(status: StageStatus): string {
       return "node-suspended";
     case "failed":
       return "node-failed";
+    case "completed":
+      return "node-completed";
     default:
       return "";
   }
