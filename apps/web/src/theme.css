@@ -1125,23 +1125,57 @@ button.server-file-name {
   align-items: center;
   justify-content: center;
   flex: none;
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  transition: background-color 140ms ease, color 140ms ease;
+  position: relative;
+  width: 20px;
+  height: 20px;
+  margin-left: -5px;
+  cursor: help;
+  transition: color 140ms ease, transform 140ms ease;
 }
 
-.composer-model .registry-indicator.connected {
+.registry-indicator.connected {
   color: #72c7ff;
-  background: color-mix(in srgb, #72c7ff 12%, transparent);
 }
 
-.composer-model .registry-indicator.disconnected {
+.registry-indicator.disconnected {
   color: #ff6b6b;
-  background: color-mix(in srgb, #ff6b6b 12%, transparent);
 }
 
-.composer-model .registry-indicator svg {
+.registry-indicator:hover,
+.registry-indicator:focus-visible {
+  transform: scale(1.08);
+  outline: none;
+}
+
+.registry-indicator::after {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  z-index: 30;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--text) 12%, transparent);
+  color: var(--text);
+  content: attr(data-tooltip);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.3;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(-50%) translateY(3px);
+  transition: opacity 120ms ease, transform 120ms ease;
+  white-space: nowrap;
+}
+
+.registry-indicator:hover::after,
+.registry-indicator:focus-visible::after {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+.registry-indicator svg {
   color: currentColor;
   width: 14px;
   height: 14px;

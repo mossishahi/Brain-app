@@ -614,25 +614,27 @@ export function SubmissionBox({
                     {display.profile}
                   </span>
                 )}
-                <span
-                  className={`registry-indicator ${
-                    registryConnected ? "connected" : "disconnected"
-                  }`}
-                  title={
-                    registryConnected
-                      ? `connected to ${registryTarget}`
-                      : `could not connect to ${registryTarget}`
-                  }
-                  aria-label={
-                    registryConnected
-                      ? `Connected to Brain Registry at ${registryTarget}`
-                      : `Could not connect to Brain Registry at ${registryTarget}`
-                  }
-                >
-                  <LuBrain aria-hidden />
-                </span>
                 <DownOutlined aria-hidden />
               </button>
+              <span
+                className={`registry-indicator ${
+                  registryConnected ? "connected" : "disconnected"
+                }`}
+                data-tooltip={
+                  registryConnected
+                    ? `connected to ${registryTarget}`
+                    : `could not connect to ${registryTarget}`
+                }
+                aria-label={
+                  registryConnected
+                    ? `Connected to Brain Registry at ${registryTarget}`
+                    : `Could not connect to Brain Registry at ${registryTarget}`
+                }
+                role="status"
+                tabIndex={0}
+              >
+                <LuBrain aria-hidden />
+              </span>
               <button
                 type="button"
                 className="send-btn"
