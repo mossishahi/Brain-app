@@ -15,6 +15,8 @@ export interface OrchestrationCommandOptions {
   readonly sessionRoot: string;
   readonly eventsFile: string;
   readonly contentDir: string;
+  readonly contentRegistryUrl?: string;
+  readonly contentRegistryVersion?: string;
   /** Manifest of the job's ingested attachments (run mode only). */
   readonly attachmentsManifest?: string;
   readonly settings: ServerSettings;
@@ -65,6 +67,18 @@ export function buildOrchestrationCommand(
     "--content-dir",
     shellQuote(options.contentDir),
   );
+  if (options.contentRegistryUrl) {
+    args.push(
+      "--content-registry-url",
+      shellQuote(options.contentRegistryUrl),
+    );
+  }
+  if (options.contentRegistryVersion) {
+    args.push(
+      "--content-registry-version",
+      shellQuote(options.contentRegistryVersion),
+    );
+  }
   if (options.settings.llm.provider === "offline") args.push("--offline");
   if (options.settings.panelConfirmation === "auto") args.push("--auto-approve");
   if (options.gate) {

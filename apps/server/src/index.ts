@@ -25,16 +25,6 @@ export {
   type ServerFileBrowserOptions,
 } from "./server-files.js";
 export {
-  fetchAndMaterializeContentRegistryBundle,
-  fetchContentRegistryBundle,
-  fetchContentRegistryIndex,
-  type FetchedContentRegistryBundle,
-  type FetchContentRegistryBundleOptions,
-  type MaterializedContentRegistryBundle,
-  type ContentRegistryIndex,
-  type ContentRegistryManifest,
-} from "./content-registry-client.js";
-export {
   DEFAULT_SLURM_TEMPLATE,
   SettingsStore,
   defaultServerSettings,

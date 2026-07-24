@@ -14,6 +14,7 @@ import {
   StaticBrainstormRouteResolver,
   StaticCapabilityToolResolver,
   type ResolvedBrainstormRoute,
+  type SkillResolver,
 } from "@brainstorm-agentic/brainstorm-runtime";
 import {
   InMemoryToolRegistry,
@@ -71,6 +72,7 @@ export interface RuntimeWiringOptions {
   /** Ingested attachment store roots; scoped file tools are exposed when set. */
   readonly attachmentRoots?: readonly string[];
   readonly bundle: ContentBundle;
+  readonly skillResolver?: SkillResolver;
   readonly onEvent?: RunEventListener;
 }
 
@@ -195,6 +197,7 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
   return new BrainstormRuntime({
     agentExecutor: buildAgentExecutor(options.providerConfig, attachmentRoots),
     bundle: options.bundle,
+    skillResolver: options.skillResolver,
     routeResolver: contentRouteResolver(options.providerConfig),
     // Legacy capability tool resolver (kept for backward compatibility)
     capabilityTools: new StaticCapabilityToolResolver({

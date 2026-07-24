@@ -9,8 +9,7 @@ import {
 
 import type { ContentRegistryRuntimeStatus } from "./model.js";
 import { startBrainServer } from "./server.js";
-import { SettingsStore } from "./settings.js";
-import { fetchContentRegistryBundle } from "./content-registry-client.js";
+import { ContentRegistryClient } from "@brainstorm-agentic/registry-client";
 
 interface ParsedArgs {
   readonly command: string;
@@ -20,6 +19,15 @@ interface ParsedArgs {
 interface ContentRegistryConnection {
   readonly url: string;
   readonly child?: ChildProcess;
+}
+
+async function inspectContentRegistry(url: string) {
+  const client = new ContentRegistryClient(url);
+  try {
+    return await client.resolvePin("brainstorm");
+  } finally {
+    await client.close().catch(() => undefined);
+  }
 }
 
 function parseArgs(argv: readonly string[]): ParsedArgs {
@@ -125,11 +133,11 @@ async function spawnContentRegistry(
   child.once("exit", () => {
     status.running = false;
   });
-  const fetched = await fetchContentRegistryBundle({ url, bundle: "brainstorm" });
-  status.skills = fetched.manifest.files.filter((file) =>
+  const pin = await inspectContentRegistry(url);
+  status.skills = pin.manifest.files.filter((file) =>
     file.path.startsWith("skills/") && file.path.endsWith(".md")
   ).length;
-  status.workflows = fetched.manifest.files.filter((file) =>
+  status.workflows = pin.manifest.files.filter((file) =>
     file.path.startsWith("workflows/") && file.path.endsWith(".workflow.json")
   ).length;
   return { child, url };
@@ -139,13 +147,13 @@ async function connectRemoteContentRegistry(
   url: string,
   status: ContentRegistryRuntimeStatus,
 ): Promise<ContentRegistryConnection> {
-  const fetched = await fetchContentRegistryBundle({ url, bundle: "brainstorm" });
+  const pin = await inspectContentRegistry(url);
   status.running = true;
   status.url = url;
-  status.skills = fetched.manifest.files.filter((file) =>
+  status.skills = pin.manifest.files.filter((file) =>
     file.path.startsWith("skills/") && file.path.endsWith(".md")
   ).length;
-  status.workflows = fetched.manifest.files.filter((file) =>
+  status.workflows = pin.manifest.files.filter((file) =>
     file.path.startsWith("workflows/") && file.path.endsWith(".workflow.json")
   ).length;
   return { url };
@@ -201,7 +209,6 @@ async function main(): Promise<void> {
     ?.split(delimiter)
     .map((entry) => expandHome(entry.trim()))
     .filter((entry) => entry.length > 0);
-  new SettingsStore(workspace);
   const contentRegistryStatus: ContentRegistryRuntimeStatus = { running: false };
   const remoteContentRegistry =
     stringFlag(args, "content-registry-url") ??

@@ -1,5 +1,6 @@
 import {
   artifactSchemas,
+  validateResolvedRole,
   type ActivityNode as ContentActivityNode,
   type AgentNode as ContentAgentNode,
   type BindValue,
@@ -8,6 +9,7 @@ import {
   type ForEachNode as ContentForEachNode,
   type HumanGateNode as ContentHumanGateNode,
   type RepeatUntilNode as ContentRepeatUntilNode,
+  type Skill,
   type WorkflowDefinition as ContentWorkflowDefinition,
   type WorkflowNode as ContentWorkflowNode,
 } from "@brainstorm-agentic/content";
@@ -93,6 +95,45 @@ export interface CompileContentWorkflowOptions {
   readonly hostTools?: readonly HostToolManifest[];
   /** User-enabled host tool IDs for the capability broker. */
   readonly enabledHostToolIds?: ReadonlySet<string>;
+  /** Resolves role/technique files on first execution; defaults to bundle.skills. */
+  readonly skillResolver?: SkillResolver;
+}
+
+export interface ResolvedRole {
+  readonly role: Skill;
+  readonly techniques: readonly Skill[];
+}
+
+export interface SkillResolver {
+  hasRole(name: string): boolean;
+  resolveRole(name: string): Promise<ResolvedRole>;
+}
+
+class BundleSkillResolver implements SkillResolver {
+  constructor(private readonly bundle: ContentBundle) {}
+
+  hasRole(name: string): boolean {
+    return this.bundle.skills[name]?.meta.kind === "role";
+  }
+
+  async resolveRole(name: string): Promise<ResolvedRole> {
+    const role = this.bundle.skills[name];
+    if (!role || role.meta.kind !== "role") {
+      throw new WorkflowConfigError(`content bundle has no role "${name}"`);
+    }
+    return {
+      role,
+      techniques: role.meta.techniques.map((techniqueName) => {
+        const technique = this.bundle.skills[techniqueName];
+        if (!technique || technique.meta.kind !== "technique") {
+          throw new WorkflowConfigError(
+            `role "${name}" references missing technique "${techniqueName}"`,
+          );
+        }
+        return technique;
+      }),
+    };
+  }
 }
 
 export interface CompiledContentWorkflow {
@@ -305,6 +346,7 @@ class ContentCompiler {
   private readonly providerOffers: readonly ProviderNativeOffer[];
   private readonly hostTools: readonly HostToolManifest[];
   private readonly enabledHostToolIds: ReadonlySet<string>;
+  private readonly skillResolver: SkillResolver;
 
   constructor(
     private readonly bundle: ContentBundle,
@@ -317,6 +359,8 @@ class ContentCompiler {
     this.providerOffers = options.providerOffers ?? [];
     this.hostTools = options.hostTools ?? [];
     this.enabledHostToolIds = options.enabledHostToolIds ?? new Set();
+    this.skillResolver =
+      options.skillResolver ?? new BundleSkillResolver(this.bundle);
     this.gateMode = options.humanGateMode ?? "manual";
     this.functions
       .registerSelector(STATE_SELECTOR, (scope) => scope.get(BRAINSTORM_STATE))
@@ -384,14 +428,46 @@ class ContentCompiler {
     const builderName = this.functionName(node.id, "task");
     const applyName = this.functionName(node.id, "apply");
     const resultKey = this.temp(node.id, "result");
-    const role = this.bundle.skills[node.skill];
     const routeDefinition = this.bundle.routes.routes[node.route];
-    if (!role || !routeDefinition) {
+    if (!this.skillResolver.hasRole(node.skill) || !routeDefinition) {
       throw new WorkflowConfigError(`agent node "${node.id}" has unresolved skill or route`);
     }
     const jsonSchema = this.jsonSchema(node.output.schema);
 
     this.functions.registerTaskBuilder(builderName, async (scope) => {
+      const { role, techniques } =
+        await this.skillResolver.resolveRole(node.skill);
+      const skillIssues = validateResolvedRole(
+        role,
+        techniques,
+        this.bundle.capabilities,
+      );
+      if (skillIssues.length > 0) {
+        throw new WorkflowConfigError(
+          `role "${node.skill}" failed lazy validation: ` +
+            skillIssues.map((issue) => `[${issue.code}] ${issue.message}`).join("; "),
+        );
+      }
+      if (
+        role.meta.output !== undefined &&
+        role.meta.output !== node.output.schema
+      ) {
+        throw new WorkflowConfigError(
+          `node "${node.id}" expects "${node.output.schema}" but role ` +
+            `"${node.skill}" declares "${role.meta.output}"`,
+        );
+      }
+      const declaredVars = new Set(role.meta.vars);
+      const boundVars = new Set(Object.keys(node.bind ?? {}));
+      const missingVars = [...declaredVars].filter((name) => !boundVars.has(name));
+      const extraVars = [...boundVars].filter((name) => !declaredVars.has(name));
+      if (missingVars.length > 0 || extraVars.length > 0) {
+        throw new WorkflowConfigError(
+          `node "${node.id}" bindings disagree with role "${node.skill}"` +
+            (missingVars.length > 0 ? `; missing: ${missingVars.join(", ")}` : "") +
+            (extraVars.length > 0 ? `; unexpected: ${extraVars.join(", ")}` : ""),
+        );
+      }
       const bindings = resolveBindings(node.bind, scope);
       let taskJsonSchema = jsonSchema;
       if (
@@ -421,7 +497,7 @@ class ContentCompiler {
           }
         }
       }
-      const prompt = compileSkillPrompt(this.bundle, role, bindings);
+      const prompt = compileSkillPrompt(role, techniques, bindings);
       const capabilityTools = prompt.capabilities.flatMap((capability) => {
         const definition = this.bundle.capabilities.capabilities[capability];
         if (!definition) throw new WorkflowConfigError(`unknown capability "${capability}"`);

@@ -13,6 +13,7 @@ packages/
   protocol/              web ↔ server API types
   core/                  workflow contracts and checkpoint-aware execution
   content/               host-side registry parsers and validators
+  registry-client/       incremental MCP client, version pin, verified cache
   brainstorm-runtime/    content-to-executable-workflow compiler
   agent-runtime/         generic model/tool execution loop
   host-tools/            provider-neutral host tool implementations
@@ -21,9 +22,9 @@ packages/
   credit-recovery/       provider reset-time resolution
 ```
 
-The independently deployed Brain Registry is deliberately not part of this application. The app
-communicates with it only through a URL, downloads and verifies an immutable content version, and
-stores that version with each job.
+The independently deployed Brain Registry is deliberately not part of this application. The
+worker connects over MCP, pins an immutable version, and retrieves only the current role and its
+declared techniques. Files are hash-verified and cached for resume.
 
 ## Install, build, and test
 
@@ -42,7 +43,7 @@ repositories are split, point tests at a checked-out/pinned registry fixture wit
 Against the shared Brain Registry:
 
 ```bash
-npm run launch -- --content-registry-url https://brain.example
+npm run launch -- --content-registry-url https://167.172.170.154/mcp
 ```
 
 For local development, start Brain Registry separately and pass its URL:

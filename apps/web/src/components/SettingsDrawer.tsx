@@ -19,6 +19,9 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
 
   const [runner, setRunner] = useState<RunnerKind>("slurm");
   const [template, setTemplate] = useState("");
+  const [registryUrl, setRegistryUrl] = useState("");
+  const [registryBundle, setRegistryBundle] = useState("brainstorm");
+  const [registryVersion, setRegistryVersion] = useState("");
   const [provider, setProvider] = useState<Provider>("anthropic");
   const [model, setModel] = useState("");
   const [apiKey, setApiKey] = useState("");
@@ -54,6 +57,9 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
         setLoaded(s);
         setRunner(s.runner);
         setTemplate(s.slurmTemplate);
+        setRegistryUrl(s.contentRegistry.url);
+        setRegistryBundle(s.contentRegistry.bundle);
+        setRegistryVersion(s.contentRegistry.version ?? "");
         setProvider(s.llm.provider);
         setModel(s.llm.model ?? "");
         setBaseUrl(s.llm.baseUrl ?? "");
@@ -146,9 +152,22 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
       if (openRouterModel.trim() === "") {
         throw new Error("OpenRouter model must not be empty.");
       }
+      if (registryUrl.trim() === "") {
+        throw new Error("Brain Registry URL must not be empty.");
+      }
+      if (registryBundle.trim() === "") {
+        throw new Error("Brain Registry bundle must not be empty.");
+      }
       const update: ServerSettingsUpdate = {
         slurmTemplate: template,
         runner,
+        contentRegistry: {
+          url: registryUrl.trim(),
+          bundle: registryBundle.trim(),
+          ...(registryVersion.trim()
+            ? { version: registryVersion.trim() }
+            : {}),
+        },
         llm: {
           provider,
           model: model.trim() ? model.trim() : undefined,
@@ -289,6 +308,50 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                 <span className="field-note">
                   Put <code>{SLURM_COMMAND_TAG}</code> where the orchestration command must run.
                 </span>
+              </div>
+            </section>
+
+            <section className="drawer-section">
+              <h3>Brain Registry</h3>
+              <div className="field">
+                <label className="field-label" htmlFor="settings-registry-url">
+                  MCP endpoint
+                </label>
+                <input
+                  id="settings-registry-url"
+                  type="url"
+                  value={registryUrl}
+                  onChange={(e) => setRegistryUrl(e.target.value)}
+                  placeholder="https://167.172.170.154/mcp"
+                />
+                <span className="field-note">
+                  The worker pins a version and fetches each skill only when its stage is reached.
+                </span>
+              </div>
+              <div className="field-grid-two">
+                <div className="field">
+                  <label className="field-label" htmlFor="settings-registry-bundle">
+                    Bundle
+                  </label>
+                  <input
+                    id="settings-registry-bundle"
+                    type="text"
+                    value={registryBundle}
+                    onChange={(e) => setRegistryBundle(e.target.value)}
+                  />
+                </div>
+                <div className="field">
+                  <label className="field-label" htmlFor="settings-registry-version">
+                    Version override
+                  </label>
+                  <input
+                    id="settings-registry-version"
+                    type="text"
+                    value={registryVersion}
+                    onChange={(e) => setRegistryVersion(e.target.value)}
+                    placeholder="latest"
+                  />
+                </div>
               </div>
             </section>
 

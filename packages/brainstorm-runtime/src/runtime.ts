@@ -21,6 +21,7 @@ import {
   compileContentWorkflow,
   type CompiledContentWorkflow,
   type DeterministicActivityHandler,
+  type SkillResolver,
 } from "./compiler.js";
 import type { HumanGateMode } from "./gates.js";
 import type { BrainstormRouteResolver, CapabilityToolResolver } from "./routes.js";
@@ -29,6 +30,7 @@ export interface BrainstormRuntimeOptions {
   readonly agentExecutor: AgentExecutor;
   /** Host-fetched, hash-verified, and validated registry bundle. */
   readonly bundle: ContentBundle;
+  readonly skillResolver?: SkillResolver;
   readonly workflow?: string | ContentWorkflowDefinition;
   readonly routeResolver?: BrainstormRouteResolver;
   readonly capabilityTools?: CapabilityToolResolver;
@@ -81,6 +83,7 @@ export class BrainstormRuntime {
       providerOffers: options.providerOffers,
       hostTools: options.hostTools,
       enabledHostToolIds: options.enabledHostToolIds,
+      skillResolver: options.skillResolver,
     });
     this.checkpoints = options.checkpoints ?? new InMemoryCheckpointStore();
     this.artifacts = options.artifacts ?? new InMemoryArtifactStore();

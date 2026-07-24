@@ -1,4 +1,4 @@
-import type { ContentBundle, Skill } from "@brainstorm-agentic/content";
+import type { Skill } from "@brainstorm-agentic/content";
 import type { JsonObject, JsonValue } from "@brainstorm-agentic/core";
 
 import { BrainstormRuntimeError } from "./errors.js";
@@ -21,15 +21,18 @@ export interface CompiledSkillPrompt {
 
 /** Folds technique instructions into a role and renders only declared vars. */
 export function compileSkillPrompt(
-  bundle: ContentBundle,
   role: Skill,
+  techniques: readonly Skill[],
   bindings: JsonObject,
 ): CompiledSkillPrompt {
   if (role.meta.kind !== "role") {
     throw new BrainstormRuntimeError(`skill "${role.meta.name}" is not a role`, "INVALID_SKILL");
   }
-  const techniques = role.meta.techniques.map((name) => {
-    const technique = bundle.skills[name];
+  const techniqueByName = new Map(
+    techniques.map((technique) => [technique.meta.name, technique]),
+  );
+  const orderedTechniques = role.meta.techniques.map((name) => {
+    const technique = techniqueByName.get(name);
     if (!technique || technique.meta.kind !== "technique") {
       throw new BrainstormRuntimeError(
         `role "${role.meta.name}" references missing technique "${name}"`,
@@ -64,7 +67,7 @@ export function compileSkillPrompt(
     );
   }
 
-  const techniqueText = techniques
+  const techniqueText = orderedTechniques
     .map((technique) => `## Included technique: ${technique.meta.name}\n\n${technique.body}`)
     .join("\n\n---\n\n");
   const system = techniqueText.length > 0
@@ -72,10 +75,13 @@ export function compileSkillPrompt(
     : renderedRole;
   return {
     system,
-    skills: [role.meta.name, ...techniques.map((technique) => technique.meta.name)],
+    skills: [
+      role.meta.name,
+      ...orderedTechniques.map((technique) => technique.meta.name),
+    ],
     capabilities: unique([
       ...role.meta.capabilities,
-      ...techniques.flatMap((technique) => technique.meta.capabilities),
+      ...orderedTechniques.flatMap((technique) => technique.meta.capabilities),
     ]),
   };
 }

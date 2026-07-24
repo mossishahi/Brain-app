@@ -15,9 +15,8 @@ The host server of the brainstorm system. `brain launch` starts an HTTP + SSE se
 - exposes the server-side attachment picker (root-confined browsing, safety checks, immutable
   job-store snapshots);
 - auto-resumes credit-blocked jobs once their provider reset time (plus safety buffer) passes;
-- connects to Brain Registry, resolves a concrete bundle version, verifies
-  every file's byte count and SHA-256, parses/cross-validates it, and atomically materializes the
-  pinned copy per job. Skill selection, placeholder binding, and execution all remain host-side.
+- configures the Brain Registry endpoint and passes it to each isolated worker. The worker owns
+  version pinning, incremental MCP reads, hash verification, lazy validation, and caching.
 
 ## Development
 

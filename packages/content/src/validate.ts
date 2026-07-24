@@ -156,7 +156,18 @@ function innerRefs(ref: string): string[] {
 // validator
 // ---------------------------------------------------------------------------
 
-export function validateBundle(bundle: ContentBundle): ValidationIssue[] {
+export interface ValidateBundleOptions {
+  /**
+   * Role names declared by a pinned manifest but not loaded yet. Their
+   * front-matter-specific checks are deferred until first use.
+   */
+  readonly availableRoleNames?: ReadonlySet<string>;
+}
+
+export function validateBundle(
+  bundle: ContentBundle,
+  options: ValidateBundleOptions = {},
+): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   const schemaNames = new Set(Object.keys(artifactSchemas));
   const routeNames = new Set(Object.keys(bundle.routes.routes));
@@ -294,16 +305,128 @@ export function validateBundle(bundle: ContentBundle): ValidationIssue[] {
 
   // -- workflows ------------------------------------------------------------
   for (const workflow of Object.values(bundle.workflows)) {
-    validateWorkflow(workflow, bundle, { schemaNames, routeNames, catalogNames }, issues);
+    validateWorkflow(
+      workflow,
+      bundle,
+      {
+        schemaNames,
+        routeNames,
+        catalogNames,
+        availableRoleNames: options.availableRoleNames,
+      },
+      issues,
+    );
   }
 
+  return issues;
+}
+
+/**
+ * Validates one lazily loaded role and its already resolved techniques. This
+ * is the runtime counterpart to the registry's full publication-time check.
+ */
+export function validateResolvedRole(
+  role: Skill,
+  techniques: readonly Skill[],
+  capabilities: CapabilityCatalog,
+): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  const skills: Record<string, Skill> = {
+    [role.meta.name]: role,
+    ...Object.fromEntries(techniques.map((skill) => [skill.meta.name, skill])),
+  };
+  const capabilityNames = new Set(Object.keys(capabilities.capabilities));
+  const schemaNames = new Set(Object.keys(artifactSchemas));
+
+  if (role.meta.kind !== "role") {
+    issues.push({
+      code: "WRONG_SKILL_KIND",
+      path: `skill ${role.meta.name}`,
+      message: `"${role.meta.name}" is not a role skill`,
+    });
+  }
+  for (const expected of role.meta.techniques) {
+    const found = skills[expected];
+    if (!found) {
+      issues.push({
+        code: "MISSING_TECHNIQUE",
+        path: `skill ${role.meta.name}`,
+        message: `technique "${expected}" does not exist`,
+      });
+    } else if (found.meta.kind !== "technique") {
+      issues.push({
+        code: "WRONG_SKILL_KIND",
+        path: `skill ${role.meta.name}`,
+        message: `"${expected}" is not a technique skill`,
+      });
+    }
+  }
+  for (const skill of Object.values(skills)) {
+    const at = `skill ${skill.meta.name}`;
+    for (const capability of skill.meta.capabilities) {
+      if (!capabilityNames.has(capability)) {
+        issues.push({
+          code: "MISSING_CAPABILITY",
+          path: at,
+          message: `capability "${capability}" is not in the capability catalog`,
+        });
+      }
+    }
+    if (skill.meta.output !== undefined && !schemaNames.has(skill.meta.output)) {
+      issues.push({
+        code: "MISSING_SCHEMA",
+        path: at,
+        message: `output schema "${skill.meta.output}" is not known`,
+      });
+    }
+    const used = new Set<string>();
+    for (const match of skill.body.matchAll(MUSTACHE_VAR)) used.add(match[1]!);
+    const declared = new Set(skill.meta.vars);
+    for (const variable of used) {
+      if (!declared.has(variable)) {
+        issues.push({
+          code: "UNDECLARED_VAR",
+          path: at,
+          message: `body uses {{${variable}}} which is not declared in vars`,
+        });
+      }
+    }
+    for (const variable of declared) {
+      if (!used.has(variable)) {
+        issues.push({
+          code: "UNUSED_VAR",
+          path: at,
+          message: `declared var "${variable}" is never used in the body`,
+        });
+      }
+    }
+    for (const { name, pattern } of FORBIDDEN_PROMPT_PATTERNS) {
+      for (const [where, text] of [
+        ["body", skill.body],
+        ["description", skill.meta.description],
+      ] as const) {
+        if (pattern.test(text)) {
+          issues.push({
+            code: "FORBIDDEN_PROMPT_CONTENT",
+            path: `${at} > ${where}`,
+            message: `matches forbidden pattern "${name}" (${pattern})`,
+          });
+        }
+      }
+    }
+  }
   return issues;
 }
 
 function validateWorkflow(
   workflow: WorkflowDefinition,
   bundle: ContentBundle,
-  known: { schemaNames: Set<string>; routeNames: Set<string>; catalogNames: Set<string> },
+  known: {
+    schemaNames: Set<string>;
+    routeNames: Set<string>;
+    catalogNames: Set<string>;
+    availableRoleNames?: ReadonlySet<string>;
+  },
   issues: ValidationIssue[],
 ): void {
   const wfPath = `workflow ${workflow.name}`;
@@ -350,7 +473,9 @@ function validateWorkflow(
     if (node.kind === "agent") {
       const skill = bundle.skills[node.skill];
       if (!skill) {
-        issues.push({ code: "MISSING_SKILL", path: at, message: `skill "${node.skill}" does not exist` });
+        if (!known.availableRoleNames?.has(node.skill)) {
+          issues.push({ code: "MISSING_SKILL", path: at, message: `skill "${node.skill}" does not exist` });
+        }
       } else {
         if (skill.meta.kind !== "role") {
           issues.push({

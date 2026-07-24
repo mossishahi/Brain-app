@@ -7,13 +7,15 @@ cannot take down the HTTP server or other jobs.
 The worker receives:
 
 - `run` or `resume`, plus the stable run id;
-- a host-materialized, version-pinned `--content-dir`;
+- a cache `--content-dir` and Brain Registry MCP URL;
 - session/checkpoint, artifact, attachment, and event-log paths;
 - provider configuration through its environment.
 
-It loads and validates the pinned content, wires the configured model backend and host tools,
-executes the checkpoint-aware workflow, and writes canonical state. It never contacts the skill
-registry directly—the host owns that trust boundary.
+It resolves and checkpoints one immutable registry version, fetches the workflow/control files,
+and then retrieves each role and technique only when that workflow node is reached. Every file is
+SHA-256 verified and cached atomically; resume reuses cached resources and never switches
+versions. The worker also wires the model backend and host tools, executes the checkpoint-aware
+workflow, and writes canonical state.
 
 From the app root:
 

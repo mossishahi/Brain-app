@@ -417,6 +417,12 @@ export interface ServerSettings {
   readonly llm: LlmSettings;
   /** "manual": jobs pause at the panel gate for dashboard confirmation. */
   readonly panelConfirmation: "manual" | "auto";
+  readonly contentRegistry: {
+    readonly url: string;
+    readonly bundle: string;
+    /** Omit to resolve latest once per new run. */
+    readonly version?: string;
+  };
   readonly creditRecovery: {
     readonly autoResume: boolean;
     readonly safetyBufferSeconds: number;
@@ -447,6 +453,11 @@ export interface ServerSettingsUpdate {
   readonly slurmTemplate: string;
   readonly runner: RunnerKind;
   readonly panelConfirmation: "manual" | "auto";
+  readonly contentRegistry: {
+    readonly url: string;
+    readonly bundle: string;
+    readonly version?: string;
+  };
   readonly creditRecovery: {
     readonly autoResume: boolean;
     readonly safetyBufferSeconds: number;

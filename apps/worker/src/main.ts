@@ -20,6 +20,7 @@ import type { JsonValue, RunEvent, RunEventListener, RunResult } from "@brainsto
 import { defaultSessionRoot, loadDotEnv } from "./env.js";
 import { FsArtifactStore, FsCheckpointStore } from "./fs-stores.js";
 import { buildRuntime, providerConfigFromEnv } from "./wiring.js";
+import { openLazyRegistryContent } from "./registry-content.js";
 
 interface CliArgs {
   readonly command: string;
@@ -180,6 +181,10 @@ async function main(): Promise<void> {
   const verbose = args.flags.get("verbose") === true;
   const eventsFile = stringFlag(args, "events-file");
   const contentDir = stringFlag(args, "content-dir");
+  const contentRegistryUrl =
+    stringFlag(args, "content-registry-url") ??
+    process.env.BRAIN_CONTENT_REGISTRY_URL?.trim();
+  const contentRegistryVersion = stringFlag(args, "content-registry-version");
   const onEvent = eventListener(verbose, eventsFile);
 
   if (args.command === "list") {
@@ -211,24 +216,38 @@ async function main(): Promise<void> {
     );
     const runId = stringFlag(args, "run-id") ?? newRunId();
     mkdirSync(join(sessionRoot, runId), { recursive: true });
+    const lazy = contentRegistryUrl
+      ? await openLazyRegistryContent({
+          registryUrl: contentRegistryUrl,
+          contentDir: contentDir!,
+          resume: false,
+          ...(contentRegistryVersion
+            ? { version: contentRegistryVersion }
+            : {}),
+        })
+      : undefined;
     const runtime = buildRuntime({
       providerConfig: providerConfigFromEnv(process.env, offline),
       checkpoints: new FsCheckpointStore(sessionRoot),
       artifacts: new FsArtifactStore(sessionRoot, runId),
       autoApproveGates: autoApprove,
       ...(manifest ? { attachmentRoots: [manifest.baseDir] } : {}),
-      bundle: loadContent(contentDir!),
+      bundle: lazy?.bundle ?? loadContent(contentDir!),
+      ...(lazy ? { skillResolver: lazy.skillResolver } : {}),
       ...(onEvent !== undefined ? { onEvent } : {}),
     });
-    if (!verbose) runtime; // stores/events optional
-    const result = await runtime.run({
-      runId,
-      submission: {
-        prompt: topic,
-        attachments: (manifest?.attachments ?? []) as unknown as JsonValue,
-      },
-    });
-    reportResult(result, sessionRoot);
+    try {
+      const result = await runtime.run({
+        runId,
+        submission: {
+          prompt: topic,
+          attachments: (manifest?.attachments ?? []) as unknown as JsonValue,
+        },
+      });
+      reportResult(result, sessionRoot);
+    } finally {
+      await lazy?.close();
+    }
     return;
   }
 
@@ -245,27 +264,39 @@ async function main(): Promise<void> {
       const { gateKey, response } = parseGateFlag(gateFlag);
       responses[gateKey] = response;
     }
+    const lazy = contentRegistryUrl
+      ? await openLazyRegistryContent({
+          registryUrl: contentRegistryUrl,
+          contentDir: contentDir!,
+          resume: true,
+        })
+      : undefined;
     const runtime = buildRuntime({
       providerConfig: providerConfigFromEnv(process.env, offline),
       checkpoints: new FsCheckpointStore(sessionRoot),
       artifacts: new FsArtifactStore(sessionRoot, runId),
       autoApproveGates: autoApprove,
-      bundle: loadContent(contentDir!),
+      bundle: lazy?.bundle ?? loadContent(contentDir!),
+      ...(lazy ? { skillResolver: lazy.skillResolver } : {}),
       ...(onEvent !== undefined ? { onEvent } : {}),
     });
-    const result = await runtime.resume(runId, {
-      ...(Object.keys(responses).length > 0 ? { responses } : {}),
-    });
-    reportResult(result, sessionRoot);
+    try {
+      const result = await runtime.resume(runId, {
+        ...(Object.keys(responses).length > 0 ? { responses } : {}),
+      });
+      reportResult(result, sessionRoot);
+    } finally {
+      await lazy?.close();
+    }
     return;
   }
 
   console.log("Usage:");
   console.log(
-    '  brainstorm-agentic run --topic "..." --content-dir <pinned-dir> [--offline] [--auto-approve] [--events-file <path>] [--verbose]',
+    '  brain-worker run --topic "..." --content-dir <cache-dir> [--content-registry-url <mcp-url>] [--offline] [--auto-approve] [--events-file <path>] [--verbose]',
   );
   console.log(
-    "  brainstorm-agentic resume --run-id <id> --content-dir <pinned-dir> [--gate key=action[:memberId,...]] [--events-file <path>]",
+    "  brain-worker resume --run-id <id> --content-dir <cache-dir> [--content-registry-url <mcp-url>] [--gate key=action[:memberId,...]] [--events-file <path>]",
   );
   console.log("  brainstorm-agentic list");
 }

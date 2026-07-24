@@ -36,7 +36,6 @@ import {
 } from "./command.js";
 import { atomicWriteFile, atomicWriteJson, readJsonFile } from "./files.js";
 import type { JobRecord } from "./model.js";
-import { fetchAndMaterializeContentRegistryBundle } from "./content-registry-client.js";
 import {
   SettingsStore,
   type AnthropicConnectionValidator,
@@ -117,6 +116,9 @@ export class JobManager {
 
   constructor(options: JobManagerOptions) {
     this.settings = new SettingsStore(options.workspace, {
+      ...(options.contentRegistryUrl
+        ? { defaultContentRegistryUrl: options.contentRegistryUrl }
+        : {}),
       ...(options.validateAnthropic
         ? { validateAnthropic: options.validateAnthropic }
         : {}),
@@ -172,25 +174,6 @@ export class JobManager {
     record.warnings = [...(record.warnings ?? []), message];
   }
 
-  private async materializeContent(record: JobRecord): Promise<void> {
-    const destination = join(this.jobDir(record.jobId), "content");
-    if (!this.contentRegistryUrl) {
-      throw new Error(
-        "content-registry URL is unavailable; every job requires a pinned registry bundle",
-      );
-    }
-    const pinned = await fetchAndMaterializeContentRegistryBundle({
-      url: this.contentRegistryUrl,
-      destination,
-      bundle: "brainstorm",
-    });
-    record.contentBundle = {
-      id: pinned.bundle,
-      version: pinned.version,
-      manifestSha256: pinned.manifestSha256,
-    };
-  }
-
   private manifestPath(jobId: string): string {
     return join(this.jobDir(jobId), "attachments", "manifest.json");
   }
@@ -212,6 +195,11 @@ export class JobManager {
       sessionRoot: this.sessionsDir,
       eventsFile: join(this.jobDir(record.jobId), "events.jsonl"),
       contentDir: join(this.jobDir(record.jobId), "content"),
+      contentRegistryUrl:
+        settings.contentRegistry?.url ?? this.contentRegistryUrl,
+      ...(settings.contentRegistry?.version
+        ? { contentRegistryVersion: settings.contentRegistry.version }
+        : {}),
       settings,
       ...(gate
         ? {
@@ -327,7 +315,7 @@ export class JobManager {
         );
         atomicWriteJson(this.manifestPath(jobId), manifest);
       }
-      await this.materializeContent(record);
+      mkdirSync(join(this.jobDir(jobId), "content"), { recursive: true });
       const command = this.command(record, "run", settings);
       const script = this.writeScript(record, "submit.sh", command, settings.slurmTemplate);
       await this.submitScript(record, script, settings);

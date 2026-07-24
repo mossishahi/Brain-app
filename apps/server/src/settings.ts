@@ -6,6 +6,7 @@ import {
   validateClaudeSetupToken,
 } from "@brainstorm-agentic/executor-claude-agent";
 import { AnthropicMessagesProvider } from "@brainstorm-agentic/provider-anthropic";
+import { ContentRegistryClient } from "@brainstorm-agentic/registry-client";
 import {
   SLURM_COMMAND_TAG,
   type ClaudeAgentSettings,
@@ -17,6 +18,8 @@ import {
 import { atomicWriteFile, atomicWriteJson, readJsonFile } from "./files.js";
 
 const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5";
+export const DEFAULT_CONTENT_REGISTRY_URL =
+  "https://167.172.170.154/mcp";
 const CONNECTION_TIMEOUT_MS = 15_000;
 export const DEFAULT_CLAUDE_AGENT_SETTINGS: ClaudeAgentSettings = {
   maxTurns: 100,
@@ -72,6 +75,12 @@ export interface SettingsStoreOptions {
     apiKey: string,
     model: string,
   ) => Promise<void>;
+  readonly defaultContentRegistryUrl?: string;
+  readonly validateContentRegistry?: (
+    url: string,
+    bundle: string,
+    version?: string,
+  ) => Promise<void>;
 }
 
 export const DEFAULT_SLURM_TEMPLATE = `#!/usr/bin/env bash
@@ -85,10 +94,16 @@ set -euo pipefail
 ${SLURM_COMMAND_TAG}
 `;
 
-export function defaultServerSettings(): ServerSettings {
+export function defaultServerSettings(
+  contentRegistryUrl = DEFAULT_CONTENT_REGISTRY_URL,
+): ServerSettings {
   return {
     runner: "slurm",
     panelConfirmation: "manual",
+    contentRegistry: {
+      url: contentRegistryUrl,
+      bundle: "brainstorm",
+    },
     creditRecovery: {
       autoResume: true,
       safetyBufferSeconds: 60,
@@ -132,6 +147,7 @@ function validateCommonSettings(value: unknown): {
   readonly panelConfirmation: "manual" | "auto";
   readonly llm: Record<string, unknown>;
   readonly creditRecovery: Record<string, unknown>;
+  readonly contentRegistry: Record<string, unknown>;
   readonly hostTools?: Record<string, unknown>;
 } {
   const input = object(value, "settings");
@@ -157,6 +173,13 @@ function validateCommonSettings(value: unknown): {
           openRouterModel: "openrouter/free",
         }
       : object(input.creditRecovery, "creditRecovery");
+  const contentRegistry =
+    input.contentRegistry === undefined
+      ? {
+          url: DEFAULT_CONTENT_REGISTRY_URL,
+          bundle: "brainstorm",
+        }
+      : object(input.contentRegistry, "contentRegistry");
   if (
     llm.provider !== "anthropic" &&
     llm.provider !== "claude-agent" &&
@@ -176,7 +199,53 @@ function validateCommonSettings(value: unknown): {
     panelConfirmation: input.panelConfirmation,
     llm,
     creditRecovery,
+    contentRegistry,
     hostTools,
+  };
+}
+
+function validateContentRegistry(
+  value: Record<string, unknown>,
+): ServerSettings["contentRegistry"] {
+  const urlText = optionalNonEmptyString(
+    value.url,
+    "contentRegistry.url",
+  );
+  if (!urlText) throw new Error("contentRegistry.url is required");
+  let parsed: URL;
+  try {
+    parsed = new URL(urlText);
+  } catch {
+    throw new Error("contentRegistry.url must be a valid URL");
+  }
+  const localHttp =
+    parsed.protocol === "http:" &&
+    (parsed.hostname === "127.0.0.1" ||
+      parsed.hostname === "localhost" ||
+      parsed.hostname === "::1");
+  if (parsed.protocol !== "https:" && !localHttp) {
+    throw new Error(
+      "contentRegistry.url must use HTTPS (HTTP is allowed only for loopback development)",
+    );
+  }
+  const bundle = optionalNonEmptyString(
+    value.bundle,
+    "contentRegistry.bundle",
+  );
+  if (!bundle || !/^[A-Za-z0-9._-]+$/.test(bundle)) {
+    throw new Error("contentRegistry.bundle must be a safe identifier");
+  }
+  const version = optionalNonEmptyString(
+    value.version,
+    "contentRegistry.version",
+  );
+  if (version && !/^\d+\.\d+\.\d+$/.test(version)) {
+    throw new Error("contentRegistry.version must be semantic version x.y.z");
+  }
+  return {
+    url: parsed.toString(),
+    bundle,
+    ...(version ? { version } : {}),
   };
 }
 
@@ -310,11 +379,13 @@ function validateStoredSettings(value: unknown): StoredServerSettings {
   const modelsByRoute = validateModelsByRoute(common.llm.modelsByRoute);
   const agentSdk = validateClaudeAgentSettings(common.llm.agentSdk);
   const creditRecovery = validateCreditRecovery(common.creditRecovery);
+  const contentRegistry = validateContentRegistry(common.contentRegistry);
   const hostTools = validateHostTools(common.hostTools);
   return {
     slurmTemplate: common.slurmTemplate,
     runner: common.runner,
     panelConfirmation: common.panelConfirmation,
+    contentRegistry,
     creditRecovery,
     llm: {
       provider,
@@ -392,6 +463,7 @@ function validateSettingsUpdate(value: unknown): ValidatedUpdate {
   const modelsByRoute = validateModelsByRoute(common.llm.modelsByRoute);
   const agentSdk = validateClaudeAgentSettings(common.llm.agentSdk);
   const creditRecovery = validateCreditRecovery(common.creditRecovery);
+  const contentRegistry = validateContentRegistry(common.contentRegistry);
   const submittedOpenRouterApiKey = optionalNonEmptyString(
     common.creditRecovery.openRouterApiKey,
     "creditRecovery.openRouterApiKey",
@@ -410,6 +482,7 @@ function validateSettingsUpdate(value: unknown): ValidatedUpdate {
       slurmTemplate: common.slurmTemplate,
       runner: common.runner,
       panelConfirmation: common.panelConfirmation,
+      contentRegistry,
       creditRecovery,
       llm: {
         provider,
@@ -514,6 +587,25 @@ export async function validateOpenRouterConnection(
   }
 }
 
+export async function validateContentRegistryConnection(
+  url: string,
+  bundle: string,
+  version?: string,
+): Promise<void> {
+  const client = new ContentRegistryClient(url);
+  try {
+    await client.resolvePin(bundle, version);
+  } catch (error) {
+    throw new Error(
+      `Could not connect to Brain Registry: ` +
+        (error instanceof Error ? error.message : String(error)),
+      { cause: error },
+    );
+  } finally {
+    await client.close().catch(() => undefined);
+  }
+}
+
 export class SettingsStore {
   readonly path: string;
   readonly credentialsPath: string;
@@ -522,6 +614,11 @@ export class SettingsStore {
   private readonly openRouterValidator: (
     apiKey: string,
     model: string,
+  ) => Promise<void>;
+  private readonly contentRegistryValidator: (
+    url: string,
+    bundle: string,
+    version?: string,
   ) => Promise<void>;
 
   constructor(
@@ -536,14 +633,33 @@ export class SettingsStore {
       options.validateClaudeAgent ?? validateClaudeAgentConnection;
     this.openRouterValidator =
       options.validateOpenRouter ?? validateOpenRouterConnection;
+    this.contentRegistryValidator =
+      options.validateContentRegistry ?? validateContentRegistryConnection;
     mkdirSync(join(workspace, "workspace", "jobs"), { recursive: true });
     mkdirSync(join(workspace, "workspace", "sessions"), { recursive: true });
     const stored = readJsonFile<unknown>(this.path);
+    const storedWithRegistry =
+      stored !== undefined &&
+      typeof stored === "object" &&
+      stored !== null &&
+      !Array.isArray(stored) &&
+      !("contentRegistry" in stored) &&
+      options.defaultContentRegistryUrl
+        ? {
+            ...stored,
+            contentRegistry: {
+              url: options.defaultContentRegistryUrl,
+              bundle: "brainstorm",
+            },
+          }
+        : stored;
     atomicWriteJson(
       this.path,
       stored === undefined
-        ? validateStoredSettings(defaultServerSettings())
-        : validateStoredSettings(stored),
+        ? validateStoredSettings(
+            defaultServerSettings(options.defaultContentRegistryUrl),
+          )
+        : validateStoredSettings(storedWithRegistry),
     );
   }
 
@@ -658,6 +774,7 @@ export class SettingsStore {
 
   async put(value: unknown): Promise<ServerSettings> {
     const update = validateSettingsUpdate(value as ServerSettingsUpdate);
+    const currentSettings = this.get();
     const currentKey = this.getAnthropicApiKey();
     const currentSetupToken = this.getClaudeSetupToken();
     const currentOpenRouterKey = this.getOpenRouterApiKey();
@@ -691,6 +808,20 @@ export class SettingsStore {
       await this.openRouterValidator(
         update.submittedOpenRouterApiKey,
         update.settings.creditRecovery.openRouterModel,
+      );
+    }
+    if (
+      update.settings.contentRegistry.url !==
+        currentSettings.contentRegistry.url ||
+      update.settings.contentRegistry.bundle !==
+        currentSettings.contentRegistry.bundle ||
+      update.settings.contentRegistry.version !==
+        currentSettings.contentRegistry.version
+    ) {
+      await this.contentRegistryValidator(
+        update.settings.contentRegistry.url,
+        update.settings.contentRegistry.bundle,
+        update.settings.contentRegistry.version,
       );
     }
 

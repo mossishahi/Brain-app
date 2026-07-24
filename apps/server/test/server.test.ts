@@ -1,9 +1,7 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import {
   appendFileSync,
   chmodSync,
-  cpSync,
   existsSync,
   mkdtempSync,
   mkdirSync,
@@ -15,8 +13,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve, sep } from "node:path";
-import { createServer } from "node:http";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
@@ -36,10 +33,10 @@ import {
   SettingsStore,
   shellQuote,
   startBrainServer,
-  fetchAndMaterializeContentRegistryBundle,
   type RunningBrainServer,
   type StartBrainServerOptions,
 } from "../src/index.js";
+import { startTestRegistry } from "./mcp-registry.js";
 
 function tempRoot(prefix = "brain-server-"): string {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -51,63 +48,10 @@ const staticRegistryRoot =
     new URL("../../../../../brain/content/", import.meta.url),
   );
 
-async function startStaticTestRegistry(registryRoot = staticRegistryRoot): Promise<{
-  readonly url: string;
-  close(): Promise<void>;
-}> {
-  const root = resolve(registryRoot);
-  const http = createServer((req, res) => {
-    const url = new URL(req.url ?? "/", "http://127.0.0.1");
-    if (req.method !== "GET" || !url.pathname.startsWith("/v1/")) {
-      res.writeHead(404).end("not found");
-      return;
-    }
-    const relativePath =
-      url.pathname === "/v1/index.json"
-        ? "index.json"
-        : decodeURIComponent(url.pathname.slice("/v1/".length));
-    const destination = resolve(root, ...relativePath.split("/"));
-    if (
-      relativePath.includes("\\") ||
-      relativePath.split("/").some((part) => part === "" || part === "." || part === "..") ||
-      !destination.startsWith(`${root}${sep}`) ||
-      !existsSync(destination) ||
-      !statSync(destination).isFile()
-    ) {
-      res.writeHead(404).end("not found");
-      return;
-    }
-    const body = readFileSync(destination);
-    res.writeHead(200, {
-      "content-type": destination.endsWith(".json")
-        ? "application/json"
-        : "text/markdown",
-      "content-length": body.length,
-    });
-    res.end(body);
-  });
-  const port = await new Promise<number>((resolvePort, reject) => {
-    http.once("error", reject);
-    http.listen(0, "127.0.0.1", () => {
-      http.off("error", reject);
-      const address = http.address();
-      resolvePort(typeof address === "object" && address ? address.port : 0);
-    });
-  });
-  return {
-    url: `http://127.0.0.1:${port}`,
-    close: () =>
-      new Promise<void>((resolveClose, reject) => {
-        http.close((error) => error ? reject(error) : resolveClose());
-        http.closeAllConnections();
-      }),
-  };
-}
-
 async function startTestBrainServer(
   options: Omit<StartBrainServerOptions, "contentRegistryUrl" | "contentRegistryStatus">,
 ): Promise<RunningBrainServer> {
-  const registry = await startStaticTestRegistry();
+  const registry = await startTestRegistry(staticRegistryRoot);
   try {
     const server = await startBrainServer({
       ...options,
@@ -126,85 +70,6 @@ async function startTestBrainServer(
     throw error;
   }
 }
-
-test("host rejects a registry file that does not match its committed hash", async () => {
-  const root = tempRoot("brain-registry-tamper-");
-  const registryDir = join(root, "registry");
-  const destination = join(root, "materialized");
-  cpSync(staticRegistryRoot, registryDir, { recursive: true });
-  const brainSkill = join(
-    registryDir,
-    "bundles",
-    "brainstorm",
-    "0.1.0",
-    "skills",
-    "roles",
-    "brain.md",
-  );
-  writeFileSync(
-    brainSkill,
-    readFileSync(brainSkill, "utf8").replace("name: brain", "name: braim"),
-  );
-  const registry = await startStaticTestRegistry(registryDir);
-  try {
-    await assert.rejects(
-      fetchAndMaterializeContentRegistryBundle({
-        url: registry.url,
-        destination,
-        bundle: "brainstorm",
-        version: "0.1.0",
-      }),
-      /SHA-256 verification/,
-    );
-    assert.equal(existsSync(destination), false);
-  } finally {
-    await registry.close();
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("host cross-validates hash-correct registry content before publishing it", async () => {
-  const root = tempRoot("brain-registry-invalid-");
-  const registryDir = join(root, "registry");
-  const destination = join(root, "materialized");
-  cpSync(staticRegistryRoot, registryDir, { recursive: true });
-  const versionDir = join(registryDir, "bundles", "brainstorm", "0.1.0");
-  const workflowPath = join(versionDir, "workflows", "brainstorm.workflow.json");
-  const workflow = JSON.parse(readFileSync(workflowPath, "utf8")) as {
-    root: { steps: Array<{ skill?: string }> };
-  };
-  workflow.root.steps[0]!.skill = "missing-static-skill";
-  const workflowBytes = Buffer.from(`${JSON.stringify(workflow, null, 2)}\n`);
-  writeFileSync(workflowPath, workflowBytes);
-
-  const manifestPath = join(versionDir, "manifest.json");
-  const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
-    files: Array<{ path: string; sha256: string; bytes: number }>;
-  };
-  const entry = manifest.files.find(
-    (file) => file.path === "workflows/brainstorm.workflow.json",
-  )!;
-  entry.bytes = workflowBytes.length;
-  entry.sha256 = createHash("sha256").update(workflowBytes).digest("hex");
-  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-
-  const registry = await startStaticTestRegistry(registryDir);
-  try {
-    await assert.rejects(
-      fetchAndMaterializeContentRegistryBundle({
-        url: registry.url,
-        destination,
-        bundle: "brainstorm",
-        version: "0.1.0",
-      }),
-      /missing-static-skill|MISSING_SKILL/i,
-    );
-    assert.equal(existsSync(destination), false);
-  } finally {
-    await registry.close();
-    rmSync(root, { recursive: true, force: true });
-  }
-});
 
 async function requestJson<T>(
   server: RunningBrainServer,
@@ -263,6 +128,9 @@ async function waitFor(
     assert.equal(response.status, 200);
     latest = response.value;
     if (latest.status === status) return latest;
+    if (latest.status === "failed") {
+      throw new Error(`job ${jobId} failed: ${latest.error ?? "unknown error"}`);
+    }
     await new Promise((resolve) => setTimeout(resolve, 150));
   }
   throw new Error(
@@ -718,21 +586,26 @@ test("local offline job completes with every dashboard artifact", async () => {
       "Can KNN graph construction be made differentiable?",
     );
     let detail = await waitFor(server, jobId, "completed");
-    const storedJob = JSON.parse(
+    const storedPin = JSON.parse(
       readFileSync(
-        join(workspace, "workspace", "jobs", jobId, "job.json"),
+        join(
+          workspace,
+          "workspace",
+          "jobs",
+          jobId,
+          "content",
+          "content-pin.json",
+        ),
         "utf8",
       ),
     ) as {
-      contentBundle?: {
-        id: string;
-        version: string;
-        manifestSha256: string;
-      };
+      bundle: string;
+      version: string;
+      manifestSha256: string;
     };
-    assert.equal(storedJob.contentBundle?.id, "brainstorm");
-    assert.equal(storedJob.contentBundle?.version, "0.1.0");
-    assert.match(storedJob.contentBundle?.manifestSha256 ?? "", /^[a-f0-9]{64}$/);
+    assert.equal(storedPin.bundle, "brainstorm");
+    assert.equal(storedPin.version, "0.1.0");
+    assert.match(storedPin.manifestSha256, /^[a-f0-9]{64}$/);
     appendFileSync(
       join(workspace, "workspace", "jobs", jobId, "events.jsonl"),
       `${JSON.stringify({
@@ -1125,6 +998,35 @@ test("manual gate can shrink, complete, and reload after restart", async () => {
     });
     const jobId = await submit(server, "Pause and shrink this panel");
     const suspended = await waitFor(server, jobId, "suspended");
+    const contentDir = join(
+      workspace,
+      "workspace",
+      "jobs",
+      jobId,
+      "content",
+    );
+    const pin = JSON.parse(
+      readFileSync(join(contentDir, "content-pin.json"), "utf8"),
+    ) as {
+      bundle: string;
+      version: string;
+      manifestSha256: string;
+    };
+    const cacheRoot = join(
+      contentDir,
+      pin.bundle,
+      pin.version,
+      pin.manifestSha256,
+    );
+    assert.ok(existsSync(join(cacheRoot, "skills", "roles", "processor.md")));
+    assert.ok(existsSync(join(cacheRoot, "skills", "roles", "decomposer.md")));
+    for (const notReached of ["brain", "commentor", "judge", "chair"]) {
+      assert.equal(
+        existsSync(join(cacheRoot, "skills", "roles", `${notReached}.md`)),
+        false,
+        `${notReached} must not be fetched before its stage is reached`,
+      );
+    }
     assert.ok(suspended.pendingGate?.members);
     const original = suspended.pendingGate.members;
     const keep = original.slice(0, 2).map((member) => member.id);
@@ -1142,6 +1044,7 @@ test("manual gate can shrink, complete, and reload after restart", async () => {
     );
     assert.equal(answered.status, 200);
     const completed = await waitFor(server, jobId, "completed");
+    assert.ok(existsSync(join(cacheRoot, "skills", "roles", "chair.md")));
     const confirm = completed.stages[3]!;
     assert.equal(confirm.id, "confirm-panel");
     assert.equal(confirm.id === "confirm-panel" && confirm.gate.state, "shrunk");
@@ -1284,19 +1187,23 @@ checkpoint.updatedAt = Date.now(); fs.writeFileSync(checkpointPath, JSON.stringi
   await manager.resumeDueCreditBlocks();
   await waitUntil(() => existsSync(marker), 5_000);
   await waitUntil(() => {
-    const checkpoint = JSON.parse(
-      readFileSync(
-        join(
-          workspace,
-          "workspace",
-          "sessions",
-          "due-job",
-          "checkpoint.json",
+    try {
+      const checkpoint = JSON.parse(
+        readFileSync(
+          join(
+            workspace,
+            "workspace",
+            "sessions",
+            "due-job",
+            "checkpoint.json",
+          ),
+          "utf8",
         ),
-        "utf8",
-      ),
-    ) as { status: string };
-    return checkpoint.status === "completed";
+      ) as { status: string };
+      return checkpoint.status === "completed";
+    } catch {
+      return false;
+    }
   }, 5_000);
   await manager.resumeDueCreditBlocks();
   assert.equal(readFileSync(marker, "utf8").trim().split("\n").length, 1);

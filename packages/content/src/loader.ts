@@ -103,6 +103,20 @@ function parseSkillFile(filePath: string, issues: ValidationIssue[]): Skill | un
   return { meta: meta.data, body, sourcePath: filePath };
 }
 
+export function readSkillFile(filePath: string): Skill {
+  const issues: ValidationIssue[] = [];
+  const skill = parseSkillFile(filePath, issues);
+  if (!skill || issues.length > 0) throw new ContentValidationError(issues);
+  return skill;
+}
+
+export function readWorkflowFile(filePath: string): WorkflowDefinition {
+  const issues: ValidationIssue[] = [];
+  const workflow = parseJsonFile(filePath, workflowSchema, issues);
+  if (!workflow || issues.length > 0) throw new ContentValidationError(issues);
+  return workflow;
+}
+
 /**
  * Host-side read and structural validation of a materialized Brain Registry
  * directory (JSON documents and skill front matter), without cross-validation.
@@ -175,5 +189,75 @@ export function loadContent(contentDir: string): ContentBundle {
   if (issues.length > 0) {
     throw new ContentValidationError(issues);
   }
+  return bundle;
+}
+
+/**
+ * Loads only the workflow/control plane needed to compile a pinned run. Role
+ * and technique files remain absent until an agent node first executes.
+ */
+export function loadControlContent(
+  contentDir: string,
+  workflowPath: string,
+  availableRoleNames: ReadonlySet<string>,
+): ContentBundle {
+  const issues: ValidationIssue[] = [];
+  const workflow = parseJsonFile(
+    join(contentDir, workflowPath),
+    workflowSchema,
+    issues,
+  );
+  const routes = parseJsonFile(
+    join(contentDir, "routes", "model-routes.json"),
+    routesSchema,
+    issues,
+  );
+  const activities = parseJsonFile(
+    join(contentDir, "catalog", "activity-handlers.json"),
+    activitiesSchema,
+    issues,
+  );
+  const capabilities = parseJsonFile(
+    join(contentDir, "capabilities", "capabilities.json"),
+    capabilitiesSchema,
+    issues,
+  );
+  const inputTypes = parseJsonFile(
+    join(contentDir, "catalog", "input-types.json"),
+    inputTypesCatalogSchema,
+    issues,
+  );
+  const verdicts = parseJsonFile(
+    join(contentDir, "catalog", "verdicts.json"),
+    verdictsCatalogSchema,
+    issues,
+  );
+  const departments = parseJsonFile(
+    join(contentDir, "catalog", "departments.json"),
+    departmentsCatalogSchema,
+    issues,
+  );
+  if (
+    issues.length > 0 ||
+    !workflow ||
+    !routes ||
+    !activities ||
+    !capabilities ||
+    !inputTypes ||
+    !verdicts ||
+    !departments
+  ) {
+    throw new ContentValidationError(issues);
+  }
+  const bundle: ContentBundle = {
+    workflows: { [workflow.name]: workflow },
+    routes,
+    activities,
+    capabilities,
+    catalogs: { inputTypes, verdicts, departments },
+    skills: {},
+  };
+  const validation = validateBundle(bundle, { availableRoleNames });
+  if (validation.length > 0) throw new ContentValidationError(validation);
   return bundle;
 }
