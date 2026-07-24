@@ -1,0 +1,247 @@
+import assert from "node:assert/strict";
+import { describe, test } from "node:test";
+
+import {
+  MAX_REPEAT_BOUND,
+  activitiesSchema,
+  validateBundle,
+  workflowSchema,
+  type RepeatUntilNode,
+  type SequenceNode,
+} from "../src/index.js";
+import { expectIssue, findActivity, findAgent, findNode, freshBundle } from "./helpers.js";
+
+test("baseline: the untouched bundle validates cleanly", () => {
+  assert.deepEqual(validateBundle(freshBundle()), []);
+});
+
+test("rejects a workflow that references a missing skill", () => {
+  const bundle = freshBundle();
+  delete bundle.skills["judge"];
+  expectIssue(bundle, "MISSING_SKILL");
+});
+
+test("rejects an agent node pointing at a technique instead of a role", () => {
+  const bundle = freshBundle();
+  const judge = findAgent(bundle.workflows["brainstorm"]!.root, "judge-step");
+  judge.skill = "deep-understanding";
+  expectIssue(bundle, "WRONG_SKILL_KIND");
+});
+
+test("rejects a node that uses an undefined model route", () => {
+  const bundle = freshBundle();
+  findAgent(bundle.workflows["brainstorm"]!.root, "process-input").route = "turbo";
+  expectIssue(bundle, "MISSING_ROUTE");
+});
+
+test("rejects a routes document whose defaultRoute does not exist", () => {
+  const bundle = freshBundle();
+  bundle.routes.defaultRoute = "nonexistent";
+  expectIssue(bundle, "MISSING_DEFAULT_ROUTE");
+});
+
+test("rejects an activity whose logical handler is not registered", () => {
+  const bundle = freshBundle();
+  findActivity(bundle.workflows["brainstorm"]!.root, "select-panel").handler = "panel.missing";
+  expectIssue(bundle, "MISSING_ACTIVITY_HANDLER");
+});
+
+test("rejects an activity missing or adding registered handler inputs", () => {
+  const bundle = freshBundle();
+  const selector = findActivity(bundle.workflows["brainstorm"]!.root, "select-panel");
+  delete selector.bind["moduleSize"];
+  selector.bind["policy"] = "params.panelSize";
+  expectIssue(bundle, "ACTIVITY_INPUT_MISMATCH");
+});
+
+test("rejects an activity output that disagrees with its registered handler", () => {
+  const bundle = freshBundle();
+  findActivity(bundle.workflows["brainstorm"]!.root, "select-panel").output.schema = "experts";
+  expectIssue(bundle, "ACTIVITY_OUTPUT_MISMATCH");
+});
+
+test("rejects a non-deterministic activity registration structurally and semantically", () => {
+  const bundle = freshBundle();
+  const handler = bundle.activities.handlers["panel.select"]!;
+  (handler as { deterministic: boolean }).deterministic = false;
+  assert.equal(activitiesSchema.safeParse(bundle.activities).success, false);
+  expectIssue(bundle, "NONDETERMINISTIC_ACTIVITY");
+});
+
+test("rejects an activity registration without a finite output bound", () => {
+  const bundle = freshBundle();
+  const handler = bundle.activities.handlers["panel.select"]!;
+  delete (handler as Partial<typeof handler>).bounds;
+  assert.equal(activitiesSchema.safeParse(bundle.activities).success, false);
+  expectIssue(bundle, "UNBOUNDED_ACTIVITY");
+});
+
+test("rejects activity bindings with the wrong artifact or parameter type", () => {
+  const bundle = freshBundle();
+  const selector = findActivity(bundle.workflows["brainstorm"]!.root, "select-panel");
+  selector.bind["experts"] = "input";
+  selector.bind["moduleSize"] = "input.cotSteps";
+  const issues = validateBundle(bundle).filter((issue) => issue.code === "ACTIVITY_INPUT_TYPE_MISMATCH");
+  assert.equal(issues.length, 2);
+});
+
+test("rejects an activity whose output bound param has no finite maximum", () => {
+  const bundle = freshBundle();
+  delete bundle.workflows["brainstorm"]!.params["panelSize"]!.max;
+  expectIssue(bundle, "UNBOUNDED_ACTIVITY");
+});
+
+test("activity schemas reject embedded implementation code and arbitrary expressions", () => {
+  const bundle = freshBundle();
+  const activitiesWithCode = structuredClone(bundle.activities);
+  Object.assign(activitiesWithCode.handlers["panel.select"]!, { implementation: "return select(tree)" });
+  assert.equal(activitiesSchema.safeParse(activitiesWithCode).success, false);
+
+  const workflowWithExpression = structuredClone(bundle.workflows["brainstorm"]!);
+  Object.assign(findActivity(workflowWithExpression.root, "select-panel"), {
+    expression: "experts.flatMap(select)",
+  });
+  assert.equal(workflowSchema.safeParse(workflowWithExpression).success, false);
+});
+
+test("rejects a node whose output schema is unknown", () => {
+  const bundle = freshBundle();
+  const chair = findAgent(bundle.workflows["brainstorm"]!.root, "synthesize-proposal");
+  chair.output.schema = "ghostSchema";
+  expectIssue(bundle, "MISSING_SCHEMA");
+});
+
+test("rejects a node whose schema disagrees with the skill's declared output", () => {
+  const bundle = freshBundle();
+  const chair = findAgent(bundle.workflows["brainstorm"]!.root, "synthesize-proposal");
+  chair.output.schema = "brainIdea"; // valid schema, wrong for the chair skill
+  expectIssue(bundle, "SKILL_OUTPUT_MISMATCH");
+});
+
+test("rejects a node that leaves a skill variable unbound", () => {
+  const bundle = freshBundle();
+  const commentor = findAgent(bundle.workflows["brainstorm"]!.root, "comment-step");
+  delete commentor.bind!["verdictOptions"];
+  expectIssue(bundle, "UNBOUND_VAR");
+});
+
+test("rejects a bind key the skill never declared", () => {
+  const bundle = freshBundle();
+  const judge = findAgent(bundle.workflows["brainstorm"]!.root, "judge-step");
+  judge.bind!["mystery"] = "input";
+  expectIssue(bundle, "UNKNOWN_BINDING");
+});
+
+test("rejects a role skill whose technique is missing", () => {
+  const bundle = freshBundle();
+  delete bundle.skills["literature-review"];
+  expectIssue(bundle, "MISSING_TECHNIQUE");
+});
+
+test("rejects a skill that requires a capability missing from the catalog", () => {
+  const bundle = freshBundle();
+  delete bundle.capabilities.capabilities["code-execution"];
+  expectIssue(bundle, "MISSING_CAPABILITY");
+});
+
+test("rejects a skill body that uses an undeclared template variable", () => {
+  const bundle = freshBundle();
+  bundle.skills["chair"]!.body += "\nAlso consider {{secretExtra}}.";
+  expectIssue(bundle, "UNDECLARED_VAR");
+});
+
+test("rejects a skill that declares a variable its body never uses", () => {
+  const bundle = freshBundle();
+  bundle.skills["chair"]!.meta.vars.push("unusedThing");
+  expectIssue(bundle, "UNUSED_VAR");
+});
+
+test("rejects unbounded loops: repeatUntil without maxIterations fails schema and validator", () => {
+  const bundle = freshBundle();
+  const round = findNode(bundle.workflows["brainstorm"]!.root, "review-round") as RepeatUntilNode;
+  delete (round as Partial<RepeatUntilNode>).maxIterations;
+
+  // Structural: the workflow schema itself refuses the document.
+  const reparsed = workflowSchema.safeParse(bundle.workflows["brainstorm"]);
+  assert.equal(reparsed.success, false);
+
+  // Cross-validator: the mutated in-memory bundle is rejected too.
+  expectIssue(bundle, "UNBOUNDED_LOOP");
+});
+
+test("rejects loop bounds above the ceiling as effectively unbounded", () => {
+  const bundle = freshBundle();
+  const round = findNode(bundle.workflows["brainstorm"]!.root, "review-round") as RepeatUntilNode;
+  round.maxIterations = MAX_REPEAT_BOUND + 1;
+  expectIssue(bundle, "LOOP_BOUND_TOO_HIGH");
+});
+
+test("rejects duplicate node ids", () => {
+  const bundle = freshBundle();
+  findNode(bundle.workflows["brainstorm"]!.root, "decompose-experts").id = "process-input";
+  expectIssue(bundle, "DUPLICATE_NODE_ID");
+});
+
+test("rejects a workflow with no terminal node", () => {
+  const bundle = freshBundle();
+  const root = bundle.workflows["brainstorm"]!.root as SequenceNode;
+  root.steps = root.steps.filter((s) => s.kind !== "terminal");
+  expectIssue(bundle, "NO_TERMINAL");
+});
+
+test("rejects references to data no prior step defines", () => {
+  const bundle = freshBundle();
+  const chair = findAgent(bundle.workflows["brainstorm"]!.root, "synthesize-proposal");
+  chair.bind!["roster"] = "committee.members";
+  expectIssue(bundle, "UNKNOWN_REF");
+});
+
+test("rejects references to undeclared params and unknown catalogs", () => {
+  const bundle = freshBundle();
+  const selector = findActivity(bundle.workflows["brainstorm"]!.root, "select-panel");
+  selector.bind["panelSize"] = "params.committeeSize";
+  const decomposer = findAgent(bundle.workflows["brainstorm"]!.root, "decompose-experts");
+  decomposer.bind!["departments"] = "catalog.faculties";
+  const issues = validateBundle(bundle);
+  assert.ok(issues.some((i) => i.code === "UNKNOWN_PARAM"));
+  assert.ok(issues.some((i) => i.code === "UNKNOWN_CATALOG"));
+});
+
+test("rejects review builtins used outside a repeatUntil loop", () => {
+  const bundle = freshBundle();
+  const processor = findAgent(bundle.workflows["brainstorm"]!.root, "process-input");
+  processor.bind!["typeOptions"] = "review.allowedVerdicts";
+  expectIssue(bundle, "REVIEW_REF_OUTSIDE_LOOP");
+});
+
+test("rejects verdict sequencing rules that name unknown verdicts", () => {
+  const bundle = freshBundle();
+  bundle.catalogs.verdicts.sequencing.advanceOn = "Approve";
+  expectIssue(bundle, "UNKNOWN_VERDICT");
+});
+
+describe("prompt hygiene", () => {
+  const cases: Array<[label: string, contamination: string]> = [
+    ["MCP mentions", "Report your result over MCP when finished."],
+    ["brainstorm_submit calls", "Then call brainstorm_submit with the artifacts."],
+    ["subagent spawning", "For each member, spawn one subagent per prompt file."],
+    ["sub-task language", "Delegate this to a sub-task and collect its result."],
+    ["legacy path templates", "Write the JSON to {{OUTPUT_PATH}} when done."],
+    ["literal file paths", "Read the chain at brain/brain_3/raw_cot.json under /tmp/session/state before commenting."],
+    ["write-to-disk instructions", "Finally, write the proposal to a markdown file in the session directory."],
+  ];
+  for (const [label, contamination] of cases) {
+    test(`rejects ${label}`, () => {
+      const bundle = freshBundle();
+      bundle.skills["brain"]!.body += `\n${contamination}`;
+      expectIssue(bundle, "FORBIDDEN_PROMPT_CONTENT");
+    });
+  }
+
+  test("shipped skills contain none of the forbidden content", () => {
+    assert.deepEqual(
+      validateBundle(freshBundle()).filter((i) => i.code === "FORBIDDEN_PROMPT_CONTENT"),
+      [],
+    );
+  });
+});

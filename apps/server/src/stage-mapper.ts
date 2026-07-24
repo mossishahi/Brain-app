@@ -1,0 +1,1284 @@
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+
+import type {
+  AgentResult,
+  JournalEntry,
+  JsonObject,
+  RunEvent,
+  WorkflowCheckpoint,
+} from "@brainstorm-agentic/core";
+import {
+  STAGE_IDS,
+  type AnnotatedFileView,
+  type BrainIdeaView,
+  type CommentView,
+  type ConfirmPanelStage,
+  type EvidenceView,
+  type ExpertsTreeView,
+  type FilePartitionView,
+  type FirstPassMemberView,
+  type GroundingView,
+  type JobDetail,
+  type JobStatus,
+  type JudgeDecisionView,
+  type PanelMemberView,
+  type PendingGateView,
+  type ProcessorOutputView,
+  type ProposalView,
+  type ReviewCursorView,
+  type ReviewMemberView,
+  type ReviewRoundView,
+  type ReviewStepView,
+  type RunSummaryView,
+  type ServerSettings,
+  type StageActivityEntry,
+  type StageBase,
+  type StageId,
+  type StageStatus,
+  type StageView,
+} from "@brainstorm-agentic/protocol";
+
+import { readJsonFile } from "./files.js";
+import type { JobRecord } from "./model.js";
+
+interface ArtifactRefFile {
+  readonly id: string;
+  readonly metadata?: {
+    readonly nodeId?: string;
+    readonly schema?: string;
+    readonly path?: string;
+  };
+}
+
+interface ArtifactIndexFile {
+  readonly refs?: readonly ArtifactRefFile[];
+}
+
+interface ArtifactValue {
+  readonly ref: ArtifactRefFile;
+  readonly value: unknown;
+}
+
+interface MapperInput {
+  readonly record: JobRecord;
+  readonly status: JobStatus;
+  readonly sessionDir: string;
+  readonly jobDir: string;
+  readonly settings: ServerSettings;
+}
+
+interface StageTiming {
+  startedAt?: number;
+  finishedAt?: number;
+  active: boolean;
+  error?: string;
+  activity: StageActivityEntry[];
+}
+
+interface Coordinates {
+  member?: number;
+  step?: number;
+  round?: number;
+  commentor?: number;
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function object(value: unknown): Record<string, unknown> | undefined {
+  return isObject(value) ? value : undefined;
+}
+
+function readCheckpoint(sessionDir: string): WorkflowCheckpoint | undefined {
+  try {
+    return readJsonFile<WorkflowCheckpoint>(join(sessionDir, "checkpoint.json"));
+  } catch {
+    return undefined;
+  }
+}
+
+function readEvents(jobDir: string): RunEvent[] {
+  const path = join(jobDir, "events.jsonl");
+  if (!existsSync(path)) return [];
+  try {
+    return readFileSync(path, "utf8")
+      .split(/\r?\n/)
+      .filter((line) => line.trim().length > 0)
+      .flatMap((line) => {
+        try {
+          return [JSON.parse(line) as RunEvent];
+        } catch {
+          return [];
+        }
+      });
+  } catch {
+    return [];
+  }
+}
+
+function readArtifacts(sessionDir: string): ArtifactValue[] {
+  const directory = join(sessionDir, "artifacts");
+  let index: ArtifactIndexFile | undefined;
+  try {
+    index = readJsonFile<ArtifactIndexFile>(join(directory, "index.json"));
+  } catch {
+    return [];
+  }
+  const values: ArtifactValue[] = [];
+  for (const ref of index?.refs ?? []) {
+    try {
+      values.push({
+        ref,
+        value: JSON.parse(readFileSync(join(directory, ref.id), "utf8")) as unknown,
+      });
+    } catch {
+      // Atomic index/payload updates can briefly expose an incomplete snapshot.
+    }
+  }
+  return values;
+}
+
+function artifact(
+  values: readonly ArtifactValue[],
+  schema: string,
+  path?: string,
+): unknown {
+  return values.find(
+    ({ ref }) =>
+      ref.metadata?.schema === schema &&
+      (path === undefined || ref.metadata.path === path),
+  )?.value;
+}
+
+function agentOutput(entry: JournalEntry): unknown {
+  if (entry.kind !== "agent") return undefined;
+  const value = object(entry.value);
+  if (value?.status !== "ok") return undefined;
+  return value.output;
+}
+
+function journalAgent(
+  entries: readonly JournalEntry[],
+  matcher: (key: string) => boolean,
+): unknown {
+  return entries.find((entry) => matcher(entry.key) && agentOutput(entry) !== undefined)
+    ? agentOutput(entries.find((entry) => matcher(entry.key) && agentOutput(entry) !== undefined)!)
+    : undefined;
+}
+
+function journalStateField(
+  entries: readonly JournalEntry[],
+  matcher: (key: string) => boolean,
+  field: string,
+): unknown {
+  for (const entry of entries) {
+    if (!matcher(entry.key)) continue;
+    const state = object(entry.value);
+    if (state && field in state) return state[field];
+  }
+  return undefined;
+}
+
+function stageForPath(path: string): StageId | undefined {
+  const segments = path.split("/");
+  return STAGE_IDS.find((id) => segments.includes(id));
+}
+
+function timings(events: readonly RunEvent[]): Map<StageId, StageTiming> {
+  const result = new Map<StageId, StageTiming>(
+    STAGE_IDS.map((id) => [id, { active: false, activity: [] }]),
+  );
+  for (const event of events) {
+    if (
+      event.type === "agent:progress" ||
+      event.type === "agent:started" ||
+      event.type === "agent:completed"
+    ) {
+      const stage = stageForPath(event.path);
+      if (!stage) continue;
+      const timing = result.get(stage)!;
+      if (event.type === "agent:progress") {
+        timing.activity.push({
+          id: String(event.seq),
+          at: event.at,
+          kind: event.progress.kind,
+          message: event.progress.message,
+          ...(event.progress.toolName
+            ? { toolName: event.progress.toolName }
+            : {}),
+          ...(event.progress.turn !== undefined
+            ? { turn: event.progress.turn }
+            : {}),
+          ...(event.progress.elapsedMs !== undefined
+            ? { elapsedMs: event.progress.elapsedMs }
+            : {}),
+        });
+      } else {
+        const role = event.taskKind.replace(/^brainstorm\./, "");
+        timing.activity.push({
+          id: String(event.seq),
+          at: event.at,
+          kind: "status",
+          message:
+            event.type === "agent:started"
+              ? `${role} agent started`
+              : `${role} agent ${event.status === "ok" ? "completed" : "failed"}`,
+        });
+      }
+      if (timing.activity.length > 200) {
+        timing.activity.splice(0, timing.activity.length - 200);
+      }
+      continue;
+    }
+    if (
+      event.type !== "node:started" &&
+      event.type !== "node:completed" &&
+      event.type !== "node:failed"
+    ) {
+      continue;
+    }
+    const stage = stageForPath(event.path);
+    if (!stage || event.path !== `brainstorm-root/${stage}`) continue;
+    const timing = result.get(stage)!;
+    if (event.type === "node:started") {
+      if (timing.finishedAt !== undefined || timing.error !== undefined) {
+        // The stage terminated before and is starting again (credit-block
+        // auto-resume, retry): the fresh attempt supersedes the old outcome.
+        timing.startedAt = event.at;
+        timing.finishedAt = undefined;
+        timing.error = undefined;
+      } else {
+        timing.startedAt = timing.startedAt === undefined
+          ? event.at
+          : Math.min(timing.startedAt, event.at);
+      }
+      timing.active = true;
+    } else {
+      timing.finishedAt = event.at;
+      timing.active = false;
+      if (event.type === "node:failed") timing.error = event.error.message;
+    }
+  }
+  return result;
+}
+
+function coordinates(path: string): Coordinates {
+  const number = (pattern: RegExp): number | undefined => {
+    const match = pattern.exec(path);
+    return match ? Number(match[1]) : undefined;
+  };
+  return {
+    member: number(/review-members\/member\[(\d+)\]/),
+    step: number(/cotStep\[(\d+)\]/),
+    round: number(/iter\[(\d+)\]/),
+    commentor: number(/commentor\[(\d+)\]/),
+  };
+}
+
+function panelMembers(value: unknown): PanelMemberView[] {
+  const members = object(value)?.members;
+  if (!Array.isArray(members)) return [];
+  return members.flatMap((candidate) => {
+    const member = object(candidate);
+    if (
+      typeof member?.id !== "string" ||
+      typeof member.department !== "string" ||
+      typeof member.umbrella !== "string" ||
+      !Array.isArray(member.subfields) ||
+      !member.subfields.every((entry) => typeof entry === "string")
+    ) {
+      return [];
+    }
+    return [
+      {
+        id: member.id,
+        department: member.department,
+        umbrella: member.umbrella,
+        subfields: member.subfields,
+      },
+    ];
+  });
+}
+
+function processor(value: unknown): ProcessorOutputView | undefined {
+  const output = object(value);
+  if (
+    typeof output?.type !== "string" ||
+    typeof output.title !== "string" ||
+    typeof output.question !== "string" ||
+    typeof output.context !== "string" ||
+    !Array.isArray(output.attachments) ||
+    !Array.isArray(output.assumptions) ||
+    typeof output.cotSteps !== "number"
+  ) {
+    return undefined;
+  }
+  // The raw artifact may also carry the annotated file map; the view exposes
+  // the clean structured input only (files surface via the partition view).
+  return {
+    type: output.type,
+    title: output.title,
+    question: output.question,
+    context: output.context,
+    attachments: output.attachments,
+    assumptions: output.assumptions,
+    cotSteps: output.cotSteps,
+  } as ProcessorOutputView;
+}
+
+function annotatedFiles(value: unknown): AnnotatedFileView[] {
+  const files = object(value)?.files;
+  if (!Array.isArray(files)) return [];
+  return files.flatMap((candidate) => {
+    const file = object(candidate);
+    return typeof file?.path === "string" && typeof file.label === "string"
+      ? [{
+          path: file.path,
+          label: file.label,
+          note: typeof file.note === "string" ? file.note : "",
+        }]
+      : [];
+  });
+}
+
+function experts(value: unknown): ExpertsTreeView | undefined {
+  const tree = object(value);
+  if (!tree) return undefined;
+  if (
+    Array.isArray(tree.departments) &&
+    tree.departments.every((department) => {
+      const item = object(department);
+      return (
+        typeof item?.name === "string" &&
+        Array.isArray(item.umbrellas) &&
+        item.umbrellas.every((umbrella) => {
+          const leaf = object(umbrella);
+          return (
+            typeof leaf?.name === "string" &&
+            Array.isArray(leaf.subfields) &&
+            leaf.subfields.every((field) => typeof field === "string")
+          );
+        })
+      );
+    })
+  ) {
+    // The artifact may also carry the literature grounding; the tree view is
+    // just the departments (grounding is extracted separately).
+    return { departments: tree.departments } as unknown as ExpertsTreeView;
+  }
+
+  // Backward compatibility for jobs produced before the constrained-output
+  // representation changed from dynamic object keys to ordered arrays.
+  const departments = Object.entries(tree).flatMap(
+    ([departmentName, umbrellaValue]) => {
+      const umbrellaRecord = object(umbrellaValue);
+      if (!umbrellaRecord) return [];
+      const umbrellas = Object.entries(umbrellaRecord).flatMap(
+        ([umbrellaName, subfields]) =>
+          Array.isArray(subfields) &&
+          subfields.every((field) => typeof field === "string")
+            ? [{ name: umbrellaName, subfields }]
+            : [],
+      );
+      return umbrellas.length > 0
+        ? [{ name: departmentName, umbrellas }]
+        : [];
+    },
+  );
+  return departments.length > 0 ? { departments } : undefined;
+}
+
+/** Papers/authors/interests recorded by the decomposer's literature search. */
+function grounding(value: unknown): GroundingView | undefined {
+  const raw = object(object(value)?.grounding);
+  if (!raw) return undefined;
+  const papers: GroundingView["papers"] = Array.isArray(raw.papers)
+    ? raw.papers.flatMap((candidate) => {
+        const paper = object(candidate);
+        if (typeof paper?.title !== "string") return [];
+        return [{
+          title: paper.title,
+          ...(Array.isArray(paper.authors) &&
+          paper.authors.every((name) => typeof name === "string")
+            ? { authors: paper.authors }
+            : {}),
+          ...(typeof paper.year === "number" ? { year: paper.year } : {}),
+          ...(typeof paper.venue === "string" && paper.venue.length > 0
+            ? { venue: paper.venue }
+            : {}),
+          ...(typeof paper.url === "string" && paper.url.length > 0
+            ? { url: paper.url }
+            : {}),
+          ...(typeof paper.relation === "string" && paper.relation.length > 0
+            ? { relation: paper.relation }
+            : {}),
+        }];
+      })
+    : [];
+  const scholars: GroundingView["scholars"] = Array.isArray(raw.scholars)
+    ? raw.scholars.flatMap((candidate) => {
+        const scholar = object(candidate);
+        if (typeof scholar?.name !== "string") return [];
+        return [{
+          name: scholar.name,
+          affiliation:
+            typeof scholar.affiliation === "string" ? scholar.affiliation : "",
+          url: typeof scholar.url === "string" ? scholar.url : "",
+          profile:
+            scholar.profile === "ambiguous" || scholar.profile === "no_profile"
+              ? scholar.profile
+              : "ok",
+          interests: Array.isArray(scholar.interests)
+            ? scholar.interests.filter(
+                (interest): interest is string => typeof interest === "string",
+              )
+            : [],
+        }];
+      })
+    : [];
+  return papers.length > 0 || scholars.length > 0
+    ? { papers, scholars }
+    : undefined;
+}
+
+function brainIdea(value: unknown): BrainIdeaView | undefined {
+  const idea = object(value);
+  if (!idea) return undefined;
+  const output = object(idea.output);
+  const section = (entry: unknown): string | undefined => {
+    if (typeof entry === "string") return entry; // pre-array jobs
+    if (
+      Array.isArray(entry) &&
+      entry.length > 0 &&
+      entry.every((paragraph) => typeof paragraph === "string")
+    ) {
+      return entry.join("\n\n");
+    }
+    return undefined;
+  };
+  const normalizedOutput = output
+    ? {
+        abstract: section(output.abstract),
+        introduction: section(output.introduction),
+        method: section(output.method),
+        discussion: section(output.discussion),
+        conclusion: section(output.conclusion),
+      }
+    : undefined;
+  if (
+    !normalizedOutput ||
+    Object.values(normalizedOutput).some((entry) => entry === undefined) ||
+    !Array.isArray(idea.cot) ||
+    typeof idea.novelty !== "string"
+  ) {
+    return undefined;
+  }
+  return {
+    output: normalizedOutput as BrainIdeaView["output"],
+    cot: idea.cot as string[],
+    novelty: idea.novelty,
+    ...(Array.isArray(idea.literature)
+      ? { literature: idea.literature as BrainIdeaView["literature"] }
+      : {}),
+  };
+}
+
+function proposal(value: unknown): ProposalView | undefined {
+  const raw = object(value);
+  if (
+    typeof raw?.title !== "string" ||
+    typeof raw.framing !== "string" ||
+    !Array.isArray(raw.consensus) ||
+    !Array.isArray(raw.tensions) ||
+    !Array.isArray(raw.novelDirections) ||
+    !Array.isArray(raw.actionItems) ||
+    !Array.isArray(raw.applications)
+  ) {
+    return undefined;
+  }
+  return {
+    title: raw.title,
+    framing: raw.framing,
+    consensus: raw.consensus as string[],
+    tensions: raw.tensions as string[],
+    novelDirections: raw.novelDirections as string[],
+    actionItems: raw.actionItems.flatMap((candidate) => {
+      const item = object(candidate);
+      return typeof item?.priority === "number" && typeof item.action === "string"
+        ? [{
+            priority: item.priority,
+            action: item.action,
+            rationale: typeof item.rationale === "string" ? item.rationale : "",
+          }]
+        : [];
+    }),
+    applications: raw.applications as string[],
+  };
+}
+
+function gateDecision(entries: readonly JournalEntry[]): {
+  action?: string;
+  members?: string[];
+  automatic: boolean;
+} {
+  const auto = entries.find((entry) =>
+    entry.key.includes("/confirm-panel/confirm-panel-auto::result")
+  );
+  const manual = entries.find(
+    (entry) =>
+      entry.kind === "gate" &&
+      entry.key.includes("/confirm-panel") &&
+      entry.key.endsWith("::response"),
+  );
+  const raw = manual?.value ?? auto?.value;
+  if (typeof raw === "string") return { action: raw, automatic: auto !== undefined };
+  const value = object(raw);
+  return {
+    action: typeof value?.action === "string" ? value.action : undefined,
+    members: Array.isArray(value?.members)
+      ? value.members.filter((entry): entry is string => typeof entry === "string")
+      : undefined,
+    automatic: auto !== undefined,
+  };
+}
+
+function evidence(value: unknown): EvidenceView | undefined {
+  const raw = object(value);
+  if (!raw || raw.kind === "none") return undefined;
+  if (raw.kind === "script" && typeof raw.code === "string") {
+    return {
+      kind: "script",
+      code: raw.code,
+      ...(typeof raw.result === "string" ? { result: raw.result } : {}),
+    };
+  }
+  if (raw.kind === "math" && typeof raw.derivation === "string") {
+    return { kind: "math", derivation: raw.derivation };
+  }
+  if (
+    raw.kind === "reference" &&
+    typeof raw.citation === "string" &&
+    typeof raw.locator === "string" &&
+    typeof raw.shows === "string"
+  ) {
+    return {
+      kind: "reference",
+      citation: raw.citation,
+      locator: raw.locator,
+      shows: raw.shows,
+    };
+  }
+  return undefined;
+}
+
+function comment(value: unknown, member: PanelMemberView): CommentView | undefined {
+  const raw = object(value);
+  if (
+    (raw?.verdict !== "Pass" &&
+      raw?.verdict !== "Build" &&
+      raw?.verdict !== "Interrupt") ||
+    typeof raw.reason !== "string"
+  ) {
+    return undefined;
+  }
+  return {
+    commentorId: member.id,
+    commentorLabel: member.umbrella,
+    verdict: raw.verdict,
+    reason: raw.reason,
+    ...(typeof raw.suggestion === "string" && raw.suggestion.length > 0
+      ? { suggestion: raw.suggestion }
+      : {}),
+    ...(evidence(raw.evidence) ? { evidence: evidence(raw.evidence)! } : {}),
+  };
+}
+
+function decision(value: unknown): JudgeDecisionView | undefined {
+  const raw = object(value);
+  if (
+    (raw?.verdict !== "Pass" &&
+      raw?.verdict !== "Build" &&
+      raw?.verdict !== "Interrupt") ||
+    typeof raw.reason !== "string"
+  ) {
+    return undefined;
+  }
+  let assessment: JudgeDecisionView["assessment"];
+  if (Array.isArray(raw.assessment)) {
+    const entries = raw.assessment.flatMap((candidate) => {
+      const item = object(candidate);
+      return typeof item?.commentorId === "string" &&
+        (item.basis === "verified" || item.basis === "authority")
+        ? [[item.commentorId, item.basis] as const]
+        : [];
+    });
+    if (entries.length !== raw.assessment.length || entries.length === 0) {
+      return undefined;
+    }
+    assessment = Object.fromEntries(entries);
+  } else if (isObject(raw.assessment)) {
+    // Backward compatibility for pre-array jobs.
+    assessment = raw.assessment as JudgeDecisionView["assessment"];
+  } else {
+    return undefined;
+  }
+  return {
+    verdict: raw.verdict,
+    reason: raw.reason,
+    ...(typeof raw.suggestion === "string" && raw.suggestion.length > 0
+      ? { suggestion: raw.suggestion }
+      : {}),
+    ...(evidence(raw.evidence) ? { evidence: evidence(raw.evidence)! } : {}),
+    assessment,
+  };
+}
+
+function activePaths(events: readonly RunEvent[]): Set<string> {
+  const active = new Set<string>();
+  for (const event of events) {
+    if (event.type === "node:started") active.add(event.path);
+    if (event.type === "node:completed" || event.type === "node:failed") {
+      active.delete(event.path);
+    }
+  }
+  return active;
+}
+
+function buildReviews(
+  panel: readonly PanelMemberView[],
+  ideas: ReadonlyMap<string, BrainIdeaView>,
+  processorOutput: ProcessorOutputView | undefined,
+  entries: readonly JournalEntry[],
+  events: readonly RunEvent[],
+  stageActive: boolean,
+): { members: ReviewMemberView[]; cursor?: ReviewCursorView; complete: boolean } {
+  const rounds = new Map<string, {
+    comments: Map<number, CommentView>;
+    decision?: JudgeDecisionView;
+    revision?: { fromStep: number; revisedStepCount: number };
+  }>();
+  const roundFor = (member: number, step: number, round: number) => {
+    const key = `${member}:${step}:${round}`;
+    let found = rounds.get(key);
+    if (!found) {
+      found = { comments: new Map() };
+      rounds.set(key, found);
+    }
+    return found;
+  };
+
+  for (const entry of entries) {
+    const output = agentOutput(entry);
+    if (output === undefined || !entry.key.includes("/review-members/")) continue;
+    const at = coordinates(entry.key);
+    if (at.member === undefined || at.step === undefined || at.round === undefined) continue;
+    const round = roundFor(at.member, at.step, at.round);
+    if (
+      /\/comment-step(?:\/comment-step-execute)?::result$/.test(entry.key) &&
+      at.commentor !== undefined
+    ) {
+      const thinker = panel[at.member];
+      const commentors = panel.filter((member) => member.id !== thinker?.id);
+      const author = commentors[at.commentor];
+      if (author) {
+        const view = comment(output, author);
+        if (view) round.comments.set(at.commentor, view);
+      }
+    } else if (/\/judge-step(?:\/judge-step-execute)?::result$/.test(entry.key)) {
+      round.decision = decision(output);
+    } else if (
+      /\/redevelop-idea(?:\/redevelop-idea-execute)?::result$/.test(entry.key)
+    ) {
+      const revision = object(output);
+      if (
+        typeof revision?.fromStep === "number" &&
+        Array.isArray(revision.revisedSteps)
+      ) {
+        round.revision = {
+          fromStep: revision.fromStep,
+          revisedStepCount: revision.revisedSteps.length,
+        };
+      }
+    }
+  }
+
+  const members: ReviewMemberView[] = panel.map((member, memberIndex) => {
+    const stepCount =
+      ideas.get(member.id)?.cot.length ?? processorOutput?.cotSteps ?? 0;
+    const steps: ReviewStepView[] = Array.from({ length: stepCount }, (_, stepIndex) => {
+      const views: ReviewRoundView[] = [...rounds.entries()]
+        .flatMap(([key, value]) => {
+          const [m, s, r] = key.split(":").map(Number);
+          if (m !== memberIndex || s !== stepIndex) return [];
+          return [{
+            round: r! + 1,
+            comments: [...value.comments.entries()]
+              .sort(([a], [b]) => a - b)
+              .map(([, item]) => item),
+            ...(value.decision ? { decision: value.decision } : {}),
+            ...(value.revision ? { revision: value.revision } : {}),
+          }];
+        })
+        .sort((a, b) => a.round - b.round);
+      const passed = views.some((round) => round.decision?.verdict === "Pass");
+      const forcePassed =
+        !passed &&
+        views.length >= 4 &&
+        views[views.length - 1]?.decision !== undefined;
+      return {
+        index: stepIndex + 1,
+        outcome: passed
+          ? "passed"
+          : forcePassed
+            ? "force-passed"
+            : views.length > 0
+              ? "under-review"
+              : "pending",
+        rounds: views,
+      };
+    });
+    return { memberId: member.id, label: member.umbrella, steps };
+  });
+
+  let cursor: ReviewCursorView | undefined;
+  const deepest = [...activePaths(events)]
+    .filter((path) => path.includes("/review-members/"))
+    .sort((a, b) => b.split("/").length - a.split("/").length)[0];
+  if (deepest) {
+    const at = coordinates(deepest);
+    if (at.member !== undefined && at.step !== undefined) {
+      cursor = {
+        member: at.member + 1,
+        memberCount: panel.length,
+        step: at.step + 1,
+        stepCount: members[at.member]?.steps.length ?? processorOutput?.cotSteps ?? 0,
+        round: (at.round ?? members[at.member]?.steps[at.step]?.rounds.length ?? 0) + 1,
+        maxRounds: 4,
+      };
+    }
+  }
+  if (!cursor && stageActive) {
+    outer: for (const [memberIndex, member] of members.entries()) {
+      for (const [stepIndex, step] of member.steps.entries()) {
+        if (step.outcome === "pending" || step.outcome === "under-review") {
+          cursor = {
+            member: memberIndex + 1,
+            memberCount: members.length,
+            step: stepIndex + 1,
+            stepCount: member.steps.length,
+            round: Math.min(4, Math.max(1, step.rounds.length || 1)),
+            maxRounds: 4,
+          };
+          break outer;
+        }
+      }
+    }
+  }
+  const complete =
+    members.length > 0 &&
+    members.every((member) =>
+      member.steps.length > 0 &&
+      member.steps.every((step) =>
+        step.outcome === "passed" || step.outcome === "force-passed"
+      )
+    );
+  return { members, ...(cursor ? { cursor } : {}), complete };
+}
+
+function stageStatus(
+  id: StageId,
+  directComplete: boolean,
+  timing: StageTiming,
+  checkpoint: WorkflowCheckpoint | undefined,
+  jobStatus: JobStatus,
+  failedStage: StageId | undefined,
+): StageStatus {
+  if (checkpoint?.status === "completed") return "completed";
+  if (failedStage === id || timing.error) return "failed";
+  if (
+    checkpoint?.status === "suspended" &&
+    checkpoint.pendingGates.some((gate) => stageForPath(gate.path) === id)
+  ) {
+    return "suspended";
+  }
+  if (checkpoint?.status === "credit_blocked" && timing.active) {
+    return "credit_blocked";
+  }
+  if (directComplete || timing.finishedAt !== undefined) return "completed";
+  if (timing.active) {
+    return jobStatus === "cancelled" ? "cancelled" : "active";
+  }
+  return "pending";
+}
+
+function base(
+  id: StageId,
+  status: StageStatus,
+  timing: StageTiming,
+): StageBase {
+  return {
+    id,
+    status,
+    ...(timing.startedAt !== undefined ? { startedAt: timing.startedAt } : {}),
+    ...(timing.finishedAt !== undefined ? { finishedAt: timing.finishedAt } : {}),
+    ...(timing.error ? { error: timing.error } : {}),
+    ...(timing.activity.length > 0 ? { activity: timing.activity } : {}),
+  };
+}
+
+function pendingGate(
+  checkpoint: WorkflowCheckpoint | undefined,
+  panel: readonly PanelMemberView[],
+): PendingGateView | undefined {
+  const gate = checkpoint?.pendingGates[0];
+  if (!gate) return undefined;
+  const metadata = object(gate.metadata);
+  return {
+    gateKey: gate.gateKey,
+    ...(typeof metadata?.title === "string" ? { title: metadata.title } : {}),
+    ...(gate.prompt ? { prompt: gate.prompt } : {}),
+    ...(stageForPath(gate.path) === "confirm-panel" ? { members: panel } : {}),
+  };
+}
+
+export function buildJobDetail(input: MapperInput): JobDetail {
+  const checkpoint = readCheckpoint(input.sessionDir);
+  const events = readEvents(input.jobDir);
+  const artifacts = readArtifacts(input.sessionDir);
+  const entries = checkpoint?.journal ?? [];
+  const stageTimings = timings(events);
+
+  const processorOutput =
+    processor(artifact(artifacts, "processorOutput")) ??
+    processor(journalAgent(entries, (key) =>
+      key.includes("/process-input") &&
+      /\/process-input(?:-execute)?::result$/.test(key)
+    ));
+  const usefulFilesView = annotatedFiles(
+    artifact(artifacts, "usefulFiles") ??
+      journalStateField(
+        entries,
+        (key) => key.endsWith("/partition-files-useful::result"),
+        "usefulFiles",
+      ),
+  );
+  const ignoredFilesView = annotatedFiles(
+    artifact(artifacts, "ignoredFiles") ??
+      journalStateField(
+        entries,
+        (key) => key.endsWith("/partition-files-ignored::result"),
+        "ignoredFiles",
+      ),
+  );
+  const filePartition: FilePartitionView | undefined =
+    usefulFilesView.length > 0 || ignoredFilesView.length > 0
+      ? { useful: usefulFilesView, ignored: ignoredFilesView }
+      : undefined;
+
+  const expertsArtifact = artifact(artifacts, "experts");
+  const expertsJournal = journalAgent(entries, (key) =>
+    key.includes("/decompose-experts") &&
+    /\/decompose-experts(?:-execute)?::result$/.test(key)
+  );
+  const expertsOutput = experts(expertsArtifact) ?? experts(expertsJournal);
+  const groundingOutput =
+    grounding(expertsArtifact) ?? grounding(expertsJournal);
+  let selectedPanel = panelMembers(
+    artifact(artifacts, "panel") ??
+      journalStateField(
+        entries,
+        (key) => key.endsWith("/select-panel::result"),
+        "panel",
+      ),
+  );
+  if (selectedPanel.length === 0) {
+    selectedPanel = panelMembers(
+      entries.find((entry) => entry.key.endsWith("/select-panel::result"))?.value,
+    );
+  }
+  const gate = gateDecision(entries);
+  const retained = new Set(gate.members ?? selectedPanel.map((member) => member.id));
+  const finalPanel =
+    gate.action === "shrink"
+      ? selectedPanel.filter((member) => retained.has(member.id))
+      : selectedPanel;
+  const removedMemberIds =
+    gate.action === "shrink"
+      ? selectedPanel.filter((member) => !retained.has(member.id)).map((member) => member.id)
+      : [];
+
+  const ideas = new Map<string, BrainIdeaView>();
+  for (const member of selectedPanel) {
+    const value =
+      brainIdea(artifact(artifacts, "brainIdea", `ideas.${member.id}`)) ??
+      brainIdea(journalAgent(entries, (key) =>
+        key.includes("/first-pass/") &&
+        key.includes(`/member[${selectedPanel.indexOf(member)}]/`) &&
+        /\/develop-idea(?:\/develop-idea-execute)?::result$/.test(key)
+      ));
+    if (value) ideas.set(member.id, value);
+  }
+
+  const firstPassActive = activePaths(events);
+  // A task that was mid-flight when the run credit-blocked is paused, not
+  // thinking: nothing is executing until the auto-resume fires.
+  const creditBlocked =
+    checkpoint?.status === "credit_blocked" || input.status === "credit-blocked";
+  const firstPassMembers: FirstPassMemberView[] = finalPanel.map((member, index) => {
+    const idea = ideas.get(member.id);
+    // Only the LAST lifecycle event decides failure: a member whose task
+    // failed and then started again (auto-resume) is running, not failed.
+    const lastLifecycle = [...events].reverse().find(
+      (event) =>
+        (event.type === "node:started" ||
+          event.type === "node:completed" ||
+          event.type === "node:failed") &&
+        event.path.includes("/first-pass/") &&
+        event.path.includes(`/member[${index}]/`),
+    );
+    const failed = lastLifecycle?.type === "node:failed";
+    const thinking = [...firstPassActive].some(
+      (path) =>
+        path.includes("/first-pass/") && path.includes(`/member[${index}]/`),
+    );
+    return {
+      memberId: member.id,
+      label: member.umbrella,
+      department: member.department,
+      umbrella: member.umbrella,
+      subfields: member.subfields,
+      status: failed
+        ? "failed"
+        : idea
+          ? "completed"
+          : thinking
+            ? creditBlocked
+              ? "paused"
+              : "thinking"
+            : "pending",
+      ...(idea ? { idea } : {}),
+    };
+  });
+
+  // The newest failure counts only while its node has not started again; a
+  // restart (credit-block auto-resume, retry) supersedes the recorded failure.
+  let failedStage: RunEvent | undefined;
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const event = events[i]!;
+    if (event.type !== "node:failed") continue;
+    const restarted = events.some(
+      (candidate, j) =>
+        j > i &&
+        candidate.type === "node:started" &&
+        candidate.path === event.path,
+    );
+    if (!restarted) failedStage = event;
+    break;
+  }
+  let failedStageId =
+    failedStage?.type === "node:failed" ? stageForPath(failedStage.path) : undefined;
+  if (failedStage?.type === "node:failed" && failedStageId) {
+    const failedTiming = stageTimings.get(failedStageId)!;
+    failedTiming.error ??= failedStage.error.message;
+    failedTiming.finishedAt ??= failedStage.at;
+    failedTiming.active = false;
+  }
+  const reviewTiming = stageTimings.get("review-members")!;
+  const reviewJournalPresent = entries.some((entry) =>
+    entry.key.includes("/review-members")
+  );
+  const review = buildReviews(
+    finalPanel,
+    ideas,
+    processorOutput,
+    entries,
+    events,
+    reviewTiming.active ||
+      (checkpoint?.status === "running" && reviewJournalPresent),
+  );
+  const proposalOutput =
+    proposal(artifact(artifacts, "finalProposal")) ??
+    proposal(journalAgent(entries, (key) =>
+      key.includes("/synthesize-proposal") &&
+      /\/synthesize-proposal(?:-execute)?::result$/.test(key)
+    ));
+
+  const gateResolvedAt = [...events]
+    .reverse()
+    .find((event) => event.type === "gate:resolved")?.at;
+  const confirmGate: ConfirmPanelStage["gate"] = checkpoint?.pendingGates.some(
+    (candidate) => stageForPath(candidate.path) === "confirm-panel",
+  )
+    ? { state: "pending" }
+    : gate.automatic || (
+        input.settings.panelConfirmation === "auto" &&
+        (gate.action !== undefined || firstPassMembers.some((member) => member.status !== "pending"))
+      )
+      ? {
+          state: "auto-approved",
+          ...(gateResolvedAt !== undefined ? { decidedAt: gateResolvedAt } : {}),
+        }
+      : gate.action === "shrink"
+        ? {
+            state: "shrunk",
+            removedMemberIds,
+            ...(gateResolvedAt !== undefined
+              ? { decidedAt: gateResolvedAt }
+              : checkpoint ? { decidedAt: checkpoint.updatedAt } : {}),
+          }
+        : gate.action === "approve"
+          ? {
+              state: "approved",
+              ...(gateResolvedAt !== undefined
+                ? { decidedAt: gateResolvedAt }
+                : checkpoint ? { decidedAt: checkpoint.updatedAt } : {}),
+            }
+          : { state: "not-reached" };
+
+  const direct = new Map<StageId, boolean>([
+    ["process-input", processorOutput !== undefined],
+    ["decompose-experts", expertsOutput !== undefined],
+    ["select-panel", selectedPanel.length > 0],
+    ["confirm-panel", confirmGate.state !== "not-reached" && confirmGate.state !== "pending"],
+    [
+      "first-pass",
+      finalPanel.length > 0 &&
+        firstPassMembers.every((member) => member.status === "completed"),
+    ],
+    ["review-members", review.complete],
+    ["synthesize-proposal", proposalOutput !== undefined],
+    ["done", checkpoint?.status === "completed"],
+  ]);
+  const journalPresent = new Map<StageId, boolean>(
+    STAGE_IDS.map((id) => [
+      id,
+      entries.some((entry) => entry.key.includes(`/${id}`)) ||
+        (checkpoint?.pendingGates.some((gate) => stageForPath(gate.path) === id) ??
+          false),
+    ]),
+  );
+  if (checkpoint) {
+    for (const id of STAGE_IDS) {
+      const timing = stageTimings.get(id)!;
+      if ((direct.get(id) || checkpoint.status === "completed") && timing.finishedAt === undefined) {
+        timing.startedAt ??= checkpoint.updatedAt;
+        timing.finishedAt = checkpoint.updatedAt;
+      }
+    }
+    if (
+      ![...stageTimings.values()].some((timing) => timing.active) &&
+      (checkpoint.status === "running" ||
+        checkpoint.status === "failed" ||
+        checkpoint.status === "credit_blocked" ||
+        checkpoint.status === "cancelled")
+    ) {
+      let reached = -1;
+      for (const [index, id] of STAGE_IDS.entries()) {
+        if (journalPresent.get(id) || direct.get(id)) reached = index;
+      }
+      const candidate =
+        reached < 0
+          ? 0
+          : direct.get(STAGE_IDS[reached]!)
+            ? Math.min(STAGE_IDS.length - 1, reached + 1)
+            : reached;
+      const id = STAGE_IDS[candidate]!;
+      const timing = stageTimings.get(id)!;
+      timing.active = true;
+      timing.startedAt ??= checkpoint.updatedAt;
+      if (checkpoint.status === "failed" && failedStageId === undefined) {
+        failedStageId = id;
+        if (checkpoint.error?.message) timing.error = checkpoint.error.message;
+      }
+    }
+  }
+  const statuses = new Map<StageId, StageStatus>(
+    STAGE_IDS.map((id) => [
+      id,
+      stageStatus(
+        id,
+        direct.get(id) ?? false,
+        stageTimings.get(id)!,
+        checkpoint,
+        input.status,
+        failedStageId,
+      ),
+    ]),
+  );
+
+  if (input.status === "queued") {
+    for (const id of STAGE_IDS) statuses.set(id, "pending");
+  } else if (input.status === "cancelled" && checkpoint?.status !== "completed") {
+    const active = STAGE_IDS.find((id) => statuses.get(id) === "active");
+    if (active) statuses.set(active, "cancelled");
+  }
+
+  const processBase = base(
+    "process-input",
+    statuses.get("process-input")!,
+    stageTimings.get("process-input")!,
+  );
+  const decomposeBase = base(
+    "decompose-experts",
+    statuses.get("decompose-experts")!,
+    stageTimings.get("decompose-experts")!,
+  );
+  const panelBase = base(
+    "select-panel",
+    statuses.get("select-panel")!,
+    stageTimings.get("select-panel")!,
+  );
+  const confirmBase = base(
+    "confirm-panel",
+    statuses.get("confirm-panel")!,
+    stageTimings.get("confirm-panel")!,
+  );
+  const firstBase = base(
+    "first-pass",
+    statuses.get("first-pass")!,
+    stageTimings.get("first-pass")!,
+  );
+  const reviewBase = base(
+    "review-members",
+    statuses.get("review-members")!,
+    reviewTiming,
+  );
+  const proposalBase = base(
+    "synthesize-proposal",
+    statuses.get("synthesize-proposal")!,
+    stageTimings.get("synthesize-proposal")!,
+  );
+  const doneTiming = stageTimings.get("done")!;
+  const terminalEvent = [...events].reverse().find((event) =>
+    event.type === "run:completed" ||
+    event.type === "run:failed" ||
+    event.type === "run:cancelled"
+  );
+  if (doneTiming.finishedAt === undefined && terminalEvent) {
+    doneTiming.finishedAt = terminalEvent.at;
+  }
+  const doneBase = base("done", statuses.get("done")!, doneTiming);
+
+  const stageDurations = STAGE_IDS.flatMap((id) => {
+    const timing = stageTimings.get(id)!;
+    return timing.startedAt !== undefined && timing.finishedAt !== undefined
+      ? [{ stage: id, durationMs: Math.max(0, timing.finishedAt - timing.startedAt) }]
+      : [];
+  });
+  const runStarted = events.find((event) => event.type === "run:started")?.at;
+  const summary: RunSummaryView | undefined =
+    checkpoint?.status === "completed"
+      ? {
+          ...(runStarted !== undefined && terminalEvent
+            ? { totalDurationMs: Math.max(0, terminalEvent.at - runStarted) }
+            : {}),
+          stageDurations,
+          agentTaskCount:
+            new Set(
+              events.flatMap((event) =>
+                event.type === "agent:started" ? [event.taskId] : []
+              ),
+            ).size || entries.filter((entry) => entry.kind === "agent").length,
+        }
+      : undefined;
+
+  const expertCounts = expertsOutput
+    ? {
+        departments: expertsOutput.departments.length,
+        umbrellas: expertsOutput.departments.reduce(
+          (count, department) => count + department.umbrellas.length,
+          0,
+        ),
+        subfields: expertsOutput.departments.reduce(
+          (count, department) =>
+            count +
+            department.umbrellas.reduce(
+              (nested, umbrella) => nested + umbrella.subfields.length,
+              0,
+            ),
+          0,
+        ),
+      }
+    : undefined;
+
+  const stages: StageView[] = [
+    {
+      ...processBase,
+      id: "process-input",
+      ...(processorOutput ? { output: processorOutput } : {}),
+      ...(filePartition ? { files: filePartition } : {}),
+    },
+    {
+      ...decomposeBase,
+      id: "decompose-experts",
+      ...(expertsOutput ? { experts: expertsOutput } : {}),
+      ...(expertCounts ? { counts: expertCounts } : {}),
+      ...(groundingOutput ? { grounding: groundingOutput } : {}),
+    },
+    {
+      ...panelBase,
+      id: "select-panel",
+      ...(selectedPanel.length > 0 ? { panel: selectedPanel } : {}),
+      ...(expertCounts ? { leavesAvailable: expertCounts.umbrellas } : {}),
+    },
+    { ...confirmBase, id: "confirm-panel", gate: confirmGate },
+    { ...firstBase, id: "first-pass", members: firstPassMembers },
+    {
+      ...reviewBase,
+      id: "review-members",
+      members: review.members,
+      ...(review.cursor ? { cursor: review.cursor } : {}),
+    },
+    {
+      ...proposalBase,
+      id: "synthesize-proposal",
+      ...(proposalOutput ? { proposal: proposalOutput } : {}),
+    },
+    { ...doneBase, id: "done", ...(summary ? { summary } : {}) },
+  ];
+
+  const activeStage = stages.find(
+    (stage) =>
+      stage.status === "active" ||
+      stage.status === "suspended" ||
+      stage.status === "credit_blocked",
+  )?.id;
+  return {
+    jobId: input.record.jobId,
+    topic: input.record.topic,
+    status: input.status,
+    runner: input.record.runner,
+    createdAt: input.record.createdAt,
+    updatedAt: Math.max(input.record.updatedAt, checkpoint?.updatedAt ?? 0),
+    ...(input.record.slurmJobId ? { slurmJobId: input.record.slurmJobId } : {}),
+    progress: {
+      ...(activeStage ? { activeStage } : {}),
+      completedStages: stages.filter((stage) => stage.status === "completed").length,
+      totalStages: STAGE_IDS.length,
+      ...(review.cursor ? { reviewCursor: review.cursor } : {}),
+    },
+    ...(input.record.error ?? checkpoint?.error?.message
+      ? { error: input.record.error ?? checkpoint?.error?.message }
+      : {}),
+    ...(checkpoint?.creditBlock
+      ? {
+          creditBlock: {
+            retryAt: checkpoint.creditBlock.retryAt,
+            providerMessage: checkpoint.creditBlock.providerMessage,
+            source: checkpoint.creditBlock.source,
+          },
+        }
+      : {}),
+    stages,
+    ...(pendingGate(checkpoint, selectedPanel)
+      ? { pendingGate: pendingGate(checkpoint, selectedPanel) }
+      : {}),
+  };
+}
+
+export function compactJobDetail(detail: JobDetail): Omit<JobDetail, "stages" | "pendingGate"> {
+  const { stages: _stages, pendingGate: _pendingGate, ...summary } = detail;
+  return summary;
+}

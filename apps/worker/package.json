@@ -1,0 +1,38 @@
+{
+  "name": "brainstorm-agentic-worker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Isolated worker process that executes or resumes one brainstorm pipeline job.",
+  "type": "module",
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "bin": {
+    "brain-worker": "./dist/src/main.js",
+    "brainstorm-agentic": "./dist/src/main.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test dist/test/*.test.js",
+    "dev": "npm run build && node dist/src/main.js run"
+  },
+  "dependencies": {
+    "@brainstorm-agentic/agent-runtime": "0.1.0",
+    "@brainstorm-agentic/brainstorm-runtime": "0.1.0",
+    "@brainstorm-agentic/content": "0.1.0",
+    "@brainstorm-agentic/core": "0.1.0",
+    "@brainstorm-agentic/executor-claude-agent": "0.1.0",
+    "@brainstorm-agentic/host-tools": "0.1.0",
+    "@brainstorm-agentic/provider-anthropic": "0.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.6.0"
+  }
+}

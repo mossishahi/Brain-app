@@ -1,0 +1,37 @@
+{
+  "name": "brainstorm-agentic-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The Brain app server: serves the frontend, manages jobs, and connects to Brain Registry.",
+  "type": "module",
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "bin": {
+    "brain": "./dist/src/main.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test dist/test/*.test.js"
+  },
+  "dependencies": {
+    "@brainstorm-agentic/content": "0.1.0",
+    "@brainstorm-agentic/core": "0.1.0",
+    "@brainstorm-agentic/credit-recovery": "0.1.0",
+    "@brainstorm-agentic/executor-claude-agent": "0.1.0",
+    "@brainstorm-agentic/protocol": "0.1.0",
+    "@brainstorm-agentic/provider-anthropic": "0.1.0",
+    "yauzl": "^3.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/yauzl": "^2.10.3",
+    "typescript": "^5.6.0"
+  }
+}
