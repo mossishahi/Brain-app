@@ -10,6 +10,7 @@ import {
 import type { ContentRegistryRuntimeStatus } from "./model.js";
 import { startBrainServer } from "./server.js";
 import { ContentRegistryClient } from "@brainstorm-agentic/registry-client";
+import { DEFAULT_CONTENT_REGISTRY_URL } from "./settings.js";
 
 interface ParsedArgs {
   readonly command: string;
@@ -210,17 +211,22 @@ async function main(): Promise<void> {
     .map((entry) => expandHome(entry.trim()))
     .filter((entry) => entry.length > 0);
   const contentRegistryStatus: ContentRegistryRuntimeStatus = { running: false };
-  const remoteContentRegistry =
+  const localRegistryMain =
+    stringFlag(args, "content-registry-main") ??
+    process.env.BRAIN_CONTENT_REGISTRY_MAIN?.trim();
+  const configuredRegistryUrl =
     stringFlag(args, "content-registry-url") ??
     process.env.BRAIN_CONTENT_REGISTRY_URL?.trim();
+  const remoteContentRegistry =
+    configuredRegistryUrl ??
+    (localRegistryMain ? undefined : DEFAULT_CONTENT_REGISTRY_URL);
   const spawned = remoteContentRegistry
     ? await connectRemoteContentRegistry(remoteContentRegistry, contentRegistryStatus)
     : await spawnContentRegistry(
         "127.0.0.1",
         contentRegistryPort,
         contentRegistryStatus,
-        stringFlag(args, "content-registry-main") ??
-          process.env.BRAIN_CONTENT_REGISTRY_MAIN?.trim(),
+        localRegistryMain,
       );
   let running;
   try {
