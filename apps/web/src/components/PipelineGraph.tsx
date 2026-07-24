@@ -68,10 +68,13 @@ export function PipelineGraph({
       >
         {LAYOUT.nodes.slice(0, -1).map((node, index) => {
           const next = LAYOUT.nodes[index + 1]!;
+          const done =
+            stages.get(node.id)?.status === "completed" &&
+            stages.get(next.id)?.status === "completed";
           return (
             <line
               key={node.id}
-              className="connector"
+              className={`connector${done ? " connector-done" : ""}`}
               x1={node.x + node.w}
               y1={TOP + NODE_H / 2}
               x2={next.x}

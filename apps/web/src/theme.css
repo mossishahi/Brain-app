@@ -47,6 +47,10 @@ body {
   font-family: var(--font);
   font-size: 14px;
   line-height: 1.5;
+  /* Matches the shared 120ms element transitions so theme switches move as one. */
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
 }
 
 #root {
@@ -60,6 +64,23 @@ body {
   min-height: 100vh;
 }
 
+/* Lightweight fade when the hash route changes. */
+.route-view {
+  animation: route-fade-in 180ms ease;
+}
+
+@keyframes route-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .route-view {
+    animation: none;
+  }
+}
+
 /*
  * Vanta renders in two narrow side canvases only. Each edge fades before the
  * central 1096px application column, keeping animation away from panel content.
@@ -71,6 +92,7 @@ body {
   width: max(0px, calc((100vw - 920px) / 2));
   z-index: 0;
   pointer-events: none;
+  transition: opacity 600ms ease;
 }
 
 .ambient-vanta-left {
@@ -91,6 +113,11 @@ body {
 
 .ambient-vanta-dark {
   opacity: 0.15;
+}
+
+/* Crossfade target; the hidden theme's WebGL loop is destroyed after the fade. */
+.ambient-vanta-hidden {
+  opacity: 0;
 }
 
 .ambient-vanta-dark canvas {
@@ -165,7 +192,17 @@ textarea,
 .job-card,
 .seat-card,
 .chip,
-.node-rect {
+.node-rect,
+.drawer,
+.activity-feed,
+.banner,
+.member-card,
+.tree-col,
+.band-col,
+.gate-card,
+.judge-card,
+.round-block,
+.code-block {
   transition:
     color 120ms ease,
     background-color 120ms ease,
@@ -1015,6 +1052,7 @@ button.server-file-name {
   padding: 24px 22px 16px;
   box-shadow: 0 14px 34px color-mix(in srgb, var(--text) 8%, transparent);
   transition:
+    background-color 120ms ease,
     border-color 120ms ease,
     box-shadow 120ms ease;
 }
@@ -1118,68 +1156,6 @@ button.server-file-name {
 
 .composer-model-profile {
   color: var(--text-dim);
-}
-
-.registry-indicator {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: none;
-  position: relative;
-  width: 20px;
-  height: 20px;
-  margin-left: -5px;
-  text-decoration: none;
-  transition: color 140ms ease, transform 140ms ease;
-}
-
-.registry-indicator.connected {
-  color: #72c7ff;
-}
-
-.registry-indicator.disconnected {
-  color: #ff6b6b;
-}
-
-.registry-indicator:hover,
-.registry-indicator:focus-visible {
-  transform: scale(1.08);
-  outline: none;
-}
-
-.registry-indicator::after {
-  position: absolute;
-  left: 50%;
-  bottom: calc(100% + 8px);
-  z-index: 30;
-  padding: 5px 8px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--surface);
-  box-shadow: 0 8px 24px color-mix(in srgb, var(--text) 12%, transparent);
-  color: var(--text);
-  content: attr(data-tooltip);
-  font-size: 11px;
-  font-weight: 400;
-  line-height: 1.3;
-  opacity: 0;
-  pointer-events: none;
-  transform: translateX(-50%) translateY(3px);
-  transition: opacity 120ms ease, transform 120ms ease;
-  white-space: nowrap;
-}
-
-.registry-indicator:hover::after,
-.registry-indicator:focus-visible::after {
-  opacity: 1;
-  transform: translateX(-50%) translateY(0);
-}
-
-.registry-indicator svg {
-  color: currentColor;
-  width: 14px;
-  height: 14px;
-  font-size: 14px;
 }
 
 .composer-model svg {
@@ -1557,6 +1533,25 @@ button.server-file-name {
   stroke-linejoin: round;
 }
 
+/*
+ * Dark theme only: progressing pulses blink in a low-opacity light green and
+ * edges between two completed phases turn dark green. Light theme keeps its
+ * original accent/border colors.
+ */
+:root[data-theme="dark"] .node-pulse {
+  fill: #86efac;
+  opacity: 0.14;
+}
+
+:root[data-theme="dark"] .dot-accent.pulse {
+  background: color-mix(in srgb, #86efac 60%, transparent);
+}
+
+:root[data-theme="dark"] .connector-done {
+  stroke: #1e7a4c;
+  stroke-width: 1.4;
+}
+
 /* ------------------------------------------------------------ stage panels */
 
 .stage-list {
@@ -1591,6 +1586,41 @@ button.server-file-name {
   gap: 12px;
   flex-wrap: wrap;
   margin-bottom: 12px;
+  cursor: pointer;
+}
+
+.stage-head-collapsed {
+  margin-bottom: 0;
+}
+
+.stage-toggle {
+  width: 22px;
+  height: 22px;
+  flex: none;
+  align-self: center;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 6px;
+  color: var(--text-dim);
+}
+
+.stage-toggle:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+}
+
+.stage-toggle svg {
+  transition: transform 160ms ease;
+}
+
+.stage-toggle[aria-expanded="true"] svg {
+  transform: rotate(90deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stage-toggle svg {
+    transition: none;
+  }
 }
 
 .stage-title {
@@ -1829,6 +1859,23 @@ button.server-file-name {
   padding: 4px;
 }
 
+/*
+ * The literature grounding columns share one responsive fixed height so their
+ * lower edges always align; each list scrolls under its own fixed title. The
+ * expertise tree browser keeps its natural height.
+ */
+.grounding-browser .tree-col {
+  display: flex;
+  flex-direction: column;
+  height: clamp(240px, 38vh, 360px);
+}
+
+.grounding-browser .tree-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
 /* Literature grounding (papers / authors / research interests) */
 
 .subpanel + .subpanel {
@@ -2012,9 +2059,10 @@ button.server-file-name {
 
 /* -------------------------------------------------------------- first pass */
 
+/* One stacked column; every card shares the same bounded height. */
 .member-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  display: flex;
+  flex-direction: column;
   gap: 12px;
 }
 
@@ -2023,6 +2071,23 @@ button.server-file-name {
   border-radius: var(--radius);
   padding: 12px;
   min-width: 0;
+  max-height: 420px;
+  display: flex;
+  flex-direction: column;
+}
+
+.idea-tabs {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+/* The member heading and tab row stay visible; only the content scrolls. */
+.idea-tab-content {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .member-head {
@@ -2446,9 +2511,13 @@ button.server-file-name {
 /* ----------------------------------------------------------------- mobile */
 
 @media (max-width: 720px) {
-  .member-grid,
   .tree-browser,
   .proposal-band {
     grid-template-columns: 1fr;
+  }
+
+  .grounding-browser .tree-col {
+    height: auto;
+    max-height: 300px;
   }
 }

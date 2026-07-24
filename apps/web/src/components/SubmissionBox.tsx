@@ -19,7 +19,6 @@ import {
   VideoCameraOutlined,
   DownOutlined,
 } from "@ant-design/icons";
-import { LuBrain } from "react-icons/lu";
 import {
   ATTACHMENT_LIMITS,
   type AttachmentSelectionKind,
@@ -28,7 +27,6 @@ import {
 } from "@brainstorm-agentic/protocol";
 import {
   errorMessage,
-  getHealth,
   getSettings,
   validateAttachments,
 } from "../api";
@@ -42,8 +40,9 @@ const ServerFileExplorer = lazy(() =>
   })),
 );
 
-const LINE_HEIGHT = 22;
-const MAX_LINES = 6;
+// Fallbacks matching `.chatbox textarea` in theme.css: 26px lines, 182px cap.
+const LINE_HEIGHT = 26;
+const MAX_LINES = 7;
 
 const PICKER_OPTIONS: readonly {
   readonly kind: AttachmentSelectionKind;
@@ -129,28 +128,6 @@ function formatModelName(value: string): string {
       .replace(/^claude[-_]/i, "")
       .replace(/[-_](\d+)[-_](\d+)(?:[-_]\d{8})?$/i, " $1.$2"),
   );
-}
-
-function registryHost(url: string | undefined): string {
-  if (!url) return "Brain Registry";
-  try {
-    return new URL(url).hostname;
-  } catch {
-    return url;
-  }
-}
-
-function registryPageUrl(url: string | undefined): string | undefined {
-  if (!url) return undefined;
-  try {
-    const parsed = new URL(url);
-    parsed.pathname = parsed.pathname.replace(/\/mcp\/?$/, "/");
-    parsed.search = "";
-    parsed.hash = "";
-    return parsed.toString();
-  } catch {
-    return undefined;
-  }
 }
 
 function modelDisplay(settings: ServerSettings | null): {
@@ -279,16 +256,26 @@ export function SubmissionBox({
   const [settings, setSettings] = useState<ServerSettings | null>(
     null,
   );
-  const [registryConnected, setRegistryConnected] = useState(false);
-  const [registryTarget, setRegistryTarget] = useState("Brain Registry");
-  const [registryPage, setRegistryPage] = useState<string | undefined>();
   const ref = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     const element = ref.current;
     if (!element) return;
+    // The CSS max-height is authoritative (it also covers the mobile styles);
+    // the constants only guard against a missing computed value.
+    const maxHeight =
+      Number.parseFloat(window.getComputedStyle(element).maxHeight) ||
+      LINE_HEIGHT * MAX_LINES;
     element.style.height = "auto";
-    element.style.height = `${Math.min(element.scrollHeight, LINE_HEIGHT * MAX_LINES)}px`;
+    element.style.height = `${Math.min(element.scrollHeight, maxHeight)}px`;
+    // Once growth is capped, keep the newest text visible while typing at the
+    // end; editing mid-text or scrolling manually is left undisturbed.
+    if (
+      element.scrollHeight > maxHeight &&
+      element.selectionEnd >= element.value.length
+    ) {
+      element.scrollTop = element.scrollHeight;
+    }
   }, [value]);
 
   useEffect(() => {
@@ -314,32 +301,6 @@ export function SubmissionBox({
       );
     };
   }, []);
-
-  useEffect(() => {
-    let live = true;
-    const refresh = async (): Promise<void> => {
-      try {
-        const health = await getHealth();
-        if (!live) return;
-        const endpoint =
-          health.contentRegistry.url ?? settings?.contentRegistry.url;
-        setRegistryConnected(health.contentRegistry.running);
-        setRegistryTarget(registryHost(endpoint));
-        setRegistryPage(registryPageUrl(endpoint));
-      } catch {
-        if (!live) return;
-        setRegistryConnected(false);
-        setRegistryTarget(registryHost(settings?.contentRegistry.url));
-        setRegistryPage(registryPageUrl(settings?.contentRegistry.url));
-      }
-    };
-    void refresh();
-    const timer = window.setInterval(() => void refresh(), 15_000);
-    return () => {
-      live = false;
-      window.clearInterval(timer);
-    };
-  }, [settings?.contentRegistry.url]);
 
   const addValidated = (
     items: readonly ValidatedAttachment[],
@@ -630,29 +591,6 @@ export function SubmissionBox({
                 )}
                 <DownOutlined aria-hidden />
               </button>
-              <a
-                className={`registry-indicator ${
-                  registryConnected ? "connected" : "disconnected"
-                }`}
-                href={registryPage}
-                target="_blank"
-                rel="noreferrer"
-                data-tooltip={
-                  registryConnected
-                    ? `connected to ${registryTarget}`
-                    : `could not connect to ${registryTarget}`
-                }
-                aria-label={
-                  registryConnected
-                    ? `Connected to Brain Registry at ${registryTarget}`
-                    : `Could not connect to Brain Registry at ${registryTarget}`
-                }
-                onClick={(event) => {
-                  if (!registryPage) event.preventDefault();
-                }}
-              >
-                <LuBrain aria-hidden />
-              </a>
               <button
                 type="button"
                 className="send-btn"

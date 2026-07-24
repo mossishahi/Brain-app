@@ -43,7 +43,7 @@ function IdeaTabs({ idea }: { idea: BrainIdeaView }) {
   ];
 
   return (
-    <div>
+    <div className="idea-tabs">
       <div className="tab-row" role="tablist">
         {tabs.map((t) => (
           <button
@@ -58,56 +58,58 @@ function IdeaTabs({ idea }: { idea: BrainIdeaView }) {
           </button>
         ))}
       </div>
-      {active === "paper" && (
-        <div>
-          {sections.map(([label, text]) => (
-            <div key={label} className="paper-section">
-              <p className="section-label">{label}</p>
-              <Clamp text={text} />
-            </div>
-          ))}
-        </div>
-      )}
-      {active === "chain" && (
-        <ol className="chain-list">
-          {idea.cot.map((step, i) => (
-            <li key={i}>
-              <Clamp text={step} />
-            </li>
-          ))}
-        </ol>
-      )}
-      {active === "novelty" && <div className="callout">{idea.novelty}</div>}
-      {active === "papers" && (
-        <table className="paper-table">
-          <thead>
-            <tr>
-              <th>Title</th>
-              <th>Year</th>
-              <th>Venue</th>
-              <th>Relation</th>
-            </tr>
-          </thead>
-          <tbody>
-            {literature.map((paper, i) => (
-              <tr key={paper.id ?? `${paper.title}-${i}`}>
-                <td>
-                  {paper.url ? (
-                    <a href={paper.url} target="_blank" rel="noreferrer">
-                      {paper.title}
-                    </a>
-                  ) : (
-                    paper.title
-                  )}
-                </td>
-                <td>{paper.year ?? "—"}</td>
-                <td>{paper.venue ?? "—"}</td>
-                <td>{paper.relation ?? "—"}</td>
-              </tr>
+      <div className="idea-tab-content">
+        {active === "paper" && (
+          <div>
+            {sections.map(([label, text]) => (
+              <div key={label} className="paper-section">
+                <p className="section-label">{label}</p>
+                <Clamp text={text} />
+              </div>
             ))}
-          </tbody>
-        </table>
-      )}
+          </div>
+        )}
+        {active === "chain" && (
+          <ol className="chain-list">
+            {idea.cot.map((step, i) => (
+              <li key={i}>
+                <Clamp text={step} />
+              </li>
+            ))}
+          </ol>
+        )}
+        {active === "novelty" && <div className="callout">{idea.novelty}</div>}
+        {active === "papers" && (
+          <table className="paper-table">
+            <thead>
+              <tr>
+                <th>Title</th>
+                <th>Year</th>
+                <th>Venue</th>
+                <th>Relation</th>
+              </tr>
+            </thead>
+            <tbody>
+              {literature.map((paper, i) => (
+                <tr key={paper.id ?? `${paper.title}-${i}`}>
+                  <td>
+                    {paper.url ? (
+                      <a href={paper.url} target="_blank" rel="noreferrer">
+                        {paper.title}
+                      </a>
+                    ) : (
+                      paper.title
+                    )}
+                  </td>
+                  <td>{paper.year ?? "—"}</td>
+                  <td>{paper.venue ?? "—"}</td>
+                  <td>{paper.relation ?? "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
     </div>
   );
 }

@@ -5,12 +5,18 @@ import { AmbientBackdrop } from "./components/AmbientBackdrop";
 import { Dashboard } from "./components/Dashboard";
 import { Landing } from "./components/Landing";
 import { SettingsDrawer } from "./components/SettingsDrawer";
-import { GearIcon, MoonIcon, SunIcon } from "./components/Icons";
+import { TrashView } from "./components/TrashView";
+import { GearIcon, MoonIcon, SunIcon, TrashIcon } from "./components/Icons";
 
-type Route = { view: "landing" } | { view: "job"; jobId: string };
+type Route =
+  | { view: "landing" }
+  | { view: "job"; jobId: string }
+  | { view: "trash" };
 
 function parseRoute(): Route {
-  const match = /^#\/jobs\/([^/?#]+)/.exec(window.location.hash);
+  const hash = window.location.hash;
+  if (/^#\/trash(?:[/?#]|$)/.test(hash)) return { view: "trash" };
+  const match = /^#\/jobs\/([^/?#]+)/.exec(hash);
   if (match) return { view: "job", jobId: decodeURIComponent(match[1]) };
   return { view: "landing" };
 }
@@ -65,6 +71,9 @@ export function App() {
       <AmbientBackdrop theme={theme} />
       <div className="app-foreground">
         <div className="top-controls">
+          <a className="ghost-btn" href="#/trash" aria-label="open the job trash">
+            <TrashIcon />
+          </a>
           <button
             type="button"
             className="ghost-btn"
@@ -82,11 +91,18 @@ export function App() {
             <GearIcon />
           </button>
         </div>
-        {route.view === "job" ? (
-          <Dashboard key={route.jobId} jobId={route.jobId} />
-        ) : (
-          <Landing onOpenSettings={() => setSettingsOpen(true)} />
-        )}
+        <div
+          className="route-view"
+          key={route.view === "job" ? `job:${route.jobId}` : route.view}
+        >
+          {route.view === "job" ? (
+            <Dashboard jobId={route.jobId} />
+          ) : route.view === "trash" ? (
+            <TrashView />
+          ) : (
+            <Landing onOpenSettings={() => setSettingsOpen(true)} />
+          )}
+        </div>
         {settingsOpen && <SettingsDrawer onClose={() => setSettingsOpen(false)} />}
       </div>
     </ConfigProvider>

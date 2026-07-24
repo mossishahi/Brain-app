@@ -338,6 +338,8 @@ export interface JobSummary {
   readonly createdAt: number;
   readonly updatedAt: number;
   readonly slurmJobId?: string;
+  /** Present once the job has been moved to the view-only trash. */
+  readonly trashedAt?: number;
   /** Compact progress for the landing-page job card. */
   readonly progress?: {
     readonly activeStage?: StageId;
@@ -584,6 +586,11 @@ export interface CancelJobResponse {
   readonly status: JobStatus;
 }
 
+export interface TrashJobResponse {
+  readonly jobId: string;
+  readonly trashedAt: number;
+}
+
 export interface ContentRegistryStatus {
   readonly running: boolean;
   readonly url?: string;
@@ -615,8 +622,10 @@ export type ServerEvent =
  *   GET  /api/attachments/search              -> SearchServerFilesResponse
  *   POST /api/attachments/validate            -> ValidateAttachmentsResponse
  *   POST /api/jobs                            -> SubmitJobResponse   (body: SubmitJobRequest with validated server paths/URLs)
+ *   GET  /api/jobs/trash                      -> JobSummary[]       (view-only trash, newest first)
  *   GET  /api/jobs/:jobId                     -> JobDetail
  *   POST /api/jobs/:jobId/cancel              -> CancelJobResponse
+ *   POST /api/jobs/:jobId/trash               -> TrashJobResponse   (409 while the job is still live)
  *   POST /api/jobs/:jobId/gate                -> JobDetail           (body: GateAnswerRequest; submits a resume job)
  *   GET  /api/stream                          -> SSE of ServerEvent{type:"jobs"}
  *   GET  /api/jobs/:jobId/stream              -> SSE of ServerEvent{type:"job"}

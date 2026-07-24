@@ -4,6 +4,7 @@ export {
   type StartBrainServerOptions,
 } from "./server.js";
 export {
+  JobConflictError,
   JobManager,
   createJobId,
   defaultWorkerPath,

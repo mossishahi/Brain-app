@@ -23,7 +23,7 @@ import type {
   SubmitJobRequest,
 } from "@brainstorm-agentic/protocol";
 
-import { JobManager } from "./job-manager.js";
+import { JobConflictError, JobManager } from "./job-manager.js";
 import type { ContentRegistryRuntimeStatus } from "./model.js";
 import {
   ServerFileBrowser,
@@ -38,7 +38,6 @@ const VERSION = "0.1.0";
 const SNAPSHOT_THROTTLE_MS = 500;
 const HEARTBEAT_MS = 15_000;
 const POLL_MS = 2_000;
-const REGISTRY_HEARTBEAT_MS = 15_000;
 const ATTACHMENT_KINDS = new Set<AttachmentSelectionKind>([
   "file",
   "folder",
@@ -54,25 +53,6 @@ function attachmentKind(value: unknown): AttachmentSelectionKind {
     throw new HttpError(400, "invalid attachment kind");
   }
   return value as AttachmentSelectionKind;
-}
-
-async function probeContentRegistry(
-  registryUrl: string,
-  status: ContentRegistryRuntimeStatus,
-): Promise<void> {
-  try {
-    const url = new URL(registryUrl);
-    url.pathname = url.pathname.replace(/\/mcp\/?$/, "/health");
-    url.search = "";
-    url.hash = "";
-    const response = await fetch(url, {
-      signal: AbortSignal.timeout(5_000),
-      headers: { accept: "application/json" },
-    });
-    status.running = response.ok;
-  } catch {
-    status.running = false;
-  }
 }
 
 export interface StartBrainServerOptions {
@@ -568,6 +548,27 @@ export async function startBrainServer(
         return;
       }
 
+      // Must precede the ":jobId" detail route, which would match "trash".
+      if (req.method === "GET" && path === "/api/jobs/trash") {
+        sendJson(res, 200, await manager.listTrashed());
+        return;
+      }
+
+      const trashMatch = /^\/api\/jobs\/([^/]+)\/trash$/.exec(path);
+      if (req.method === "POST" && trashMatch) {
+        try {
+          const result = await manager.trash(decodeURIComponent(trashMatch[1]!));
+          broadcast();
+          sendJson(res, 200, result);
+        } catch (error) {
+          if (error instanceof JobConflictError) {
+            throw new HttpError(409, error.message);
+          }
+          throw error; // "was not found" maps to 404 in the outer handler
+        }
+        return;
+      }
+
       const gateMatch = /^\/api\/jobs\/([^/]+)\/gate$/.exec(path);
       if (req.method === "POST" && gateMatch) {
         const body = requestObject(await readJson(req));
@@ -647,11 +648,7 @@ export async function startBrainServer(
   const poll = setInterval(() => {
     void manager.resumeDueCreditBlocks().finally(broadcast);
   }, POLL_MS);
-  const registryPoll = setInterval(() => {
-    void probeContentRegistry(contentRegistryUrl, contentRegistry);
-  }, REGISTRY_HEARTBEAT_MS);
   await manager.resumeDueCreditBlocks();
-  await probeContentRegistry(contentRegistryUrl, contentRegistry);
 
   return {
     port,
@@ -663,7 +660,6 @@ export async function startBrainServer(
     httpServer,
     close: async () => {
       clearInterval(poll);
-      clearInterval(registryPoll);
       watchers.forEach((entry) => entry.close());
       for (const stream of [...jobStreams]) stream.close();
       for (const streams of detailStreams.values()) {

@@ -2,35 +2,48 @@
 import { useEffect, useState } from "react";
 import type { JobSummary } from "@brainstorm-agentic/protocol";
 import {
+  cacheJobs,
+  cachedJobs,
   cancelJob,
   errorMessage,
   getJobs,
   jobsStreamUrl,
+  prefetchJobDetail,
   submitJob,
+  trashJob,
   useServerEvents,
 } from "../api";
 import { jobDot, jobStatusLine } from "../format";
 import { Dot } from "./common";
-import { XIcon } from "./Icons";
+import { TrashIcon, XIcon } from "./Icons";
 import { SubmissionBox } from "./SubmissionBox";
 
 function JobCard({ job }: { readonly job: JobSummary }) {
-  const [confirming, setConfirming] = useState(false);
-  const [cancelFailed, setCancelFailed] = useState(false);
+  const [confirming, setConfirming] = useState<"cancel" | "trash" | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const cancellable =
     job.status === "queued" ||
     job.status === "running" ||
     job.status === "suspended" ||
     job.status === "orphaned";
+  // Running/queued/suspended jobs must be stopped before they can be trashed.
+  const trashable =
+    job.status === "completed" ||
+    job.status === "failed" ||
+    job.status === "cancelled" ||
+    job.status === "orphaned";
 
-  const doCancel = async (): Promise<void> => {
+  const perform = async (
+    action: () => Promise<unknown>,
+    failure: string,
+  ): Promise<void> => {
     try {
-      await cancelJob(job.jobId);
-      setCancelFailed(false);
+      await action();
+      setActionError(null);
     } catch {
-      setCancelFailed(true);
+      setActionError(failure);
     } finally {
-      setConfirming(false);
+      setConfirming(null);
     }
   };
 
@@ -39,6 +52,8 @@ function JobCard({ job }: { readonly job: JobSummary }) {
       <a
         className="job-card-main"
         href={`#/jobs/${encodeURIComponent(job.jobId)}`}
+        onMouseEnter={() => prefetchJobDetail(job.jobId)}
+        onFocus={() => prefetchJobDetail(job.jobId)}
       >
         <span className="job-topic">{job.topic}</span>
         <span className="job-status-line">
@@ -46,43 +61,74 @@ function JobCard({ job }: { readonly job: JobSummary }) {
           <span>{jobStatusLine(job)}</span>
         </span>
       </a>
-      {confirming ? (
+      {confirming !== null ? (
         <div className="cancel-zone">
           <span className="cancel-question">
-            Are you sure you want to cancel this job?
+            {confirming === "cancel"
+              ? "Are you sure you want to cancel this job?"
+              : "Move this job to the view-only trash?"}
           </span>
-          <button
-            type="button"
-            className="btn btn-danger btn-small"
-            onClick={() => void doCancel()}
-          >
-            Yes, cancel
-          </button>
+          {confirming === "cancel" ? (
+            <button
+              type="button"
+              className="btn btn-danger btn-small"
+              onClick={() =>
+                void perform(() => cancelJob(job.jobId), "cancel failed")
+              }
+            >
+              Yes, cancel
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="btn btn-small"
+              onClick={() =>
+                void perform(() => trashJob(job.jobId), "move to trash failed")
+              }
+            >
+              Yes, move
+            </button>
+          )}
           <button
             type="button"
             className="btn btn-small"
-            onClick={() => setConfirming(false)}
+            onClick={() => setConfirming(null)}
           >
             No
           </button>
         </div>
       ) : (
-        cancellable && (
+        (cancellable || trashable) && (
           <div className="cancel-zone">
-            {cancelFailed && (
-              <span className="error-text">cancel failed</span>
+            {actionError && (
+              <span className="error-text">{actionError}</span>
             )}
-            <button
-              type="button"
-              className="ghost-btn"
-              aria-label={`cancel job: ${job.topic}`}
-              onClick={() => {
-                setCancelFailed(false);
-                setConfirming(true);
-              }}
-            >
-              <XIcon />
-            </button>
+            {trashable && (
+              <button
+                type="button"
+                className="ghost-btn"
+                aria-label={`move job to trash: ${job.topic}`}
+                onClick={() => {
+                  setActionError(null);
+                  setConfirming("trash");
+                }}
+              >
+                <TrashIcon size={16} />
+              </button>
+            )}
+            {cancellable && (
+              <button
+                type="button"
+                className="ghost-btn"
+                aria-label={`cancel job: ${job.topic}`}
+                onClick={() => {
+                  setActionError(null);
+                  setConfirming("cancel");
+                }}
+              >
+                <XIcon />
+              </button>
+            )}
           </div>
         )
       )}
@@ -95,9 +141,8 @@ export function Landing({
 }: {
   readonly onOpenSettings: () => void;
 }) {
-  const [jobs, setJobs] = useState<readonly JobSummary[] | null>(
-    null,
-  );
+  // Render the cached list immediately; the fetch/SSE below refresh it.
+  const [jobs, setJobs] = useState<readonly JobSummary[] | null>(cachedJobs);
   const [submitError, setSubmitError] = useState<string | null>(
     null,
   );
@@ -117,7 +162,10 @@ export function Landing({
   }, []);
 
   const connected = useServerEvents(jobsStreamUrl, (event) => {
-    if (event.type === "jobs") setJobs(event.jobs);
+    if (event.type === "jobs") {
+      setJobs(event.jobs);
+      cacheJobs(event.jobs);
+    }
   });
 
   const submit = async (

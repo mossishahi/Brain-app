@@ -12,6 +12,8 @@ import type {
 } from "@brainstorm-agentic/protocol";
 import {
   answerGate,
+  cacheJobDetail,
+  cachedJobDetail,
   cancelJob,
   errorMessage,
   getJob,
@@ -28,7 +30,7 @@ import {
   STAGE_TITLES,
 } from "../format";
 import { ActivityFeed, Dot, SkeletonLines } from "./common";
-import { BackIcon } from "./Icons";
+import { BackIcon, ChevronIcon } from "./Icons";
 import { PipelineGraph } from "./PipelineGraph";
 import { ProcessInputBody } from "./panels/ProcessInputPanel";
 import { DecomposeBody } from "./panels/DecomposePanel";
@@ -57,6 +59,7 @@ function useNow(enabled: boolean): number {
 }
 
 function StageFrame({
+  id,
   title,
   status,
   startedAt,
@@ -66,10 +69,13 @@ function StageFrame({
   error,
   activity,
   selected,
+  expanded,
+  onToggle,
   refCb,
   actions,
   children,
 }: {
+  id: StageId;
   title: string;
   status: StageStatus;
   startedAt?: number;
@@ -80,6 +86,8 @@ function StageFrame({
   error?: string;
   activity?: readonly StageActivityEntry[];
   selected: boolean;
+  expanded: boolean;
+  onToggle: () => void;
   refCb: (el: HTMLElement | null) => void;
   actions?: ReactNode;
   children: ReactNode;
@@ -95,9 +103,28 @@ function StageFrame({
   const running = status === "active" || status === "suspended";
   const end = finishedAt ?? (running ? now : fallbackEnd);
   const elapsed = startedAt !== undefined ? Math.max(0, end - startedAt) : undefined;
+  const bodyId = `stage-body-${id}`;
   return (
     <section ref={refCb} className={`stage${selected ? " stage-selected" : ""}`}>
-      <header className="stage-head">
+      <header
+        className={`stage-head${expanded ? "" : " stage-head-collapsed"}`}
+        onClick={(event) => {
+          // The header is a convenience toggle; its own controls must not fold
+          // the panel when clicked (the chevron button handles itself).
+          if ((event.target as HTMLElement).closest("button, a")) return;
+          onToggle();
+        }}
+      >
+        <button
+          type="button"
+          className="stage-toggle"
+          aria-expanded={expanded}
+          aria-controls={bodyId}
+          aria-label={`${expanded ? "collapse" : "expand"} ${title} panel`}
+          onClick={onToggle}
+        >
+          <ChevronIcon />
+        </button>
         <span className="stage-title">{title}</span>
         <span className="stage-status">
           <Dot state={stageDot(status)} />
@@ -109,12 +136,18 @@ function StageFrame({
         </span>
         {actions && <span className="stage-actions">{actions}</span>}
       </header>
-      {error && <div className="stage-error">{error}</div>}
-      <ActivityFeed entries={activity ?? []} active={status === "active"} now={now} />
-      {children ??
-        (status === "active" && (activity?.length ?? 0) === 0 ? (
-          <SkeletonLines />
-        ) : null)}
+      <div id={bodyId}>
+        {expanded && (
+          <>
+            {error && <div className="stage-error">{error}</div>}
+            <ActivityFeed entries={activity ?? []} active={status === "active"} now={now} />
+            {children ??
+              (status === "active" && (activity?.length ?? 0) === 0 ? (
+                <SkeletonLines />
+              ) : null)}
+          </>
+        )}
+      </div>
     </section>
   );
 }
@@ -133,9 +166,14 @@ function DashboardSkeleton() {
 }
 
 export function Dashboard({ jobId }: { jobId: string }) {
-  const [job, setJob] = useState<JobDetail | null>(null);
+  // Start from the cached/prefetched snapshot so navigation paints instantly.
+  const [job, setJob] = useState<JobDetail | null>(
+    () => cachedJobDetail(jobId) ?? null,
+  );
   const [loadError, setLoadError] = useState<string | null>(null);
   const [pinned, setPinned] = useState<StageId | null>(null);
+  // Stages fold by id; the set starts empty so every panel opens expanded.
+  const [collapsed, setCollapsed] = useState<ReadonlySet<StageId>>(() => new Set());
   const [confirmCancelResume, setConfirmCancelResume] = useState(false);
   const [cancellingResume, setCancellingResume] = useState(false);
   const stageRefs = useRef(new Map<StageId, HTMLElement | null>());
@@ -159,6 +197,7 @@ export function Dashboard({ jobId }: { jobId: string }) {
   const connected = useServerEvents(jobStreamUrl(jobId), (ev) => {
     if (ev.type === "job" && ev.job.jobId === jobId) {
       setJob(ev.job);
+      cacheJobDetail(ev.job);
       setLoadError(null);
     }
   });
@@ -187,9 +226,25 @@ export function Dashboard({ jobId }: { jobId: string }) {
     scrollToStage(activeStage);
   }, [activeStage, pinned, jobLoaded, scrollToStage]);
 
+  const toggleStage = useCallback((id: StageId) => {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
   const onSelectStage = useCallback(
     (id: StageId) => {
       setPinned(id);
+      // Selecting a node in the pipeline graph expands its panel first.
+      setCollapsed((prev) => {
+        if (!prev.has(id)) return prev;
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
       scrollToStage(id);
     },
     [scrollToStage],
@@ -304,6 +359,9 @@ export function Dashboard({ jobId }: { jobId: string }) {
       </header>
 
       {!connected && <div className="reconnect-line">reconnecting…</div>}
+      {job.trashedAt !== undefined && (
+        <div className="banner">in trash — view-only; files remain on disk</div>
+      )}
       {job.status === "cancelled" && <div className="banner">cancelled</div>}
       {job.status === "credit-blocked" && job.creditBlock && (
         <div className="banner credit-banner">
@@ -363,6 +421,7 @@ export function Dashboard({ jobId }: { jobId: string }) {
           return (
             <StageFrame
               key={id}
+              id={id}
               title={STAGE_TITLES[id]}
               status={stage?.status ?? "pending"}
               startedAt={stage?.startedAt}
@@ -372,6 +431,8 @@ export function Dashboard({ jobId }: { jobId: string }) {
               error={stage?.error}
               activity={stage?.activity}
               selected={selected === id}
+              expanded={!collapsed.has(id)}
+              onToggle={() => toggleStage(id)}
               refCb={(el) => {
                 stageRefs.current.set(id, el);
               }}

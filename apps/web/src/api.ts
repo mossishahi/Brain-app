@@ -19,6 +19,7 @@ import type {
   SearchServerFilesResponse,
   SubmitJobRequest,
   SubmitJobResponse,
+  TrashJobResponse,
   ValidateAttachmentsResponse,
 } from "@brainstorm-agentic/protocol";
 
@@ -66,7 +67,40 @@ export const getSettings = (): Promise<ServerSettings> => request("/settings");
 export const putSettings = (settings: ServerSettingsUpdate): Promise<ServerSettings> =>
   request("/settings", jsonInit("PUT", settings));
 
-export const getJobs = (): Promise<readonly JobSummary[]> => request("/jobs");
+/*
+ * Module-level caches so navigating between the landing page and a dashboard
+ * renders the last known snapshot immediately; SSE refreshes it right after.
+ */
+let jobsCache: readonly JobSummary[] | null = null;
+const jobDetailCache = new Map<string, JobDetail>();
+
+export function cachedJobs(): readonly JobSummary[] | null {
+  return jobsCache;
+}
+
+export function cacheJobs(jobs: readonly JobSummary[]): void {
+  jobsCache = jobs;
+}
+
+export function cachedJobDetail(jobId: string): JobDetail | undefined {
+  return jobDetailCache.get(jobId);
+}
+
+export function cacheJobDetail(detail: JobDetail): void {
+  jobDetailCache.set(detail.jobId, detail);
+}
+
+/** Warm the detail cache (job-card hover/focus) so opening a job is instant. */
+export function prefetchJobDetail(jobId: string): void {
+  if (jobDetailCache.has(jobId)) return;
+  void getJob(jobId).catch(() => undefined);
+}
+
+export const getJobs = async (): Promise<readonly JobSummary[]> => {
+  const jobs = await request<readonly JobSummary[]>("/jobs");
+  jobsCache = jobs;
+  return jobs;
+};
 
 export const submitJob = (
   topic: string,
@@ -115,11 +149,20 @@ export const validateAttachments = (
     jsonInit("POST", { kind, paths }),
   );
 
-export const getJob = (jobId: string): Promise<JobDetail> =>
-  request(`/jobs/${encodeURIComponent(jobId)}`);
+export const getJob = async (jobId: string): Promise<JobDetail> => {
+  const detail = await request<JobDetail>(`/jobs/${encodeURIComponent(jobId)}`);
+  jobDetailCache.set(detail.jobId, detail);
+  return detail;
+};
 
 export const cancelJob = (jobId: string): Promise<CancelJobResponse> =>
   request(`/jobs/${encodeURIComponent(jobId)}/cancel`, { method: "POST" });
+
+export const trashJob = (jobId: string): Promise<TrashJobResponse> =>
+  request(`/jobs/${encodeURIComponent(jobId)}/trash`, { method: "POST" });
+
+export const getTrashedJobs = (): Promise<readonly JobSummary[]> =>
+  request("/jobs/trash");
 
 export const answerGate = (jobId: string, body: GateAnswerRequest): Promise<JobDetail> =>
   request(`/jobs/${encodeURIComponent(jobId)}/gate`, jsonInit("POST", body));

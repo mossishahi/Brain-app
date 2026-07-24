@@ -106,10 +106,10 @@ function GroundingBrowser({ grounding }: { grounding: GroundingView }) {
         author{scholars.length === 1 ? "" : "s"} · {uniqueInterests} research{" "}
         interest{uniqueInterests === 1 ? "" : "s"}
       </p>
-      <div className="tree-browser">
+      <div className="tree-browser grounding-browser">
         <div className="tree-col">
           <p className="tree-col-title">Papers</p>
-          <div className="tree-rows">
+          <div className="tree-rows tree-scroll">
             {papers.map((item, index) => (
               <div
                 key={`${item.title}-${index}`}
@@ -159,7 +159,7 @@ function GroundingBrowser({ grounding }: { grounding: GroundingView }) {
           <p className="tree-col-title">
             Authors{paper ? " — selected paper" : ""}
           </p>
-          <div className="tree-rows">
+          <div className="tree-rows tree-scroll">
             {visibleAuthors.map(({ name, scholar }, index) => {
               if (!scholar) {
                 return (
@@ -209,22 +209,24 @@ function GroundingBrowser({ grounding }: { grounding: GroundingView }) {
           <p className="tree-col-title">
             Research interests{selectedScholar ? ` — ${selectedScholar.name}` : ""}
           </p>
-          {interests.length > 0 ? (
-            <div className="tag-row">
-              {interests.map(({ label, count }) => (
-                <span key={label} className="tag">
-                  {label}
-                  {count > 1 && <span className="tag-count">×{count}</span>}
-                </span>
-              ))}
-            </div>
-          ) : (
-            <p className="dim small">
-              {selectedScholar
-                ? "no interests on this profile"
-                : "no research interests"}
-            </p>
-          )}
+          <div className="tree-scroll">
+            {interests.length > 0 ? (
+              <div className="tag-row">
+                {interests.map(({ label, count }) => (
+                  <span key={label} className="tag">
+                    {label}
+                    {count > 1 && <span className="tag-count">×{count}</span>}
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <p className="dim small">
+                {selectedScholar
+                  ? "no interests on this profile"
+                  : "no research interests"}
+              </p>
+            )}
+          </div>
         </div>
       </div>
     </div>

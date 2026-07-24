@@ -26,6 +26,7 @@ import {
   type JobStatus,
   type JobSummary,
   type ServerSettings,
+  type TrashJobResponse,
 } from "@brainstorm-agentic/protocol";
 import {
   ingestAttachments,
@@ -102,6 +103,9 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** The requested transition needs the job stopped first (HTTP 409). */
+export class JobConflictError extends Error {}
+
 export class JobManager {
   readonly settings: SettingsStore;
   readonly jobsDir: string;
@@ -113,6 +117,10 @@ export class JobManager {
   private readonly now: () => number;
   private readonly onChange: () => void;
   private readonly autoResuming = new Set<string>();
+  private readonly summaryCache = new Map<
+    string,
+    { key: string; value: JobSummary }
+  >();
 
   constructor(options: JobManagerOptions) {
     this.settings = new SettingsStore(options.workspace, {
@@ -508,13 +516,84 @@ export class JobManager {
     });
   }
 
+  /** Statuses whose workspace files no process writes to anymore. */
+  private static readonly SETTLED_STATUSES: ReadonlySet<JobStatus> = new Set([
+    "completed",
+    "failed",
+    "cancelled",
+  ]);
+
+  /**
+   * Landing-card summary. Settled jobs are hydrated once and cached so a list
+   * snapshot does not re-read every job's event log and artifacts; live jobs
+   * recompute so their progress stays current.
+   */
+  private async summary(record: JobRecord): Promise<JobSummary> {
+    const status = await this.reconcile(record);
+    const key = `${status}:${record.updatedAt}`;
+    const cached = this.summaryCache.get(record.jobId);
+    if (cached?.key === key) return cached.value;
+    const value = compactJobDetail(
+      buildJobDetail({
+        record,
+        status,
+        sessionDir: this.sessionDir(record.jobId),
+        jobDir: this.jobDir(record.jobId),
+        settings: record.executionSettings ?? this.settings.get(),
+      }),
+    );
+    if (JobManager.SETTLED_STATUSES.has(status)) {
+      this.summaryCache.set(record.jobId, { key, value });
+    }
+    return value;
+  }
+
   async list(): Promise<JobSummary[]> {
-    const records = [...this.jobs.values()].sort((a, b) =>
-      b.createdAt - a.createdAt || b.jobId.localeCompare(a.jobId)
-    );
-    return Promise.all(
-      records.map(async (record) => compactJobDetail(await this.detail(record.jobId))),
-    );
+    const records = [...this.jobs.values()]
+      .filter((record) => record.trashedAt === undefined)
+      .sort((a, b) =>
+        b.createdAt - a.createdAt || b.jobId.localeCompare(a.jobId)
+      );
+    return Promise.all(records.map((record) => this.summary(record)));
+  }
+
+  /** Trashed jobs, newest trash first. View-only: files stay on disk. */
+  async listTrashed(): Promise<JobSummary[]> {
+    const records = [...this.jobs.values()]
+      .filter((record) => record.trashedAt !== undefined)
+      .sort((a, b) =>
+        b.trashedAt! - a.trashedAt! || b.jobId.localeCompare(a.jobId)
+      );
+    return Promise.all(records.map((record) => this.summary(record)));
+  }
+
+  /** Job states that may move to trash; everything else must stop first. */
+  private static readonly TRASHABLE_STATUSES: ReadonlySet<JobStatus> = new Set([
+    "completed",
+    "failed",
+    "cancelled",
+    "orphaned",
+  ]);
+
+  /**
+   * Soft-delete: the job leaves the active list but its files and dashboard
+   * stay readable forever. Live jobs conflict and must be cancelled first.
+   */
+  async trash(jobId: string): Promise<TrashJobResponse> {
+    const record = this.record(jobId);
+    if (record.trashedAt !== undefined) {
+      return { jobId, trashedAt: record.trashedAt };
+    }
+    const status = await this.reconcile(record);
+    if (!JobManager.TRASHABLE_STATUSES.has(status)) {
+      throw new JobConflictError(
+        `a ${status} job cannot move to trash; stop it first`,
+      );
+    }
+    record.trashedAt = this.now();
+    record.updatedAt = this.now();
+    this.write(record);
+    return { jobId, trashedAt: record.trashedAt };
   }
 
   private signalLocal(pid: number, signal: NodeJS.Signals): void {

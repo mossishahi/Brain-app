@@ -30,6 +30,8 @@ export interface JobRecord {
   };
   /** Snapshot used so a suspended run resumes with the same execution policy. */
   executionSettings?: ServerSettings;
+  /** Set when the job moves to the view-only trash; never cleared. */
+  trashedAt?: number;
 }
 
 export interface ContentRegistryRuntimeStatus {

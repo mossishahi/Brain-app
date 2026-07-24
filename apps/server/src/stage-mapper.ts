@@ -1253,6 +1253,9 @@ export function buildJobDetail(input: MapperInput): JobDetail {
     createdAt: input.record.createdAt,
     updatedAt: Math.max(input.record.updatedAt, checkpoint?.updatedAt ?? 0),
     ...(input.record.slurmJobId ? { slurmJobId: input.record.slurmJobId } : {}),
+    ...(input.record.trashedAt !== undefined
+      ? { trashedAt: input.record.trashedAt }
+      : {}),
     progress: {
       ...(activeStage ? { activeStage } : {}),
       completedStages: stages.filter((stage) => stage.status === "completed").length,
