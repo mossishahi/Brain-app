@@ -106,6 +106,11 @@ export async function startTestRegistry(root: string): Promise<{
   >();
   const httpServer = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    if (req.method === "GET" && url.pathname === "/health") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end('{"ok":true}');
+      return;
+    }
     if (req.method === "GET" && url.pathname.startsWith("/v1/")) {
       const path = url.pathname === "/v1/index.json"
         ? "index.json"

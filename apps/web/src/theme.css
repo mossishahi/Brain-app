@@ -1120,6 +1120,34 @@ button.server-file-name {
   color: var(--text-dim);
 }
 
+.registry-indicator {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  transition: background-color 140ms ease, color 140ms ease;
+}
+
+.composer-model .registry-indicator.connected {
+  color: #72c7ff;
+  background: color-mix(in srgb, #72c7ff 12%, transparent);
+}
+
+.composer-model .registry-indicator.disconnected {
+  color: #ff6b6b;
+  background: color-mix(in srgb, #ff6b6b 12%, transparent);
+}
+
+.composer-model .registry-indicator svg {
+  color: currentColor;
+  width: 14px;
+  height: 14px;
+  font-size: 14px;
+}
+
 .composer-model svg {
   flex: none;
   color: var(--text-dim);

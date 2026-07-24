@@ -19,6 +19,7 @@ import {
   VideoCameraOutlined,
   DownOutlined,
 } from "@ant-design/icons";
+import { LuBrain } from "react-icons/lu";
 import {
   ATTACHMENT_LIMITS,
   type AttachmentSelectionKind,
@@ -27,6 +28,7 @@ import {
 } from "@brainstorm-agentic/protocol";
 import {
   errorMessage,
+  getHealth,
   getSettings,
   validateAttachments,
 } from "../api";
@@ -127,6 +129,15 @@ function formatModelName(value: string): string {
       .replace(/^claude[-_]/i, "")
       .replace(/[-_](\d+)[-_](\d+)(?:[-_]\d{8})?$/i, " $1.$2"),
   );
+}
+
+function registryHost(url: string | undefined): string {
+  if (!url) return "Brain Registry";
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return url;
+  }
 }
 
 function modelDisplay(settings: ServerSettings | null): {
@@ -255,6 +266,8 @@ export function SubmissionBox({
   const [settings, setSettings] = useState<ServerSettings | null>(
     null,
   );
+  const [registryConnected, setRegistryConnected] = useState(false);
+  const [registryTarget, setRegistryTarget] = useState("Brain Registry");
   const ref = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -287,6 +300,32 @@ export function SubmissionBox({
       );
     };
   }, []);
+
+  useEffect(() => {
+    let live = true;
+    const refresh = async (): Promise<void> => {
+      try {
+        const health = await getHealth();
+        if (!live) return;
+        setRegistryConnected(health.contentRegistry.running);
+        setRegistryTarget(
+          registryHost(
+            health.contentRegistry.url ?? settings?.contentRegistry.url,
+          ),
+        );
+      } catch {
+        if (!live) return;
+        setRegistryConnected(false);
+        setRegistryTarget(registryHost(settings?.contentRegistry.url));
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 15_000);
+    return () => {
+      live = false;
+      window.clearInterval(timer);
+    };
+  }, [settings?.contentRegistry.url]);
 
   const addValidated = (
     items: readonly ValidatedAttachment[],
@@ -575,6 +614,23 @@ export function SubmissionBox({
                     {display.profile}
                   </span>
                 )}
+                <span
+                  className={`registry-indicator ${
+                    registryConnected ? "connected" : "disconnected"
+                  }`}
+                  title={
+                    registryConnected
+                      ? `connected to ${registryTarget}`
+                      : `could not connect to ${registryTarget}`
+                  }
+                  aria-label={
+                    registryConnected
+                      ? `Connected to Brain Registry at ${registryTarget}`
+                      : `Could not connect to Brain Registry at ${registryTarget}`
+                  }
+                >
+                  <LuBrain aria-hidden />
+                </span>
                 <DownOutlined aria-hidden />
               </button>
               <button
