@@ -18,27 +18,19 @@ const paragraphArray = (n: number) =>
 
 const nonEmpty = z.string().min(1);
 
-/**
- * The closed catalog of requested epistemic acts — what the submitter wants
- * the panel to DO, not the grammatical shape the request arrived in
- * (mirrored by catalog/input-types.json). `develop` is the residual/default
- * act; every other act is chosen only when its specific cue is present.
- */
+/** The closed classification catalog for submissions (mirrored by catalog/input-types.json). */
 export const INPUT_TYPES = [
-  "develop",
-  "resolve",
-  "verify",
-  "assess-feasibility",
-  "critique",
-  "interpret",
-  "survey",
-  "explain",
+  "research proposal",
+  "research idea",
+  "hypothesis",
+  "research question",
+  "open problem",
+  "research goal",
+  "gap-bridging research topic",
+  "exploratory research topic",
 ] as const;
 
 export type InputType = (typeof INPUT_TYPES)[number];
-
-/** Epistemic acts whose output is positioned against a literature map. */
-const NOVELTY_ACTS = new Set<InputType>(["develop", "resolve", "survey"]);
 
 /** The three review verdicts (mirrored by catalog/verdicts.json). */
 export const VERDICTS = ["Pass", "Build", "Interrupt"] as const;
@@ -338,15 +330,60 @@ export const panelSchema = z
 export type Panel = z.infer<typeof panelSchema>;
 
 // ---------------------------------------------------------------------------
-// evidence (shared by verification-bearing fields across acts, and by review)
+// brain idea (first pass) and redevelopment (revision)
+// ---------------------------------------------------------------------------
+
+/** The five-section developed paper; paragraph counts are part of the contract. */
+export const ideaOutputSchema = z
+  .object({
+    abstract: paragraphArray(3),
+    introduction: paragraphArray(3),
+    method: paragraphArray(3),
+    discussion: paragraphArray(3),
+    conclusion: paragraphArray(1),
+  })
+  .strict();
+
+export type IdeaOutput = z.infer<typeof ideaOutputSchema>;
+
+export const brainIdeaSchema = z
+  .object({
+    output: ideaOutputSchema,
+    /** The chain of thought: one paragraph per step, forward-only, in order. */
+    cot: z.array(paragraphs(1)).min(3).max(9),
+    /** One paragraph naming the closest prior works and what this idea does that none of them does. */
+    novelty: paragraphs(1),
+    /** The works the literature review surfaced; omit when none were found. */
+    literature: z.array(paperSchema).max(30).optional(),
+  })
+  .strict();
+
+export type BrainIdea = z.infer<typeof brainIdeaSchema>;
+
+/**
+ * A member's revision after a Build/Interrupt on one step: the runtime keeps
+ * chain steps before `fromStep` frozen and replaces everything from `fromStep`
+ * on with `revisedSteps`; `output` and `novelty` replace the previous ones.
+ */
+export const redevelopmentSchema = z
+  .object({
+    fromStep: z.number().int().min(1),
+    output: ideaOutputSchema,
+    revisedSteps: z.array(paragraphs(1)).min(1),
+    novelty: paragraphs(1),
+  })
+  .strict();
+
+export type Redevelopment = z.infer<typeof redevelopmentSchema>;
+
+// ---------------------------------------------------------------------------
+// review: comment, judge decision
 // ---------------------------------------------------------------------------
 
 /**
- * The evidence that must back a truth- or validity-bearing claim: a runnable
- * script, a self-contained mathematical derivation, or a real citable
- * reference. Assertion alone never qualifies. Shared by the review loop's
- * Interrupt verdicts and by every developed-output body that renders its own
- * verdict (resolve's verification, verify's evidence, critique's issues).
+ * The evidence that must back an Interrupt: a runnable script, a self-contained
+ * mathematical derivation, or a real citable reference. Assertion alone never
+ * qualifies.
  */
 export const evidenceSchema = z
   .object({
@@ -403,360 +440,6 @@ export const evidenceSchema = z
   });
 
 export type Evidence = z.infer<typeof evidenceSchema>;
-
-/** A confidence rating with a one-line rationale; reused by verify and interpret. */
-export const confidenceSchema = z
-  .object({
-    level: z.enum(["high", "medium", "low"]),
-    rationale: nonEmpty,
-  })
-  .strict();
-
-export type Confidence = z.infer<typeof confidenceSchema>;
-
-// ---------------------------------------------------------------------------
-// developed-output bodies: one shape per epistemic act
-// ---------------------------------------------------------------------------
-
-/** develop — build an under-specified idea into a full research contribution. */
-export const developBodySchema = z
-  .object({
-    abstract: paragraphArray(3),
-    introduction: paragraphArray(3),
-    method: paragraphArray(3),
-    discussion: paragraphArray(3),
-    conclusion: paragraphArray(1),
-  })
-  .strict();
-
-export type DevelopBody = z.infer<typeof developBodySchema>;
-
-/** One prior result the resolve act's approach must be positioned against. */
-export const knownResultSchema = z
-  .object({
-    result: nonEmpty,
-    sourceType: z.enum(["theorem", "bound", "partial-result", "counterexample-attempt"]),
-    relation: nonEmpty,
-  })
-  .strict();
-
-/** resolve — attempt a formally posed problem: prove, disprove, construct, or bound it. */
-export const resolveBodySchema = z
-  .object({
-    problemStatement: paragraphs(1),
-    knownResults: z.array(knownResultSchema).max(30),
-    approach: paragraphs(1),
-    /** Proof or construction steps, one per paragraph. */
-    derivation: z.array(paragraphs(1)).min(1).max(20),
-    /** A self-check of the derivation: script, independent re-derivation, or none. */
-    verification: evidenceSchema,
-    status: z.enum(["resolved", "partial", "refuted", "still-open"]),
-    remainingGaps: z.array(nonEmpty),
-    significance: paragraphs(1),
-  })
-  .strict()
-  .superRefine((body, ctx) => {
-    if (body.status === "resolved" && body.remainingGaps.length > 0) {
-      ctx.addIssue({ code: "custom", path: ["remainingGaps"], message: "a resolved status leaves no remaining gaps" });
-    }
-    if (body.status !== "resolved" && body.remainingGaps.length === 0) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["remainingGaps"],
-        message: "a status other than resolved must name at least one remaining gap",
-      });
-    }
-  });
-
-export type ResolveBody = z.infer<typeof resolveBodySchema>;
-
-/** verify — adjudicate one specific claim, proof step, or previously published finding. */
-export const verifyBodySchema = z
-  .object({
-    claim: nonEmpty,
-    /** Where the claim comes from: the submitter's own hypothesis, or a located attachment passage. */
-    claimSource: nonEmpty,
-    verdict: z.enum(["confirmed", "refuted", "partially-correct", "indeterminate"]),
-    evidence: evidenceSchema,
-    reasoning: paragraphs(1),
-    confidence: confidenceSchema,
-  })
-  .strict()
-  .superRefine((body, ctx) => {
-    if (body.verdict !== "indeterminate" && body.evidence.kind === "none") {
-      ctx.addIssue({
-        code: "custom",
-        path: ["evidence"],
-        message: "confirmed, refuted, and partially-correct verdicts require script, math, or reference evidence",
-      });
-    }
-  });
-
-export type VerifyBody = z.infer<typeof verifyBodySchema>;
-
-/** One aspect of a design's methodology, judged on its own terms. */
-export const soundnessAspectSchema = z
-  .object({
-    aspect: nonEmpty,
-    assessment: z.enum(["sound", "concern", "flaw"]),
-    note: nonEmpty,
-  })
-  .strict();
-
-/** assess-feasibility — a Registered-Reports-style soundness review of a not-yet-run design. */
-export const assessFeasibilityBodySchema = z
-  .object({
-    designSummary: paragraphs(1),
-    importance: paragraphs(1),
-    hypothesisLogic: paragraphs(1),
-    methodologySoundness: z.array(soundnessAspectSchema).min(1).max(15),
-    replicability: paragraphs(1),
-    feasibilityVerdict: z.enum(["feasible-as-is", "feasible-with-changes", "not-feasible"]),
-    requiredChanges: z.array(nonEmpty),
-    alternativeDesigns: z.array(nonEmpty),
-  })
-  .strict()
-  .superRefine((body, ctx) => {
-    if (body.feasibilityVerdict === "feasible-as-is" && body.requiredChanges.length > 0) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["requiredChanges"],
-        message: "feasible-as-is leaves no required changes",
-      });
-    }
-    if (body.feasibilityVerdict !== "feasible-as-is" && body.requiredChanges.length === 0) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["requiredChanges"],
-        message: "a design that is not feasible-as-is must name at least one required change",
-      });
-    }
-  });
-
-export type AssessFeasibilityBody = z.infer<typeof assessFeasibilityBodySchema>;
-
-/** One itemized finding in a critique, with severity and a fix suggestion. */
-export const critiqueIssueSchema = z
-  .object({
-    description: nonEmpty,
-    severity: z.enum(["minor", "major", "critical"]),
-    evidence: evidenceSchema,
-    suggestion: z.string(),
-  })
-  .strict();
-
-/** critique — a holistic, itemized review of a finished artifact. */
-export const critiqueBodySchema = z
-  .object({
-    artifactSummary: paragraphs(1),
-    strengths: z.array(nonEmpty).min(1),
-    issues: z.array(critiqueIssueSchema),
-    missingConsiderations: z.array(nonEmpty),
-    recommendation: z.enum(["sound", "sound-with-revisions", "not-sound"]),
-    prioritizedNextSteps: z
-      .array(z.object({ priority: z.number().int().min(1), action: nonEmpty }).strict())
-      .min(1),
-  })
-  .strict()
-  .superRefine((body, ctx) => {
-    if (body.recommendation === "sound" && body.issues.some((issue) => issue.severity === "critical")) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["recommendation"],
-        message: "a critical issue cannot coexist with a sound recommendation",
-      });
-    }
-  });
-
-export type CritiqueBody = z.infer<typeof critiqueBodySchema>;
-
-/** One candidate reading of an observation, ranked against the others. */
-export const interpretationCandidateSchema = z
-  .object({
-    interpretation: nonEmpty,
-    supportingEvidence: z.string(),
-    contradictingEvidence: z.string(),
-    plausibility: z.enum(["high", "medium", "low"]),
-  })
-  .strict();
-
-/** interpret — sense-making of the submitter's own specific result or observation. */
-export const interpretBodySchema = z
-  .object({
-    observationSummary: paragraphs(1),
-    candidateInterpretations: z.array(interpretationCandidateSchema).min(1).max(10),
-    mostLikelyInterpretation: paragraphs(1),
-    confidence: confidenceSchema,
-    threatsToValidity: z.array(nonEmpty),
-    implications: z.string(),
-  })
-  .strict();
-
-export type InterpretBody = z.infer<typeof interpretBodySchema>;
-
-/** One school of thought or family of approaches in a landscape map. */
-export const landscapeGroupSchema = z
-  .object({
-    name: nonEmpty,
-    works: z.array(paperSchema).max(15),
-    characterization: nonEmpty,
-  })
-  .strict();
-
-/** One dimension along which the surveyed approaches are compared. */
-export const comparisonRowSchema = z
-  .object({
-    dimension: nonEmpty,
-    comparison: nonEmpty,
-  })
-  .strict();
-
-/** survey — map existing work and, if a decision was requested, compare and recommend. */
-export const surveyBodySchema = z
-  .object({
-    landscapeMap: z.array(landscapeGroupSchema).min(1).max(12),
-    /** Only populated when the submitter actually asked to compare or choose between options. */
-    comparisonTable: z.array(comparisonRowSchema),
-    consensusAndFrontier: paragraphs(1),
-    openGaps: z.array(nonEmpty),
-    /** Only populated when the submitter asked which option to use. */
-    recommendation: z.string(),
-  })
-  .strict();
-
-export type SurveyBody = z.infer<typeof surveyBodySchema>;
-
-/** One misconception an explanation should preempt or correct. */
-export const misconceptionSchema = z
-  .object({
-    misconception: nonEmpty,
-    correction: nonEmpty,
-  })
-  .strict();
-
-/** explain — pedagogical exposition of an established concept, method, or topic. */
-export const explainBodySchema = z
-  .object({
-    motivatingQuestion: paragraphs(1),
-    coreIntuition: paragraphs(1),
-    formalTreatment: paragraphs(1),
-    workedExample: paragraphs(1),
-    commonMisconceptions: z.array(misconceptionSchema),
-    connections: z.array(nonEmpty),
-  })
-  .strict();
-
-export type ExplainBody = z.infer<typeof explainBodySchema>;
-
-/**
- * The full developed-output envelope: exactly one body populated, matching
- * `type`, which mirrors the run's `input.type` (the runtime cross-checks the
- * two — see brainstorm-runtime's writeValidatedOutput). One flat schema kept
- * deliberately (never a `oneOf`/discriminated union): every field the model
- * could possibly need is always a plain declared property, exactly like
- * `evidenceSchema` already does for its four evidence kinds — only the
- * *conditional requiredness*, enforced below, changes per act.
- */
-export const developedOutputSchema = z
-  .object({
-    type: z.enum(INPUT_TYPES),
-    develop: developBodySchema.optional(),
-    resolve: resolveBodySchema.optional(),
-    verify: verifyBodySchema.optional(),
-    "assess-feasibility": assessFeasibilityBodySchema.optional(),
-    critique: critiqueBodySchema.optional(),
-    interpret: interpretBodySchema.optional(),
-    survey: surveyBodySchema.optional(),
-    explain: explainBodySchema.optional(),
-  })
-  .strict()
-  .superRefine((value, ctx) => {
-    const bodies: Record<InputType, unknown> = {
-      develop: value.develop,
-      resolve: value.resolve,
-      verify: value.verify,
-      "assess-feasibility": value["assess-feasibility"],
-      critique: value.critique,
-      interpret: value.interpret,
-      survey: value.survey,
-      explain: value.explain,
-    };
-    for (const act of INPUT_TYPES) {
-      const present = bodies[act] !== undefined && bodies[act] !== null;
-      if (act === value.type && !present) {
-        ctx.addIssue({ code: "custom", path: [act], message: `type "${value.type}" requires a populated "${act}" body` });
-      }
-      if (act !== value.type && present) {
-        ctx.addIssue({ code: "custom", path: [act], message: `"${act}" must be absent when type is "${value.type}"` });
-      }
-    }
-  });
-
-export type DevelopedOutput = z.infer<typeof developedOutputSchema>;
-
-// ---------------------------------------------------------------------------
-// brain idea (first pass) and redevelopment (revision)
-// ---------------------------------------------------------------------------
-
-export const brainIdeaSchema = z
-  .object({
-    output: developedOutputSchema,
-    /** The chain of thought: one paragraph per step, forward-only, in order. */
-    cot: z.array(paragraphs(1)).min(3).max(9),
-    /**
-     * One paragraph naming the closest prior works and what this idea does
-     * that none of them does. Required only for acts positioned against a
-     * literature map (develop, resolve, survey); omitted otherwise.
-     */
-    novelty: paragraphs(1).optional(),
-    /** The works the literature review surfaced; omit when none were found. */
-    literature: z.array(paperSchema).max(30).optional(),
-  })
-  .strict()
-  .superRefine((idea, ctx) => {
-    const wantsNovelty = NOVELTY_ACTS.has(idea.output.type);
-    if (wantsNovelty && idea.novelty === undefined) {
-      ctx.addIssue({ code: "custom", path: ["novelty"], message: `type "${idea.output.type}" requires a novelty statement` });
-    }
-    if (!wantsNovelty && idea.novelty !== undefined) {
-      ctx.addIssue({ code: "custom", path: ["novelty"], message: `type "${idea.output.type}" must omit novelty` });
-    }
-  });
-
-export type BrainIdea = z.infer<typeof brainIdeaSchema>;
-
-/**
- * A member's revision after a Build/Interrupt on one step: the runtime keeps
- * chain steps before `fromStep` frozen and replaces everything from `fromStep`
- * on with `revisedSteps`; `output` and `novelty` replace the previous ones.
- */
-export const redevelopmentSchema = z
-  .object({
-    fromStep: z.number().int().min(1),
-    output: developedOutputSchema,
-    revisedSteps: z.array(paragraphs(1)).min(1),
-    novelty: paragraphs(1).optional(),
-  })
-  .strict()
-  .superRefine((revision, ctx) => {
-    const wantsNovelty = NOVELTY_ACTS.has(revision.output.type);
-    if (wantsNovelty && revision.novelty === undefined) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["novelty"],
-        message: `type "${revision.output.type}" requires a novelty statement`,
-      });
-    }
-    if (!wantsNovelty && revision.novelty !== undefined) {
-      ctx.addIssue({ code: "custom", path: ["novelty"], message: `type "${revision.output.type}" must omit novelty` });
-    }
-  });
-
-export type Redevelopment = z.infer<typeof redevelopmentSchema>;
-
-// ---------------------------------------------------------------------------
-// review: comment, judge decision
-// ---------------------------------------------------------------------------
 
 /**
  * A substantive free-text field: long enough that placeholder probes ("test",
