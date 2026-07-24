@@ -7,7 +7,7 @@ import type {
   ServerSettingsUpdate,
 } from "@brainstorm-agentic/protocol";
 import { errorMessage, getSettings, putSettings } from "../api";
-import { XIcon } from "./Icons";
+import { TrashIcon, XIcon } from "./Icons";
 
 type Provider = "anthropic" | "claude-agent" | "offline";
 
@@ -729,6 +729,22 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                   verified before saving and never returned to the browser.
                 </span>
               </div>
+            </section>
+
+            <section className="drawer-section">
+              <h3>Trash</h3>
+              <a
+                className="btn drawer-trash-link"
+                href="#/trash"
+                onClick={onClose}
+              >
+                <TrashIcon size={14} />
+                View trashed jobs
+              </a>
+              <span className="field-note">
+                Stopped jobs moved to trash leave the job list but stay
+                readable.
+              </span>
             </section>
 
             {saveError && <p className="error-text">{saveError}</p>}

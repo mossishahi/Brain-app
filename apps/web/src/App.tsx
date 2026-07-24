@@ -6,7 +6,7 @@ import { Dashboard } from "./components/Dashboard";
 import { Landing } from "./components/Landing";
 import { SettingsDrawer } from "./components/SettingsDrawer";
 import { TrashView } from "./components/TrashView";
-import { GearIcon, MoonIcon, SunIcon, TrashIcon } from "./components/Icons";
+import { GearIcon, MoonIcon, SunIcon } from "./components/Icons";
 
 type Route =
   | { view: "landing" }
@@ -71,9 +71,6 @@ export function App() {
       <AmbientBackdrop theme={theme} />
       <div className="app-foreground">
         <div className="top-controls">
-          <a className="ghost-btn" href="#/trash" aria-label="open the job trash">
-            <TrashIcon />
-          </a>
           <button
             type="button"
             className="ghost-btn"

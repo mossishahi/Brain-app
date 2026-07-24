@@ -38,6 +38,7 @@ const VERSION = "0.1.0";
 const SNAPSHOT_THROTTLE_MS = 500;
 const HEARTBEAT_MS = 15_000;
 const POLL_MS = 2_000;
+const REGISTRY_HEARTBEAT_MS = 15_000;
 const ATTACHMENT_KINDS = new Set<AttachmentSelectionKind>([
   "file",
   "folder",
@@ -53,6 +54,25 @@ function attachmentKind(value: unknown): AttachmentSelectionKind {
     throw new HttpError(400, "invalid attachment kind");
   }
   return value as AttachmentSelectionKind;
+}
+
+async function probeContentRegistry(
+  registryUrl: string,
+  status: ContentRegistryRuntimeStatus,
+): Promise<void> {
+  try {
+    const url = new URL(registryUrl);
+    url.pathname = url.pathname.replace(/\/mcp\/?$/, "/health");
+    url.search = "";
+    url.hash = "";
+    const response = await fetch(url, {
+      signal: AbortSignal.timeout(5_000),
+      headers: { accept: "application/json" },
+    });
+    status.running = response.ok;
+  } catch {
+    status.running = false;
+  }
 }
 
 export interface StartBrainServerOptions {
@@ -648,7 +668,11 @@ export async function startBrainServer(
   const poll = setInterval(() => {
     void manager.resumeDueCreditBlocks().finally(broadcast);
   }, POLL_MS);
+  const registryPoll = setInterval(() => {
+    void probeContentRegistry(contentRegistryUrl, contentRegistry);
+  }, REGISTRY_HEARTBEAT_MS);
   await manager.resumeDueCreditBlocks();
+  await probeContentRegistry(contentRegistryUrl, contentRegistry);
 
   return {
     port,
@@ -660,6 +684,7 @@ export async function startBrainServer(
     httpServer,
     close: async () => {
       clearInterval(poll);
+      clearInterval(registryPoll);
       watchers.forEach((entry) => entry.close());
       for (const stream of [...jobStreams]) stream.close();
       for (const streams of detailStreams.values()) {
