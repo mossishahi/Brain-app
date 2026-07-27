@@ -11,20 +11,24 @@ import {
   BrainstormAgentTaskAdapter,
   BrainstormRuntime,
   ContentArtifactOutputValidator,
-  StaticBrainstormRouteResolver,
   StaticCapabilityToolResolver,
+  type BrainstormRouteResolver,
   type ResolvedBrainstormRoute,
   type SkillResolver,
 } from "@brainstorm-agentic/brainstorm-runtime";
 import {
   InMemoryToolRegistry,
+  type AgentExecutionContext,
   type AgentExecutor,
+  type AgentResult,
   type AgentTask,
   type ArtifactStore,
   type CheckpointStore,
+  type JsonObject,
+  type JsonValue,
   type RunEventListener,
 } from "@brainstorm-agentic/core";
-import type { ContentBundle } from "@brainstorm-agentic/content";
+import type { ContentBundle, LoadedInputTypes } from "@brainstorm-agentic/content";
 import { ClaudeAgentExecutor } from "@brainstorm-agentic/executor-claude-agent";
 import { AnthropicMessagesProvider } from "@brainstorm-agentic/provider-anthropic";
 
@@ -89,9 +93,10 @@ class TaskDescribedRouteResolver implements ModelRouteResolver {
 export function buildAgentExecutor(
   config: ProviderConfig,
   attachmentRoots: readonly string[] = [],
+  inputTypes?: LoadedInputTypes,
 ): AgentExecutor {
   if (config.provider === "offline") {
-    return new OfflineBrainstormExecutor();
+    return new OfflineBrainstormExecutor({ ...(inputTypes ? { inputTypes } : {}) });
   }
   if (config.provider === "claude-agent") {
     if (!config.setupToken) {
@@ -153,27 +158,90 @@ export function buildAgentExecutor(
   });
 }
 
-/** Logical content route -> concrete model id, as pure deployment config. */
-function contentRouteResolver(config: ProviderConfig): StaticBrainstormRouteResolver {
+/**
+ * Logical content route -> concrete model id, as pure deployment config. The
+ * resolver is dynamic over route names, so new task types published by the
+ * bundle work without code changes. Routes carrying the "extended-reasoning"
+ * trait additionally get the Messages-API thinking configuration; it is
+ * constant per route across a run, which keeps prompt-cache prefixes stable.
+ */
+function contentRouteResolver(config: ProviderConfig): BrainstormRouteResolver {
   const models = config.models ?? {};
   const fallback = config.defaultModel ?? models.reasoning ?? "";
-  const route = (name: string): ResolvedBrainstormRoute =>
-    config.provider === "offline"
-      ? {}
-      : {
-          providerId:
-            config.provider === "claude-agent"
-              ? "claude-agent"
-              : "anthropic",
-          ...((models[name] ?? fallback)
-            ? { modelId: models[name] ?? fallback }
-            : {}),
-        };
-  return new StaticBrainstormRouteResolver({
-    reasoning: route("reasoning"),
-    writing: route("writing"),
-    balanced: route("balanced"),
-  });
+  return {
+    resolve(request): ResolvedBrainstormRoute {
+      if (config.provider === "offline") return {};
+      const modelId = models[request.logicalRoute] ?? fallback;
+      const thinking =
+        config.provider === "anthropic" &&
+        request.traits.includes("extended-reasoning")
+          ? {
+              providerOptions: {
+                anthropic: {
+                  thinking: { type: "adaptive", display: "summarized" },
+                },
+              },
+            }
+          : {};
+      return {
+        providerId:
+          config.provider === "claude-agent" ? "claude-agent" : "anthropic",
+        ...(modelId ? { modelId } : {}),
+        ...thinking,
+      };
+    },
+  };
+}
+
+/**
+ * Persists reasoning-trace capture (thinking segments and stepwise chain
+ * turns) as a per-task artifact, then strips it from the journaled result so
+ * checkpoints stay lean. Traces reach the job owner through the artifact
+ * store only — never events.jsonl, task feedback, or reviewer context.
+ */
+class ThinkingArtifactAgentExecutor implements AgentExecutor {
+  constructor(
+    private readonly inner: AgentExecutor,
+    private readonly artifacts: ArtifactStore,
+  ) {}
+
+  async execute(
+    task: AgentTask,
+    context: AgentExecutionContext,
+  ): Promise<AgentResult> {
+    const result = await this.inner.execute(task, context);
+    if (result.status !== "ok" || result.metadata === undefined) {
+      return result;
+    }
+    const { thinkingSegments, stepTurns, ...metadata } = result.metadata as {
+      readonly thinkingSegments?: JsonValue;
+      readonly stepTurns?: JsonValue;
+      readonly [key: string]: JsonValue | undefined;
+    };
+    if (thinkingSegments === undefined && stepTurns === undefined) {
+      return result;
+    }
+    try {
+      await this.artifacts.put({
+        name: `${context.runId}/${context.nodePath}.thinking.json`,
+        data: JSON.stringify({
+          taskId: task.taskId,
+          nodePath: context.nodePath,
+          segments: thinkingSegments ?? [],
+          stepTurns: stepTurns ?? [],
+        }),
+        contentType: "application/json",
+        metadata: {
+          kind: "thinking",
+          nodePath: context.nodePath,
+          taskId: task.taskId,
+        },
+      });
+    } catch {
+      // Trace capture must never fail the task itself.
+    }
+    return { ...result, metadata: metadata as JsonObject };
+  }
 }
 
 export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
@@ -195,7 +263,14 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
   );
 
   return new BrainstormRuntime({
-    agentExecutor: buildAgentExecutor(options.providerConfig, attachmentRoots),
+    agentExecutor: new ThinkingArtifactAgentExecutor(
+      buildAgentExecutor(
+        options.providerConfig,
+        attachmentRoots,
+        options.bundle.catalogs.inputTypes,
+      ),
+      options.artifacts,
+    ),
     bundle: options.bundle,
     skillResolver: options.skillResolver,
     routeResolver: contentRouteResolver(options.providerConfig),
@@ -216,6 +291,35 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
   });
 }
 
+/**
+ * Per-route models arrive as one JSON env variable (lossless for any route
+ * name a bundle may declare); the three legacy per-route variables remain
+ * readable so older submit scripts keep resuming.
+ */
+function modelsByRouteFromEnv(env: NodeJS.ProcessEnv): Record<string, string> {
+  const models: Record<string, string> = {};
+  for (const routeName of ["reasoning", "writing", "balanced"] as const) {
+    const value = env[`BRAINSTORM_AGENTIC_MODEL_${routeName.toUpperCase()}`]?.trim();
+    if (value) models[routeName] = value;
+  }
+  const json = env.BRAINSTORM_AGENTIC_MODELS_BY_ROUTE?.trim();
+  if (json) {
+    try {
+      const parsed: unknown = JSON.parse(json);
+      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+        for (const [route, model] of Object.entries(parsed)) {
+          if (typeof model === "string" && model.trim().length > 0) {
+            models[route] = model.trim();
+          }
+        }
+      }
+    } catch {
+      // A malformed override falls back to the legacy per-route variables.
+    }
+  }
+  return models;
+}
+
 export function providerConfigFromEnv(env: NodeJS.ProcessEnv, offline: boolean): ProviderConfig {
   if (offline) return { provider: "offline" };
   const selectedProvider =
@@ -223,11 +327,7 @@ export function providerConfigFromEnv(env: NodeJS.ProcessEnv, offline: boolean):
       ? "claude-agent"
       : "anthropic";
   const defaultModel = env.BRAINSTORM_AGENTIC_MODEL?.trim();
-  const models: Record<string, string> = {};
-  for (const routeName of ["reasoning", "writing", "balanced"] as const) {
-    const value = env[`BRAINSTORM_AGENTIC_MODEL_${routeName.toUpperCase()}`]?.trim();
-    if (value) models[routeName] = value;
-  }
+  const models = modelsByRouteFromEnv(env);
   const maxTurns = Number(env.BRAINSTORM_AGENTIC_AGENT_MAX_TURNS);
   const maxBudgetUsd = Number(
     env.BRAINSTORM_AGENTIC_AGENT_MAX_BUDGET_USD,

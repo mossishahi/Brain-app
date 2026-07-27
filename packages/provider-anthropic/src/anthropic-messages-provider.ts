@@ -15,9 +15,14 @@ import type {
   ModelResponse,
   ResponseFormat,
   StopReason,
+  SystemPrompt,
   TokenUsage,
   ToolChoice,
   ToolDefinition,
+} from "./core-adapter.js";
+import {
+  systemPromptBoundary,
+  systemPromptSegments,
 } from "./core-adapter.js";
 import {
   AnthropicProviderError,
@@ -39,6 +44,27 @@ export interface AnthropicMessagesClient {
   };
 }
 
+/**
+ * Thinking configuration in provider-neutral camelCase, mapped to the wire
+ * shape (`budget_tokens`) when requests are built.
+ */
+export interface AnthropicThinkingConfig {
+  /**
+   * "adaptive": the model decides when and how deeply to think (newer models).
+   * "enabled": manual extended thinking; requires budgetTokens.
+   * "disabled": no thinking blocks.
+   */
+  readonly type: "adaptive" | "enabled" | "disabled";
+  /** Manual-mode budget; at least 1024 and less than max_tokens. */
+  readonly budgetTokens?: number;
+  /**
+   * "summarized" returns readable thinking summaries; "omitted" returns
+   * thinking blocks with an empty text field (signature only). No setting
+   * returns the raw chain of thought.
+   */
+  readonly display?: "summarized" | "omitted";
+}
+
 export interface AnthropicMessagesProviderConfig {
   readonly apiKey?: string;
   /** Configured model advertised by listModels(). */
@@ -49,6 +75,16 @@ export interface AnthropicMessagesProviderConfig {
   readonly capabilities?: Partial<ModelCapabilities>;
   readonly clientOptions?: WireRecord;
   readonly providerOptions?: WireRecord;
+  /**
+   * Deployment-level thinking configuration applied to every request from
+   * this provider instance. The API renders the thinking configuration (and
+   * effort) into the prompt itself, so changing it between calls invalidates
+   * prompt-cache prefixes; keeping it constant per instance keeps the
+   * pipeline's cacheable instruction prefixes warm. A per-request
+   * `providerOptions.anthropic.thinking` wire object overrides this default;
+   * both paths are validated against the documented API rules.
+   */
+  readonly thinking?: AnthropicThinkingConfig;
   /** Official-SDK boundary injection for deterministic tests. */
   readonly client?: AnthropicMessagesClient;
 }
@@ -64,7 +100,7 @@ const BASE_CAPABILITIES: ModelCapabilities = {
   imageInput: true,
   jsonOutput: true,
   jsonSchemaOutput: true,
-  thinking: false,
+  thinking: true,
   systemPrompt: true,
   stopSequences: true,
 };
@@ -167,7 +203,7 @@ function mapToolResultContent(
   );
 }
 
-function mapRequestBlock(block: ContentBlock): WireRecord {
+function mapRequestBlock(block: ContentBlock): WireRecord | undefined {
   switch (block.type) {
     case "text":
       return { type: "text", text: block.text };
@@ -176,14 +212,22 @@ function mapRequestBlock(block: ContentBlock): WireRecord {
     case "document":
       return mapDocument(block);
     case "thinking": {
+      // Safety-redacted blocks must round-trip as redacted_thinking,
+      // byte-identical; re-shaping them breaks the multi-turn protocol.
+      const redactedData = block.metadata?.redactedData;
+      if (typeof redactedData === "string") {
+        return { type: "redacted_thinking", data: redactedData };
+      }
       const signature = block.metadata?.signature;
-      return typeof signature === "string"
-        ? {
-            type: "thinking",
-            thinking: block.text,
-            signature,
-          }
-        : { type: "text", text: block.text };
+      if (typeof signature === "string") {
+        return { type: "thinking", thinking: block.text, signature };
+      }
+      // Unsigned thinking (e.g. produced by another provider) cannot be
+      // replayed as a thinking block. Carry its text as plain text; drop
+      // empty blocks instead of sending an invalid empty text block.
+      return block.text.length > 0
+        ? { type: "text", text: block.text }
+        : undefined;
     }
     case "tool_use":
       return {
@@ -208,7 +252,9 @@ function mapMessages(messages: readonly ModelMessage[]): WireMessage[] {
     content: WireRecord[];
   }> = [];
   for (const message of messages) {
-    const content = message.content.map(mapRequestBlock);
+    const content = message.content
+      .map(mapRequestBlock)
+      .filter((block): block is WireRecord => block !== undefined);
     if (content.length === 0) {
       continue;
     }
@@ -243,6 +289,140 @@ function mapToolChoice(choice: ToolChoice): WireRecord | undefined {
     case "tool":
       return { type: "tool", name: choice.name };
   }
+}
+
+const THINKING_TYPES = new Set(["adaptive", "enabled", "disabled"]);
+const THINKING_DISPLAYS = new Set(["summarized", "omitted"]);
+const MIN_THINKING_BUDGET_TOKENS = 1024;
+
+function thinkingError(message: string): AnthropicProviderError {
+  return new AnthropicProviderError(message, "validation", false);
+}
+
+/** Maps the camelCase provider configuration to the wire thinking object. */
+function mapThinkingConfig(config: AnthropicThinkingConfig): WireRecord {
+  return {
+    type: config.type,
+    ...(config.budgetTokens !== undefined
+      ? { budget_tokens: config.budgetTokens }
+      : {}),
+    ...(config.display !== undefined ? { display: config.display } : {}),
+  };
+}
+
+/**
+ * Validates the effective wire thinking configuration against the rules the
+ * Messages API documents, so misconfigurations fail locally with a named
+ * reason instead of as an opaque 400 in the middle of a pipeline run:
+ * - `display` accepts only "summarized"/"omitted" and is invalid with
+ *   `type: "disabled"`;
+ * - manual mode (`type: "enabled"`) requires `budget_tokens` of at least
+ *   1024 and below `max_tokens`, and forbids forced tool use
+ *   (`tool_choice: any/tool`); adaptive mode takes no budget;
+ * - while thinking is on, `temperature` and `top_k` are rejected and
+ *   `top_p` must stay within 0.95-1.
+ */
+function validateThinkingParams(
+  thinking: unknown,
+  params: WireRecord,
+): WireRecord {
+  if (
+    typeof thinking !== "object" ||
+    thinking === null ||
+    Array.isArray(thinking)
+  ) {
+    throw thinkingError("thinking must be a configuration object.");
+  }
+  const config = thinking as WireRecord;
+  const type = config.type;
+  if (typeof type !== "string" || !THINKING_TYPES.has(type)) {
+    throw thinkingError(
+      'thinking.type must be "adaptive", "enabled", or "disabled".',
+    );
+  }
+  if (config.display !== undefined) {
+    if (
+      typeof config.display !== "string" ||
+      !THINKING_DISPLAYS.has(config.display)
+    ) {
+      throw thinkingError(
+        'thinking.display must be "summarized" or "omitted".',
+      );
+    }
+    if (type === "disabled") {
+      throw thinkingError(
+        "thinking.display is invalid when thinking is disabled.",
+      );
+    }
+  }
+  if (type !== "enabled" && config.budget_tokens !== undefined) {
+    throw thinkingError(
+      'thinking.budget_tokens is only valid in manual mode (type "enabled").',
+    );
+  }
+  if (type === "enabled") {
+    const budget = config.budget_tokens;
+    if (
+      typeof budget !== "number" ||
+      !Number.isSafeInteger(budget) ||
+      budget < MIN_THINKING_BUDGET_TOKENS
+    ) {
+      throw thinkingError(
+        `manual thinking requires budget_tokens of at least ${MIN_THINKING_BUDGET_TOKENS}.`,
+      );
+    }
+    const maxTokens = params.max_tokens;
+    if (typeof maxTokens === "number" && budget >= maxTokens) {
+      throw thinkingError(
+        "thinking.budget_tokens must be less than max_tokens.",
+      );
+    }
+    const choice = asWireRecord(params.tool_choice).type;
+    if (choice === "any" || choice === "tool") {
+      throw thinkingError(
+        "forced tool use is incompatible with manual thinking; use adaptive thinking or tool_choice auto/none.",
+      );
+    }
+  }
+  if (type !== "disabled") {
+    if (params.temperature !== undefined) {
+      throw thinkingError(
+        "temperature is incompatible with thinking; leave it unset.",
+      );
+    }
+    if (params.top_k !== undefined) {
+      throw thinkingError(
+        "top_k is incompatible with thinking; leave it unset.",
+      );
+    }
+    const topP = params.top_p;
+    if (
+      topP !== undefined &&
+      (typeof topP !== "number" || topP < 0.95 || topP > 1)
+    ) {
+      throw thinkingError(
+        "top_p must be between 0.95 and 1 while thinking is on.",
+      );
+    }
+  }
+  return config;
+}
+
+/**
+ * A plain string stays a plain string; segments become text blocks with a
+ * cache breakpoint closing the stable prefix. Anthropic ignores a breakpoint
+ * on a prefix shorter than the model's cacheable minimum, so marking one is
+ * safe even for short instructions.
+ */
+function mapSystem(system: SystemPrompt): WireRecord[] | string {
+  if (typeof system === "string") return system;
+  const segments = systemPromptSegments(system);
+  const boundary = systemPromptBoundary(segments);
+  return segments.map((segment, index) => ({
+    type: "text",
+    text: segment.text,
+    ...(index === boundary - 1 ? { cache_control: { type: "ephemeral" } } : {}),
+  }));
 }
 
 function schemaForFormat(format: ResponseFormat): JsonObject | undefined {
@@ -403,6 +583,7 @@ export class AnthropicMessagesProvider implements ModelProvider {
   readonly #maxTokens: number;
   readonly #capabilities: ModelCapabilities;
   readonly #providerOptions: WireRecord;
+  readonly #thinking: WireRecord | undefined;
 
   public constructor(config: AnthropicMessagesProviderConfig) {
     if (config.model.trim() === "") {
@@ -422,6 +603,10 @@ export class AnthropicMessagesProvider implements ModelProvider {
       ...(config.capabilities ?? {}),
     };
     this.#providerOptions = { ...(config.providerOptions ?? {}) };
+    this.#thinking =
+      config.thinking !== undefined
+        ? mapThinkingConfig(config.thinking)
+        : undefined;
 
     if (config.client !== undefined) {
       this.#client = config.client;
@@ -507,7 +692,7 @@ export class AnthropicMessagesProvider implements ModelProvider {
     delete params.tool_choice;
 
     if (request.system !== undefined) {
-      params.system = request.system;
+      params.system = mapSystem(request.system);
     }
     const tools =
       request.toolChoice?.type === "none" ? [] : (request.tools ?? []);
@@ -544,6 +729,17 @@ export class AnthropicMessagesProvider implements ModelProvider {
       } else {
         delete params.output_config;
       }
+    }
+
+    // Thinking arrives either through the per-request escape hatch
+    // (providerOptions.anthropic.thinking, already spread into params) or the
+    // provider-level default. Validate the effective configuration against
+    // the final wire parameters before sending.
+    const requestedThinking = params.thinking;
+    delete params.thinking;
+    const thinking = requestedThinking ?? this.#thinking;
+    if (thinking !== undefined) {
+      params.thinking = validateThinkingParams(thinking, params);
     }
 
     try {

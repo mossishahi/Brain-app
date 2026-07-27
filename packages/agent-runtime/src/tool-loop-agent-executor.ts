@@ -12,6 +12,7 @@ import type {
   ModelResponse,
   TokenUsage,
   Tool,
+  ToolDefinition,
   ToolResult,
   ToolResultBlock,
   ToolUseBlock,
@@ -306,6 +307,126 @@ function toolCallHint(input: JsonValue): string | undefined {
   return undefined;
 }
 
+/**
+ * Stepwise delivery contract read from AgentTask.metadata.stepwise: the model
+ * must deliver `count` ordered items through the named virtual tool. The
+ * executor records the calls and injects the collected texts into the final
+ * structured output under `field` (plus any literal `inject` fields) before
+ * output validation, so the chain the runtime reviews is assembled by the
+ * orchestrator rather than self-reported inside the JSON answer.
+ */
+interface StepwiseSpec {
+  readonly tool: string;
+  readonly field: string;
+  readonly count: number;
+  readonly inject?: JsonObject;
+}
+
+interface StepwiseStep {
+  readonly index: number;
+  readonly text: string;
+  readonly turn: number;
+}
+
+interface StepwiseSession {
+  readonly spec: StepwiseSpec;
+  readonly steps: StepwiseStep[];
+  readonly turn: number;
+}
+
+function stepwiseSpec(task: AgentTask): StepwiseSpec | undefined {
+  const raw = task.metadata?.stepwise;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return undefined;
+  }
+  const record = raw as { readonly [key: string]: JsonValue };
+  const { tool, field, count, inject } = record;
+  if (typeof tool !== "string" || tool.length === 0) return undefined;
+  if (typeof field !== "string" || field.length === 0) return undefined;
+  if (typeof count !== "number" || !Number.isSafeInteger(count) || count < 1) {
+    return undefined;
+  }
+  return {
+    tool,
+    field,
+    count,
+    ...(typeof inject === "object" && inject !== null && !Array.isArray(inject)
+      ? { inject: inject as JsonObject }
+      : {}),
+  };
+}
+
+function stepwiseToolDefinition(spec: StepwiseSpec): ToolDefinition {
+  return {
+    name: spec.tool,
+    description:
+      `Submit one step of your ${spec.count}-step chain. Call this tool once per step, strictly ` +
+      `in order (index 1 through ${spec.count}), each call carrying exactly one paragraph. All ` +
+      `${spec.count} steps must be submitted before the final structured answer.`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        index: {
+          type: "integer",
+          minimum: 1,
+          maximum: spec.count,
+          description: "1-based step position.",
+        },
+        text: {
+          type: "string",
+          minLength: 1,
+          description: "The step: exactly one paragraph.",
+        },
+      },
+      required: ["index", "text"],
+      additionalProperties: false,
+    },
+  };
+}
+
+function recordStepwiseCall(
+  call: ToolUseBlock,
+  session: StepwiseSession,
+): ToolResultBlock {
+  const input =
+    typeof call.input === "object" &&
+    call.input !== null &&
+    !Array.isArray(call.input)
+      ? (call.input as { readonly [key: string]: JsonValue })
+      : undefined;
+  const expected = session.steps.length + 1;
+  if (expected > session.spec.count) {
+    return failureToolResult(
+      call,
+      `All ${session.spec.count} steps are already submitted; return the final structured answer now.`,
+    );
+  }
+  if (typeof input?.index !== "number" || input.index !== expected) {
+    return failureToolResult(
+      call,
+      `Steps must be submitted strictly in order; expected index ${expected} next.`,
+    );
+  }
+  if (typeof input.text !== "string" || input.text.trim().length === 0) {
+    return failureToolResult(
+      call,
+      "text must carry the step as one non-empty paragraph.",
+    );
+  }
+  session.steps.push({
+    index: expected,
+    text: input.text,
+    turn: session.turn,
+  });
+  return toolResultBlock(call, {
+    output: {
+      ok: true,
+      recorded: expected,
+      remaining: session.spec.count - expected,
+    },
+  });
+}
+
 export class ToolLoopAgentExecutor<
   TOutput extends JsonValue = JsonValue,
 > implements AgentExecutor {
@@ -426,9 +547,26 @@ export class ToolLoopAgentExecutor<
       );
     }
 
+    const stepwise = stepwiseSpec(task);
+    const steps: StepwiseStep[] = [];
+    const thinkingSegments: { turn: number; text: string }[] = [];
     const allowedToolNames = task.tools ?? [];
-    const toolDefinitions = this.#tools.definitions(allowedToolNames);
-    const allowedTools = new Set(allowedToolNames);
+    const registryDefinitions = this.#tools.definitions(allowedToolNames);
+    const toolDefinitions =
+      stepwise !== undefined
+        ? [...registryDefinitions, stepwiseToolDefinition(stepwise)]
+        : registryDefinitions;
+    const allowedTools = new Set(
+      stepwise !== undefined
+        ? [...allowedToolNames, stepwise.tool]
+        : allowedToolNames,
+    );
+    // A stepwise task needs at least one turn per step plus room for the
+    // final answer and validation retries.
+    const maxTurns =
+      stepwise !== undefined
+        ? Math.max(this.#maxTurns, stepwise.count * 2 + 4)
+        : this.#maxTurns;
     const messages: ModelMessage[] = [...baseRequest.messages];
     const schema =
       baseRequest.responseFormat?.type === "jsonSchema"
@@ -442,7 +580,7 @@ export class ToolLoopAgentExecutor<
     }
 
     let validationRetries = 0;
-    for (let turn = 1; turn <= this.#maxTurns; turn += 1) {
+    for (let turn = 1; turn <= maxTurns; turn += 1) {
       throwIfAborted(context.signal);
       context.reportProgress?.({
         kind: "model",
@@ -462,6 +600,13 @@ export class ToolLoopAgentExecutor<
       throwIfAborted(context.signal);
       state.usage = addUsage(state.usage, response.usage);
       messages.push({ role: "assistant", content: response.content });
+      // Native reasoning traces (thinking blocks) are collected for artifact
+      // capture; they never join the parsed output or progress events.
+      for (const block of response.content) {
+        if (block.type === "thinking" && block.text.trim().length > 0) {
+          thinkingSegments.push({ turn, text: block.text });
+        }
+      }
 
       const calls = toolUseBlocks(response.content);
       if (calls.length > 0) {
@@ -476,6 +621,7 @@ export class ToolLoopAgentExecutor<
           allowedTools,
           task,
           context,
+          stepwise !== undefined ? { spec: stepwise, steps, turn } : undefined,
         );
         messages.push({ role: "user", content: results });
         continue;
@@ -509,6 +655,53 @@ export class ToolLoopAgentExecutor<
         messages.push(validationFeedback(issues));
         continue;
       }
+      if (stepwise !== undefined) {
+        if (steps.length !== stepwise.count) {
+          const issues = [
+            `Exactly ${stepwise.count} steps must be submitted through the ${stepwise.tool} tool ` +
+              `before the final answer; ${steps.length} have been received. Submit the missing ` +
+              `steps in order, then return the complete final answer again.`,
+          ];
+          if (validationRetries >= this.#maxValidationRetries) {
+            throw new OutputValidationError(issues);
+          }
+          validationRetries += 1;
+          context.reportProgress?.({
+            kind: "validation",
+            turn,
+            message: `Stepwise delivery retry ${validationRetries}/${this.#maxValidationRetries}`,
+          });
+          messages.push(validationFeedback(issues));
+          continue;
+        }
+        // The orchestrator, not the model, assembles the reviewed chain: the
+        // recorded steps (and any literal fields) are injected into the
+        // output before validation.
+        if (
+          typeof output === "object" &&
+          output !== null &&
+          !Array.isArray(output)
+        ) {
+          output = {
+            ...(output as JsonObject),
+            [stepwise.field]: steps.map((step) => step.text),
+            ...(stepwise.inject ?? {}),
+          };
+        }
+      }
+      const traceExtras: JsonObject = {
+        ...(thinkingSegments.length > 0
+          ? { thinkingSegments: thinkingSegments as unknown as JsonValue }
+          : {}),
+        ...(stepwise !== undefined && steps.length > 0
+          ? {
+              stepTurns: steps.map(({ index, turn: stepTurn }) => ({
+                index,
+                turn: stepTurn,
+              })) as unknown as JsonValue,
+            }
+          : {}),
+      };
       if (schema === undefined) {
         return this.#successResult(
           task,
@@ -517,6 +710,7 @@ export class ToolLoopAgentExecutor<
           state.usage,
           turn,
           validationRetries,
+          traceExtras,
         );
       }
 
@@ -534,6 +728,7 @@ export class ToolLoopAgentExecutor<
           state.usage,
           turn,
           validationRetries,
+          traceExtras,
         );
       }
       if (validationRetries >= this.#maxValidationRetries) {
@@ -548,7 +743,7 @@ export class ToolLoopAgentExecutor<
       messages.push(validationFeedback(validation.issues));
     }
 
-    throw new MaxTurnsExceededError(this.#maxTurns);
+    throw new MaxTurnsExceededError(maxTurns);
   }
 
   #validateRoute(route: ModelRoute): void {
@@ -567,6 +762,7 @@ export class ToolLoopAgentExecutor<
     usage: TokenUsage,
     turns: number,
     validationRetries: number,
+    extras: JsonObject = {},
   ): AgentResult {
     return {
       taskId: task.taskId,
@@ -574,6 +770,7 @@ export class ToolLoopAgentExecutor<
       output,
       usage,
       metadata: {
+        ...extras,
         providerId: response.providerId,
         modelId: response.modelId,
         turns,
@@ -641,6 +838,7 @@ export class ToolLoopAgentExecutor<
     allowed: ReadonlySet<string>,
     task: AgentTask,
     context: AgentExecutionContext,
+    stepwise?: StepwiseSession,
   ): Promise<readonly ToolResultBlock[]> {
     const results: ToolResultBlock[] = [];
     const seenIds = new Set<string>();
@@ -656,7 +854,14 @@ export class ToolLoopAgentExecutor<
         this.#parallelSafety(tool);
       if (!canRunInParallel) {
         results.push(
-          await this.#executeOneTool(call, allowed, seenIds, task, context),
+          await this.#executeOneTool(
+            call,
+            allowed,
+            seenIds,
+            task,
+            context,
+            stepwise,
+          ),
         );
         index += 1;
         continue;
@@ -685,6 +890,7 @@ export class ToolLoopAgentExecutor<
               seenIds,
               task,
               context,
+              stepwise,
             ),
           ),
         )),
@@ -700,6 +906,7 @@ export class ToolLoopAgentExecutor<
     seenIds: Set<string>,
     task: AgentTask,
     context: AgentExecutionContext,
+    stepwise?: StepwiseSession,
   ): Promise<ToolResultBlock> {
     throwIfAborted(context.signal);
     if (seenIds.has(call.id)) {
@@ -714,6 +921,20 @@ export class ToolLoopAgentExecutor<
         call,
         `Tool \`${call.name}\` is not permitted for this task.`,
       );
+    }
+    // The stepwise chain tool is virtual: recorded by the executor itself,
+    // never dispatched to the host tool registry.
+    if (stepwise !== undefined && call.name === stepwise.spec.tool) {
+      const result = recordStepwiseCall(call, stepwise);
+      context.reportProgress?.({
+        kind: "tool_end",
+        toolName: call.name,
+        message:
+          result.isError === true
+            ? `${call.name} rejected an out-of-order or empty step`
+            : `Chain step ${stepwise.steps.length}/${stepwise.spec.count} recorded`,
+      });
+      return result;
     }
 
     const tool = this.#tools.get(call.name);

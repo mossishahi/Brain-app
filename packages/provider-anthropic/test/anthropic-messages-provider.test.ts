@@ -116,7 +116,9 @@ test("maps exact core requests and native JSON-schema responses", async () => {
     maxOutputTokens: 123,
     providerOptions: {
       anthropic: {
-        thinking: { type: "enabled", budget_tokens: 32 },
+        // Adaptive thinking is the only mode compatible with the forced
+        // tool_choice above; manual mode would be rejected by validation.
+        thinking: { type: "adaptive", display: "summarized" },
         stream: true,
       },
     },
@@ -131,8 +133,8 @@ test("maps exact core requests and native JSON-schema responses", async () => {
   assert.equal(capturedBody?.max_tokens, 123);
   assert.equal(capturedBody?.stream, false);
   assert.deepEqual(capturedBody?.thinking, {
-    type: "enabled",
-    budget_tokens: 32,
+    type: "adaptive",
+    display: "summarized",
   });
   assert.equal(capturedBody?.system, "Be concise.");
   assert.deepEqual(capturedBody?.tool_choice, { type: "any" });
@@ -344,6 +346,269 @@ test("lists the configured model and classifies failures", async () => {
   );
   assert.equal(validation.category, "validation");
   assert.equal(validation.transient, false);
+});
+
+test("round-trips thinking, omitted, and redacted thinking blocks losslessly", async () => {
+  let captured: Record<string, unknown> | undefined;
+  const provider = new AnthropicMessagesProvider({
+    model: "claude-test",
+    client: {
+      messages: {
+        async create(body) {
+          captured = body;
+          return {
+            model: "claude-test",
+            content: [{ type: "text", text: "ok" }],
+            stop_reason: "end_turn",
+            usage: {},
+          };
+        },
+      },
+    },
+  });
+
+  await provider.complete({
+    modelId: "claude-test",
+    messages: [
+      { role: "user", content: [{ type: "text", text: "Continue." }] },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "thinking",
+            text: "Summarized reasoning.",
+            metadata: { signature: "sig-1" },
+          },
+          // Omitted-display block: empty text, signature only.
+          { type: "thinking", text: "", metadata: { signature: "sig-2" } },
+          // Safety-redacted block: opaque data, no readable text.
+          {
+            type: "thinking",
+            text: "",
+            metadata: { redactedData: "opaque-redacted" },
+          },
+          // Unsigned cross-provider thinking degrades to plain text.
+          { type: "thinking", text: "Cross-provider reasoning text." },
+          // Unsigned empty thinking is dropped, never an empty text block.
+          { type: "thinking", text: "" },
+          { type: "text", text: "Answer so far." },
+        ],
+      },
+      { role: "user", content: [{ type: "text", text: "And then?" }] },
+    ],
+  });
+
+  const messages = captured?.messages as Array<{
+    role: string;
+    content: Array<Record<string, unknown>>;
+  }>;
+  assert.deepEqual(messages[1]?.content, [
+    { type: "thinking", thinking: "Summarized reasoning.", signature: "sig-1" },
+    { type: "thinking", thinking: "", signature: "sig-2" },
+    { type: "redacted_thinking", data: "opaque-redacted" },
+    { type: "text", text: "Cross-provider reasoning text." },
+    { type: "text", text: "Answer so far." },
+  ]);
+});
+
+test("maps thinking and redacted_thinking response blocks for lossless replay", async () => {
+  const provider = new AnthropicMessagesProvider({
+    model: "claude-test",
+    client: {
+      messages: {
+        async create() {
+          return {
+            model: "claude-test",
+            content: [
+              {
+                type: "thinking",
+                thinking: "Reasoning summary.",
+                signature: "sig-9",
+              },
+              { type: "redacted_thinking", data: "opaque-9" },
+              { type: "text", text: "Final." },
+            ],
+            stop_reason: "end_turn",
+            usage: {},
+          };
+        },
+      },
+    },
+  });
+
+  const response = await provider.complete({
+    modelId: "claude-test",
+    messages: [{ role: "user", content: [{ type: "text", text: "Think." }] }],
+  });
+
+  assert.deepEqual(response.content, [
+    {
+      type: "thinking",
+      text: "Reasoning summary.",
+      metadata: { signature: "sig-9" },
+    },
+    { type: "thinking", text: "", metadata: { redactedData: "opaque-9" } },
+    { type: "text", text: "Final." },
+  ]);
+});
+
+test("applies the provider-level thinking configuration and lets requests override it", async () => {
+  const bodies: Array<Record<string, unknown>> = [];
+  const provider = new AnthropicMessagesProvider({
+    model: "claude-test",
+    thinking: { type: "adaptive", display: "summarized" },
+    client: {
+      messages: {
+        async create(body) {
+          bodies.push(body);
+          return {
+            model: "claude-test",
+            content: [{ type: "text", text: "ok" }],
+            stop_reason: "end_turn",
+            usage: {},
+          };
+        },
+      },
+    },
+  });
+  const request: ModelRequest = {
+    modelId: "claude-test",
+    messages: [{ role: "user", content: [{ type: "text", text: "Hi." }] }],
+  };
+
+  await provider.complete(request);
+  assert.deepEqual(bodies[0]?.thinking, {
+    type: "adaptive",
+    display: "summarized",
+  });
+
+  await provider.complete({
+    ...request,
+    providerOptions: { anthropic: { thinking: { type: "disabled" } } },
+  });
+  assert.deepEqual(bodies[1]?.thinking, { type: "disabled" });
+});
+
+test("rejects thinking configurations the Messages API documents as invalid", async () => {
+  const provider = new AnthropicMessagesProvider({
+    model: "claude-test",
+    maxTokens: 4096,
+    client: {
+      messages: {
+        async create() {
+          return {
+            model: "claude-test",
+            content: [{ type: "text", text: "ok" }],
+            stop_reason: "end_turn",
+            usage: {},
+          };
+        },
+      },
+    },
+  });
+  const base: ModelRequest = {
+    modelId: "claude-test",
+    messages: [{ role: "user", content: [{ type: "text", text: "Hi." }] }],
+  };
+  const expectValidation = (request: ModelRequest, pattern: RegExp) =>
+    assert.rejects(provider.complete(request), (error: unknown) => {
+      assert.ok(error instanceof AnthropicProviderError);
+      assert.equal(error.category, "validation");
+      assert.match(error.message, pattern);
+      return true;
+    });
+
+  await expectValidation(
+    {
+      ...base,
+      providerOptions: { anthropic: { thinking: { type: "enabled" } } },
+    },
+    /budget_tokens/,
+  );
+  await expectValidation(
+    {
+      ...base,
+      providerOptions: {
+        anthropic: { thinking: { type: "enabled", budget_tokens: 512 } },
+      },
+    },
+    /at least 1024/,
+  );
+  await expectValidation(
+    {
+      ...base,
+      providerOptions: {
+        anthropic: { thinking: { type: "enabled", budget_tokens: 4096 } },
+      },
+    },
+    /less than max_tokens/,
+  );
+  await expectValidation(
+    {
+      ...base,
+      providerOptions: {
+        anthropic: { thinking: { type: "adaptive", budget_tokens: 2048 } },
+      },
+    },
+    /manual mode/,
+  );
+  await expectValidation(
+    {
+      ...base,
+      providerOptions: {
+        anthropic: { thinking: { type: "disabled", display: "summarized" } },
+      },
+    },
+    /disabled/,
+  );
+  await expectValidation(
+    {
+      ...base,
+      tools: [{ name: "t", inputSchema: { type: "object" } }],
+      toolChoice: { type: "required" },
+      providerOptions: {
+        anthropic: { thinking: { type: "enabled", budget_tokens: 2048 } },
+      },
+    },
+    /forced tool use/,
+  );
+  await expectValidation(
+    {
+      ...base,
+      temperature: 0.3,
+      providerOptions: { anthropic: { thinking: { type: "adaptive" } } },
+    },
+    /temperature/,
+  );
+  await expectValidation(
+    {
+      ...base,
+      topP: 0.5,
+      providerOptions: { anthropic: { thinking: { type: "adaptive" } } },
+    },
+    /top_p/,
+  );
+
+  // Documented-valid combinations pass through untouched.
+  await provider.complete({
+    ...base,
+    topP: 0.98,
+    providerOptions: {
+      anthropic: { thinking: { type: "adaptive", display: "omitted" } },
+    },
+  });
+  await provider.complete({
+    ...base,
+    tools: [{ name: "t", inputSchema: { type: "object" } }],
+    toolChoice: { type: "required" },
+    providerOptions: { anthropic: { thinking: { type: "adaptive" } } },
+  });
+  await provider.complete({
+    ...base,
+    providerOptions: {
+      anthropic: { thinking: { type: "enabled", budget_tokens: 2048 } },
+    },
+  });
 });
 
 test("rejects pre-aborted calls with AbortError before the SDK boundary", async () => {

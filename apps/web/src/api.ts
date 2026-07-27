@@ -12,6 +12,8 @@ import type {
   HealthResponse,
   JobDetail,
   JobSummary,
+  ModelOptionsResponse,
+  ModelsByRouteUpdate,
   ServerEvent,
   ServerAttachmentRootsResponse,
   ServerSettings,
@@ -66,6 +68,14 @@ export const getSettings = (): Promise<ServerSettings> => request("/settings");
 
 export const putSettings = (settings: ServerSettingsUpdate): Promise<ServerSettings> =>
   request("/settings", jsonInit("PUT", settings));
+
+export const getModelOptions = (): Promise<ModelOptionsResponse> =>
+  request("/model-options");
+
+export const putModelsByRoute = (
+  update: ModelsByRouteUpdate,
+): Promise<ServerSettings> =>
+  request("/settings/models-by-route", jsonInit("PUT", update));
 
 /*
  * Module-level caches so navigating between the landing page and a dashboard

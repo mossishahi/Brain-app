@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from "@anthropic-ai/claude-agent-sdk";
 import type { AgentTask } from "@brainstorm-agentic/core";
 
 import {
@@ -72,6 +73,57 @@ const structuredTask: AgentTask = {
     ],
   },
 };
+
+test("segmented instructions become a cacheable prefix split by the SDK boundary marker", async () => {
+  const captured: ClaudeAgentQueryInput[] = [];
+  const executor = new ClaudeAgentExecutor({
+    token: "setup-token-secret",
+    queryFn: successQuery(captured),
+  });
+  await executor.execute(
+    {
+      ...structuredTask,
+      modelRequest: {
+        ...structuredTask.modelRequest!,
+        system: [
+          { text: "Stable role instructions.", cacheable: true },
+          { text: "Web search is unavailable for this run." },
+        ],
+      },
+    },
+    { runId: "run-1", nodePath: "root/brain" },
+  );
+
+  // Every task runs in a fresh session, so the marker is what makes the
+  // instruction prefix reusable across the panel's many similar calls.
+  assert.deepEqual(captured[0]!.options.systemPrompt, [
+    "Stable role instructions.",
+    SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+    "Web search is unavailable for this run.",
+  ]);
+});
+
+test("instructions with nothing stable to cache stay a single system string", async () => {
+  const captured: ClaudeAgentQueryInput[] = [];
+  const executor = new ClaudeAgentExecutor({
+    token: "setup-token-secret",
+    queryFn: successQuery(captured),
+  });
+  await executor.execute(
+    {
+      ...structuredTask,
+      modelRequest: {
+        ...structuredTask.modelRequest!,
+        system: [{ text: "Per-call instructions." }, { text: "More context." }],
+      },
+    },
+    { runId: "run-1", nodePath: "root/brain" },
+  );
+  assert.equal(
+    captured[0]!.options.systemPrompt,
+    "Per-call instructions.\n\nMore context.",
+  );
+});
 
 test("executes a structured task with setup-token auth and capability tools", async () => {
   const captured: ClaudeAgentQueryInput[] = [];
@@ -618,3 +670,60 @@ test("setup-token validation performs a real-shaped one-turn query", async () =>
   );
 });
 
+
+test("reasoning-trace routes get summarized thinking and stepwise tasks get the chain tool", async () => {
+  const captured: ClaudeAgentQueryInput[] = [];
+  const executor = new ClaudeAgentExecutor({
+    token: "setup-token-secret",
+    maxValidationAttempts: 2,
+    queryFn: successQuery(captured, {
+      output: { type: "research idea" },
+    }),
+  });
+  const result = await executor.execute(
+    {
+      ...structuredTask,
+      input: { role: "brain", routeTraits: ["extended-reasoning"] },
+      metadata: {
+        stepwise: { tool: "submit_step", field: "cot", count: 3 },
+      },
+    },
+    { runId: "run-stepwise", nodePath: "root/first-pass/member[0]" },
+  );
+
+  const options = captured[0]!.options;
+  assert.deepEqual(options.thinking, {
+    type: "adaptive",
+    display: "summarized",
+  });
+  const tools = options.tools as string[];
+  assert.ok(tools.includes("mcp__steps__submit_step"));
+  const servers = options.mcpServers as Record<string, unknown>;
+  assert.ok(servers.steps !== undefined);
+
+  // The stubbed query never records submit_step calls, so the executor must
+  // fail closed rather than accept a chainless result.
+  assert.equal(result.status, "error");
+  assert.match(
+    result.status === "error" ? result.error.message : "",
+    /3 steps must be submitted/,
+  );
+  assert.equal(captured.length, 2);
+});
+
+test("tasks without the trace trait keep the omitted thinking display", async () => {
+  const captured: ClaudeAgentQueryInput[] = [];
+  const executor = new ClaudeAgentExecutor({
+    token: "setup-token-secret",
+    queryFn: successQuery(captured),
+  });
+  await executor.execute(structuredTask, {
+    runId: "run-untraced",
+    nodePath: "root/brain",
+  });
+  assert.deepEqual(captured[0]!.options.thinking, {
+    type: "adaptive",
+    display: "omitted",
+  });
+  assert.equal(captured[0]!.options.mcpServers, undefined);
+});

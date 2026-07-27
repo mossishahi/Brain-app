@@ -1,4 +1,10 @@
-import { query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
+import {
+  createSdkMcpServer,
+  query as sdkQuery,
+  SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+  tool as sdkTool,
+} from "@anthropic-ai/claude-agent-sdk";
+import { z } from "zod";
 import { createHash } from "node:crypto";
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -9,6 +15,8 @@ import {
   addUsage,
   emptyUsage,
   serializeError,
+  systemPromptBoundary,
+  systemPromptSegments,
   textContent,
   type AgentExecutionContext,
   type AgentProgress,
@@ -18,6 +26,7 @@ import {
   type JsonObject,
   type JsonValue,
   type ModelMessage,
+  type SystemPrompt,
   type TokenUsage,
 } from "@brainstorm-agentic/core";
 import {
@@ -132,6 +141,138 @@ const KNOWN_BUILTIN_TOOLS = [
   "Task",
   "TodoWrite",
 ] as const;
+
+/** Route trait that turns on reasoning-trace capture for a task. */
+const TRACE_TRAIT = "extended-reasoning";
+/** In-process MCP server name carrying the stepwise chain tool. */
+const STEPWISE_SERVER = "steps";
+
+/** Stepwise delivery contract mirrored from AgentTask.metadata.stepwise. */
+interface StepwiseSpec {
+  readonly tool: string;
+  readonly field: string;
+  readonly count: number;
+  readonly inject?: JsonObject;
+}
+
+interface StepwiseStep {
+  readonly index: number;
+  readonly text: string;
+  readonly turn: number;
+}
+
+/** Per-attempt trace state: thinking segments plus recorded chain steps. */
+interface TraceCapture {
+  readonly wantsTrace: boolean;
+  readonly thinking: { turn: number; text: string }[];
+  readonly stepwise?: {
+    readonly spec: StepwiseSpec;
+    readonly steps: StepwiseStep[];
+  };
+  turn: number;
+}
+
+function routeTraits(task: AgentTask): readonly string[] {
+  const input = record(task.input);
+  return Array.isArray(input.routeTraits)
+    ? input.routeTraits.filter(
+        (trait): trait is string => typeof trait === "string",
+      )
+    : [];
+}
+
+function stepwiseSpecOf(task: AgentTask): StepwiseSpec | undefined {
+  const raw = task.metadata?.stepwise;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return undefined;
+  }
+  const value = raw as { readonly [key: string]: JsonValue };
+  const { tool, field, count, inject } = value;
+  if (typeof tool !== "string" || tool.length === 0) return undefined;
+  if (typeof field !== "string" || field.length === 0) return undefined;
+  if (typeof count !== "number" || !Number.isSafeInteger(count) || count < 1) {
+    return undefined;
+  }
+  return {
+    tool,
+    field,
+    count,
+    ...(typeof inject === "object" && inject !== null && !Array.isArray(inject)
+      ? { inject: inject as JsonObject }
+      : {}),
+  };
+}
+
+/** Full tool name Claude Code assigns to an SDK MCP server tool. */
+function stepwiseSdkToolName(spec: StepwiseSpec): string {
+  return `mcp__${STEPWISE_SERVER}__${spec.tool}`;
+}
+
+function stepwiseRefusal(message: string): {
+  content: Array<{ type: "text"; text: string }>;
+  isError: true;
+} {
+  return { content: [{ type: "text", text: message }], isError: true };
+}
+
+/**
+ * In-process MCP server exposing the stepwise chain tool. The handler
+ * records ordered steps into the attempt's capture state; the executor
+ * injects them into the structured output before authoritative validation.
+ */
+function stepwiseServer(
+  spec: StepwiseSpec,
+  capture: TraceCapture,
+): ReturnType<typeof createSdkMcpServer> {
+  return createSdkMcpServer({
+    name: STEPWISE_SERVER,
+    version: "1.0.0",
+    tools: [
+      sdkTool(
+        spec.tool,
+        `Submit one step of your ${spec.count}-step chain. Call this tool once per step, ` +
+          `strictly in order (index 1 through ${spec.count}), each call carrying exactly one ` +
+          `paragraph. All ${spec.count} steps must be submitted before the final structured answer.`,
+        {
+          index: z.number().int().min(1).max(spec.count),
+          text: z.string().min(1),
+        },
+        async (args) => {
+          const steps = capture.stepwise!.steps;
+          const expected = steps.length + 1;
+          if (expected > spec.count) {
+            return stepwiseRefusal(
+              `All ${spec.count} steps are already submitted; return the final structured answer now.`,
+            );
+          }
+          if (args.index !== expected) {
+            return stepwiseRefusal(
+              `Steps must be submitted strictly in order; expected index ${expected} next.`,
+            );
+          }
+          if (args.text.trim().length === 0) {
+            return stepwiseRefusal(
+              "text must carry the step as one non-empty paragraph.",
+            );
+          }
+          steps.push({ index: expected, text: args.text, turn: capture.turn });
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  ok: true,
+                  recorded: expected,
+                  remaining: spec.count - expected,
+                }),
+              },
+            ],
+          };
+        },
+      ),
+    ],
+  });
+}
 
 function record(value: unknown): UnknownRecord {
   return typeof value === "object" && value !== null
@@ -251,6 +392,25 @@ function messagePrompt(messages: readonly ModelMessage[]): string {
     .filter(Boolean)
     .join("\n\n");
   return rendered === "" ? "Complete the task described in the system prompt." : rendered;
+}
+
+/**
+ * Every task runs in a fresh session, so the only caching available is the
+ * SDK's cross-session prefix cache. The boundary marker declares where the
+ * stable instructions end; without it a custom prompt is one opaque block and
+ * nothing can be reused between the panel's many near-identical calls.
+ */
+function sdkSystemPrompt(system: SystemPrompt): string | string[] {
+  const segments = systemPromptSegments(system);
+  if (segments.length === 0) return "";
+  const boundary = systemPromptBoundary(segments);
+  const texts = segments.map((segment) => segment.text);
+  if (boundary === 0) return texts.join("\n\n");
+  return [
+    ...texts.slice(0, boundary),
+    SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+    ...texts.slice(boundary),
+  ];
 }
 
 function allowedTools(task: AgentTask): string[] {
@@ -784,8 +944,13 @@ function queryOptions(
   task: AgentTask,
   controller: AbortController,
   nativeStructuredOutput: boolean,
+  capture: TraceCapture,
 ): UnknownRecord {
-  const tools = allowedTools(task);
+  const builtinTools = allowedTools(task);
+  const tools =
+    capture.stepwise !== undefined
+      ? [...builtinTools, stepwiseSdkToolName(capture.stepwise.spec)]
+      : builtinTools;
   const disallowedTools = KNOWN_BUILTIN_TOOLS.filter(
     (name) => !tools.includes(name),
   );
@@ -803,20 +968,33 @@ function queryOptions(
     includePartialMessages: true,
     maxTurns: config.maxTurns ?? 100,
     effort: config.effort ?? "high",
+    // The reasoning trace (a summary; the raw chain of thought is never
+    // returned) is requested only for routes that capture it; other tasks
+    // keep the faster omitted display.
     thinking:
       config.thinking === "disabled"
         ? { type: "disabled" }
-        : { type: "adaptive", display: "omitted" },
+        : {
+            type: "adaptive",
+            display: capture.wantsTrace ? "summarized" : "omitted",
+          },
     cwd: config.cwd ?? process.cwd(),
     env: sdkEnvironment(config.token, config.env),
     hooks: fileAccessHooks(config),
   };
+  if (capture.stepwise !== undefined) {
+    options.mcpServers = {
+      [STEPWISE_SERVER]: stepwiseServer(capture.stepwise.spec, capture),
+    };
+  }
   if ((config.attachmentRoots?.length ?? 0) > 0) {
     options.additionalDirectories = [...config.attachmentRoots!];
   }
   const model = description?.modelId ?? config.model;
   if (model) options.model = model;
-  if (description?.system) options.systemPrompt = description.system;
+  if (description?.system) {
+    options.systemPrompt = sdkSystemPrompt(description.system);
+  }
   if (task.outputSchema && nativeStructuredOutput) {
     options.outputFormat = {
       type: "json_schema",
@@ -848,6 +1026,7 @@ async function executeQuery(
   config: ClaudeAgentExecutorConfig,
   task: AgentTask,
   context: AgentExecutionContext,
+  capture: TraceCapture,
   validationIssues: readonly string[] = [],
   nativeStructuredOutput = true,
   rejectedOutput: JsonValue | undefined = undefined,
@@ -899,11 +1078,36 @@ async function executeQuery(
             ]
           : []),
       ].join("\n"),
-      options: queryOptions(config, task, controller, nativeStructuredOutput),
+      options: queryOptions(
+        config,
+        task,
+        controller,
+        nativeStructuredOutput,
+        capture,
+      ),
     })) {
       const current = record(message);
       // Stream deltas are progress signals, not conversation turns.
       if (current.type !== "stream_event") messageCount += 1;
+      capture.turn = messageCount;
+      if (capture.wantsTrace && current.type === "assistant") {
+        const content = record(current.message).content;
+        if (Array.isArray(content)) {
+          for (const candidate of content) {
+            const block = record(candidate);
+            if (
+              block.type === "thinking" &&
+              typeof block.thinking === "string" &&
+              block.thinking.trim().length > 0
+            ) {
+              capture.thinking.push({
+                turn: messageCount,
+                text: block.thinking,
+              });
+            }
+          }
+        }
+      }
       reportSdkMessage(current, context, progressState);
       if (current.type === "result") finalResult = current;
     }
@@ -966,47 +1170,122 @@ export class ClaudeAgentExecutor implements AgentExecutor {
     context: AgentExecutionContext,
   ): Promise<AgentResult> {
     const attempts = this.config.maxValidationAttempts ?? 3;
+    const stepwise = stepwiseSpecOf(task);
+    const wantsTrace =
+      routeTraits(task).includes(TRACE_TRAIT) &&
+      this.config.thinking !== "disabled";
     let validationIssues: string[] = [];
     let rejectedOutput: JsonValue | undefined;
     let usage = emptyUsage();
     let nativeStructuredOutput = true;
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       const workspace = taskWorkspace(this.config, task, context, attempt);
+      // Fresh per-attempt trace state: attempts run in fresh sessions, so
+      // recorded steps and thinking segments must never leak across them.
+      const capture: TraceCapture = {
+        wantsTrace,
+        thinking: [],
+        ...(stepwise !== undefined
+          ? { stepwise: { spec: stepwise, steps: [] } }
+          : {}),
+        turn: 0,
+      };
       try {
         const result = await executeQuery(
           { ...this.config, cwd: workspace },
           task,
           context,
+          capture,
           validationIssues,
           nativeStructuredOutput,
           rejectedOutput,
         );
         if (result.usage) usage = addUsage(usage, result.usage);
-        if (
-          result.status === "error" ||
-          !task.outputSchema ||
-          !this.config.outputValidator
-        ) {
+        if (result.status === "error") {
           return { ...result, usage };
         }
+        let output = result.output;
+        if (stepwise !== undefined) {
+          const steps = capture.stepwise!.steps;
+          if (steps.length !== stepwise.count) {
+            validationIssues = [
+              `Exactly ${stepwise.count} steps must be submitted through the ${stepwise.tool} ` +
+                `tool before the final answer; ${steps.length} were received. Submit every step ` +
+                `in order, then return the complete final answer.`,
+            ];
+            rejectedOutput = result.output;
+            if (attempt < attempts) {
+              progress(context, {
+                kind: "validation",
+                message: `Stepwise delivery retry ${attempt}/${attempts - 1}`,
+              });
+              continue;
+            }
+            return {
+              taskId: task.taskId,
+              status: "error",
+              error: serializeError(
+                new Error(
+                  `Stepwise chain delivery failed after ${attempts} attempts: ${validationIssues.join("; ")}`,
+                ),
+              ),
+              usage,
+            };
+          }
+          // The orchestrator assembles the reviewed chain from the recorded
+          // tool calls; the model's JSON never carries it.
+          if (
+            typeof output === "object" &&
+            output !== null &&
+            !Array.isArray(output)
+          ) {
+            output = {
+              ...(output as JsonObject),
+              [stepwise.field]: steps.map((step) => step.text),
+              ...(stepwise.inject ?? {}),
+            };
+          }
+        }
+        const traceMetadata: JsonObject = {
+          ...(capture.thinking.length > 0
+            ? { thinkingSegments: capture.thinking as unknown as JsonValue }
+            : {}),
+          ...(capture.stepwise !== undefined &&
+          capture.stepwise.steps.length > 0
+            ? {
+                stepTurns: capture.stepwise.steps.map(({ index, turn }) => ({
+                  index,
+                  turn,
+                })) as unknown as JsonValue,
+              }
+            : {}),
+        };
+        const succeeded = {
+          ...result,
+          output,
+          usage,
+          metadata: { ...(result.metadata ?? {}), ...traceMetadata },
+        };
+        if (!task.outputSchema || !this.config.outputValidator) {
+          return succeeded;
+        }
         const checked = await this.config.outputValidator.validate(
-          result.output,
+          succeeded.output,
           task.outputSchema.schema,
         );
-        const normalized = normalizeValidation(checked, result.output);
+        const normalized = normalizeValidation(checked, succeeded.output);
         if (normalized.success) {
           return {
-            ...result,
+            ...succeeded,
             output: normalized.value,
-            usage,
             metadata: {
-              ...(result.metadata ?? {}),
+              ...succeeded.metadata,
               validationAttempts: attempt,
             },
           };
         }
         validationIssues = normalized.issues;
-        rejectedOutput = result.output;
+        rejectedOutput = succeeded.output;
         if (attempt < attempts) {
           progress(context, {
             kind: "validation",

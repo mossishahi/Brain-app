@@ -769,7 +769,44 @@ export class SettingsStore {
         .replace(/[^A-Z0-9_]/g, "_")}`;
       env[name] = model;
     }
+    // Lossless JSON form of the per-route map; the worker prefers it over
+    // the mangled legacy variables above.
+    const modelsByRoute = settings.llm.modelsByRoute ?? {};
+    if (Object.keys(modelsByRoute).length > 0) {
+      env.BRAINSTORM_AGENTIC_MODELS_BY_ROUTE = JSON.stringify(modelsByRoute);
+    }
     return env;
+  }
+
+  /**
+   * Focused per-task-type model update from the submission-box picker.
+   * Unlike put(), this never touches credentials and performs no connection
+   * re-verification; entries with an empty model string mean "use the
+   * default model" and are dropped.
+   */
+  putModelsByRoute(value: unknown): ServerSettings {
+    const body = object(value, "models-by-route update");
+    const raw = object(body.modelsByRoute ?? {}, "modelsByRoute");
+    const map: Record<string, string> = {};
+    for (const [route, model] of Object.entries(raw)) {
+      if (route.trim().length === 0) {
+        throw new Error("modelsByRoute keys must be task-type names");
+      }
+      if (typeof model !== "string") {
+        throw new Error(`modelsByRoute.${route} must be a string`);
+      }
+      const trimmed = model.trim();
+      if (trimmed.length > 0) map[route] = trimmed;
+    }
+    const stored = validateStoredSettings(readJsonFile<unknown>(this.path));
+    const llm: StoredLlmSettings = { ...stored.llm };
+    if (Object.keys(map).length > 0) {
+      (llm as { modelsByRoute?: Record<string, string> }).modelsByRoute = map;
+    } else {
+      delete (llm as { modelsByRoute?: Record<string, string> }).modelsByRoute;
+    }
+    atomicWriteJson(this.path, { ...stored, llm });
+    return this.get();
   }
 
   async put(value: unknown): Promise<ServerSettings> {

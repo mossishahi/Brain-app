@@ -19,12 +19,14 @@ import type {
   AttachmentSelectionKind,
   GateAnswerRequest,
   HealthResponse,
+  ModelOptionsResponse,
   ServerEvent,
   SubmitJobRequest,
 } from "@brainstorm-agentic/protocol";
 
 import { JobConflictError, JobManager } from "./job-manager.js";
 import type { ContentRegistryRuntimeStatus } from "./model.js";
+import { RouteCatalog, loadModelCatalog } from "./route-catalog.js";
 import {
   ServerFileBrowser,
   ServerFileError,
@@ -332,6 +334,7 @@ export async function startBrainServer(
 
   const jobStreams = new Set<SseConnection>();
   const detailStreams = new Map<string, Set<SseConnection>>();
+  const routeCatalog = new RouteCatalog();
   let manager!: JobManager;
   const broadcastJobs = (): void => {
     for (const stream of jobStreams) {
@@ -478,6 +481,39 @@ export async function startBrainServer(
       if (req.method === "PUT" && path === "/api/settings") {
         try {
           const settings = await manager.settings.put(await readJson(req));
+          broadcast();
+          sendJson(res, 200, settings);
+        } catch (error) {
+          throw new HttpError(
+            400,
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+        return;
+      }
+      if (req.method === "GET" && path === "/api/model-options") {
+        const settings = manager.settings.get();
+        const catalog = loadModelCatalog(options.workspace);
+        const taskTypes = await routeCatalog.taskTypes(
+          settings.contentRegistry.url,
+          settings.contentRegistry.bundle,
+          settings.contentRegistry.version,
+        );
+        const response: ModelOptionsResponse = {
+          provider: settings.llm.provider,
+          taskTypes,
+          models: catalog[settings.llm.provider] ?? [],
+          modelsByRoute: settings.llm.modelsByRoute ?? {},
+          ...(settings.llm.model ? { defaultModel: settings.llm.model } : {}),
+        };
+        sendJson(res, 200, response);
+        return;
+      }
+      if (req.method === "PUT" && path === "/api/settings/models-by-route") {
+        try {
+          const settings = manager.settings.putModelsByRoute(
+            await readJson(req),
+          );
           broadcast();
           sendJson(res, 200, settings);
         } catch (error) {

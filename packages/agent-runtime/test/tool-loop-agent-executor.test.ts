@@ -500,3 +500,130 @@ test("returns an error result when the bounded loop is exhausted", async () => {
   }
   assert.equal(provider.requests.length, 2);
 });
+
+test("stepwise tasks record ordered submit_step calls, inject the chain, and capture traces", async () => {
+  const provider = new FakeProvider((_request, call) =>
+    call === 1
+      ? response([
+          {
+            type: "thinking",
+            text: "planning the chain",
+            metadata: { signature: "sig" },
+          },
+          // Out of order: must be rejected without being recorded.
+          {
+            type: "tool_use",
+            id: "s-2-early",
+            name: "submit_step",
+            input: { index: 2, text: "out of order" },
+          },
+          {
+            type: "tool_use",
+            id: "s-1",
+            name: "submit_step",
+            input: { index: 1, text: "step one" },
+          },
+        ])
+      : call === 2
+        ? response([
+            {
+              type: "tool_use",
+              id: "s-2",
+              name: "submit_step",
+              input: { index: 2, text: "step two" },
+            },
+            {
+              type: "tool_use",
+              id: "s-3",
+              name: "submit_step",
+              input: { index: 3, text: "step three" },
+            },
+          ])
+        : response([{ type: "text", text: '{"title":"done"}' }]),
+  );
+  const executor = new ToolLoopAgentExecutor({
+    provider,
+    tools: new ToolRegistry(),
+    modelRouteResolver: new FixedModelRouteResolver({
+      modelId: "fake-model",
+      responseFormat: { type: "json" },
+    }),
+  });
+
+  const result = await executor.execute(
+    task({
+      taskId: "stepwise-1",
+      input: "chain please",
+      metadata: {
+        stepwise: { tool: "submit_step", field: "cot", count: 3 },
+      },
+    }),
+    context,
+  );
+
+  assert.equal(result.status, "ok");
+  if (result.status !== "ok") throw new Error("unreachable");
+  assert.ok(isJsonObjectValue(result.output));
+  assert.equal(result.output.title, "done");
+  assert.deepEqual(result.output.cot, ["step one", "step two", "step three"]);
+
+  // The virtual tool definition is offered to the model.
+  assert.ok(
+    provider.requests[0]?.tools?.some(
+      (tool) => tool.name === "submit_step",
+    ),
+  );
+  // The out-of-order call was answered with an error tool result.
+  const secondTurn = provider.requests[1]?.messages.at(-1);
+  const rejected = secondTurn?.content.find(
+    (block) =>
+      block.type === "tool_result" && block.toolUseId === "s-2-early",
+  );
+  assert.ok(
+    rejected !== undefined &&
+      rejected.type === "tool_result" &&
+      rejected.isError === true,
+  );
+
+  // Thinking segments and step turns are surfaced for artifact capture.
+  assert.deepEqual(result.metadata?.thinkingSegments, [
+    { turn: 1, text: "planning the chain" },
+  ]);
+  assert.deepEqual(result.metadata?.stepTurns, [
+    { index: 1, turn: 1 },
+    { index: 2, turn: 2 },
+    { index: 3, turn: 2 },
+  ]);
+});
+
+test("a stepwise task that skips submissions gets corrective feedback, then fails closed", async () => {
+  const provider = new FakeProvider(() =>
+    response([{ type: "text", text: '{"title":"no steps"}' }]),
+  );
+  const executor = new ToolLoopAgentExecutor({
+    provider,
+    tools: new ToolRegistry(),
+    modelRouteResolver: new FixedModelRouteResolver({
+      modelId: "fake-model",
+      responseFormat: { type: "json" },
+    }),
+    retry: { maxValidationRetries: 1 },
+  });
+
+  const result = await executor.execute(
+    task({
+      taskId: "stepwise-2",
+      input: "chain please",
+      metadata: {
+        stepwise: { tool: "submit_step", field: "cot", count: 2 },
+      },
+    }),
+    context,
+  );
+
+  assert.equal(result.status, "error");
+  if (result.status !== "error") throw new Error("unreachable");
+  assert.match(result.error.message, /2 steps must be submitted/);
+  // One corrective feedback round-trip happened before failing closed.
+  assert.equal(provider.requests.length, 2);
+});

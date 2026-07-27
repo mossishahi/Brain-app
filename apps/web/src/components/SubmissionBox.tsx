@@ -2,6 +2,7 @@ import {
   lazy,
   Suspense,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
 } from "react";
@@ -23,13 +24,16 @@ import { LuBrain } from "react-icons/lu";
 import {
   ATTACHMENT_LIMITS,
   type AttachmentSelectionKind,
+  type ModelOptionsResponse,
   type ServerSettings,
   type ValidatedAttachment,
 } from "@brainstorm-agentic/protocol";
 import {
   errorMessage,
   getHealth,
+  getModelOptions,
   getSettings,
+  putModelsByRoute,
   validateAttachments,
 } from "../api";
 import { SendIcon } from "./Icons";
@@ -43,7 +47,7 @@ const ServerFileExplorer = lazy(() =>
 );
 
 // Fallback matching the `.chatbox textarea` max-height in theme.css.
-const MAX_HEIGHT_FALLBACK = 218;
+const MAX_HEIGHT_FALLBACK = 446;
 
 const PICKER_OPTIONS: readonly {
   readonly kind: AttachmentSelectionKind;
@@ -150,6 +154,21 @@ function registryPageUrl(url: string | undefined): string | undefined {
     return parsed.toString();
   } catch {
     return undefined;
+  }
+}
+
+function providerLabel(
+  provider: ServerSettings["llm"]["provider"] | undefined,
+): string {
+  switch (provider) {
+    case "anthropic":
+      return "Anthropic API";
+    case "claude-agent":
+      return "Claude Agent SDK";
+    case "offline":
+      return "Offline (deterministic)";
+    default:
+      return "Provider";
   }
 }
 
@@ -279,12 +298,19 @@ export function SubmissionBox({
   const [settings, setSettings] = useState<ServerSettings | null>(
     null,
   );
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const [modelOptions, setModelOptions] =
+    useState<ModelOptionsResponse | null>(null);
+  const [modelDraft, setModelDraft] = useState<Record<string, string>>({});
+  const [modelError, setModelError] = useState<string | null>(null);
+  const [savingModels, setSavingModels] = useState(false);
   const [registryConnected, setRegistryConnected] = useState(false);
   const [registryTarget, setRegistryTarget] = useState("Brain Registry");
   const [registryPage, setRegistryPage] = useState<string | undefined>();
   const ref = useRef<HTMLTextAreaElement>(null);
+  const pastedRef = useRef(false);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const element = ref.current;
     if (!element) return;
     // The CSS max-height is authoritative (it also covers mobile styles);
@@ -294,9 +320,35 @@ export function SubmissionBox({
       MAX_HEIGHT_FALLBACK;
     element.style.height = "auto";
     element.style.height = `${Math.min(element.scrollHeight, maxHeight)}px`;
-    // The box grows downward and the beginning of the prompt stays in view;
-    // the browser still scrolls the caret into view when typing past the cap.
-    if (element.scrollHeight <= maxHeight) element.scrollTop = 0;
+    if (pastedRef.current) {
+      // A paste longer than the cap would leave the view scrolled to the
+      // caret at the end, cutting the text off from the top. Anchor the view
+      // to the FIRST line instead — the caret stays after the last word, and
+      // the browser scrolls it back into view as soon as the user types.
+      pastedRef.current = false;
+      const anchorToStart = () => {
+        if (ref.current === element) element.scrollTop = 0;
+      };
+      anchorToStart();
+      // React restores the controlled textarea's selection during commit and
+      // some browsers then scroll that end-caret into view after layout. Pin
+      // the viewport again on the next two frames, after both operations.
+      let secondFrame: number | undefined;
+      const firstFrame = window.requestAnimationFrame(() => {
+        anchorToStart();
+        secondFrame = window.requestAnimationFrame(anchorToStart);
+      });
+      return () => {
+        window.cancelAnimationFrame(firstFrame);
+        if (secondFrame !== undefined) {
+          window.cancelAnimationFrame(secondFrame);
+        }
+      };
+    } else if (element.scrollHeight <= maxHeight) {
+      // The box grows downward and the beginning of the prompt stays in view;
+      // the browser still scrolls the caret into view when typing past the cap.
+      element.scrollTop = 0;
+    }
   }, [value]);
 
   useEffect(() => {
@@ -475,6 +527,40 @@ export function SubmissionBox({
       void send();
     }
   };
+
+  const toggleModelMenu = async (): Promise<void> => {
+    if (modelMenuOpen) {
+      setModelMenuOpen(false);
+      return;
+    }
+    setModelMenuOpen(true);
+    setModelError(null);
+    try {
+      const options = await getModelOptions();
+      setModelOptions(options);
+      setModelDraft({ ...options.modelsByRoute });
+    } catch (error) {
+      setModelError(errorMessage(error));
+    }
+  };
+
+  const saveModels = async (): Promise<void> => {
+    if (savingModels) return;
+    setSavingModels(true);
+    setModelError(null);
+    try {
+      const updated = await putModelsByRoute({ modelsByRoute: modelDraft });
+      setSettings(updated);
+      window.dispatchEvent(
+        new CustomEvent("brain-settings-updated", { detail: updated }),
+      );
+      setModelMenuOpen(false);
+    } catch (error) {
+      setModelError(errorMessage(error));
+    } finally {
+      setSavingModels(false);
+    }
+  };
   const display = modelDisplay(settings);
 
   return (
@@ -489,6 +575,9 @@ export function SubmissionBox({
           disabled={submitting}
           onChange={(event) => setValue(event.target.value)}
           onKeyDown={onKeyDown}
+          onPaste={() => {
+            pastedRef.current = true;
+          }}
         />
 
         <div className="attach-zone">
@@ -621,23 +710,142 @@ export function SubmissionBox({
               )}
             </div>
             <div className="composer-footer-right">
-              <button
-                type="button"
-                className="composer-model"
-                title="Open model settings"
-                aria-label={`Model settings: ${display.model}${display.profile ? `, ${display.profile} effort` : ""}`}
-                onClick={onOpenSettings}
-              >
-                <span className="composer-model-name">
-                  {display.model}
-                </span>
-                {display.profile && (
-                  <span className="composer-model-profile">
-                    {display.profile}
+              <div className="model-picker">
+                <button
+                  type="button"
+                  className="composer-model"
+                  title="Choose the model per task type"
+                  aria-haspopup="dialog"
+                  aria-expanded={modelMenuOpen}
+                  aria-label={`Models by task type: ${display.model}${display.profile ? `, ${display.profile} effort` : ""}`}
+                  onClick={() => void toggleModelMenu()}
+                >
+                  <span className="composer-model-name">
+                    {display.model}
                   </span>
+                  {display.profile && (
+                    <span className="composer-model-profile">
+                      {display.profile}
+                    </span>
+                  )}
+                  <DownOutlined aria-hidden />
+                </button>
+                {modelMenuOpen && (
+                  <div
+                    className="model-popover"
+                    role="dialog"
+                    aria-label="Models by task type"
+                    onKeyDown={(event) => {
+                      if (event.key === "Escape") setModelMenuOpen(false);
+                    }}
+                  >
+                    <div className="model-popover-header">
+                      <span className="model-popover-title">
+                        Models by task type
+                      </span>
+                      <span className="model-popover-provider">
+                        {providerLabel(
+                          modelOptions?.provider ?? settings?.llm.provider,
+                        )}
+                      </span>
+                    </div>
+                    {modelError && (
+                      <p className="error-text">{modelError}</p>
+                    )}
+                    {!modelOptions && !modelError && (
+                      <p className="model-popover-hint">Loading…</p>
+                    )}
+                    {modelOptions?.provider === "offline" && (
+                      <p className="model-popover-hint">
+                        The offline provider is deterministic; model
+                        selection does not apply.
+                      </p>
+                    )}
+                    {modelOptions &&
+                      modelOptions.provider !== "offline" &&
+                      modelOptions.taskTypes.map((taskType) => {
+                        const selected = modelDraft[taskType.id] ?? "";
+                        const known =
+                          selected.length === 0 ||
+                          modelOptions.models.some(
+                            (model) => model.id === selected,
+                          );
+                        return (
+                          <label
+                            key={taskType.id}
+                            className="model-popover-row"
+                            title={taskType.description}
+                          >
+                            <span className="model-popover-type">
+                              {titleCase(taskType.id)}
+                            </span>
+                            <select
+                              value={selected}
+                              disabled={savingModels}
+                              onChange={(event) =>
+                                setModelDraft((current) => ({
+                                  ...current,
+                                  [taskType.id]: event.target.value,
+                                }))
+                              }
+                            >
+                              <option value="">
+                                Default
+                                {modelOptions.defaultModel
+                                  ? ` (${formatModelName(modelOptions.defaultModel)})`
+                                  : ""}
+                              </option>
+                              {!known && (
+                                <option value={selected}>
+                                  {formatModelName(selected)}
+                                </option>
+                              )}
+                              {modelOptions.models.map((model) => (
+                                <option key={model.id} value={model.id}>
+                                  {model.label}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        );
+                      })}
+                    <div className="model-popover-footer">
+                      <button
+                        type="button"
+                        className="btn btn-small"
+                        onClick={() => {
+                          setModelMenuOpen(false);
+                          onOpenSettings();
+                        }}
+                      >
+                        Provider settings…
+                      </button>
+                      <span className="model-popover-actions">
+                        <button
+                          type="button"
+                          className="btn btn-small"
+                          disabled={savingModels}
+                          onClick={() => setModelMenuOpen(false)}
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-small"
+                          disabled={
+                            savingModels ||
+                            !modelOptions ||
+                            modelOptions.provider === "offline"
+                          }
+                          onClick={() => void saveModels()}
+                        >
+                          {savingModels ? "Saving…" : "Save"}
+                        </button>
+                      </span>
+                    </div>
+                  </div>
                 )}
-                <DownOutlined aria-hidden />
-              </button>
+              </div>
               <a
                 className={`registry-indicator ${
                   registryConnected ? "connected" : "disconnected"

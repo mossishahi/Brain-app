@@ -39,6 +39,15 @@ function modelEnvironment(settings: ServerSettings): string[] {
     const name = `BRAINSTORM_AGENTIC_MODEL_${route.toUpperCase().replace(/[^A-Z0-9_]/g, "_")}`;
     entries.push(`${name}=${shellQuote(model)}`);
   }
+  // The JSON form is authoritative for the worker: it round-trips any route
+  // name losslessly (the per-route variables above mangle non-alphanumerics
+  // and remain only for older resume scripts).
+  const modelsByRoute = settings.llm.modelsByRoute ?? {};
+  if (Object.keys(modelsByRoute).length > 0) {
+    entries.push(
+      `BRAINSTORM_AGENTIC_MODELS_BY_ROUTE=${shellQuote(JSON.stringify(modelsByRoute))}`,
+    );
+  }
   return entries;
 }
 

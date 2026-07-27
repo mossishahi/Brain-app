@@ -3,6 +3,7 @@ export {
   type AnthropicMessagesClient,
   type AnthropicMessagesProviderConfig,
   type AnthropicRequestOptions,
+  type AnthropicThinkingConfig,
 } from "./anthropic-messages-provider.js";
 export {
   AnthropicProviderError,

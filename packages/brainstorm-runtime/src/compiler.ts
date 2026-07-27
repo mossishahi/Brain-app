@@ -1,5 +1,6 @@
 import {
   artifactSchemas,
+  populatedShape,
   validateResolvedRole,
   type ActivityNode as ContentActivityNode,
   type AgentNode as ContentAgentNode,
@@ -39,6 +40,7 @@ import {
   type ProviderNativeOffer,
   type ResolvedCapabilityPlan,
   type ScopeReader,
+  type SystemPromptSegment,
   type WorkflowDefinition,
   type WorkflowNode,
 } from "@brainstorm-agentic/core";
@@ -53,7 +55,7 @@ import { BrainstormRuntimeError } from "./errors.js";
 import { applyGateDecision, autoApproveDecision, type HumanGateMode } from "./gates.js";
 import { artifactSchemaToJsonSchema } from "./json-schema.js";
 import { selectPanel } from "./panel.js";
-import { compileSkillPrompt } from "./prompts.js";
+import { compileSkillPrompt, type PayloadEntry } from "./prompts.js";
 import {
   ExecutorOwnedRouteResolver,
   LogicalCapabilityToolResolver,
@@ -239,6 +241,50 @@ async function writeValidatedOutput(
 ): Promise<JsonObject> {
   const state = stateFrom(scope);
   const parsed = validateArtifact(schemaName, nodeId, raw);
+  if (schemaName === "processorOutput") {
+    // The submission types are data (catalog/input-types.json), so the static
+    // schema cannot enumerate them; membership is enforced here instead.
+    const type = asObject(parsed, "processor output").type;
+    const knownTypes = resolveDataReference("catalog.inputTypes.types", scope, state, { required: true });
+    if (
+      typeof type !== "string" ||
+      typeof knownTypes !== "object" ||
+      knownTypes === null ||
+      Array.isArray(knownTypes) ||
+      !Object.prototype.hasOwnProperty.call(knownTypes, type)
+    ) {
+      throw new BrainstormRuntimeError(
+        `node "${nodeId}" classified the submission as "${String(type)}", which is not a type of the loaded input-type catalog`,
+        "INPUT_TYPE_NOT_IN_CATALOG",
+      );
+    }
+  }
+  if (schemaName === "brainIdea" || schemaName === "redevelopment") {
+    // The envelope schema enforces "exactly one shape body"; the catalog owns
+    // which shape that must be for the run's type, so that pairing — and the
+    // type echo itself — is checked here against the loaded bundle.
+    const developed = asObject(asObject(parsed, schemaName).output, `${schemaName}.output`);
+    const expectedType = resolveDataReference("input.type", scope, state, { required: true });
+    if (developed.type !== expectedType) {
+      throw new BrainstormRuntimeError(
+        `node "${nodeId}" returned output.type "${String(developed.type)}" but this run works a "${String(expectedType)}"`,
+        "OUTPUT_TYPE_MISMATCH",
+      );
+    }
+    const shape = populatedShape(developed as Parameters<typeof populatedShape>[0]);
+    // Description-only bundles (pre-0.2.0) map no shapes; for them any single
+    // populated shape is acceptable, so the pairing check only runs when the
+    // loaded catalog actually declares one.
+    const expectedShape = resolveDataReference("catalog.inputTypes.shapes[input.type]", scope, state, {
+      required: false,
+    });
+    if (expectedShape !== undefined && shape !== expectedShape) {
+      throw new BrainstormRuntimeError(
+        `node "${nodeId}" produced a "${shape}" body but the catalog maps "${String(expectedType)}" to "${String(expectedShape)}"`,
+        "OUTPUT_SHAPE_MISMATCH",
+      );
+    }
+  }
   if (schemaName === "brainIdea") {
     const idea = asObject(parsed, "brain idea");
     const expected = resolveDataReference("input.cotSteps", scope, state, { required: true });
@@ -265,12 +311,160 @@ async function writeValidatedOutput(
       );
     }
   }
+  if (schemaName === "bridgeReport") {
+    // Panel membership is run data, so the static schema cannot enumerate the
+    // member ids; the audit is pinned to the seated panel here instead.
+    const members = resolveDataReference("panel.members", scope, state, { required: true });
+    const seated = new Set(
+      (Array.isArray(members) ? members : []).flatMap((member) => {
+        const id = (member as { readonly id?: JsonValue }).id;
+        return typeof id === "string" ? [id] : [];
+      }),
+    );
+    const audits = asObject(parsed, "bridge report").noveltyAudit;
+    for (const entry of Array.isArray(audits) ? audits : []) {
+      const memberId = (entry as { readonly memberId?: JsonValue }).memberId;
+      if (typeof memberId !== "string" || !seated.has(memberId)) {
+        throw new BrainstormRuntimeError(
+          `node "${nodeId}" audited "${String(memberId)}", which is not a seated panel member`,
+          "AUDIT_MEMBER_NOT_SEATED",
+        );
+      }
+    }
+  }
   const write = writeDataReference(state, target, parsed, scope);
   let next = write.state;
   if (schemaName === "redevelopment") {
     next = applyRedevelopment(next, scope, parsed, nodeId);
   }
   return persistArtifact(next, write.path, schemaName, nodeId, parsed, context);
+}
+
+function isJsonRecord(value: JsonValue | undefined): value is JsonObject {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Returns a clone of a JSON schema with the object property at
+ * `properties.<path[0]>.properties.<path[1]>…` replaced by `patch`'s result,
+ * or undefined when the path does not lead through object schemas. Used to
+ * narrow per-task what the static artifact schema must leave open (allowed
+ * verdicts per review round, the submission-type label per run).
+ */
+function patchSchemaProperty(
+  schema: JsonObject,
+  path: readonly string[],
+  patch: (property: JsonObject) => JsonObject,
+): JsonObject | undefined {
+  const cloned = structuredClone(schema);
+  let owner: JsonObject = cloned;
+  for (let index = 0; index < path.length; index += 1) {
+    const properties = owner.properties;
+    if (!isJsonRecord(properties)) return undefined;
+    const property = properties[path[index]!];
+    if (!isJsonRecord(property)) return undefined;
+    if (index === path.length - 1) {
+      (properties as Record<string, JsonValue>)[path[index]!] = patch(property);
+      return cloned;
+    }
+    owner = property;
+  }
+  return undefined;
+}
+
+/**
+ * Returns a clone of an object JSON schema with the named top-level
+ * properties removed from `properties` and `required`. Used for stepwise
+ * agent tasks: fields the runtime assembles from submit_step tool calls must
+ * not be demanded from (or offered to) the constrained model output.
+ */
+function removeSchemaProperties(
+  schema: JsonObject,
+  names: readonly string[],
+): JsonObject {
+  const cloned = structuredClone(schema) as Record<string, JsonValue>;
+  const properties = cloned.properties;
+  if (isJsonRecord(properties)) {
+    for (const name of names) {
+      delete (properties as Record<string, JsonValue>)[name];
+    }
+  }
+  const required = cloned.required;
+  if (Array.isArray(required)) {
+    cloned.required = required.filter(
+      (entry) => typeof entry !== "string" || !names.includes(entry),
+    );
+  }
+  return cloned;
+}
+
+/**
+ * The stepwise-delivery contract for chain-producing nodes: the model
+ * submits each chain step through the submit_step tool and the executor
+ * assembles the reviewed chain (plus any literal fields) into the artifact
+ * before validation. Derived from the node's output schema and bindings.
+ */
+function stepwiseContract(
+  schemaName: string,
+  bindings: JsonObject,
+): { readonly spec: JsonObject; readonly removed: readonly string[] } | undefined {
+  if (schemaName === "brainIdea") {
+    const count = bindings.cotSteps;
+    if (typeof count !== "number" || !Number.isSafeInteger(count) || count < 1) {
+      return undefined;
+    }
+    return {
+      spec: { tool: "submit_step", field: "cot", count },
+      removed: ["cot"],
+    };
+  }
+  if (schemaName === "redevelopment") {
+    const currentStep = bindings.currentStep;
+    const totalSteps = bindings.totalSteps;
+    if (
+      typeof currentStep !== "number" ||
+      typeof totalSteps !== "number" ||
+      !Number.isSafeInteger(currentStep) ||
+      !Number.isSafeInteger(totalSteps)
+    ) {
+      return undefined;
+    }
+    const count = totalSteps - currentStep + 1;
+    if (count < 1) return undefined;
+    return {
+      spec: {
+        tool: "submit_step",
+        field: "revisedSteps",
+        count,
+        inject: { fromStep: currentStep },
+      },
+      removed: ["revisedSteps", "fromStep"],
+    };
+  }
+  return undefined;
+}
+
+/**
+ * The task turn: what to do plus the payload the role's instructions refer to
+ * by name. Keeping submission-derived data here rather than in the system
+ * prompt holds it at user privilege and leaves the instructions byte-stable
+ * across calls.
+ */
+function renderTaskMessage(
+  role: string,
+  schemaName: string,
+  payload: readonly PayloadEntry[],
+): string {
+  const sections = payload.map(({ name, value }) => {
+    const rendered = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+    return `## ${name}\n\n${rendered}`;
+  });
+  return [
+    `# Task`,
+    `Execute the ${role} role instructions from the system prompt against the data below. ` +
+      `Return only one JSON value satisfying the "${schemaName}" schema.`,
+    ...(sections.length > 0 ? ["# Task data", ...sections] : []),
+  ].join("\n\n");
 }
 
 function concreteWorkflow(
@@ -473,29 +667,52 @@ class ContentCompiler {
       if (
         (node.output.schema === "comment" ||
           node.output.schema === "judgeDecision") &&
-        typeof bindings.verdictOptions === "object" &&
-        bindings.verdictOptions !== null &&
-        !Array.isArray(bindings.verdictOptions)
+        isJsonRecord(bindings.verdictOptions)
       ) {
         const allowed = Object.keys(bindings.verdictOptions);
-        const cloned = structuredClone(jsonSchema);
-        const properties = cloned.properties;
-        if (
-          typeof properties === "object" &&
-          properties !== null &&
-          !Array.isArray(properties)
-        ) {
-          const propertyRecord = properties as Record<string, JsonValue>;
-          const verdict = propertyRecord.verdict;
-          if (
-            typeof verdict === "object" &&
-            verdict !== null &&
-            !Array.isArray(verdict)
-          ) {
-            propertyRecord.verdict = { ...verdict, enum: allowed };
-            taskJsonSchema = cloned;
-          }
-        }
+        taskJsonSchema =
+          patchSchemaProperty(taskJsonSchema, ["verdict"], (verdict) => ({
+            ...verdict,
+            enum: allowed,
+          })) ?? taskJsonSchema;
+      }
+      // The submission types are catalog data, so the static artifact schemas
+      // leave `type` as an open string; each task narrows it to what is
+      // actually legal for THIS run, so a schema-constrained model cannot
+      // write the shape id (or any other invention) into the label field.
+      if (
+        (node.output.schema === "brainIdea" || node.output.schema === "redevelopment") &&
+        typeof bindings.type === "string" &&
+        bindings.type.length > 0
+      ) {
+        const label = bindings.type;
+        const shape = typeof bindings.shape === "string" ? bindings.shape : undefined;
+        taskJsonSchema =
+          patchSchemaProperty(taskJsonSchema, ["output"], (output) => {
+            const envelope =
+              patchSchemaProperty(output, ["type"], (type) => ({ ...type, enum: [label] })) ??
+              output;
+            const required = Array.isArray(envelope.required) ? envelope.required : [];
+            return shape !== undefined && !required.includes(shape)
+              ? { ...envelope, required: [...required, shape] }
+              : envelope;
+          }) ?? taskJsonSchema;
+      }
+      if (
+        node.output.schema === "processorOutput" &&
+        isJsonRecord(bindings.typeOptions) &&
+        Object.keys(bindings.typeOptions).length > 0
+      ) {
+        const labels = Object.keys(bindings.typeOptions);
+        taskJsonSchema =
+          patchSchemaProperty(taskJsonSchema, ["type"], (type) => ({
+            ...type,
+            enum: labels,
+          })) ?? taskJsonSchema;
+      }
+      const stepwise = stepwiseContract(node.output.schema, bindings);
+      if (stepwise !== undefined) {
+        taskJsonSchema = removeSchemaProperties(taskJsonSchema, stepwise.removed);
       }
       const prompt = compileSkillPrompt(role, techniques, bindings);
       const capabilityTools = prompt.capabilities.flatMap((capability) => {
@@ -531,16 +748,22 @@ class ContentCompiler {
         enabledHostToolIds: this.enabledHostToolIds,
       };
       const capabilityPlan: ResolvedCapabilityPlan = resolveCapabilityPlan(brokerInput);
-      const userPrompt =
-        `Execute the rendered ${node.skill} role instructions. ` +
-        `Return only one JSON value satisfying the "${node.output.schema}" schema.`;
-      const messages = [userMessage(userPrompt)];
-      const systemWithAvailability = capabilityPlan.unavailableInstructions
-        ? `${prompt.system}\n\n---\n\n${capabilityPlan.unavailableInstructions}`
-        : prompt.system;
+      const messages = [
+        userMessage(
+          renderTaskMessage(node.skill, node.output.schema, prompt.payload),
+        ),
+      ];
+      // Capability availability depends on the host's settings, not on the
+      // bundle, so it trails the cacheable instruction segments.
+      const system: SystemPromptSegment[] = [
+        ...prompt.system,
+        ...(capabilityPlan.unavailableInstructions
+          ? [{ text: capabilityPlan.unavailableInstructions }]
+          : []),
+      ];
       const modelRequest = {
         ...(resolved.modelId !== undefined ? { modelId: resolved.modelId } : {}),
-        system: systemWithAvailability,
+        system,
         messages,
         ...(resolved.toolChoice !== undefined ? { toolChoice: resolved.toolChoice } : {}),
         ...(resolved.maxOutputTokens !== undefined
@@ -592,6 +815,7 @@ class ContentCompiler {
           nodeId: node.id,
           schema: node.output.schema,
           logicalRoute: node.route,
+          ...(stepwise !== undefined ? { stepwise: stepwise.spec } : {}),
           ...(resolved.providerId !== undefined ? { providerId: resolved.providerId } : {}),
         },
       };

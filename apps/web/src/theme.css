@@ -2740,3 +2740,81 @@ button.server-file-name {
 .member-card .issue-item .code-block {
   border-color: var(--border-3);
 }
+
+/* Per-task-type model picker (submission box popover) */
+.model-picker {
+  position: relative;
+  display: inline-flex;
+}
+
+.model-popover {
+  position: absolute;
+  bottom: calc(100% + 10px);
+  right: 0;
+  width: 330px;
+  padding: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  text-align: left;
+}
+
+.model-popover-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.model-popover-title {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.model-popover-provider {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.model-popover-hint {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin: 0;
+}
+
+.model-popover-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.model-popover-type {
+  white-space: nowrap;
+}
+
+.model-popover-row select {
+  flex: 1;
+  min-width: 0;
+  max-width: 190px;
+}
+
+.model-popover-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.model-popover-actions {
+  display: inline-flex;
+  gap: 8px;
+}

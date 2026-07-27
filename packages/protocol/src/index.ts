@@ -16,6 +16,7 @@ export const STAGE_IDS = [
   "confirm-panel",
   "first-pass",
   "review-members",
+  "bridge-audit",
   "synthesize-proposal",
   "done",
 ] as const;
@@ -136,6 +137,27 @@ export interface GroundingView {
   readonly scholars: readonly ScholarView[];
 }
 
+/* ------------------------------------------- per-shape developed-output views */
+
+/**
+ * The eight structural output shapes (mirrors the content package's
+ * OUTPUT_SHAPES). Which submission TYPES exist — and what they are called —
+ * is bundle data (catalog/input-types.json), so views carry the type as a
+ * free-form label alongside the closed shape id the body was validated as.
+ */
+export const OUTPUT_SHAPES = [
+  "paper",
+  "resolution",
+  "verification",
+  "feasibility",
+  "critique",
+  "interpretation",
+  "survey",
+  "explanation",
+] as const;
+export type OutputShape = (typeof OUTPUT_SHAPES)[number];
+
+/** paper — the five-section research paper. */
 export interface IdeaOutputView {
   readonly abstract: string;
   readonly introduction: string;
@@ -144,10 +166,148 @@ export interface IdeaOutputView {
   readonly conclusion: string;
 }
 
+export interface ConfidenceView {
+  readonly level: "high" | "medium" | "low";
+  readonly rationale: string;
+}
+
+export interface KnownResultView {
+  readonly result: string;
+  readonly sourceType: string;
+  readonly relation: string;
+}
+
+/** resolution — a proof/construction attempt with an explicit status. */
+export interface ResolveOutputView {
+  readonly problemStatement: string;
+  readonly knownResults: readonly KnownResultView[];
+  readonly approach: string;
+  readonly derivation: readonly string[];
+  /** Self-check of the derivation; absent when the member had none. */
+  readonly verification?: EvidenceView;
+  readonly status: "resolved" | "partial" | "refuted" | "still-open";
+  readonly remainingGaps: readonly string[];
+  readonly significance: string;
+}
+
+/** verification — one claim adjudicated with evidence. */
+export interface VerifyOutputView {
+  readonly claim: string;
+  readonly claimSource: string;
+  readonly verdict: "confirmed" | "refuted" | "partially-correct" | "indeterminate";
+  /** Absent only for indeterminate verdicts. */
+  readonly evidence?: EvidenceView;
+  readonly reasoning: string;
+  readonly confidence: ConfidenceView;
+}
+
+export interface SoundnessAspectView {
+  readonly aspect: string;
+  readonly assessment: "sound" | "concern" | "flaw";
+  readonly note: string;
+}
+
+/** feasibility — a Registered-Reports-style soundness review. */
+export interface AssessFeasibilityOutputView {
+  readonly designSummary: string;
+  readonly importance: string;
+  readonly hypothesisLogic: string;
+  readonly methodologySoundness: readonly SoundnessAspectView[];
+  readonly replicability: string;
+  readonly feasibilityVerdict: "feasible-as-is" | "feasible-with-changes" | "not-feasible";
+  readonly requiredChanges: readonly string[];
+  readonly alternativeDesigns: readonly string[];
+}
+
+export interface CritiqueIssueView {
+  readonly description: string;
+  readonly severity: "minor" | "major" | "critical";
+  readonly evidence?: EvidenceView;
+  readonly suggestion?: string;
+}
+
+/** critique — an itemized review of a finished artifact. */
+export interface CritiqueOutputView {
+  readonly artifactSummary: string;
+  readonly strengths: readonly string[];
+  readonly issues: readonly CritiqueIssueView[];
+  readonly missingConsiderations: readonly string[];
+  readonly recommendation: "sound" | "sound-with-revisions" | "not-sound";
+  readonly prioritizedNextSteps: readonly { readonly priority: number; readonly action: string }[];
+}
+
+export interface InterpretationCandidateView {
+  readonly interpretation: string;
+  readonly supportingEvidence?: string;
+  readonly contradictingEvidence?: string;
+  readonly plausibility: "high" | "medium" | "low";
+}
+
+/** interpretation — ranked readings of the submitter's own finding. */
+export interface InterpretOutputView {
+  readonly observationSummary: string;
+  readonly candidateInterpretations: readonly InterpretationCandidateView[];
+  readonly mostLikelyInterpretation: string;
+  readonly confidence: ConfidenceView;
+  readonly threatsToValidity: readonly string[];
+  readonly implications?: string;
+}
+
+export interface LandscapeGroupView {
+  readonly name: string;
+  readonly works: readonly PaperView[];
+  readonly characterization: string;
+}
+
+export interface ComparisonRowView {
+  readonly dimension: string;
+  readonly comparison: string;
+}
+
+/** survey — the landscape map plus optional comparison and recommendation. */
+export interface SurveyOutputView {
+  readonly landscapeMap: readonly LandscapeGroupView[];
+  readonly comparisonTable: readonly ComparisonRowView[];
+  readonly consensusAndFrontier: string;
+  readonly openGaps: readonly string[];
+  readonly recommendation?: string;
+}
+
+export interface MisconceptionView {
+  readonly misconception: string;
+  readonly correction: string;
+}
+
+/** explanation — pedagogical exposition from intuition to rigor. */
+export interface ExplainOutputView {
+  readonly motivatingQuestion: string;
+  readonly coreIntuition: string;
+  readonly formalTreatment: string;
+  readonly workedExample: string;
+  readonly commonMisconceptions: readonly MisconceptionView[];
+  readonly connections: readonly string[];
+}
+
+/**
+ * One member's finished first-pass output. `type` is the submission's catalog
+ * label (free-form — the catalog is bundle data); `shape` is the closed
+ * structural id, and exactly the matching body field is present. `novelty`
+ * exists only for shapes positioned against a literature map (paper,
+ * resolution, survey).
+ */
 export interface BrainIdeaView {
-  readonly output: IdeaOutputView;
+  readonly type: string;
+  readonly shape: OutputShape;
+  readonly paper?: IdeaOutputView;
+  readonly resolution?: ResolveOutputView;
+  readonly verification?: VerifyOutputView;
+  readonly feasibility?: AssessFeasibilityOutputView;
+  readonly critique?: CritiqueOutputView;
+  readonly interpretation?: InterpretOutputView;
+  readonly survey?: SurveyOutputView;
+  readonly explanation?: ExplainOutputView;
   readonly cot: readonly string[];
-  readonly novelty: string;
+  readonly novelty?: string;
   readonly literature?: readonly PaperView[];
 }
 
@@ -210,6 +370,36 @@ export interface ReviewCursorView {
   /** 1-based review round on the current step. */
   readonly round: number;
   readonly maxRounds: number;
+}
+
+/** One member's novelty claim, audited across fields after review. */
+export interface NoveltyAuditView {
+  readonly memberId: string;
+  readonly claim: string;
+  readonly status: "clear" | "challenged";
+  readonly note: string;
+  /** The overlapping prior work; present only when challenged. */
+  readonly evidence?: EvidenceView;
+}
+
+/** Two or more members whose outputs make claims that cannot both hold. */
+export interface ContradictionView {
+  readonly members: readonly string[];
+  readonly description: string;
+}
+
+/** A gap between the seats: an interface no member covered. */
+export interface SeamView {
+  readonly between: readonly string[];
+  readonly gap: string;
+  readonly opportunity: string;
+}
+
+/** The integrator's post-review audit, advisory input to the chair. */
+export interface BridgeReportView {
+  readonly noveltyAudit: readonly NoveltyAuditView[];
+  readonly contradictions: readonly ContradictionView[];
+  readonly seams: readonly SeamView[];
 }
 
 export interface ActionItemView {
@@ -296,6 +486,11 @@ export interface ReviewStage extends StageBase {
   readonly members: readonly ReviewMemberView[];
 }
 
+export interface BridgeAuditStage extends StageBase {
+  readonly id: "bridge-audit";
+  readonly bridge?: BridgeReportView;
+}
+
 export interface ChairStage extends StageBase {
   readonly id: "synthesize-proposal";
   readonly proposal?: ProposalView;
@@ -313,6 +508,7 @@ export type StageView =
   | ConfirmPanelStage
   | FirstPassStage
   | ReviewStage
+  | BridgeAuditStage
   | ChairStage
   | DoneStage;
 
@@ -438,6 +634,69 @@ export interface ServerSettings {
   readonly hostTools?: {
     readonly enabledToolIds: readonly string[];
   };
+}
+
+/* --------------------------------------------------- task types and models */
+
+/** One selectable model of a provider's catalog. */
+export interface ModelOption {
+  readonly id: string;
+  readonly label: string;
+}
+
+/** Per-provider dictionary of models offered by the per-task-type picker. */
+export type ProviderModelCatalog = Readonly<
+  Record<string, readonly ModelOption[]>
+>;
+
+/**
+ * Built-in per-provider model dictionary. A deployment can extend or replace
+ * entries by placing a `model-catalog.json` file with the same shape in the
+ * workspace root; the server merges that file over these defaults.
+ */
+export const DEFAULT_MODEL_CATALOG: ProviderModelCatalog = {
+  anthropic: [
+    { id: "claude-opus-5", label: "Claude Opus 5" },
+    { id: "claude-sonnet-5", label: "Claude Sonnet 5" },
+    { id: "claude-opus-4-8", label: "Claude Opus 4.8" },
+    { id: "claude-opus-4-6", label: "Claude Opus 4.6" },
+    { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6" },
+    { id: "claude-haiku-4-5", label: "Claude Haiku 4.5" },
+  ],
+  "claude-agent": [
+    { id: "opus", label: "Opus (alias)" },
+    { id: "sonnet", label: "Sonnet (alias)" },
+    { id: "haiku", label: "Haiku (alias)" },
+  ],
+  offline: [],
+};
+
+/** One task type (logical route) declared by the pinned content bundle. */
+export interface TaskTypeOption {
+  readonly id: string;
+  readonly description: string;
+}
+
+/** GET /api/model-options: everything the per-task-type model picker needs. */
+export interface ModelOptionsResponse {
+  readonly provider: LlmSettings["provider"];
+  /** Task types from the pinned bundle's route catalog, in declared order. */
+  readonly taskTypes: readonly TaskTypeOption[];
+  /** Selectable models for the active provider. */
+  readonly models: readonly ModelOption[];
+  /** Current per-task-type selection; a missing type uses defaultModel. */
+  readonly modelsByRoute: Readonly<Record<string, string>>;
+  readonly defaultModel?: string;
+}
+
+/**
+ * PUT /api/settings/models-by-route request body. Entries with an empty
+ * model string mean "use the default model" and are dropped. Unlike
+ * PUT /api/settings this endpoint never touches credentials and performs no
+ * connection re-verification.
+ */
+export interface ModelsByRouteUpdate {
+  readonly modelsByRoute: Readonly<Record<string, string>>;
 }
 
 /* ---------------------------------------------------------------- api shapes */
@@ -616,6 +875,8 @@ export type ServerEvent =
  *   GET  /api/health                          -> HealthResponse
  *   GET  /api/settings                        -> ServerSettings
  *   PUT  /api/settings                        -> ServerSettings (body: ServerSettingsUpdate; Anthropic credentials are connection-tested before any save)
+ *   GET  /api/model-options                   -> ModelOptionsResponse (task types from the pinned bundle + provider model catalog)
+ *   PUT  /api/settings/models-by-route        -> ServerSettings (body: ModelsByRouteUpdate; no credential re-verification)
  *   GET  /api/jobs                            -> JobSummary[]
  *   GET  /api/attachments/roots               -> ServerAttachmentRootsResponse
  *   GET  /api/attachments/browse              -> BrowseServerFilesResponse

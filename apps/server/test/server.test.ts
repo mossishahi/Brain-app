@@ -604,7 +604,7 @@ test("local offline job completes with every dashboard artifact", async () => {
       manifestSha256: string;
     };
     assert.equal(storedPin.bundle, "brainstorm");
-    assert.equal(storedPin.version, "0.2.0");
+    assert.equal(storedPin.version, "0.3.0");
     assert.match(storedPin.manifestSha256, /^[a-f0-9]{64}$/);
     appendFileSync(
       join(workspace, "workspace", "jobs", jobId, "events.jsonl"),
