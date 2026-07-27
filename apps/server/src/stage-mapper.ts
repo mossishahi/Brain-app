@@ -9,19 +9,37 @@ import type {
   WorkflowCheckpoint,
 } from "@brainstorm-agentic/core";
 import {
+  OUTPUT_SHAPES,
   STAGE_IDS,
   type AnnotatedFileView,
+  type AssessFeasibilityOutputView,
   type BrainIdeaView,
+  type BridgeReportView,
   type CommentView,
+  type ContradictionView,
+  type ConfidenceView,
   type ConfirmPanelStage,
+  type CritiqueIssueView,
+  type CritiqueOutputView,
   type EvidenceView,
   type ExpertsTreeView,
+  type ExplainOutputView,
   type FilePartitionView,
   type FirstPassMemberView,
   type GroundingView,
+  type IdeaOutputView,
+  type InterpretationCandidateView,
+  type InterpretOutputView,
   type JobDetail,
   type JobStatus,
   type JudgeDecisionView,
+  type NoveltyAuditView,
+  type PaperView,
+  type ResolveOutputView,
+  type SeamView,
+  type SoundnessAspectView,
+  type SurveyOutputView,
+  type VerifyOutputView,
   type PanelMemberView,
   type PendingGateView,
   type ProcessorOutputView,
@@ -443,46 +461,470 @@ function grounding(value: unknown): GroundingView | undefined {
     : undefined;
 }
 
-function brainIdea(value: unknown): BrainIdeaView | undefined {
-  const idea = object(value);
-  if (!idea) return undefined;
-  const output = object(idea.output);
-  const section = (entry: unknown): string | undefined => {
-    if (typeof entry === "string") return entry; // pre-array jobs
-    if (
-      Array.isArray(entry) &&
-      entry.length > 0 &&
-      entry.every((paragraph) => typeof paragraph === "string")
-    ) {
-      return entry.join("\n\n");
-    }
-    return undefined;
-  };
-  const normalizedOutput = output
-    ? {
-        abstract: section(output.abstract),
-        introduction: section(output.introduction),
-        method: section(output.method),
-        discussion: section(output.discussion),
-        conclusion: section(output.conclusion),
-      }
-    : undefined;
+/** A single text block: a plain string, or paragraph array joined with blank lines. */
+function textBlock(entry: unknown): string | undefined {
+  if (typeof entry === "string") return entry; // pre-array jobs
   if (
-    !normalizedOutput ||
-    Object.values(normalizedOutput).some((entry) => entry === undefined) ||
-    !Array.isArray(idea.cot) ||
-    typeof idea.novelty !== "string"
+    Array.isArray(entry) &&
+    entry.length > 0 &&
+    entry.every((paragraph) => typeof paragraph === "string")
+  ) {
+    return entry.join("\n\n");
+  }
+  return undefined;
+}
+
+function stringList(entry: unknown): string[] {
+  return Array.isArray(entry)
+    ? entry.filter((item): item is string => typeof item === "string")
+    : [];
+}
+
+function paperView(candidate: unknown): PaperView | undefined {
+  const paper = object(candidate);
+  if (typeof paper?.title !== "string") return undefined;
+  return {
+    ...(typeof paper.id === "string" ? { id: paper.id } : {}),
+    title: paper.title,
+    ...(Array.isArray(paper.authors) &&
+    paper.authors.every((name) => typeof name === "string")
+      ? { authors: paper.authors }
+      : {}),
+    ...(typeof paper.year === "number" ? { year: paper.year } : {}),
+    ...(typeof paper.venue === "string" && paper.venue.length > 0
+      ? { venue: paper.venue }
+      : {}),
+    ...(typeof paper.url === "string" && paper.url.length > 0
+      ? { url: paper.url }
+      : {}),
+    ...(typeof paper.relation === "string" && paper.relation.length > 0
+      ? { relation: paper.relation }
+      : {}),
+  };
+}
+
+function paperViews(entry: unknown): PaperView[] {
+  return Array.isArray(entry)
+    ? entry.flatMap((candidate) => {
+        const paper = paperView(candidate);
+        return paper ? [paper] : [];
+      })
+    : [];
+}
+
+function confidenceView(entry: unknown): ConfidenceView | undefined {
+  const raw = object(entry);
+  if (
+    (raw?.level !== "high" && raw?.level !== "medium" && raw?.level !== "low") ||
+    typeof raw.rationale !== "string"
   ) {
     return undefined;
   }
+  return { level: raw.level, rationale: raw.rationale };
+}
+
+function researchIdeaView(body: Record<string, unknown>): IdeaOutputView | undefined {
+  const paper = {
+    abstract: textBlock(body.abstract),
+    introduction: textBlock(body.introduction),
+    method: textBlock(body.method),
+    discussion: textBlock(body.discussion),
+    conclusion: textBlock(body.conclusion),
+  };
+  if (Object.values(paper).some((entry) => entry === undefined)) return undefined;
+  return paper as IdeaOutputView;
+}
+
+function openProblemView(body: Record<string, unknown>): ResolveOutputView | undefined {
+  const problemStatement = textBlock(body.problemStatement);
+  const approach = textBlock(body.approach);
+  const significance = textBlock(body.significance);
+  const derivation = stringList(body.derivation);
+  const status = body.status;
+  if (
+    problemStatement === undefined ||
+    approach === undefined ||
+    significance === undefined ||
+    derivation.length === 0 ||
+    (status !== "resolved" && status !== "partial" && status !== "refuted" && status !== "still-open")
+  ) {
+    return undefined;
+  }
+  const knownResults = Array.isArray(body.knownResults)
+    ? body.knownResults.flatMap((candidate) => {
+        const item = object(candidate);
+        return typeof item?.result === "string" &&
+          typeof item.sourceType === "string" &&
+          typeof item.relation === "string"
+          ? [{ result: item.result, sourceType: item.sourceType, relation: item.relation }]
+          : [];
+      })
+    : [];
+  const verification = evidence(body.verification);
   return {
-    output: normalizedOutput as BrainIdeaView["output"],
-    cot: idea.cot as string[],
-    novelty: idea.novelty,
-    ...(Array.isArray(idea.literature)
-      ? { literature: idea.literature as BrainIdeaView["literature"] }
+    problemStatement,
+    knownResults,
+    approach,
+    derivation,
+    ...(verification ? { verification } : {}),
+    status,
+    remainingGaps: stringList(body.remainingGaps),
+    significance,
+  };
+}
+
+function unverifiedClaimView(body: Record<string, unknown>): VerifyOutputView | undefined {
+  const reasoning = textBlock(body.reasoning);
+  const confidence = confidenceView(body.confidence);
+  const verdict = body.verdict;
+  if (
+    typeof body.claim !== "string" ||
+    typeof body.claimSource !== "string" ||
+    reasoning === undefined ||
+    confidence === undefined ||
+    (verdict !== "confirmed" &&
+      verdict !== "refuted" &&
+      verdict !== "partially-correct" &&
+      verdict !== "indeterminate")
+  ) {
+    return undefined;
+  }
+  const found = evidence(body.evidence);
+  return {
+    claim: body.claim,
+    claimSource: body.claimSource,
+    verdict,
+    ...(found ? { evidence: found } : {}),
+    reasoning,
+    confidence,
+  };
+}
+
+function researchProposalView(body: Record<string, unknown>): AssessFeasibilityOutputView | undefined {
+  const designSummary = textBlock(body.designSummary);
+  const importance = textBlock(body.importance);
+  const hypothesisLogic = textBlock(body.hypothesisLogic);
+  const replicability = textBlock(body.replicability);
+  const verdict = body.feasibilityVerdict;
+  if (
+    designSummary === undefined ||
+    importance === undefined ||
+    hypothesisLogic === undefined ||
+    replicability === undefined ||
+    (verdict !== "feasible-as-is" && verdict !== "feasible-with-changes" && verdict !== "not-feasible")
+  ) {
+    return undefined;
+  }
+  const methodologySoundness: SoundnessAspectView[] = Array.isArray(body.methodologySoundness)
+    ? body.methodologySoundness.flatMap((candidate) => {
+        const item = object(candidate);
+        const assessment = item?.assessment;
+        if (
+          typeof item?.aspect !== "string" ||
+          typeof item.note !== "string" ||
+          (assessment !== "sound" && assessment !== "concern" && assessment !== "flaw")
+        ) {
+          return [];
+        }
+        return [{ aspect: item.aspect, assessment, note: item.note }];
+      })
+    : [];
+  return {
+    designSummary,
+    importance,
+    hypothesisLogic,
+    methodologySoundness,
+    replicability,
+    feasibilityVerdict: verdict,
+    requiredChanges: stringList(body.requiredChanges),
+    alternativeDesigns: stringList(body.alternativeDesigns),
+  };
+}
+
+function completedWorkView(body: Record<string, unknown>): CritiqueOutputView | undefined {
+  const artifactSummary = textBlock(body.artifactSummary);
+  const recommendation = body.recommendation;
+  if (
+    artifactSummary === undefined ||
+    (recommendation !== "sound" && recommendation !== "sound-with-revisions" && recommendation !== "not-sound")
+  ) {
+    return undefined;
+  }
+  const issues: CritiqueIssueView[] = Array.isArray(body.issues)
+    ? body.issues.flatMap((candidate) => {
+        const item = object(candidate);
+        const severity = item?.severity;
+        if (
+          typeof item?.description !== "string" ||
+          (severity !== "minor" && severity !== "major" && severity !== "critical")
+        ) {
+          return [];
+        }
+        const found = evidence(item.evidence);
+        return [{
+          description: item.description,
+          severity,
+          ...(found ? { evidence: found } : {}),
+          ...(typeof item.suggestion === "string" && item.suggestion.length > 0
+            ? { suggestion: item.suggestion }
+            : {}),
+        }];
+      })
+    : [];
+  const prioritizedNextSteps = Array.isArray(body.prioritizedNextSteps)
+    ? body.prioritizedNextSteps.flatMap((candidate) => {
+        const item = object(candidate);
+        return typeof item?.priority === "number" && typeof item.action === "string"
+          ? [{ priority: item.priority, action: item.action }]
+          : [];
+      })
+    : [];
+  return {
+    artifactSummary,
+    strengths: stringList(body.strengths),
+    issues,
+    missingConsiderations: stringList(body.missingConsiderations),
+    recommendation,
+    prioritizedNextSteps,
+  };
+}
+
+function empiricalResultView(body: Record<string, unknown>): InterpretOutputView | undefined {
+  const observationSummary = textBlock(body.observationSummary);
+  const mostLikelyInterpretation = textBlock(body.mostLikelyInterpretation);
+  const confidence = confidenceView(body.confidence);
+  if (observationSummary === undefined || mostLikelyInterpretation === undefined || confidence === undefined) {
+    return undefined;
+  }
+  const candidateInterpretations: InterpretationCandidateView[] = Array.isArray(body.candidateInterpretations)
+    ? body.candidateInterpretations.flatMap((candidate) => {
+        const item = object(candidate);
+        const plausibility = item?.plausibility;
+        if (
+          typeof item?.interpretation !== "string" ||
+          (plausibility !== "high" && plausibility !== "medium" && plausibility !== "low")
+        ) {
+          return [];
+        }
+        return [{
+          interpretation: item.interpretation,
+          ...(typeof item.supportingEvidence === "string" && item.supportingEvidence.length > 0
+            ? { supportingEvidence: item.supportingEvidence }
+            : {}),
+          ...(typeof item.contradictingEvidence === "string" && item.contradictingEvidence.length > 0
+            ? { contradictingEvidence: item.contradictingEvidence }
+            : {}),
+          plausibility,
+        }];
+      })
+    : [];
+  return {
+    observationSummary,
+    candidateInterpretations,
+    mostLikelyInterpretation,
+    confidence,
+    threatsToValidity: stringList(body.threatsToValidity),
+    ...(typeof body.implications === "string" && body.implications.length > 0
+      ? { implications: body.implications }
       : {}),
   };
+}
+
+function researchAreaView(body: Record<string, unknown>): SurveyOutputView | undefined {
+  const consensusAndFrontier = textBlock(body.consensusAndFrontier);
+  if (consensusAndFrontier === undefined || !Array.isArray(body.landscapeMap)) return undefined;
+  const landscapeMap = body.landscapeMap.flatMap((candidate) => {
+    const item = object(candidate);
+    return typeof item?.name === "string" && typeof item.characterization === "string"
+      ? [{ name: item.name, works: paperViews(item.works), characterization: item.characterization }]
+      : [];
+  });
+  if (landscapeMap.length === 0) return undefined;
+  const comparisonTable = Array.isArray(body.comparisonTable)
+    ? body.comparisonTable.flatMap((candidate) => {
+        const item = object(candidate);
+        return typeof item?.dimension === "string" && typeof item.comparison === "string"
+          ? [{ dimension: item.dimension, comparison: item.comparison }]
+          : [];
+      })
+    : [];
+  return {
+    landscapeMap,
+    comparisonTable,
+    consensusAndFrontier,
+    openGaps: stringList(body.openGaps),
+    ...(typeof body.recommendation === "string" && body.recommendation.length > 0
+      ? { recommendation: body.recommendation }
+      : {}),
+  };
+}
+
+function establishedConceptView(body: Record<string, unknown>): ExplainOutputView | undefined {
+  const motivatingQuestion = textBlock(body.motivatingQuestion);
+  const coreIntuition = textBlock(body.coreIntuition);
+  const formalTreatment = textBlock(body.formalTreatment);
+  const workedExample = textBlock(body.workedExample);
+  if (
+    motivatingQuestion === undefined ||
+    coreIntuition === undefined ||
+    formalTreatment === undefined ||
+    workedExample === undefined
+  ) {
+    return undefined;
+  }
+  const commonMisconceptions = Array.isArray(body.commonMisconceptions)
+    ? body.commonMisconceptions.flatMap((candidate) => {
+        const item = object(candidate);
+        return typeof item?.misconception === "string" && typeof item.correction === "string"
+          ? [{ misconception: item.misconception, correction: item.correction }]
+          : [];
+      })
+    : [];
+  return {
+    motivatingQuestion,
+    coreIntuition,
+    formalTreatment,
+    workedExample,
+    commonMisconceptions,
+    connections: stringList(body.connections),
+  };
+}
+
+function brainIdea(value: unknown): BrainIdeaView | undefined {
+  const idea = object(value);
+  if (!idea || !Array.isArray(idea.cot)) return undefined;
+  const envelope = object(idea.output);
+  if (!envelope) return undefined;
+
+  // The developed-output envelope nests the body under its SHAPE key
+  // (`output.verification`, …) while `type` carries the free-form catalog
+  // label. Artifacts from before the shape envelope carry the five paper
+  // sections directly on `output` and are read as a legacy paper.
+  const shape = OUTPUT_SHAPES.find((candidate) => object(envelope[candidate]) !== undefined);
+  const body = shape ? object(envelope[shape])! : envelope;
+  const label =
+    typeof envelope.type === "string" && envelope.type.length > 0
+      ? envelope.type
+      : (shape ?? "paper");
+
+  const shaped: {
+    paper?: IdeaOutputView;
+    resolution?: ResolveOutputView;
+    verification?: VerifyOutputView;
+    feasibility?: AssessFeasibilityOutputView;
+    critique?: CritiqueOutputView;
+    interpretation?: InterpretOutputView;
+    survey?: SurveyOutputView;
+    explanation?: ExplainOutputView;
+  } = {};
+  switch (shape ?? "paper") {
+    case "paper": {
+      const paper = researchIdeaView(body);
+      if (!paper) return undefined;
+      shaped.paper = paper;
+      break;
+    }
+    case "resolution": {
+      const resolution = openProblemView(body);
+      if (!resolution) return undefined;
+      shaped.resolution = resolution;
+      break;
+    }
+    case "verification": {
+      const verification = unverifiedClaimView(body);
+      if (!verification) return undefined;
+      shaped.verification = verification;
+      break;
+    }
+    case "feasibility": {
+      const feasibility = researchProposalView(body);
+      if (!feasibility) return undefined;
+      shaped.feasibility = feasibility;
+      break;
+    }
+    case "critique": {
+      const critique = completedWorkView(body);
+      if (!critique) return undefined;
+      shaped.critique = critique;
+      break;
+    }
+    case "interpretation": {
+      const interpretation = empiricalResultView(body);
+      if (!interpretation) return undefined;
+      shaped.interpretation = interpretation;
+      break;
+    }
+    case "survey": {
+      const survey = researchAreaView(body);
+      if (!survey) return undefined;
+      shaped.survey = survey;
+      break;
+    }
+    case "explanation": {
+      const explanation = establishedConceptView(body);
+      if (!explanation) return undefined;
+      shaped.explanation = explanation;
+      break;
+    }
+  }
+
+  const literature = paperViews(idea.literature);
+  return {
+    type: label,
+    shape: shape ?? "paper",
+    ...shaped,
+    cot: idea.cot as string[],
+    ...(typeof idea.novelty === "string" ? { novelty: idea.novelty } : {}),
+    ...(literature.length > 0 ? { literature } : {}),
+  };
+}
+
+function bridgeReport(value: unknown): BridgeReportView | undefined {
+  const raw = object(value);
+  if (
+    !Array.isArray(raw?.noveltyAudit) ||
+    !Array.isArray(raw.contradictions) ||
+    !Array.isArray(raw.seams)
+  ) {
+    return undefined;
+  }
+  const noveltyAudit: NoveltyAuditView[] = raw.noveltyAudit.flatMap((candidate) => {
+    const entry = object(candidate);
+    if (
+      typeof entry?.memberId !== "string" ||
+      typeof entry.claim !== "string" ||
+      (entry.status !== "clear" && entry.status !== "challenged") ||
+      typeof entry.note !== "string"
+    ) {
+      return [];
+    }
+    const found = evidence(entry.evidence);
+    return [{
+      memberId: entry.memberId,
+      claim: entry.claim,
+      status: entry.status,
+      note: entry.note,
+      ...(found ? { evidence: found } : {}),
+    }];
+  });
+  const contradictions: ContradictionView[] = raw.contradictions.flatMap((candidate) => {
+    const entry = object(candidate);
+    return Array.isArray(entry?.members) &&
+      entry.members.every((member) => typeof member === "string") &&
+      typeof entry.description === "string"
+      ? [{ members: entry.members, description: entry.description }]
+      : [];
+  });
+  const seams: SeamView[] = raw.seams.flatMap((candidate) => {
+    const entry = object(candidate);
+    return Array.isArray(entry?.between) &&
+      entry.between.every((name) => typeof name === "string") &&
+      typeof entry.gap === "string" &&
+      typeof entry.opportunity === "string"
+      ? [{ between: entry.between, gap: entry.gap, opportunity: entry.opportunity }]
+      : [];
+  });
+  return { noveltyAudit, contradictions, seams };
 }
 
 function proposal(value: unknown): ProposalView | undefined {
@@ -998,6 +1440,12 @@ export function buildJobDetail(input: MapperInput): JobDetail {
     reviewTiming.active ||
       (checkpoint?.status === "running" && reviewJournalPresent),
   );
+  const bridgeOutput =
+    bridgeReport(artifact(artifacts, "bridgeReport")) ??
+    bridgeReport(journalAgent(entries, (key) =>
+      key.includes("/bridge-audit") &&
+      /\/bridge-audit(?:\/bridge-audit-execute)?::result$/.test(key)
+    ));
   const proposalOutput =
     proposal(artifact(artifacts, "finalProposal")) ??
     proposal(journalAgent(entries, (key) =>
@@ -1048,6 +1496,7 @@ export function buildJobDetail(input: MapperInput): JobDetail {
         firstPassMembers.every((member) => member.status === "completed"),
     ],
     ["review-members", review.complete],
+    ["bridge-audit", bridgeOutput !== undefined],
     ["synthesize-proposal", proposalOutput !== undefined],
     ["done", checkpoint?.status === "completed"],
   ]);
@@ -1145,6 +1594,11 @@ export function buildJobDetail(input: MapperInput): JobDetail {
     statuses.get("review-members")!,
     reviewTiming,
   );
+  const bridgeBase = base(
+    "bridge-audit",
+    statuses.get("bridge-audit")!,
+    stageTimings.get("bridge-audit")!,
+  );
   const proposalBase = base(
     "synthesize-proposal",
     statuses.get("synthesize-proposal")!,
@@ -1230,6 +1684,11 @@ export function buildJobDetail(input: MapperInput): JobDetail {
       id: "review-members",
       members: review.members,
       ...(review.cursor ? { cursor: review.cursor } : {}),
+    },
+    {
+      ...bridgeBase,
+      id: "bridge-audit",
+      ...(bridgeOutput ? { bridge: bridgeOutput } : {}),
     },
     {
       ...proposalBase,

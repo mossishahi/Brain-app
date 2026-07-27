@@ -17,10 +17,17 @@ export type {
   ModelResponse,
   ResponseFormat,
   StopReason,
+  SystemPrompt,
+  SystemPromptSegment,
   ThinkingBlock,
   TokenUsage,
   ToolChoice,
   ToolDefinition,
   ToolResultBlock,
   ToolUseBlock,
+} from "@brainstorm-agentic/core";
+
+export {
+  systemPromptBoundary,
+  systemPromptSegments,
 } from "@brainstorm-agentic/core";

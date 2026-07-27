@@ -31,6 +31,7 @@ export type {
   ProviderOptions,
   ResponseFormat,
   StopReason,
+  SystemPrompt,
   TokenUsage,
   Tool,
   ToolChoice,

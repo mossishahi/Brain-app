@@ -11,6 +11,9 @@ light and dark themes are complete, not approximate.
 --bg          page background            light #fafafa   dark #121212
 --surface     cards, drawers            light #ffffff   dark #1b1b1b
 --border      hairlines                 light #e4e4e4   dark #2c2c2c
+--border-1..3 nested panel strokes: each nesting level (stage > card > inner box > nested box)
+              steps 10% away from its parent's stroke so the hierarchy reads at a glance —
+              lighter per level in dark theme, darker per level in light theme.
 --text        primary text              light #1a1a1a   dark #ececec
 --text-dim    secondary text            light #6b6b6b   dark #9a9a9a
 --accent      single accent             light #2f6fed   dark #6ea0ff
@@ -29,10 +32,14 @@ An empty page. Nothing else competes with the chat box.
 
 - Top right corner, fixed: theme toggle (sun/moon glyph) and a gear icon. Both are 32px ghost
   buttons.
-- Vertically and horizontally centered: a chat box, max-width 640px. One multiline textarea
-  ("What do you want to think through?"), autosizing to 6 lines, Enter submits, Shift+Enter
-  newlines. A small send button inside the box, bottom-right. Nothing else — no logo, no title,
-  no marketing copy.
+- Vertically and horizontally centered: a chat box, max-width 640px. One multiline textarea.
+  The whole composer is exactly 264px at rest (1.5× the original 176px) and grows with input to
+  528px (3× the original) before the textarea scrolls; its text region is 182–446px. A paste
+  longer than the cap anchors the
+  VIEW to the first line while the caret stays after the last word — the start of the prompt is
+  always the thing on screen. Enter submits, Shift+Enter newlines. The footer strip (attach dial,
+  model chip, send button) sits snug under the last text line with a tiny 4px gap. Nothing else —
+  no logo, no title, no marketing copy.
 - On submit: POST /api/jobs, clear the textarea immediately (the prompt stays free for the next
   idea), and a job card appears under the chat box.
 
@@ -88,7 +95,9 @@ A horizontal SVG graph, full width, ~120px tall, eight nodes joined by 1px conne
 Process → Decompose → Panel → Confirm → First pass → Review → Proposal → Done
 
 - Node: rounded rect, 96×44, label under it. Fill `--surface`, border `--border`.
-- Status ring: pending = dim border; active = accent border + soft accent pulse; suspended =
+- Status ring: pending = dim border; active = accent border + an implicit dark-grey pulse
+  (#565656 at low opacity, both themes — the blink hints at activity without a signal color);
+  suspended =
   `--warn` border; completed = `--ok` check glyph top-right; failed = `--bad`.
 - The Review node is wider (140px) and shows a live sub-line while active:
   "m 2/5 · s 3/6 · r 2" from the cursor.
@@ -108,11 +117,15 @@ five-second tool heartbeats, API retries, context compaction, and artifact valid
 sanitized operational events only — assistant prose, chain-of-thought, prompts, credentials, tool
 outputs, and command contents are never logged or sent to the browser.
 
-**1. Process input** — the classifier. Body: a row of facts — input-type chip (accent outline),
-`cotSteps` badge ("6 reasoning steps"). Then title (semibold), the sharpened question as a
-blockquote, context paragraph (clamped), assumptions as a bulleted list, attachments as small
-file chips with their one-line note. Empty states: "no assumptions detected", attachments row
-omitted when none.
+**1. Process input** — the classifier. Body: a row of facts — the submission-type chip (accent
+outline; the label is whatever the bundle's `catalog/input-types.json` defines — that file is the
+single reference for the types the pipeline considers, shipped as `research idea · open problem ·
+unverified claim · research proposal · completed work · empirical result · research area ·
+established concept`) and the `cotSteps` badge ("6 chain steps"). Then title (semibold), the
+sharpened question as a blockquote, context paragraph (clamped), assumptions as a bulleted list,
+attachments as small file chips with their one-line note. Empty states: "no assumptions detected",
+attachments row omitted when none. The catalog maps the type to an output SHAPE, which drives the
+First pass panel's primary tab below.
 
 **2. Decompose** — the expertise tree. Body: three columns (Departments / Umbrella terms /
 Subfields). Departments render as rows; selecting one filters column two; selecting an umbrella
@@ -129,21 +142,58 @@ rewritten.
 
 **4. Confirm panel** — the human gate. Three states:
 - *Pending (job suspended):* an action card — "The panel is waiting for your confirmation." The
-  seated members render as the same seat cards with checkboxes (all checked). Buttons:
-  **Approve panel** (primary accent) and **Continue with selected** (enabled when the user
-  unchecks seats; unchecking all but one disables it — a panel needs ≥2 members). Both call
-  POST /api/jobs/:id/gate; the card then shows "resuming…" until the stream updates.
+  seated members render as the same seat cards with checkboxes (all checked). ONE primary button
+  whose action follows the checkboxes — the selection is the decision, so it can never be
+  silently discarded: with every seat checked it reads **Approve panel** (action `approve`);
+  with seats unchecked it reads **Continue with N of M seats** (action `shrink`, retained ids
+  from the checked set); with fewer than two seats checked it is disabled with a hint (a panel
+  needs ≥2 members). It calls POST /api/jobs/:id/gate; the card then shows "resuming…" until the
+  stream updates.
 - *Decided:* one quiet line — "Approved as seated" / "Shrunk to 4 members (removed: …)" /
   "Approved automatically (settings)". With timestamp.
 - *Not reached:* collapsed.
 
 **5. First pass** — parallel thinking. Body: a member grid (2 columns desktop, 1 mobile). Each
 member card: header (umbrella + department dim), live status ("thinking…" with pulse /
-"done" / "failed"), and when the idea lands, tabs: **Paper · Chain · Novelty · Papers**.
-- Paper: Abstract/Introduction/Method/Discussion/Conclusion as labeled sections, clamped.
+"done" / "failed"), and when the output lands, tabs: **[shape tab] · Chain · Novelty · Papers**.
+The primary tab is DESIGNED PER OUTPUT SHAPE — the eight shapes are code; which type maps to
+which shape is catalog data:
+
+- `paper` → **Paper**: Abstract/Introduction/Method/Discussion/Conclusion as labeled sections,
+  clamped.
+- `resolution` → **Resolution**: status chip (`resolved`/`refuted` in `--ok` — a disproof is a
+  decisive resolution too; `partial` in `--warn`; `still open` dim), then Problem, Approach, the
+  numbered Derivation steps, Verification as an evidence block (script/math; "no self-check was
+  possible" when absent), Remaining gaps, Significance, and a Known-results table (Result / Kind
+  tag / Relation).
+- `verification` → **Verdict**: verdict chip (`confirmed` `--ok`, `refuted` `--bad`,
+  `partially correct` `--warn`, `indeterminate` dim) plus a confidence chip, the claim as a
+  blockquote with its source in a dim line, the Evidence block (script code + result, math block,
+  or citation + locator link + "shows"), Reasoning, and the confidence rationale.
+- `feasibility` → **Assessment**: feasibility chip (`feasible as is` `--ok`,
+  `feasible with changes` `--warn`, `not feasible` `--bad`), Design/Importance/Hypothesis
+  logic/Replicability sections, a Methodology-soundness table (Aspect / `sound`·`concern`·`flaw`
+  chip / Note), Required changes, Alternative designs.
+- `critique` → **Review**: recommendation chip (`sound` `--ok`, `sound with revisions` `--warn`,
+  `not sound` `--bad`), Artifact summary, Strengths list, itemized Issues (severity chip
+  `minor` dim / `major` `--warn` / `critical` `--bad`, description, suggestion, evidence block
+  when present), Missing considerations, and a Next-steps table sorted by priority.
+- `interpretation` → **Interpretation**: confidence chip, Observation, ranked Candidate
+  interpretations (plausibility chip + for/against evidence lines), the Most-likely reading as an
+  accent callout with its confidence rationale, Threats to validity, Implications.
+- `survey` → **Landscape**: one section per school of thought (name, characterization, its works
+  as a mini literature table), a Comparison table when a decision was requested, Consensus &
+  frontier, Open gaps, and the Recommendation as a callout when one was asked for.
+- `explanation` → **Explanation**: Why it matters, the Core intuition as an accent callout, Formal
+  treatment, Worked example, Common misconceptions (each with its correction in a dim line), and
+  Connections as a tag row.
+
+Shared tabs on every card:
 - Chain: numbered steps 1..N, each one paragraph; the numbers become the anchor the review stage
-  refers back to.
-- Novelty: single callout paragraph, accent left border.
+  refers back to. What a "step" is follows the shape (reasoning step, proof step,
+  evidence-gathering step, …).
+- Novelty: single callout paragraph, accent left border. Present only for the shapes positioned
+  against a literature map (`paper`, `resolution`, `survey`); the tab is hidden otherwise.
 - Papers: the literature table (title, year, venue, one-line relation; title links out when a URL
   exists). Tab hidden when the member returned no literature.
 

@@ -4,6 +4,7 @@
  * `--offline` runs and by the worker's own tests, so the full nested pipeline
  * (panel selection, review rounds, chair) can be exercised end to end.
  */
+import type { LoadedInputTypes } from "@brainstorm-agentic/content";
 import type { AgentExecutor, AgentResult, AgentTask, JsonObject, JsonValue } from "@brainstorm-agentic/core";
 
 function asObject(value: JsonValue | undefined): JsonObject {
@@ -14,7 +15,7 @@ function paragraphs(label: string, n: number): string[] {
   return Array.from({ length: n }, (_, i) => `${label} paragraph ${i + 1}.`);
 }
 
-function ideaOutput(label: string): JsonObject {
+function paperBody(label: string): JsonObject {
   return {
     abstract: paragraphs(`${label} abstract`, 3),
     introduction: paragraphs(`${label} introduction`, 3),
@@ -22,6 +23,24 @@ function ideaOutput(label: string): JsonObject {
     discussion: paragraphs(`${label} discussion`, 3),
     conclusion: [`${label} conclusion paragraph.`],
   };
+}
+
+/**
+ * The offline executor only stubs the `paper` output shape, so its processor
+ * always classifies the run as the loaded catalog's paper-shaped type (the
+ * residual default). The type NAME comes from the catalog, never from code,
+ * so renaming types in catalog/input-types.json keeps offline runs working.
+ */
+function paperTypeOf(inputTypes: LoadedInputTypes | undefined): string {
+  if (!inputTypes) return "research idea";
+  for (const [name, shape] of Object.entries(inputTypes.shapes)) {
+    if (shape === "paper") return name;
+  }
+  // Description-only bundles (pre-0.2.0) have no shape projections; their
+  // residual default is the last listed type.
+  const names = Object.keys(inputTypes.types);
+  if (names.length === 0) throw new Error("offline executor: input-type catalog defines no types");
+  return names[names.length - 1]!;
 }
 
 const noEvidence: JsonObject = {
@@ -37,14 +56,22 @@ const noEvidence: JsonObject = {
 export interface OfflineExecutorOptions {
   /** Chain-of-thought steps the offline processor requests. Default 3. */
   readonly cotSteps?: number;
+  /** The loaded input-type catalog; the executor classifies runs as its paper-shaped type. */
+  readonly inputTypes?: LoadedInputTypes;
 }
 
 export class OfflineBrainstormExecutor implements AgentExecutor {
   readonly executed: Array<{ role: string; agentId: string }> = [];
   private readonly cotSteps: number;
+  private readonly paperType: string;
 
   constructor(options: OfflineExecutorOptions = {}) {
     this.cotSteps = options.cotSteps ?? 3;
+    this.paperType = paperTypeOf(options.inputTypes);
+  }
+
+  private developedOutput(label: string): JsonObject {
+    return { type: this.paperType, paper: paperBody(label) };
   }
 
   async execute(task: AgentTask): Promise<AgentResult> {
@@ -82,7 +109,7 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
           });
         });
         output = {
-          type: "research question",
+          type: this.paperType,
           title: prompt.slice(0, 80),
           question: prompt,
           context: "Offline deterministic context.",
@@ -178,7 +205,7 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
         break;
       case "brain":
         output = {
-          output: ideaOutput(agentId),
+          output: this.developedOutput(agentId),
           cot: Array.from({ length: this.cotSteps }, (_, i) => `${agentId} chain step ${i + 1} reasoning paragraph.`),
           novelty: `${agentId} novelty paragraph naming the two closest works and the precise gap.`,
           literature: [
@@ -227,12 +254,44 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
         const total = this.cotSteps;
         output = {
           fromStep,
-          output: ideaOutput(`${agentId} revised`),
+          output: this.developedOutput(`${agentId} revised`),
           revisedSteps: Array.from(
             { length: total - fromStep + 1 },
             (_, i) => `${agentId} revised step ${fromStep + i} paragraph.`,
           ),
           novelty: `${agentId} revised novelty paragraph.`,
+        };
+        break;
+      }
+      case "integrator": {
+        const ideas = asObject(bindings.ideas as JsonValue);
+        const roster = Array.isArray(bindings.roster) ? bindings.roster : [];
+        const umbrellas = roster.flatMap((member) => {
+          const umbrella = asObject(member as JsonValue).umbrella;
+          return typeof umbrella === "string" ? [umbrella] : [];
+        });
+        output = {
+          noveltyAudit: Object.entries(ideas).flatMap(([memberId, idea]) => {
+            const novelty = asObject(idea as JsonValue).novelty;
+            if (typeof novelty !== "string") return [];
+            return [
+              {
+                memberId,
+                claim: novelty,
+                status: "clear",
+                note: "Offline deterministic audit: no prior work surfaced against this claim.",
+                evidence: noEvidence,
+              },
+            ];
+          }),
+          contradictions: [],
+          seams: [
+            {
+              between: [umbrellas[0] ?? "Field A", umbrellas[1] ?? "Field B"],
+              gap: "No member connected the two seated framings of the submission.",
+              opportunity: "A joint treatment of both framings remains open, per the outputs.",
+            },
+          ],
         };
         break;
       }

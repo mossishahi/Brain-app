@@ -19,12 +19,17 @@ const para = (n: number, text = "Lorem ipsum dolor sit amet.") =>
 const section = (n: number, text = "Lorem ipsum dolor sit amet.") =>
   Array.from({ length: n }, (_, i) => `${text} (${i + 1})`);
 
-const validIdeaOutput = {
+const validPaperBody = {
   abstract: section(3),
   introduction: section(3),
   method: section(3),
   discussion: section(3),
   conclusion: section(1),
+};
+// `type` is the catalog label (free-form data); `paper` is the shape key.
+const validDevelopedOutput = {
+  type: "research idea",
+  paper: validPaperBody,
 };
 const noEvidence = {
   kind: "none" as const,
@@ -36,9 +41,9 @@ const noEvidence = {
   shows: "",
 };
 
-test("processor output: accepts a well-formed object, rejects invented types", () => {
+test("processor output: accepts a well-formed object; type is data checked at runtime", () => {
   const good = {
-    type: "research question",
+    type: "research idea",
     title: "Differentiable KNN graphs",
     question: "Can KNN graph construction be made differentiable?",
     context: "Graph learning pipelines build KNN graphs as a discrete step.",
@@ -48,11 +53,11 @@ test("processor output: accepts a well-formed object, rejects invented types", (
   };
   assert.ok(processorOutputSchema.safeParse(good).success);
 
-  assert.equal(
-    processorOutputSchema.safeParse({ ...good, type: "brilliant idea" }).success,
-    false,
-    "type must come from the closed catalog",
-  );
+  // The types live in catalog/input-types.json, so the static schema accepts
+  // any non-empty label; catalog membership is the runtime's cross-check
+  // (INPUT_TYPE_NOT_IN_CATALOG), exercised in the brainstorm-runtime e2e tests.
+  assert.ok(processorOutputSchema.safeParse({ ...good, type: "brilliant idea" }).success);
+  assert.equal(processorOutputSchema.safeParse({ ...good, type: "" }).success, false);
   assert.equal(processorOutputSchema.safeParse({ ...good, cotSteps: 2 }).success, false);
   assert.equal(processorOutputSchema.safeParse({ ...good, cotSteps: 5.5 }).success, false);
 });
@@ -62,7 +67,7 @@ test("annotated file map: labels are closed, NA notes may be empty, partitions a
   const ignored = { path: "attachments/1-repo/package-lock.json", label: "NA", note: "" };
 
   const withFiles = {
-    type: "research question",
+    type: "research idea",
     title: "Differentiable KNN graphs",
     question: "Can KNN graph construction be made differentiable?",
     context: "",
@@ -214,11 +219,11 @@ test("experts and panel are separate artifacts", () => {
 });
 
 test("brain idea: paragraph counts and chain length limits are enforced", () => {
-  const good = { output: validIdeaOutput, cot: [para(1), para(1), para(1), para(1), para(1)], novelty: para(1) };
+  const good = { output: validDevelopedOutput, cot: [para(1), para(1), para(1), para(1), para(1)], novelty: para(1) };
   assert.ok(brainIdeaSchema.safeParse(good).success);
 
   const shortAbstract = structuredClone(good);
-  shortAbstract.output.abstract = section(2);
+  shortAbstract.output.paper.abstract = section(2);
   assert.equal(brainIdeaSchema.safeParse(shortAbstract).success, false, "abstract must be exactly 3 paragraphs");
 
   const multiParagraphStep = structuredClone(good);
@@ -226,6 +231,42 @@ test("brain idea: paragraph counts and chain length limits are enforced", () => 
   assert.equal(brainIdeaSchema.safeParse(multiParagraphStep).success, false, "each step is exactly one paragraph");
 
   assert.equal(brainIdeaSchema.safeParse({ ...good, cot: [para(1), para(1)] }).success, false, "chain too short");
+
+  assert.equal(
+    brainIdeaSchema.safeParse({ ...good, novelty: undefined }).success,
+    false,
+    "a paper-shaped output requires a novelty statement",
+  );
+
+  const verificationOutput = {
+    type: "unverified claim",
+    verification: {
+      claim: "Attention layers implicitly perform kernel regression.",
+      claimSource: "submitter's own hypothesis",
+      verdict: "indeterminate" as const,
+      evidence: noEvidence,
+      reasoning: para(1),
+      confidence: { level: "low" as const, rationale: "No decisive test was available in the time given." },
+    },
+  };
+  assert.ok(
+    brainIdeaSchema.safeParse({ output: verificationOutput, cot: [para(1), para(1), para(1)] }).success,
+    "a verification-shaped output needs no novelty statement",
+  );
+  assert.equal(
+    brainIdeaSchema.safeParse({ output: verificationOutput, cot: [para(1), para(1), para(1)], novelty: para(1) })
+      .success,
+    false,
+    "a verification-shaped output must omit novelty entirely",
+  );
+  assert.equal(
+    brainIdeaSchema.safeParse({
+      output: { ...verificationOutput, paper: validPaperBody },
+      cot: [para(1), para(1), para(1)],
+    }).success,
+    false,
+    "exactly one shape body may be populated",
+  );
 });
 
 test("comment: Build requires a suggestion; Interrupt requires structured evidence", () => {
@@ -414,10 +455,15 @@ test("judge decision: always carries the per-commentor assessment", () => {
 });
 
 test("redevelopment: revised steps start at a positive step and replace the tail only", () => {
-  const good = { fromStep: 3, output: validIdeaOutput, revisedSteps: [para(1), para(1), para(1)], novelty: para(1) };
+  const good = { fromStep: 3, output: validDevelopedOutput, revisedSteps: [para(1), para(1), para(1)], novelty: para(1) };
   assert.ok(redevelopmentSchema.safeParse(good).success);
   assert.equal(redevelopmentSchema.safeParse({ ...good, fromStep: 0 }).success, false);
   assert.equal(redevelopmentSchema.safeParse({ ...good, revisedSteps: [] }).success, false);
+  assert.equal(
+    redevelopmentSchema.safeParse({ ...good, output: validDevelopedOutput, novelty: undefined }).success,
+    false,
+    "a paper-shaped output still requires novelty on a redevelopment",
+  );
 });
 
 test("final proposal: prioritized action items are required", () => {

@@ -4,6 +4,7 @@ import { describe, test } from "node:test";
 import {
   MAX_REPEAT_BOUND,
   activitiesSchema,
+  skillMetaSchema,
   validateBundle,
   workflowSchema,
   type RepeatUntilNode,
@@ -138,6 +139,16 @@ test("rejects a role skill whose technique is missing", () => {
   expectIssue(bundle, "MISSING_TECHNIQUE");
 });
 
+test("rejects a technique var the including role does not cover as a non-payload var", () => {
+  const bundle = freshBundle();
+  const technique = bundle.skills["deep-understanding"]!;
+  technique.meta.vars.push("umbrella");
+  technique.body += "\nRead the material as {{umbrella}} would.";
+  // deep-understanding is included by roles that do not declare `umbrella`
+  // (e.g. the processor), so coverage must fail there.
+  expectIssue(bundle, "TECHNIQUE_VAR_UNCOVERED");
+});
+
 test("rejects a skill that requires a capability missing from the catalog", () => {
   const bundle = freshBundle();
   delete bundle.capabilities.capabilities["code-execution"];
@@ -154,6 +165,26 @@ test("rejects a skill that declares a variable its body never uses", () => {
   const bundle = freshBundle();
   bundle.skills["chair"]!.meta.vars.push("unusedThing");
   expectIssue(bundle, "UNUSED_VAR");
+});
+
+test("a payload var is delivered as task data, so declaring it is not an unused var", () => {
+  const bundle = freshBundle();
+  const chair = bundle.skills["chair"]!;
+  assert.ok(chair.meta.payload.includes("ideas"), "chair delivers ideas as task data");
+  assert.ok(!chair.body.includes("{{ideas}}"), "payload vars stay out of the instructions");
+  assert.deepEqual(validateBundle(bundle), []);
+});
+
+test("rejects a payload var rendered back into the instruction body", () => {
+  const bundle = freshBundle();
+  bundle.skills["chair"]!.body += "\nThe members' outputs are {{ideas}}.";
+  expectIssue(bundle, "PAYLOAD_VAR_IN_BODY");
+});
+
+test("rejects a payload var that is not a declared skill var", () => {
+  const meta = { ...freshBundle().skills["chair"]!.meta };
+  const result = skillMetaSchema.safeParse({ ...meta, payload: [...meta.payload, "notAVar"] });
+  assert.equal(result.success, false);
 });
 
 test("rejects unbounded loops: repeatUntil without maxIterations fails schema and validator", () => {

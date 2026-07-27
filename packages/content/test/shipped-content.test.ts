@@ -3,24 +3,29 @@ import { test } from "node:test";
 
 import {
   loadContent,
+  SHAPE_FIELDS,
   validateBundle,
   type ForEachNode,
   type RepeatUntilNode,
   type SequenceNode,
 } from "../src/index.js";
 import {
-  registryContentDir,
   findActivity,
   findAgent,
   findNode,
   freshBundle,
+  publishedContentDirs,
 } from "./helpers.js";
 
-test("Brain Registry content loads and cross-validates with zero issues", () => {
-  const bundle = loadContent(registryContentDir());
-  assert.deepEqual(validateBundle(bundle), []);
-  assert.ok(bundle.workflows["brainstorm"], "brainstorm workflow present");
-  assert.equal(bundle.workflows["brainstorm"]!.version, "0.1.0");
+test("every published Brain Registry version loads and cross-validates with zero issues", () => {
+  const published = publishedContentDirs();
+  assert.ok(published.length > 0, "the registry index publishes at least one version");
+  for (const { version, dir } of published) {
+    const bundle = loadContent(dir);
+    assert.deepEqual(validateBundle(bundle), [], `bundle ${version} has validation issues`);
+    assert.ok(bundle.workflows["brainstorm"], `bundle ${version} ships the brainstorm workflow`);
+    assert.equal(bundle.workflows["brainstorm"]!.version, version);
+  }
 });
 
 test("workflow phases appear in the canonical order", () => {
@@ -38,6 +43,7 @@ test("workflow phases appear in the canonical order", () => {
       "confirm-panel",
       "first-pass",
       "review-members",
+      "bridge-audit",
       "synthesize-proposal",
       "done",
     ],
@@ -253,13 +259,13 @@ test("verdict catalog preserves the Pass/Build/Interrupt contract", () => {
   assert.deepEqual(catalog.sequencing.noImmediateRepeat, ["Build"]);
 });
 
-test("skills split into 7 roles and 3 techniques, with clean prompt bodies", () => {
+test("skills split into 8 roles and 3 techniques, with clean prompt bodies", () => {
   const bundle = freshBundle();
   const roles = Object.values(bundle.skills).filter((s) => s.meta.kind === "role");
   const techniques = Object.values(bundle.skills).filter((s) => s.meta.kind === "technique");
   assert.deepEqual(
     roles.map((s) => s.meta.name).sort(),
-    ["brain", "chair", "commentor", "decomposer", "judge", "processor", "redeveloper"],
+    ["brain", "chair", "commentor", "decomposer", "integrator", "judge", "processor", "redeveloper"],
   );
   assert.deepEqual(
     techniques.map((s) => s.meta.name).sort(),
@@ -270,9 +276,126 @@ test("skills split into 7 roles and 3 techniques, with clean prompt bodies", () 
   }
   for (const technique of techniques) {
     assert.equal(technique.meta.output, undefined);
-    assert.deepEqual(technique.meta.vars, []);
   }
+  // The literature review is parameterized by the seat's expertise; the other
+  // techniques stay var-free and universal.
+  assert.deepEqual(
+    bundle.skills["literature-review"]!.meta.vars.sort(),
+    ["department", "subfields", "umbrella"],
+  );
+  assert.deepEqual(bundle.skills["deep-understanding"]!.meta.vars, []);
+  assert.deepEqual(bundle.skills["academic-profile-lookup"]!.meta.vars, []);
   // Executable needs are declared as capabilities, never prose-only:
   assert.ok(bundle.skills["commentor"]!.meta.capabilities.includes("code-execution"));
   assert.ok(bundle.skills["literature-review"]!.meta.capabilities.includes("web-search"));
+});
+
+/**
+ * catalog/input-types.json is the single hand-edited reference that defines
+ * the submission types. The loader projects it and validateBundle enforces
+ * outline-vs-shape consistency at load time; this test pins the projections
+ * for the shipped file so a partial edit can't slip through.
+ */
+test("the merged input-type reference defines every projection for every type", () => {
+  const bundle = freshBundle();
+  const { types, shapes, guidance, outlines } = bundle.catalogs.inputTypes;
+  const names = Object.keys(types);
+  assert.ok(names.length >= 2, "the shipped catalog defines a real set of types");
+  assert.deepEqual(Object.keys(shapes).sort(), [...names].sort());
+  assert.deepEqual(Object.keys(guidance).sort(), [...names].sort());
+  assert.deepEqual(Object.keys(outlines).sort(), [...names].sort());
+
+  for (const [name, outline] of Object.entries(outlines)) {
+    assert.deepEqual(
+      Object.keys(outline).sort(),
+      [...SHAPE_FIELDS[shapes[name]!]].sort(),
+      `outline sections for "${name}" must match the fields of its shape "${shapes[name]}"`,
+    );
+  }
+
+  // The last entry is the residual default the processor falls back to; the
+  // shipped default must be the open-ended shape.
+  assert.equal(shapes[names[names.length - 1]!], "paper");
+});
+
+test("a broken hand edit of the reference file fails load-time validation with a named issue", () => {
+  const bundle = freshBundle();
+  const inputTypes = bundle.catalogs.inputTypes;
+  const [firstType] = Object.keys(inputTypes.types);
+  const tampered = {
+    ...bundle,
+    catalogs: {
+      ...bundle.catalogs,
+      inputTypes: {
+        ...inputTypes,
+        outlines: {
+          ...inputTypes.outlines,
+          [firstType!]: { madeUpSection: "This section does not exist on the shape's schema at all." },
+        },
+      },
+    },
+  };
+  const issues = validateBundle(tampered);
+  assert.ok(
+    issues.some((issue) => issue.code === "OUTLINE_SHAPE_MISMATCH" && issue.path.includes(firstType!)),
+    `expected OUTLINE_SHAPE_MISMATCH for "${firstType}", got: ${JSON.stringify(issues)}`,
+  );
+});
+
+test("the developing skills read outline and shape from the reference catalog", () => {
+  const bundle = freshBundle();
+  const root = bundle.workflows["brainstorm"]!.root;
+  for (const [nodeId, skillName] of [
+    ["develop-idea", "brain"],
+    ["redevelop-idea", "redeveloper"],
+  ] as const) {
+    const node = findAgent(root, nodeId);
+    assert.equal(
+      node.bind?.["outline"],
+      "catalog.inputTypes.outlines[input.type]",
+      `${nodeId} binds the outline for the submission's type`,
+    );
+    assert.equal(
+      node.bind?.["shape"],
+      "catalog.inputTypes.shapes[input.type]",
+      `${nodeId} binds the shape for the submission's type`,
+    );
+    const skill = bundle.skills[skillName]!;
+    assert.ok(skill.meta.vars.includes("outline"));
+    assert.ok(
+      !skill.meta.payload.includes("outline"),
+      "the outline is stable framing for the run, so it is rendered rather than sent as payload",
+    );
+    assert.match(skill.body, /\{\{outline\}\}/);
+    assert.match(skill.body, /\{\{shape\}\}/);
+  }
+});
+
+test("no type-aware skill hardcodes a type name, so a JSON rename needs no prompt edits", () => {
+  const bundle = freshBundle();
+  // Types are data: the skills that work the submission may only speak of it
+  // through {{type}}, {{shape}}, {{outline}}, and {{typeGuidance}} (plus the
+  // processor's rendered {{typeOptions}}). A literal type name in one of these
+  // bodies would silently rot the prompt the moment the catalog is edited.
+  for (const name of ["processor", "brain", "redeveloper", "commentor", "judge", "chair", "integrator"]) {
+    const skill = bundle.skills[name]!;
+    for (const typeName of Object.keys(bundle.catalogs.inputTypes.types)) {
+      assert.ok(
+        !skill.body.toLowerCase().includes(typeName.toLowerCase()),
+        `skill "${name}" hardcodes the type name "${typeName}"`,
+      );
+    }
+    assert.doesNotMatch(
+      skill.body,
+      /requested act|epistemic act/i,
+      `${name} must not describe the submission as a requested act`,
+    );
+  }
+  for (const inputType of Object.keys(bundle.catalogs.inputTypes.types)) {
+    assert.doesNotMatch(
+      inputType,
+      /^(develop|resolve|verify|critique|interpret|survey|explain|assess)/,
+      `input type "${inputType}" must name the submission, not the action`,
+    );
+  }
 });

@@ -45,16 +45,20 @@ export function GateCard({
   };
 
   const kept = members.filter((m) => checked.has(m.id));
-  const canShrink = kept.length >= 2 && kept.length < members.length;
+  // The checkboxes ARE the decision: removing a seat turns the single submit
+  // action into a shrink. A separate always-enabled "approve" button used to
+  // silently discard the selection — the seats stayed unchecked on screen but
+  // the full panel ran.
+  const shrinking = members.length > 0 && kept.length < members.length;
+  const keptTooFew = shrinking && kept.length < 2;
 
-  const answer = async (action: "approve" | "shrink") => {
-    if (!gateKey) return;
+  const answer = async () => {
+    if (!gateKey || keptTooFew) return;
     setPhase("busy");
     setError(null);
-    const req: GateAnswerRequest =
-      action === "shrink"
-        ? { gateKey, action, members: kept.map((m) => m.id) }
-        : { gateKey, action };
+    const req: GateAnswerRequest = shrinking
+      ? { gateKey, action: "shrink", members: kept.map((m) => m.id) }
+      : { gateKey, action: "approve" };
     try {
       await onAnswer(req);
       setPhase("resuming");
@@ -90,19 +94,16 @@ export function GateCard({
           <button
             type="button"
             className="btn btn-primary"
-            disabled={phase !== "idle" || !gateKey}
-            onClick={() => void answer("approve")}
+            disabled={phase !== "idle" || !gateKey || keptTooFew}
+            onClick={() => void answer()}
           >
-            Approve panel
+            {shrinking
+              ? `Continue with ${kept.length} of ${members.length} seats`
+              : "Approve panel"}
           </button>
-          <button
-            type="button"
-            className="btn"
-            disabled={phase !== "idle" || !gateKey || !canShrink}
-            onClick={() => void answer("shrink")}
-          >
-            Continue with selected
-          </button>
+          {keptTooFew && (
+            <p className="dim small">A panel needs at least two seats — re-check some members.</p>
+          )}
         </div>
       )}
       {!gateKey && <p className="dim small">gate details unavailable</p>}

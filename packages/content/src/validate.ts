@@ -1,11 +1,11 @@
-import { artifactSchemas } from "./schemas/artifacts.js";
+import { artifactSchemas, SHAPE_FIELDS } from "./schemas/artifacts.js";
 import type {
   ActivityRegistry,
   BindValue,
   CapabilityCatalog,
   ConditionExpr,
   DepartmentsCatalog,
-  InputTypesCatalog,
+  LoadedInputTypes,
   ModelRoutes,
   Skill,
   VerdictsCatalog,
@@ -28,7 +28,13 @@ export interface ContentBundle {
   activities: ActivityRegistry;
   capabilities: CapabilityCatalog;
   catalogs: {
-    inputTypes: InputTypesCatalog;
+    /**
+     * The projected view of catalog/input-types.json — the single reference
+     * file that defines the submission types the pipeline considers. See
+     * `LoadedInputTypes` for the projections and `validateInputTypes` for the
+     * load-time consistency rules.
+     */
+    inputTypes: LoadedInputTypes;
     verdicts: VerdictsCatalog;
     departments: DepartmentsCatalog;
   };
@@ -54,9 +60,11 @@ export type IssueCode =
   | "UNBOUND_VAR"
   | "UNKNOWN_BINDING"
   | "MISSING_TECHNIQUE"
+  | "TECHNIQUE_VAR_UNCOVERED"
   | "MISSING_CAPABILITY"
   | "UNDECLARED_VAR"
   | "UNUSED_VAR"
+  | "PAYLOAD_VAR_IN_BODY"
   | "FORBIDDEN_PROMPT_CONTENT"
   | "UNBOUNDED_LOOP"
   | "LOOP_BOUND_TOO_HIGH"
@@ -65,7 +73,11 @@ export type IssueCode =
   | "UNKNOWN_CATALOG"
   | "REVIEW_REF_OUTSIDE_LOOP"
   | "UNKNOWN_VERDICT"
-  | "DUPLICATE_SKILL";
+  | "DUPLICATE_SKILL"
+  | "EMPTY_INPUT_TYPES"
+  | "INPUT_TYPES_MIXED_FORMAT"
+  | "OUTLINE_SHAPE_MISMATCH"
+  | "OUTLINE_SECTION_STUB";
 
 export interface ValidationIssue {
   code: IssueCode;
@@ -106,6 +118,43 @@ const MUSTACHE_VAR = /\{\{\s*([A-Za-z][A-Za-z0-9_]*)\s*\}\}/g;
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Body usage and var declaration must agree exactly, except for payload vars:
+ * those reach the model as task data, so rendering one into the instructions
+ * would put per-call content back into the cacheable prefix (and back into the
+ * instruction channel). Shared by publication-time and lazy role validation.
+ */
+function checkSkillVars(skill: Skill, at: string, issues: ValidationIssue[]): void {
+  const used = new Set<string>();
+  for (const match of skill.body.matchAll(MUSTACHE_VAR)) used.add(match[1]!);
+  const declared = new Set(skill.meta.vars);
+  const payload = new Set(skill.meta.payload);
+  for (const variable of used) {
+    if (!declared.has(variable)) {
+      issues.push({
+        code: "UNDECLARED_VAR",
+        path: at,
+        message: `body uses {{${variable}}} which is not declared in vars`,
+      });
+    } else if (payload.has(variable)) {
+      issues.push({
+        code: "PAYLOAD_VAR_IN_BODY",
+        path: at,
+        message: `payload var "${variable}" is delivered as task data and must not appear as {{${variable}}}`,
+      });
+    }
+  }
+  for (const variable of declared) {
+    if (!used.has(variable) && !payload.has(variable)) {
+      issues.push({
+        code: "UNUSED_VAR",
+        path: at,
+        message: `declared var "${variable}" is never used in the body`,
+      });
+    }
+  }
+}
 
 function walkNodes(node: WorkflowNode, visit: (node: WorkflowNode) => void): void {
   visit(node);
@@ -162,6 +211,65 @@ export interface ValidateBundleOptions {
    * front-matter-specific checks are deferred until first use.
    */
   readonly availableRoleNames?: ReadonlySet<string>;
+}
+
+/**
+ * Consistency rules for the single editable reference file
+ * catalog/input-types.json. This is what makes the file a live setting rather
+ * than documentation: a hand edit that breaks any rule fails at load time
+ * (server/worker startup, tests, pinned-run compile) with a named issue.
+ */
+function validateInputTypes(inputTypes: ContentBundle["catalogs"]["inputTypes"], issues: ValidationIssue[]): void {
+  const at = "catalog input-types";
+  const typeNames = Object.keys(inputTypes.types);
+  if (typeNames.length === 0) {
+    issues.push({
+      code: "EMPTY_INPUT_TYPES",
+      path: at,
+      message: "the catalog must define at least one submission type",
+    });
+    return;
+  }
+
+  const extended = Object.keys(inputTypes.shapes);
+  if (extended.length > 0 && extended.length !== typeNames.length) {
+    const missing = typeNames.filter((name) => !(name in inputTypes.shapes));
+    issues.push({
+      code: "INPUT_TYPES_MIXED_FORMAT",
+      path: at,
+      message:
+        `either every type is a full definition (description, shape, guidance, outline) or every ` +
+        `type is a plain description; missing full definitions: ${missing.join(", ")}`,
+    });
+  }
+
+  for (const [typeName, outline] of Object.entries(inputTypes.outlines)) {
+    const shape = inputTypes.shapes[typeName];
+    if (!shape) continue; // unreachable per the loader's projection, guarded above
+    const expected = [...SHAPE_FIELDS[shape]].sort();
+    const actual = Object.keys(outline).sort();
+    if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+      const extra = actual.filter((field) => !expected.includes(field));
+      const absent = expected.filter((field) => !actual.includes(field));
+      issues.push({
+        code: "OUTLINE_SHAPE_MISMATCH",
+        path: `${at} > ${typeName}`,
+        message:
+          `outline sections must be exactly the fields of shape "${shape}"` +
+          (absent.length > 0 ? `; missing: ${absent.join(", ")}` : "") +
+          (extra.length > 0 ? `; unknown: ${extra.join(", ")}` : ""),
+      });
+    }
+    for (const [section, description] of Object.entries(outline)) {
+      if (description.trim().length < 20) {
+        issues.push({
+          code: "OUTLINE_SECTION_STUB",
+          path: `${at} > ${typeName} > ${section}`,
+          message: "outline sections need a real description of what the section must contain, not a stub",
+        });
+      }
+    }
+  }
 }
 
 export function validateBundle(
@@ -239,6 +347,9 @@ export function validateBundle(
     }
   }
 
+  // -- input-type catalog ----------------------------------------------------
+  validateInputTypes(bundle.catalogs.inputTypes, issues);
+
   // -- skills ---------------------------------------------------------------
   for (const skill of Object.values(bundle.skills)) {
     const at = `skill ${skill.meta.name}`;
@@ -253,6 +364,18 @@ export function validateBundle(
           path: at,
           message: `"${tech}" is a ${found.meta.kind} skill, not a technique`,
         });
+      } else {
+        // Technique bodies render with the including role's bindings, so
+        // every technique var must be a non-payload var of the role.
+        for (const variable of found.meta.vars) {
+          if (!skill.meta.vars.includes(variable) || skill.meta.payload.includes(variable)) {
+            issues.push({
+              code: "TECHNIQUE_VAR_UNCOVERED",
+              path: at,
+              message: `technique "${tech}" uses {{${variable}}}, which the including role must declare as a non-payload var`,
+            });
+          }
+        }
       }
     }
 
@@ -274,20 +397,7 @@ export function validateBundle(
       });
     }
 
-    // Template variables: body usage and declaration must agree exactly.
-    const used = new Set<string>();
-    for (const match of skill.body.matchAll(MUSTACHE_VAR)) used.add(match[1]!);
-    const declared = new Set(skill.meta.vars);
-    for (const v of used) {
-      if (!declared.has(v)) {
-        issues.push({ code: "UNDECLARED_VAR", path: at, message: `body uses {{${v}}} which is not declared in vars` });
-      }
-    }
-    for (const v of declared) {
-      if (!used.has(v)) {
-        issues.push({ code: "UNUSED_VAR", path: at, message: `declared var "${v}" is never used in the body` });
-      }
-    }
+    checkSkillVars(skill, at, issues);
 
     // Prompt hygiene: no transport, host-control, or filesystem coupling.
     for (const { name, pattern } of FORBIDDEN_PROMPT_PATTERNS) {
@@ -359,6 +469,16 @@ export function validateResolvedRole(
         path: `skill ${role.meta.name}`,
         message: `"${expected}" is not a technique skill`,
       });
+    } else {
+      for (const variable of found.meta.vars) {
+        if (!role.meta.vars.includes(variable) || role.meta.payload.includes(variable)) {
+          issues.push({
+            code: "TECHNIQUE_VAR_UNCOVERED",
+            path: `skill ${role.meta.name}`,
+            message: `technique "${expected}" uses {{${variable}}}, which the including role must declare as a non-payload var`,
+          });
+        }
+      }
     }
   }
   for (const skill of Object.values(skills)) {
@@ -379,27 +499,7 @@ export function validateResolvedRole(
         message: `output schema "${skill.meta.output}" is not known`,
       });
     }
-    const used = new Set<string>();
-    for (const match of skill.body.matchAll(MUSTACHE_VAR)) used.add(match[1]!);
-    const declared = new Set(skill.meta.vars);
-    for (const variable of used) {
-      if (!declared.has(variable)) {
-        issues.push({
-          code: "UNDECLARED_VAR",
-          path: at,
-          message: `body uses {{${variable}}} which is not declared in vars`,
-        });
-      }
-    }
-    for (const variable of declared) {
-      if (!used.has(variable)) {
-        issues.push({
-          code: "UNUSED_VAR",
-          path: at,
-          message: `declared var "${variable}" is never used in the body`,
-        });
-      }
-    }
+    checkSkillVars(skill, at, issues);
     for (const { name, pattern } of FORBIDDEN_PROMPT_PATTERNS) {
       for (const [where, text] of [
         ["body", skill.body],

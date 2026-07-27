@@ -1,5 +1,6 @@
 import { artifactSchemas } from "@brainstorm-agentic/content";
 import {
+  systemPromptSegments,
   textContent,
   type AgentExecutionContext,
   type AgentTask,
@@ -9,6 +10,7 @@ import {
   type ModelResponse,
   type ProviderOptions,
   type ResponseFormat,
+  type SystemPrompt,
   type ToolChoice,
 } from "@brainstorm-agentic/core";
 
@@ -20,7 +22,7 @@ import { BrainstormRuntimeError } from "./errors.js";
  */
 export interface GenericAgentModelRoute {
   readonly modelId: string;
-  readonly system?: string;
+  readonly system?: SystemPrompt;
   readonly toolChoice?: ToolChoice;
   readonly maxOutputTokens?: number;
   readonly temperature?: number;
@@ -42,6 +44,27 @@ function mergeProviderOptions(
     merged[provider] = { ...(base[provider] ?? {}), ...(override[provider] ?? {}) };
   }
   return merged;
+}
+
+/**
+ * Deployment policy precedes the content's instructions. Both are static, so
+ * the merged prefix stays cacheable; the result collapses back to a plain
+ * string when nothing claims to be cacheable.
+ */
+function mergeSystem(
+  routeSystem: SystemPrompt | undefined,
+  descriptionSystem: SystemPrompt | undefined,
+): SystemPrompt | undefined {
+  const routeSegments = systemPromptSegments(routeSystem).map((segment) => ({
+    ...segment,
+    cacheable: true,
+  }));
+  const segments = [...routeSegments, ...systemPromptSegments(descriptionSystem)];
+  if (segments.length === 0) return undefined;
+  if (segments.every((segment) => segment.cacheable !== true)) {
+    return segments.map((segment) => segment.text).join("\n\n");
+  }
+  return segments;
 }
 
 function jsonValue(value: unknown): value is JsonValue {
@@ -80,7 +103,7 @@ export class BrainstormAgentTaskAdapter {
         "MISSING_MODEL_REQUEST",
       );
     }
-    const system = [route.system, description.system].filter(Boolean).join("\n\n");
+    const system = mergeSystem(route.system, description.system);
     const toolChoice = route.toolChoice ?? description.toolChoice;
     const maxOutputTokens = route.maxOutputTokens ?? description.maxOutputTokens;
     const temperature = route.temperature ?? description.temperature;
@@ -94,7 +117,7 @@ export class BrainstormAgentTaskAdapter {
         : undefined;
     return {
       modelId: route.modelId,
-      ...(system.length > 0 ? { system } : {}),
+      ...(system !== undefined ? { system } : {}),
       messages: description.messages,
       ...(toolChoice !== undefined ? { toolChoice } : {}),
       ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),

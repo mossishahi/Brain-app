@@ -7,6 +7,7 @@ import type {
   ModelResponse,
   ProviderOptions,
   ResponseFormat,
+  SystemPrompt,
   ToolChoice,
 } from "./core-adapter.js";
 import { textContent, userMessage } from "./core-adapter.js";
@@ -14,7 +15,7 @@ import { AgentRuntimeError } from "./errors.js";
 
 export interface ModelRoute {
   readonly modelId: string;
-  readonly system?: string;
+  readonly system?: SystemPrompt;
   readonly toolChoice?: ToolChoice;
   readonly maxOutputTokens?: number;
   readonly temperature?: number;

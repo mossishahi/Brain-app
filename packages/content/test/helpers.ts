@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { readContentBundle, validateBundle } from "../src/index.js";
@@ -12,16 +14,41 @@ import type {
 
 let cached: ContentBundle | undefined;
 
-/** Authoritative static bundle owned by Brain Registry. */
+interface RegistryIndexBundle {
+  readonly id: string;
+  readonly latest: string;
+  readonly versions: readonly string[];
+}
+
+function registryRoot(): string {
+  return fileURLToPath(new URL("../../../../../brain/content/", import.meta.url));
+}
+
+function brainstormIndexEntry(): RegistryIndexBundle {
+  const index = JSON.parse(
+    readFileSync(join(registryRoot(), "index.json"), "utf8"),
+  ) as { readonly bundles: readonly RegistryIndexBundle[] };
+  const entry = index.bundles.find((bundle) => bundle.id === "brainstorm");
+  if (!entry) throw new Error("the registry index does not publish a brainstorm bundle");
+  return entry;
+}
+
+function versionDir(version: string): string {
+  return `${join(registryRoot(), "bundles", "brainstorm", version)}/`;
+}
+
+/** Every version the registry index publishes; all of them must stay valid. */
+export function publishedContentDirs(): readonly { version: string; dir: string }[] {
+  return brainstormIndexEntry().versions.map((version) => ({
+    version,
+    dir: versionDir(version),
+  }));
+}
+
+/** Authoritative static bundle owned by Brain Registry: the published latest. */
 export function registryContentDir(): string {
   return (
-    process.env.BRAIN_TEST_CONTENT_DIR ??
-    fileURLToPath(
-      new URL(
-        "../../../../../brain/content/bundles/brainstorm/0.1.0/",
-        import.meta.url,
-      ),
-    )
+    process.env.BRAIN_TEST_CONTENT_DIR ?? versionDir(brainstormIndexEntry().latest)
   );
 }
 

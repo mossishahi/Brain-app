@@ -1,14 +1,19 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { loadContent } from "@brainstorm-agentic/content";
-import type {
-  AgentExecutor,
-  AgentResult,
-  AgentTask,
-  JsonObject,
-  JsonValue,
+import { loadContent, type ContentBundle } from "@brainstorm-agentic/content";
+import {
+  systemPromptSegments,
+  systemPromptText,
+  textContent,
+  type AgentExecutor,
+  type AgentResult,
+  type AgentTask,
+  type JsonObject,
+  type JsonValue,
 } from "@brainstorm-agentic/core";
 
 import {
@@ -18,21 +23,28 @@ import {
 
 type JudgeMode = "pass" | "build-step-2" | "repeat-build" | "cap-step-1";
 
-const registryContentDir =
-  process.env.BRAIN_TEST_CONTENT_DIR ??
-  fileURLToPath(
-    new URL(
-      "../../../../../brain/content/bundles/brainstorm/0.1.0/",
-      import.meta.url,
-    ),
+/** The version the registry index publishes as latest, like a real submission. */
+function latestPublishedBundleDir(): string {
+  const root = fileURLToPath(
+    new URL("../../../../../brain/content/", import.meta.url),
   );
+  const index = JSON.parse(readFileSync(join(root, "index.json"), "utf8")) as {
+    readonly bundles: readonly { readonly id: string; readonly latest: string }[];
+  };
+  const entry = index.bundles.find((bundle) => bundle.id === "brainstorm");
+  if (!entry) throw new Error("the registry index does not publish a brainstorm bundle");
+  return `${join(root, "bundles", "brainstorm", entry.latest)}/`;
+}
+
+const registryContentDir =
+  process.env.BRAIN_TEST_CONTENT_DIR ?? latestPublishedBundleDir();
 
 function object(value: JsonValue | undefined, label: string): JsonObject {
   assert.ok(typeof value === "object" && value !== null && !Array.isArray(value), `${label} is not an object`);
   return value as JsonObject;
 }
 
-function ideaOutput(label: string): JsonObject {
+function paperBody(label: string): JsonObject {
   return {
     abstract: [1, 2, 3].map((i) => `${label} abstract paragraph ${i}`),
     introduction: [1, 2, 3].map(
@@ -44,6 +56,10 @@ function ideaOutput(label: string): JsonObject {
     ),
     conclusion: [`${label} conclusion`],
   };
+}
+
+function developedOutput(label: string): JsonObject {
+  return { type: "research idea", paper: paperBody(label) };
 }
 
 function finalProposal(): JsonObject {
@@ -94,7 +110,7 @@ class FakeBrainstormExecutor implements AgentExecutor {
     switch (role) {
       case "processor":
         output = {
-          type: "research question",
+          type: "research idea",
           title: "Test question",
           question: "Can the mechanism be tested?",
           context: "Deterministic context",
@@ -167,7 +183,7 @@ class FakeBrainstormExecutor implements AgentExecutor {
         break;
       case "brain":
         output = {
-          output: ideaOutput(agentId),
+          output: developedOutput(agentId),
           cot: [1, 2, 3].map((step) => `COT:${agentId}:${step}`),
           novelty: `Novelty for ${agentId}`,
         };
@@ -186,6 +202,33 @@ class FakeBrainstormExecutor implements AgentExecutor {
       case "redeveloper":
         output = this.redevelop(agentId, bindings);
         break;
+      case "integrator": {
+        const ideas = object(bindings.ideas, "integrator ideas");
+        output = {
+          noveltyAudit: Object.entries(ideas).flatMap(([memberId, idea]) => {
+            const record = object(idea, `idea for ${memberId}`);
+            if (typeof record.novelty !== "string") return [];
+            return [
+              {
+                memberId,
+                claim: record.novelty,
+                status: "clear",
+                note: `Audited ${memberId}: no prior work already does this claim.`,
+                evidence: noEvidence,
+              },
+            ];
+          }),
+          contradictions: [],
+          seams: [
+            {
+              between: ["Quantum Optics", "Systems Biology"],
+              gap: "No member connected the two seated framings.",
+              opportunity: "A joint treatment of both framings remains open.",
+            },
+          ],
+        };
+        break;
+      }
       case "chair":
         output = finalProposal();
         break;
@@ -254,7 +297,7 @@ class FakeBrainstormExecutor implements AgentExecutor {
     this.revisionCalls.set(key, (this.revisionCalls.get(key) ?? 0) + 1);
     return {
       fromStep: step,
-      output: ideaOutput(`${memberId} revised at ${step}`),
+      output: developedOutput(`${memberId} revised at ${step}`),
       revisedSteps: Array.from(
         { length: total - step + 1 },
         (_unused, offset) => `REVISED:${memberId}:${step + offset}`,
@@ -266,6 +309,13 @@ class FakeBrainstormExecutor implements AgentExecutor {
   tasks(role: string): readonly SeenTask[] {
     return this.seen.filter((entry) => entry.role === role);
   }
+}
+
+let publishedBundle: ContentBundle | undefined;
+
+function payloadVars(role: string): readonly string[] {
+  publishedBundle ??= loadContent(registryContentDir);
+  return publishedBundle.skills[role]?.meta.payload ?? [];
 }
 
 function runtime(
@@ -331,11 +381,57 @@ test("Pass path executes member -> step -> round order and keeps C-O-T from chai
   for (const idea of Object.values(chairIdeas)) {
     assert.deepEqual(Object.keys(object(idea, "projected idea")).sort(), ["novelty", "output"]);
   }
+
+  // The integration audit runs after review on finished outputs only, and its
+  // report reaches the chair.
+  const integrator = executor.tasks("integrator")[0]!;
+  const auditedIdeas = object(integrator.bindings.ideas, "integrator ideas");
+  assert.ok(!JSON.stringify(auditedIdeas).includes("COT:"), "the integrator never sees chains");
+  for (const idea of Object.values(auditedIdeas)) {
+    const keys = Object.keys(object(idea, "audited idea"));
+    assert.ok(
+      keys.every((key) => ["output", "novelty", "literature"].includes(key)),
+      "the integrator sees only projected idea fields",
+    );
+  }
+  const bridge = object(chair.bindings.bridge, "chair bridge report");
+  assert.ok(
+    Array.isArray(bridge.noveltyAudit) && bridge.noveltyAudit.length === 3,
+    "the chair receives one audit entry per member",
+  );
+
   for (const task of executor.seen) {
     assert.equal(task.task.logicalRoute, task.role === "chair" ? "writing" : "reasoning");
     assert.equal(task.task.outputSchema?.name, (object(task.task.input, "input").outputSchema as JsonObject).name);
     assert.ok(task.task.modelRequest?.responseFormat?.type === "jsonSchema");
   }
+
+  // The delivered response schemas narrow what the static artifact schemas
+  // leave open: the processor may only pick a catalog type, and members'
+  // output.type is pinned to this run's label with the shape body required —
+  // a schema-constrained model cannot mislabel the envelope.
+  const deliveredSchema = (role: string): JsonObject => {
+    const request = executor.tasks(role)[0]!.task.modelRequest;
+    const format = request?.responseFormat;
+    if (format?.type !== "jsonSchema") throw new Error(`${role} has no jsonSchema format`);
+    return format.schema;
+  };
+  const processorType = object(
+    object(deliveredSchema("processor").properties, "processor properties").type,
+    "processor type property",
+  );
+  assert.ok(Array.isArray(processorType.enum), "processor type is enum-narrowed");
+  assert.ok((processorType.enum as JsonValue[]).includes("research idea"));
+  const memberEnvelope = object(
+    object(deliveredSchema("brain").properties, "brain properties").output,
+    "brain output property",
+  );
+  const memberType = object(object(memberEnvelope.properties, "envelope properties").type, "envelope type");
+  assert.deepEqual(memberType.enum, ["research idea"], "member output.type pinned to the run's label");
+  assert.ok(
+    Array.isArray(memberEnvelope.required) && (memberEnvelope.required as JsonValue[]).includes("paper"),
+    "the run's shape body is required in the delivered schema",
+  );
   assert.ok((await app.artifacts.list()).length > 0);
   assert.deepEqual(executor.tasks("processor")[0]!.task.allowedCapabilities, [
     "attachment-access",
@@ -370,6 +466,59 @@ test("Pass path executes member -> step -> round order and keeps C-O-T from chai
   const schemas = artifacts.map((ref) => ref.metadata?.schema);
   assert.ok(schemas.includes("usefulFiles"), "useful-files artifact persisted");
   assert.ok(schemas.includes("ignoredFiles"), "ignored-files artifact persisted");
+});
+
+test("instructions stay in a cacheable system prefix; submitted data rides the task turn", async () => {
+  const executor = new FakeBrainstormExecutor();
+  const topic = "Investigate the mechanism";
+  const result = await runtime(executor).run({
+    runId: "prompt-split",
+    submission: { prompt: topic, attachments: [] },
+    params: { panelSize: 2, moduleSize: 1 },
+  });
+  assert.equal(result.status, "completed");
+
+  for (const seen of executor.seen) {
+    const request = seen.task.modelRequest!;
+    const segments = systemPromptSegments(request.system);
+    assert.ok(segments.length > 0, `${seen.role} has system instructions`);
+    assert.equal(
+      segments[0]?.cacheable,
+      true,
+      `${seen.role} must open with a cacheable instruction segment`,
+    );
+
+    // Payload values are addressed by name in the instructions and carried in
+    // the task turn, so nothing submission-derived sits at instruction privilege.
+    const system = systemPromptText(request.system) ?? "";
+    const turn = request.messages.map((message) => textContent(message.content)).join("\n");
+    for (const name of payloadVars(seen.role)) {
+      const value = seen.bindings[name];
+      const rendered = JSON.stringify(value, null, 2);
+      assert.ok(turn.includes(`## ${name}`), `${seen.role} task turn carries ${name}`);
+      assert.ok(turn.includes(rendered), `${seen.role} task turn carries the ${name} value`);
+      // A bare scalar such as a step index collides with ordinary prose, so
+      // only structured payloads can be checked for absence this way.
+      if (typeof value === "object" && value !== null) {
+        assert.ok(
+          !system.includes(rendered),
+          `${seen.role} must not render ${name} into its instructions`,
+        );
+      }
+    }
+  }
+
+  const processor = executor.tasks("processor")[0]!;
+  assert.ok(!(systemPromptText(processor.task.modelRequest!.system) ?? "").includes(topic));
+
+  // Technique bodies render with the role's bindings: the literature-review
+  // vantage carries the seat's expertise into the instructions.
+  const brainTask = executor.seen.find((seen) => seen.role === "brain")!;
+  const brainSystem = systemPromptText(brainTask.task.modelRequest!.system) ?? "";
+  assert.ok(
+    brainSystem.includes(String(brainTask.bindings.umbrella)),
+    "the literature-review technique renders the seat's umbrella into the instructions",
+  );
 });
 
 test("Build redevelops the current tail, freezes earlier steps, and cannot immediately repeat", async () => {
@@ -485,4 +634,28 @@ test("invalid agent artifacts fail before downstream state updates", async () =>
   assert.equal(result.status, "failed");
   assert.equal(result.status === "failed" && result.error.name, "ArtifactValidationError");
   assert.match(result.status === "failed" ? result.error.message : "", /processorOutput/);
+});
+
+test("a classification outside the input-type catalog fails the run with a named error", async () => {
+  // The submission types are data (catalog/input-types.json), so the schema
+  // accepts any label; this is the runtime cross-check that pins the
+  // processor's choice to the loaded catalog.
+  const inventsType = new (class extends FakeBrainstormExecutor {
+    override async execute(task: AgentTask): Promise<AgentResult> {
+      const result = await super.execute(task);
+      const input = object(task.input, "task input");
+      if (input.role !== "processor" || result.status !== "ok") return result;
+      const output = object(result.output as JsonValue, "processor output");
+      return { ...result, output: { ...output, type: "brilliant brainstorm" } };
+    }
+  })();
+  const result = await runtime(inventsType).run({
+    submission: "Invented type",
+    params: { panelSize: 2, moduleSize: 1 },
+  });
+  assert.equal(result.status, "failed");
+  assert.match(
+    result.status === "failed" ? result.error.message : "",
+    /brilliant brainstorm.*not a type of the loaded input-type catalog/,
+  );
 });

@@ -604,7 +604,7 @@ test("local offline job completes with every dashboard artifact", async () => {
       manifestSha256: string;
     };
     assert.equal(storedPin.bundle, "brainstorm");
-    assert.equal(storedPin.version, "0.1.0");
+    assert.equal(storedPin.version, "0.2.0");
     assert.match(storedPin.manifestSha256, /^[a-f0-9]{64}$/);
     appendFileSync(
       join(workspace, "workspace", "jobs", jobId, "events.jsonl"),
@@ -624,7 +624,7 @@ test("local offline job completes with every dashboard artifact", async () => {
       })}\n`,
     );
     detail = await server.manager.detail(jobId);
-    assert.equal(detail.stages.length, 8);
+    assert.equal(detail.stages.length, 9);
     assert.ok(detail.stages.every((stage) => stage.status === "completed"));
     assert.ok(detail.stages[0]!.id === "process-input" && detail.stages[0].output);
     assert.ok(detail.stages[1]!.id === "decompose-experts" && detail.stages[1].experts);
@@ -661,10 +661,16 @@ test("local offline job completes with every dashboard artifact", async () => {
       ),
     );
     assert.ok(
-      detail.stages[6]!.id === "synthesize-proposal" &&
-      detail.stages[6].proposal,
+      detail.stages[6]!.id === "bridge-audit" &&
+      detail.stages[6].bridge &&
+      detail.stages[6].bridge.noveltyAudit.length > 0,
+      "the integration audit stage carries the bridge report",
     );
-    assert.ok(detail.stages[7]!.id === "done" && detail.stages[7].summary);
+    assert.ok(
+      detail.stages[7]!.id === "synthesize-proposal" &&
+      detail.stages[7].proposal,
+    );
+    assert.ok(detail.stages[8]!.id === "done" && detail.stages[8].summary);
   } finally {
     await server.close();
     rmSync(workspace, { recursive: true, force: true });
@@ -1059,7 +1065,8 @@ test("manual gate can shrink, complete, and reload after restart", async () => {
     assert.ok(listed.value.some((job) => job.jobId === jobId && job.status === "completed"));
     const reloaded = await requestJson<JobDetail>(server, `/api/jobs/${jobId}`);
     assert.equal(reloaded.value.status, "completed");
-    assert.ok(reloaded.value.stages[6]!.id === "synthesize-proposal");
+    assert.ok(reloaded.value.stages[6]!.id === "bridge-audit");
+    assert.ok(reloaded.value.stages[7]!.id === "synthesize-proposal");
   } finally {
     await server.close();
     rmSync(workspace, { recursive: true, force: true });

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 type Theme = "light" | "dark";
 
@@ -31,108 +31,124 @@ function effectFactory(module: unknown): VantaFactory {
 /** Matches the .ambient-vanta opacity transition in theme.css, plus margin. */
 const DISPOSE_AFTER_MS = 700;
 
-async function createEffects(
+async function createEffect(
   theme: Theme,
-  hosts: readonly HTMLDivElement[],
-): Promise<VantaInstance[]> {
+  host: HTMLDivElement,
+): Promise<VantaInstance> {
   if (theme === "dark") {
     const [module, THREE] = await Promise.all([
       import("vanta/dist/vanta.halo.min"),
       import("three"),
     ]);
     const factory = effectFactory(module);
-    return hosts.map((host, index) =>
-      factory({
-        el: host,
-        THREE,
-        mouseControls: false,
-        touchControls: false,
-        gyroControls: false,
-        minWidth: 1,
-        backgroundColor: 0x121212,
-        baseColor: 0x17346d,
-        color2: 0x6ea0ff,
-        amplitudeFactor: 0.35,
-        ringFactor: 0.8,
-        rotationFactor: 0.12,
-        // Place each halo's dark core beneath the opaque dashboard;
-        // only the outer waves remain visible in the side canvas.
-        xOffset: index === 0 ? 0.65 : -0.65,
-        size: 2.1,
-        speed: 0.002,
-        mouseEase: false,
-        scale: 1.25,
-        scaleMobile: 1,
-      }),
-    );
-  }
-  const [module, THREE] = await Promise.all([
-    import("vanta/dist/vanta.clouds.min"),
-    import("three"),
-  ]);
-  const factory = effectFactory(module);
-  return hosts.map((host) =>
-    factory({
+    return factory({
       el: host,
       THREE,
       mouseControls: false,
       touchControls: false,
       gyroControls: false,
       minWidth: 1,
-      backgroundColor: 0xfafafa,
-      skyColor: 0xbdd7ed,
-      cloudColor: 0xf8fbff,
-      cloudShadowColor: 0x91abc5,
-      sunColor: 0xfff2cf,
-      sunGlareColor: 0xffead0,
-      sunlightColor: 0xffffff,
-      speed: 0.25,
+      backgroundColor: 0x121212,
+      baseColor: 0x17346d,
+      color2: 0x6ea0ff,
+      amplitudeFactor: 0.4,
+      ringFactor: 0.9,
+      // Rotation and speed are what make the rings read as concentric motion
+      // rather than a still image; kept low enough to stay peripheral.
+      rotationFactor: 0.3,
+      speed: 0.45,
+      // Centred: the vignette hides the dark core, so the rings radiate out of
+      // the page's middle and reach every margin together.
+      xOffset: 0,
+      yOffset: 0,
+      size: 2,
       mouseEase: false,
-      scale: 4,
-      scaleMobile: 8,
-    }),
-  );
+      // The scene now covers the viewport rather than two narrow strips, so it
+      // renders at half device resolution to keep the pixel cost comparable.
+      scale: 2,
+      scaleMobile: 2,
+    });
+  }
+  const [module, THREE] = await Promise.all([
+    import("vanta/dist/vanta.clouds.min"),
+    import("three"),
+  ]);
+  const factory = effectFactory(module);
+  return factory({
+    el: host,
+    THREE,
+    mouseControls: false,
+    touchControls: false,
+    gyroControls: false,
+    minWidth: 1,
+    backgroundColor: 0xfafafa,
+    skyColor: 0xbdd7ed,
+    cloudColor: 0xf8fbff,
+    cloudShadowColor: 0x91abc5,
+    sunColor: 0xfff2cf,
+    sunGlareColor: 0xffead0,
+    sunlightColor: 0xffffff,
+    speed: 0.4,
+    mouseEase: false,
+    scale: 4,
+    scaleMobile: 4,
+  });
 }
 
 /**
- * Decorative Vanta layers rendered only in the left/right side margins. Theme
- * switches crossfade between per-theme host elements via CSS opacity, then
- * destroy the hidden theme's effects: at rest exactly one theme's WebGL loops
- * run, so the switch is smooth without a lasting rendering cost.
+ * Mirrors the CSS that hides the backdrop; kept in sync with theme.css.
+ * Width alone must not classify a portrait desktop monitor as mobile.
+ */
+const SUPPRESSED_QUERY =
+  "(max-width: 720px), (hover: none) and (pointer: coarse), (prefers-reduced-motion: reduce)";
+
+function useMediaFlag(query: string): boolean {
+  const [matches, setMatches] = useState(() => window.matchMedia(query).matches);
+  useEffect(() => {
+    // Evaluated live, not just at mount: resizing or moving the window between
+    // monitors has to re-evaluate, not leave the layer where it started.
+    const media = window.matchMedia(query);
+    const onChange = () => setMatches(media.matches);
+    media.addEventListener("change", onChange);
+    return () => media.removeEventListener("change", onChange);
+  }, [query]);
+  return matches;
+}
+
+/**
+ * One decorative Vanta scene per theme, covering the viewport and centred on it,
+ * revealed only in the margin around the reading column (the vignette lives in
+ * theme.css). Vanta resizes its own canvas with the window, so the same scene
+ * serves any window shape. Theme switches crossfade between the two scenes and
+ * then destroy the hidden one, so at rest exactly one WebGL loop runs.
  */
 export function AmbientBackdrop({ theme }: { theme: Theme }) {
-  const darkLeftRef = useRef<HTMLDivElement>(null);
-  const darkRightRef = useRef<HTMLDivElement>(null);
-  const lightLeftRef = useRef<HTMLDivElement>(null);
-  const lightRightRef = useRef<HTMLDivElement>(null);
-  const instancesRef = useRef<Record<Theme, VantaInstance[]>>({
-    light: [],
-    dark: [],
-  });
+  const darkRef = useRef<HTMLDivElement>(null);
+  const lightRef = useRef<HTMLDivElement>(null);
+  const instancesRef = useRef<Partial<Record<Theme, VantaInstance>>>({});
   const disposeTimerRef = useRef<number | undefined>(undefined);
+  const suppressed = useMediaFlag(SUPPRESSED_QUERY);
 
   useEffect(() => {
-    if (
-      window.matchMedia("(max-width: 1180px)").matches ||
-      window.matchMedia("(prefers-reduced-motion: reduce)").matches
-    ) {
+    if (suppressed) {
+      // The CSS already hides the scenes; also stop the WebGL loops.
+      for (const key of ["light", "dark"] as const) {
+        instancesRef.current[key]?.destroy();
+        delete instancesRef.current[key];
+      }
       return;
     }
     let cancelled = false;
     window.clearTimeout(disposeTimerRef.current);
 
-    const hosts = (
-      theme === "dark"
-        ? [darkLeftRef.current, darkRightRef.current]
-        : [lightLeftRef.current, lightRightRef.current]
-    ).filter((host): host is HTMLDivElement => host !== null);
+    const host = theme === "dark" ? darkRef.current : lightRef.current;
 
     const ensure = async () => {
-      if (hosts.length === 0 || instancesRef.current[theme].length > 0) return;
+      if (host === null || instancesRef.current[theme] !== undefined) return;
       try {
-        const created = await createEffects(theme, hosts);
+        const created = await createEffect(theme, host);
         if (cancelled) {
-          created.forEach((effect) => effect.destroy());
+          created.destroy();
           return;
         }
         instancesRef.current[theme] = created;
@@ -146,21 +162,21 @@ export function AmbientBackdrop({ theme }: { theme: Theme }) {
     // Once the CSS crossfade finishes, stop the hidden theme's render loop.
     const other: Theme = theme === "dark" ? "light" : "dark";
     disposeTimerRef.current = window.setTimeout(() => {
-      instancesRef.current[other].forEach((effect) => effect.destroy());
-      instancesRef.current[other] = [];
+      instancesRef.current[other]?.destroy();
+      delete instancesRef.current[other];
     }, DISPOSE_AFTER_MS);
 
     return () => {
       cancelled = true;
     };
-  }, [theme]);
+  }, [theme, suppressed]);
 
   useEffect(
     () => () => {
       window.clearTimeout(disposeTimerRef.current);
       for (const key of ["light", "dark"] as const) {
-        instancesRef.current[key].forEach((effect) => effect.destroy());
-        instancesRef.current[key] = [];
+        instancesRef.current[key]?.destroy();
+        delete instancesRef.current[key];
       }
     },
     [],
@@ -172,23 +188,13 @@ export function AmbientBackdrop({ theme }: { theme: Theme }) {
   return (
     <>
       <div
-        ref={darkLeftRef}
-        className={`ambient-vanta ambient-vanta-left ambient-vanta-dark${hiddenUnless("dark")}`}
+        ref={darkRef}
+        className={`ambient-vanta ambient-vanta-dark${hiddenUnless("dark")}`}
         aria-hidden
       />
       <div
-        ref={darkRightRef}
-        className={`ambient-vanta ambient-vanta-right ambient-vanta-dark${hiddenUnless("dark")}`}
-        aria-hidden
-      />
-      <div
-        ref={lightLeftRef}
-        className={`ambient-vanta ambient-vanta-left ambient-vanta-light${hiddenUnless("light")}`}
-        aria-hidden
-      />
-      <div
-        ref={lightRightRef}
-        className={`ambient-vanta ambient-vanta-right ambient-vanta-light${hiddenUnless("light")}`}
+        ref={lightRef}
+        className={`ambient-vanta ambient-vanta-light${hiddenUnless("light")}`}
         aria-hidden
       />
     </>

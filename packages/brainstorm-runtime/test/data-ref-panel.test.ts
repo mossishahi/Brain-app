@@ -4,6 +4,7 @@ import test from "node:test";
 import { artifactSchemas, type BindValue } from "@brainstorm-agentic/content";
 import {
   Scope,
+  systemPromptText,
   textBlock,
   userMessage,
   type AgentTask,
@@ -195,11 +196,14 @@ test("generic agent adapter consumes compiled request descriptions and content s
     { modelId: "configured-model", system: "Deployment policy" },
   );
   assert.equal(request.modelId, "configured-model");
-  assert.match(request.system ?? "", /Deployment policy[\s\S]*Rendered content instructions/);
+  assert.match(
+    systemPromptText(request.system) ?? "",
+    /Deployment policy[\s\S]*Rendered content instructions/,
+  );
   assert.equal(request.responseFormat?.type, "jsonSchema");
 
   const value = {
-    type: "research question",
+    type: "research idea",
     title: "Title",
     question: "Question",
     context: "",

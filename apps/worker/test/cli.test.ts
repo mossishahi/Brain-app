@@ -122,6 +122,20 @@ test("manual gate suspends; resume across a fresh runtime instance completes fro
   }
 });
 
+/** Distinct first-pass member indices that actually executed, from the journal. */
+function firstPassMembers(root: string, runId: string): number[] {
+  const checkpoint = JSON.parse(
+    readFileSync(join(root, runId, "checkpoint.json"), "utf8"),
+  ) as { journal: Array<{ key?: string }> };
+  const indices = new Set<number>();
+  for (const entry of checkpoint.journal) {
+    if (!entry.key?.includes("/first-pass/")) continue;
+    const match = entry.key.match(/\/member\[(\d+)\]\//);
+    if (match) indices.add(Number(match[1]));
+  }
+  return [...indices].sort();
+}
+
 test("gate shrink action reduces the seated panel before the first pass", async () => {
   const root = tempRoot();
   try {
@@ -144,6 +158,67 @@ test("gate shrink action reduces the seated panel before the first pass", async 
       responses: { [gateKey]: { action: "shrink", members: ["member-1", "member-2"] } },
     });
     assert.equal(finished.status, "completed");
+    assert.deepEqual(
+      firstPassMembers(root, runId),
+      [0, 1],
+      "only the retained members may reach the first pass",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an explicit gate answer wins over --auto-approve on resume", () => {
+  // Regression: the server may pass --auto-approve on a resume (settings
+  // drift), which used to compile the gate as an auto-approve activity that
+  // silently discarded the human's shrink and ran the full panel.
+  const root = tempRoot();
+  try {
+    const runId = "bsa_test_gate_beats_auto";
+    const cli = new URL("../src/main.js", import.meta.url);
+    const common = [
+      "--offline",
+      "--run-id",
+      runId,
+      "--session-root",
+      root,
+      "--content-dir",
+      registryContentDir,
+    ];
+    const started = spawnSync(
+      process.execPath,
+      [cli.pathname, "run", "--topic", "Shrink must survive auto-approve", ...common],
+      { encoding: "utf8" },
+    );
+    assert.equal(started.status, 0, started.stderr);
+    const checkpoint = JSON.parse(
+      readFileSync(join(root, runId, "checkpoint.json"), "utf8"),
+    ) as { status: string; pendingGates: Array<{ gateKey: string }> };
+    assert.equal(checkpoint.status, "suspended");
+    const gateKey = checkpoint.pendingGates[0]!.gateKey;
+
+    const resumed = spawnSync(
+      process.execPath,
+      [
+        cli.pathname,
+        "resume",
+        ...common,
+        "--auto-approve",
+        "--gate",
+        `${gateKey}=shrink:member-1,member-2`,
+      ],
+      { encoding: "utf8" },
+    );
+    assert.equal(resumed.status, 0, resumed.stderr);
+    const finished = JSON.parse(
+      readFileSync(join(root, runId, "checkpoint.json"), "utf8"),
+    ) as { status: string; journal: Array<{ key?: string }> };
+    assert.equal(finished.status, "completed");
+    assert.ok(
+      !finished.journal.some((entry) => entry.key?.includes("confirm-panel-auto")),
+      "the gate must not be auto-approved when an explicit answer was given",
+    );
+    assert.deepEqual(firstPassMembers(root, runId), [0, 1]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

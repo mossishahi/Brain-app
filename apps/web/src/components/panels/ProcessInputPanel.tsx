@@ -90,8 +90,9 @@ export function ProcessInputBody({
   return (
     <div>
       <div className="fact-row">
+        {/* What kind of submission this is; shapes the First pass primary tab. */}
         <span className="chip chip-accent">{output.type}</span>
-        <span className="chip chip-dim">{output.cotSteps} reasoning steps</span>
+        <span className="chip chip-dim">{output.cotSteps} chain steps</span>
       </div>
       <h3 className="artifact-title">{output.title}</h3>
       <blockquote className="question">{output.question}</blockquote>

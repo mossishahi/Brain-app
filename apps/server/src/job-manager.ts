@@ -741,7 +741,14 @@ export class JobManager {
       throw new Error("approve does not accept a members list");
     }
 
-    const settings = record.executionSettings ?? this.settings.get();
+    // The human just answered this gate, so the resume is a manual-mode
+    // continuation no matter what the settings say now: `--auto-approve` on a
+    // gate-answering resume would compile the gate as an auto-approve activity
+    // and silently discard the answer (e.g. a panel shrink).
+    const settings: ServerSettings = {
+      ...(record.executionSettings ?? this.settings.get()),
+      panelConfirmation: "manual",
+    };
     const command = this.command(record, "resume", settings, answer);
     const number = (record.submissionCount ?? 1) + 1;
     const script = this.writeScript(

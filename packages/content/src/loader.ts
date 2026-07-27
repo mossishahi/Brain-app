@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { ZodType } from "zod";
 
 import { parseFrontMatter } from "./frontmatter.js";
+import type { OutputShape } from "./schemas/artifacts.js";
 import {
   activitiesSchema,
   capabilitiesSchema,
@@ -12,6 +13,8 @@ import {
   skillMetaSchema,
   verdictsCatalogSchema,
   workflowSchema,
+  type InputTypesCatalog,
+  type LoadedInputTypes,
   type Skill,
   type WorkflowDefinition,
 } from "./schemas/workflow.js";
@@ -170,9 +173,38 @@ export function readContentBundle(contentDir: string): ContentBundle {
     routes,
     activities,
     capabilities,
-    catalogs: { inputTypes, verdicts, departments },
+    catalogs: {
+      inputTypes: projectInputTypes(inputTypes),
+      verdicts,
+      departments,
+    },
     skills,
   };
+}
+
+/**
+ * Flattens the on-disk input-types catalog into the bind-friendly projections
+ * of `LoadedInputTypes`. Description-only entries (pre-0.2.0 bundles) project
+ * into `types` alone; full definitions also fill `shapes`, `guidance`, and
+ * `outlines`. Insertion order is preserved everywhere — it is the processor's
+ * disambiguation order.
+ */
+function projectInputTypes(catalog: InputTypesCatalog): LoadedInputTypes {
+  const types: Record<string, string> = {};
+  const shapes: Record<string, OutputShape> = {};
+  const guidance: Record<string, string> = {};
+  const outlines: Record<string, Record<string, string>> = {};
+  for (const [name, entry] of Object.entries(catalog.types)) {
+    if (typeof entry === "string") {
+      types[name] = entry;
+      continue;
+    }
+    types[name] = entry.description;
+    shapes[name] = entry.shape;
+    guidance[name] = entry.guidance;
+    outlines[name] = entry.outline;
+  }
+  return { version: catalog.version, types, shapes, guidance, outlines };
 }
 
 /**
@@ -254,7 +286,11 @@ export function loadControlContent(
     routes,
     activities,
     capabilities,
-    catalogs: { inputTypes, verdicts, departments },
+    catalogs: {
+      inputTypes: projectInputTypes(inputTypes),
+      verdicts,
+      departments,
+    },
     skills: {},
   };
   const validation = validateBundle(bundle, { availableRoleNames });

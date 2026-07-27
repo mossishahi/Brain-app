@@ -19,6 +19,7 @@ export const STAGE_GRAPH_LABELS: Record<StageId, string> = {
   "confirm-panel": "Confirm",
   "first-pass": "First pass",
   "review-members": "Review",
+  "bridge-audit": "Audit",
   "synthesize-proposal": "Proposal",
   done: "Done",
 };
@@ -31,6 +32,7 @@ export const STAGE_TITLES: Record<StageId, string> = {
   "confirm-panel": "Confirm panel",
   "first-pass": "First pass",
   "review-members": "Review",
+  "bridge-audit": "Integration audit",
   "synthesize-proposal": "Proposal",
   done: "Done",
 };
@@ -83,6 +85,7 @@ const RUNNING_STAGE_LINES: Partial<Record<StageId, string>> = {
   "select-panel": "selecting panel…",
   "confirm-panel": "confirming panel…",
   "first-pass": "first pass…",
+  "bridge-audit": "auditing across fields…",
   "synthesize-proposal": "synthesizing proposal…",
   done: "finishing…",
 };

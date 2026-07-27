@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { OUTPUT_SHAPES, type OutputShape } from "./artifacts.js";
+
 /**
  * Schema for the declarative workflow definition, the logical model routes,
  * the executable-capability catalog, and skill front matter. Everything here
@@ -499,6 +501,14 @@ export const skillMetaSchema = z
     description: z.string().min(1),
     /** Template variables the body may use as {{var}}; bound by the workflow node. */
     vars: z.array(identifier).default([]),
+    /**
+     * Vars delivered to the model as task data instead of being rendered into
+     * the instruction body (roles only; a subset of `vars`). Declaring any
+     * payload var asserts that every remaining var is per-call-stable framing,
+     * which is what lets the runtime mark the rendered instructions as a
+     * cacheable system-prompt prefix. Payload vars must not appear as {{var}}.
+     */
+    payload: z.array(identifier).default([]),
     /** Technique skills folded into this role's instructions (roles only). */
     techniques: z.array(identifier).default([]),
     /** Executable capabilities the host must provide (from the capability catalog). */
@@ -517,6 +527,21 @@ export const skillMetaSchema = z
     if (meta.kind === "technique" && meta.techniques.length > 0) {
       ctx.addIssue({ code: "custom", path: ["techniques"], message: "technique skills cannot include other techniques" });
     }
+    if (meta.kind === "technique" && meta.payload.length > 0) {
+      ctx.addIssue({ code: "custom", path: ["payload"], message: "technique skills cannot declare payload vars" });
+    }
+    for (const name of meta.payload) {
+      if (!meta.vars.includes(name)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["payload"],
+          message: `payload var "${name}" is not declared in vars`,
+        });
+      }
+    }
+    if (new Set(meta.payload).size !== meta.payload.length) {
+      ctx.addIssue({ code: "custom", path: ["payload"], message: "payload vars must be unique" });
+    }
   });
 
 export type SkillMeta = z.infer<typeof skillMetaSchema>;
@@ -533,15 +558,64 @@ export interface Skill {
 // catalogs
 // ---------------------------------------------------------------------------
 
+/**
+ * One submission type, fully described in data. This is the single reference
+ * the pipeline obeys: the record key is the type's name (rendered verbatim
+ * into prompts as `{{type}}`), `description` is the "what it is / choose when"
+ * text the processor classifies against, `shape` names which code-owned output
+ * structure members produce for it, `guidance` is the reviewing rubric for the
+ * commentor/judge, and `outline` maps each output section (a literal field of
+ * the shape's schema) to what it must contain.
+ */
+export const inputTypeDefinitionSchema = z
+  .object({
+    description: z.string().min(1),
+    shape: z.enum(OUTPUT_SHAPES),
+    guidance: z.string().min(1),
+    outline: z.record(z.string().min(1), z.string().min(1)),
+  })
+  .strict();
+
+export type InputTypeDefinition = z.infer<typeof inputTypeDefinitionSchema>;
+
+/**
+ * catalog/input-types.json. Since bundle 0.2.0 each entry is a full
+ * `InputTypeDefinition`; entries may also be plain "choose when" strings,
+ * which is how pre-0.2.0 immutable bundles remain loadable. Entry order is
+ * meaningful: it is the processor's disambiguation order, and the LAST entry
+ * is the residual default.
+ */
 export const inputTypesCatalogSchema = z
   .object({
     version: semver,
-    /** Classification key -> "choose when" guidance shown to the processor. */
-    types: z.record(z.string().min(1), z.string().min(1)),
+    types: z.record(
+      z.string().min(1),
+      z.union([z.string().min(1), inputTypeDefinitionSchema]),
+    ),
   })
   .strict();
 
 export type InputTypesCatalog = z.infer<typeof inputTypesCatalogSchema>;
+
+/**
+ * The in-memory view of catalog/input-types.json the loader builds and the
+ * runtime serializes into state: flat projections so workflow binds stay
+ * simple bracket lookups (`catalog.inputTypes.outlines[input.type]`, …).
+ * `types` is always the name -> description map (whatever the on-disk format),
+ * so the processor's `typeOptions` bind is identical across bundle versions;
+ * the other projections are empty for pre-0.2.0 description-only bundles.
+ */
+export interface LoadedInputTypes {
+  readonly version: string;
+  /** Type name -> description; the processor's option set, in priority order. */
+  readonly types: Record<string, string>;
+  /** Type name -> output shape (empty for description-only bundles). */
+  readonly shapes: Record<string, OutputShape>;
+  /** Type name -> reviewing rubric (empty for description-only bundles). */
+  readonly guidance: Record<string, string>;
+  /** Type name -> output outline (empty for description-only bundles). */
+  readonly outlines: Record<string, Record<string, string>>;
+}
 
 export const verdictsCatalogSchema = z
   .object({
@@ -595,3 +669,4 @@ export const departmentsCatalogSchema = z
   .strict();
 
 export type DepartmentsCatalog = z.infer<typeof departmentsCatalogSchema>;
+

@@ -31,6 +31,20 @@
   --ok-dark: #0a3a1e;
   --warn: #d99a2b;
   --bad: #d5484d;
+  --border-step-tint: #ffffff;
+}
+
+/*
+ * Nested panel stroke ladder: each nesting level (stage > card > inner box >
+ * nested box) draws its border one 10% step away from its parent's, so the
+ * hierarchy stays legible. Dark theme steps lighter; light theme steps darker
+ * (lighter-than-parent would dissolve into the white page).
+ */
+:root {
+  --border-step-tint: #000000;
+  --border-1: color-mix(in srgb, var(--border) 90%, var(--border-step-tint));
+  --border-2: color-mix(in srgb, var(--border-1) 90%, var(--border-step-tint));
+  --border-3: color-mix(in srgb, var(--border-2) 90%, var(--border-step-tint));
 }
 
 /* ------------------------------------------------------------------ resets */
@@ -86,31 +100,50 @@ body {
 }
 
 /*
- * Vanta renders in two narrow side canvases only. Each edge fades before the
- * central 1096px application column, keeping animation away from panel content.
+ * One viewport-sized scene per theme, centred on the page, so the halo's rings
+ * and the cloud field radiate concentrically around the middle of the window and
+ * the same motion reaches every margin at once. Edge-anchored strips cannot do
+ * this: each one shows a lone arc belonging to a circle whose centre sits far
+ * off-page, which reads as static.
+ *
+ * A soft radial vignette hides the middle, so the animation only ever shows in
+ * the empty margin around the reading column. The clear ellipse tracks the
+ * viewport (vw/vh), which is also what keeps the scene's aspect usable in any
+ * window shape — both shaders degrade to flat colour when forced into an extreme
+ * aspect, so the scene is never cropped to a sliver or a letterbox.
  */
 .ambient-vanta {
+  --ambient-clear-x: clamp(300px, 44vw, 620px);
+  --ambient-clear-y: clamp(300px, 40vh, 760px);
   position: fixed !important;
-  top: 0;
-  bottom: 0;
-  width: max(0px, calc((100vw - 920px) / 2));
+  inset: 0;
   z-index: 0;
   pointer-events: none;
   transition: opacity 600ms ease;
+  -webkit-mask-image: radial-gradient(
+    ellipse var(--ambient-clear-x) var(--ambient-clear-y) at 50% 46%,
+    transparent 0,
+    transparent 55%,
+    #000 100%
+  );
+  mask-image: radial-gradient(
+    ellipse var(--ambient-clear-x) var(--ambient-clear-y) at 50% 46%,
+    transparent 0,
+    transparent 55%,
+    #000 100%
+  );
 }
 
-.ambient-vanta-left {
-  left: 0;
-  -webkit-mask-image: linear-gradient(90deg, #000 0 70%, transparent 100%);
-  mask-image: linear-gradient(90deg, #000 0 70%, transparent 100%);
+.ambient-vanta canvas {
+  width: 100% !important;
+  height: 100% !important;
 }
 
-.ambient-vanta-right {
-  right: 0;
-  -webkit-mask-image: linear-gradient(270deg, #000 0 70%, transparent 100%);
-  mask-image: linear-gradient(270deg, #000 0 70%, transparent 100%);
-}
-
+/*
+ * Per-theme strength, checked against renders: the clouds need presence to read
+ * as sky at all, while the halo's ring turns into a plum wash over the whole
+ * page above ~0.2.
+ */
 .ambient-vanta-light {
   opacity: 0.72;
 }
@@ -119,8 +152,8 @@ body {
   opacity: 0.15;
 }
 
-/* Crossfade target; the hidden theme's WebGL loop is destroyed after the fade. */
-.ambient-vanta-hidden {
+/* Crossfade target; two classes deep so it outranks the per-theme opacities. */
+.ambient-vanta.ambient-vanta-hidden {
   opacity: 0;
 }
 
@@ -139,12 +172,12 @@ body {
   mix-blend-mode: color;
 }
 
-.ambient-vanta canvas {
-  width: 100% !important;
-  height: 100% !important;
-}
-
-@media (max-width: 1180px), (prefers-reduced-motion: reduce) {
+/*
+ * Suppress only on genuinely compact/mobile input surfaces, not portrait
+ * desktop monitors. The same query is mirrored by AmbientBackdrop.tsx so its
+ * WebGL loops stop whenever these canvases are hidden.
+ */
+@media (max-width: 720px), (hover: none) and (pointer: coarse), (prefers-reduced-motion: reduce) {
   .ambient-vanta {
     display: none;
   }
@@ -287,6 +320,22 @@ textarea,
 
 .chip-dim {
   color: var(--text-dim);
+}
+
+/* Tone chips for act verdicts, statuses, severities, and confidence levels. */
+.chip-ok {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+.chip-warn {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.chip-bad {
+  border-color: var(--bad);
+  color: var(--bad);
 }
 
 .tag {
@@ -567,7 +616,7 @@ input[type="radio"] {
 
 .attach-zone {
   min-height: 0;
-  flex: 1;
+  flex: none;
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -1052,12 +1101,13 @@ button.server-file-name {
   position: relative;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  min-height: 176px;
+  /* Deliberately tiny: the footer strip sits snug under the last text line. */
+  gap: 4px;
+  min-height: 264px;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 26px;
-  padding: 24px 22px 16px;
+  padding: 24px 22px 12px;
   box-shadow: 0 14px 34px color-mix(in srgb, var(--text) 8%, transparent);
   transition:
     background-color 120ms ease,
@@ -1073,7 +1123,7 @@ button.server-file-name {
 .chatbox textarea {
   display: block;
   width: 100%;
-  flex: 1;
+  flex: none;
   border: none;
   background: transparent;
   resize: none;
@@ -1081,8 +1131,11 @@ button.server-file-name {
   font: inherit;
   font-size: 17px;
   line-height: 26px;
-  min-height: 70px;
-  max-height: 218px;
+  /* Together with padding, the 4px gap, and the 40px footer, these exact
+     bounds make the whole panel 264px at rest (1.5 x the old 176px) and
+     528px at its cap (3 x the old default) before the textarea scrolls. */
+  min-height: 182px;
+  max-height: 446px;
   overflow-y: auto;
   padding: 0;
 }
@@ -1123,7 +1176,7 @@ button.server-file-name {
   justify-content: space-between;
   gap: 16px;
   min-height: 40px;
-  margin-top: auto;
+  margin-top: 0;
 }
 
 .composer-footer-left,
@@ -1241,15 +1294,15 @@ button.server-file-name {
   }
 
   .chatbox {
-    min-height: 156px;
+    min-height: 234px;
     border-radius: 20px;
-    padding: 18px 16px 12px;
+    padding: 18px 16px 10px;
   }
 
   .chatbox textarea {
     font-size: 15px;
     line-height: 23px;
-    min-height: 62px;
+    min-height: 160px;
   }
 
   .composer-footer {
@@ -1567,8 +1620,9 @@ button.server-file-name {
   stroke-width: 2;
 }
 
+/* A deliberately implicit blink: dark grey in both themes, never a signal color. */
 .node-pulse {
-  fill: var(--accent);
+  fill: #565656;
   opacity: 0.12;
   animation: soft-pulse 1.6s ease-in-out infinite;
   pointer-events: none;
@@ -1613,15 +1667,10 @@ button.server-file-name {
 }
 
 /*
- * Dark theme only: progressing pulses blink in a low-opacity light green and
- * edges between two completed phases turn dark green. Light theme keeps its
- * original accent/border colors.
+ * Dark theme only: the header activity dot blinks in a low-opacity light
+ * green and edges between two completed phases turn dark green. Light theme
+ * keeps its original accent/border colors.
  */
-:root[data-theme="dark"] .node-pulse {
-  fill: #86efac;
-  opacity: 0.14;
-}
-
 :root[data-theme="dark"] .dot-accent.pulse {
   background: color-mix(in srgb, #86efac 60%, transparent);
 }
@@ -2270,6 +2319,31 @@ button.server-file-name {
   font-size: 13px;
 }
 
+/* Itemized act findings: critique issues, interpretation candidates, misconceptions. */
+.issue-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.issue-item {
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+.issue-item:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+
+.issue-item .fact-row {
+  margin-bottom: 4px;
+}
+
 .paper-table,
 .action-table {
   width: 100%;
@@ -2627,4 +2701,42 @@ button.server-file-name {
     height: auto;
     max-height: 300px;
   }
+}
+
+/* ------------------------------------------- nested panel stroke ladder */
+/*
+ * Depth assignments for the ladder declared with the theme variables.
+ * Level 0 (stage panels) keeps --border; every container below steps once.
+ */
+
+/* Level 1 — cards and columns sitting directly inside a stage panel. */
+.activity-feed,
+.tree-col,
+.seat-card,
+.member-card,
+.cell,
+.round-block,
+.band-col {
+  border-color: var(--border-1);
+}
+
+/* Level 2 — boxes inside those cards. */
+.cell-redev,
+.comment-chip,
+.judge-card,
+.member-card .paper-table th,
+.member-card .paper-table td,
+.member-card .issue-item,
+.member-card .code-block,
+.round-block .code-block,
+.seat-card .tag,
+.tree-col .tag {
+  border-color: var(--border-2);
+}
+
+/* Level 3 — evidence blocks nested one level deeper still. */
+.comment-chip .code-block,
+.judge-card .code-block,
+.member-card .issue-item .code-block {
+  border-color: var(--border-3);
 }

@@ -68,6 +68,9 @@ export function createInitialState(
     session: { submission },
     params,
     catalog: {
+      // The projected input-types reference: types (name -> description, in
+      // disambiguation order) plus shapes/guidance/outlines projections, all
+      // sourced from the bundle's single catalog/input-types.json.
       inputTypes: asJson<JsonObject>(bundle.catalogs.inputTypes),
       verdicts,
       departments: asJson<JsonObject>(bundle.catalogs.departments),

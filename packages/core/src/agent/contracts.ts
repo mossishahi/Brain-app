@@ -1,5 +1,10 @@
 import type { SerializedError } from "../errors.js";
-import type { ModelMessage, ProviderOptions, ResponseFormat } from "../model/request.js";
+import type {
+  ModelMessage,
+  ProviderOptions,
+  ResponseFormat,
+  SystemPrompt,
+} from "../model/request.js";
 import type { CapabilityRequirements } from "../model/provider.js";
 import type { TokenUsage } from "../model/response.js";
 import type { ToolChoice } from "../model/tools.js";
@@ -13,7 +18,7 @@ import type { ResolvedCapabilityPlan } from "../capability/types.js";
  */
 export interface AgentModelRequestDescription {
   readonly modelId?: string;
-  readonly system?: string;
+  readonly system?: SystemPrompt;
   readonly messages: readonly ModelMessage[];
   readonly toolChoice?: ToolChoice;
   readonly maxOutputTokens?: number;

@@ -271,11 +271,17 @@ async function main(): Promise<void> {
           resume: true,
         })
       : undefined;
+    // A resume that carries an explicit gate answer must compile the gate as a
+    // real (manual) gate: in auto-approve mode the gate becomes an auto-approve
+    // activity that never reads the answer, silently discarding e.g. a panel
+    // shrink. The run only suspends on gates in manual mode anyway, so a
+    // gate-answering resume is by definition a manual-mode continuation.
+    const resumeAutoApprove = autoApprove && Object.keys(responses).length === 0;
     const runtime = buildRuntime({
       providerConfig: providerConfigFromEnv(process.env, offline),
       checkpoints: new FsCheckpointStore(sessionRoot),
       artifacts: new FsArtifactStore(sessionRoot, runId),
-      autoApproveGates: autoApprove,
+      autoApproveGates: resumeAutoApprove,
       bundle: lazy?.bundle ?? loadContent(contentDir!),
       ...(lazy ? { skillResolver: lazy.skillResolver } : {}),
       ...(onEvent !== undefined ? { onEvent } : {}),

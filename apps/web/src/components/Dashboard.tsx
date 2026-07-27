@@ -38,6 +38,7 @@ import { SelectPanelBody } from "./panels/SelectPanelPanel";
 import { GateCard, GateDecided } from "./panels/ConfirmPanelPanel";
 import { FirstPassBody } from "./panels/FirstPassPanel";
 import { ReviewBody } from "./panels/ReviewPanel";
+import { BridgeAuditBody } from "./panels/BridgeAuditPanel";
 import { ProposalActions, ProposalBody } from "./panels/ProposalPanel";
 import { DoneBody } from "./panels/DonePanel";
 
@@ -331,6 +332,10 @@ export function Dashboard({ jobId }: { jobId: string }) {
         return stage && (stage.members.length > 0 || stage.cursor) ? (
           <ReviewBody stage={stage} />
         ) : null;
+      }
+      case "bridge-audit": {
+        const stage = stageOf(job, id);
+        return stage?.bridge ? <BridgeAuditBody stage={stage} /> : null;
       }
       case "synthesize-proposal": {
         const stage = stageOf(job, id);
