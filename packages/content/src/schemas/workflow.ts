@@ -584,6 +584,13 @@ export type InputTypeDefinition = z.infer<typeof inputTypeDefinitionSchema>;
  * which is how pre-0.2.0 immutable bundles remain loadable. Entry order is
  * meaningful: it is the processor's disambiguation order, and the LAST entry
  * is the residual default.
+ *
+ * `shapeRules` (optional) maps a shape id to the mechanical-rules block the
+ * developing skills receive as `{{shapeGuide}}`: exact paragraph counts,
+ * permitted enum values, and what a chain step is for that shape. The rules
+ * are prose mirrors of the code-owned artifact schemas — the runtime enforces
+ * the structure regardless — and must contain no template syntax, because
+ * they are injected into already-rendered instructions.
  */
 export const inputTypesCatalogSchema = z
   .object({
@@ -592,6 +599,7 @@ export const inputTypesCatalogSchema = z
       z.string().min(1),
       z.union([z.string().min(1), inputTypeDefinitionSchema]),
     ),
+    shapeRules: z.record(z.string().min(1), z.string().min(1)).optional(),
   })
   .strict();
 
@@ -615,6 +623,11 @@ export interface LoadedInputTypes {
   readonly guidance: Record<string, string>;
   /** Type name -> output outline (empty for description-only bundles). */
   readonly outlines: Record<string, Record<string, string>>;
+  /**
+   * Type name -> the mechanical rules of the type's shape (resolved through
+   * `shapeRules`; empty for bundles that keep the rules in the skill body).
+   */
+  readonly shapeGuides: Record<string, string>;
 }
 
 export const verdictsCatalogSchema = z

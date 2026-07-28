@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   mkdtempSync,
@@ -20,14 +21,17 @@ import {
   type ContentRegistryPin,
 } from "../src/index.js";
 
-const versionRoot =
-  process.env.BRAIN_TEST_CONTENT_DIR ??
-  fileURLToPath(
-    new URL(
-      "../../../../../brain/content/bundles/brainstorm/0.1.0/",
-      import.meta.url,
-    ),
+const brainRepoRoot = fileURLToPath(new URL("../../../../../brain/", import.meta.url));
+function materializedVersionDir(version: string): string {
+  execFileSync(
+    process.execPath,
+    [join(brainRepoRoot, "scripts", "materialize-store.mjs"), "--quiet"],
+    { stdio: "inherit" },
   );
+  return `${join(brainRepoRoot, ".registry-store", "bundles", "brainstorm", version)}/`;
+}
+const versionRoot =
+  process.env.BRAIN_TEST_CONTENT_DIR ?? materializedVersionDir("0.1.0");
 
 function fixturePin(): ContentRegistryPin {
   const manifest = parseContentRegistryManifest(

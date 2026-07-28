@@ -26,6 +26,7 @@ import type {
 
 import { JobConflictError, JobManager } from "./job-manager.js";
 import type { ContentRegistryRuntimeStatus } from "./model.js";
+import { checkAppUpdate } from "./self-update.js";
 import { RouteCatalog, loadModelCatalog } from "./route-catalog.js";
 import {
   ServerFileBrowser,
@@ -97,6 +98,8 @@ export interface StartBrainServerOptions {
     apiKey: string,
     model: string,
   ) => Promise<void>;
+  /** Check git release tags for a newer app version (real deployments only). */
+  readonly selfUpdateCheck?: boolean;
 }
 
 export interface RunningBrainServer {
@@ -332,6 +335,64 @@ export async function startBrainServer(
   };
   const contentRegistryUrl = options.contentRegistryUrl;
 
+  // Pull-based update discovery. Content: the registry index is polled with
+  // a short cache so the dashboard can show newer published bundles. App:
+  // release tags are checked at startup and daily when enabled (the real
+  // CLI server enables it; tests do not).
+  let registryIndexCache:
+    | { at: number; latest?: string; latestNotes?: string }
+    | undefined;
+  const registryLatest = async (
+    bundle: string,
+  ): Promise<{ latest?: string; latestNotes?: string }> => {
+    if (registryIndexCache && Date.now() - registryIndexCache.at < 60_000) {
+      return registryIndexCache;
+    }
+    let latest: string | undefined;
+    let latestNotes: string | undefined;
+    try {
+      const response = await fetch(`${contentRegistryUrl}/v1/index.json`, {
+        signal: AbortSignal.timeout(2_000),
+      });
+      if (response.ok) {
+        const index = (await response.json()) as {
+          bundles?: Array<{
+            id?: string;
+            latest?: string;
+            releases?: Record<string, { notes?: string }>;
+          }>;
+        };
+        const entry = index.bundles?.find((candidate) => candidate.id === bundle);
+        if (entry && typeof entry.latest === "string") {
+          latest = entry.latest;
+          const notes = entry.releases?.[entry.latest]?.notes;
+          if (typeof notes === "string" && notes.length > 0) latestNotes = notes;
+        }
+      }
+    } catch {
+      // The registry being unreachable never fails the health endpoint.
+    }
+    registryIndexCache = {
+      at: Date.now(),
+      ...(latest ? { latest } : {}),
+      ...(latestNotes ? { latestNotes } : {}),
+    };
+    return registryIndexCache;
+  };
+
+  let appUpdate: Awaited<ReturnType<typeof checkAppUpdate>>;
+  let appUpdateTimer: NodeJS.Timeout | undefined;
+  if (options.selfUpdateCheck === true) {
+    const runCheck = (): void => {
+      void checkAppUpdate(VERSION).then((found) => {
+        appUpdate = found;
+      });
+    };
+    runCheck();
+    appUpdateTimer = setInterval(runCheck, 24 * 60 * 60 * 1000);
+    appUpdateTimer.unref();
+  }
+
   const jobStreams = new Set<SseConnection>();
   const detailStreams = new Map<string, Set<SseConnection>>();
   const routeCatalog = new RouteCatalog();
@@ -391,6 +452,10 @@ export async function startBrainServer(
       const url = new URL(req.url ?? "/", `http://${authority}`);
       const path = url.pathname;
       if (req.method === "GET" && path === "/api/health") {
+        const settings = manager.settings.get();
+        const { latest, latestNotes } = await registryLatest(
+          settings.contentRegistry.bundle,
+        );
         const health: HealthResponse = {
           ok: true,
           version: VERSION,
@@ -402,7 +467,13 @@ export async function startBrainServer(
             ...(contentRegistry.workflows !== undefined
               ? { workflows: contentRegistry.workflows }
               : {}),
+            ...(latest ? { latest } : {}),
+            ...(latestNotes ? { latestNotes } : {}),
+            ...(settings.contentRegistry.version
+              ? { pinnedVersion: settings.contentRegistry.version }
+              : {}),
           },
+          ...(appUpdate && settings.updateCheck !== "off" ? { appUpdate } : {}),
         };
         sendJson(res, 200, health);
         return;
@@ -721,6 +792,7 @@ export async function startBrainServer(
     close: async () => {
       clearInterval(poll);
       clearInterval(registryPoll);
+      if (appUpdateTimer) clearInterval(appUpdateTimer);
       watchers.forEach((entry) => entry.close());
       for (const stream of [...jobStreams]) stream.close();
       for (const streams of detailStreams.values()) {

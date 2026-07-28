@@ -149,6 +149,7 @@ function validateCommonSettings(value: unknown): {
   readonly creditRecovery: Record<string, unknown>;
   readonly contentRegistry: Record<string, unknown>;
   readonly hostTools?: Record<string, unknown>;
+  readonly updateCheck?: "off" | "notify";
 } {
   const input = object(value, "settings");
   const template = input.slurmTemplate;
@@ -193,6 +194,14 @@ function validateCommonSettings(value: unknown): {
     input.hostTools !== undefined
       ? object(input.hostTools, "hostTools")
       : undefined;
+  const updateCheck = input.updateCheck;
+  if (
+    updateCheck !== undefined &&
+    updateCheck !== "off" &&
+    updateCheck !== "notify"
+  ) {
+    throw new Error('updateCheck must be "off" or "notify"');
+  }
   return {
     slurmTemplate: template,
     runner: input.runner,
@@ -201,6 +210,7 @@ function validateCommonSettings(value: unknown): {
     creditRecovery,
     contentRegistry,
     hostTools,
+    ...(updateCheck !== undefined ? { updateCheck } : {}),
   };
 }
 
@@ -242,10 +252,19 @@ function validateContentRegistry(
   if (version && !/^\d+\.\d+\.\d+$/.test(version)) {
     throw new Error("contentRegistry.version must be semantic version x.y.z");
   }
+  const updatePolicy = value.updatePolicy;
+  if (
+    updatePolicy !== undefined &&
+    updatePolicy !== "auto" &&
+    updatePolicy !== "notify"
+  ) {
+    throw new Error('contentRegistry.updatePolicy must be "auto" or "notify"');
+  }
   return {
     url: parsed.toString(),
     bundle,
     ...(version ? { version } : {}),
+    ...(updatePolicy !== undefined ? { updatePolicy } : {}),
   };
 }
 
@@ -395,6 +414,7 @@ function validateStoredSettings(value: unknown): StoredServerSettings {
       agentSdk,
     },
     ...(hostTools !== undefined ? { hostTools } : {}),
+    ...(common.updateCheck !== undefined ? { updateCheck: common.updateCheck } : {}),
   };
 }
 
@@ -482,6 +502,7 @@ function validateSettingsUpdate(value: unknown): ValidatedUpdate {
       slurmTemplate: common.slurmTemplate,
       runner: common.runner,
       panelConfirmation: common.panelConfirmation,
+      ...(common.updateCheck !== undefined ? { updateCheck: common.updateCheck } : {}),
       contentRegistry,
       creditRecovery,
       llm: {

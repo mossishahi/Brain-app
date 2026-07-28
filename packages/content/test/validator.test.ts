@@ -139,6 +139,20 @@ test("rejects a role skill whose technique is missing", () => {
   expectIssue(bundle, "MISSING_TECHNIQUE");
 });
 
+test("rejects a shape-rules dictionary that leaves a mapped shape without a rule", () => {
+  const bundle = freshBundle();
+  const [firstType] = Object.keys(bundle.catalogs.inputTypes.shapeGuides);
+  delete bundle.catalogs.inputTypes.shapeGuides[firstType!];
+  expectIssue(bundle, "INPUT_TYPES_MIXED_FORMAT");
+});
+
+test("rejects template syntax inside a shape rule, which is injected after rendering", () => {
+  const bundle = freshBundle();
+  const [firstType] = Object.keys(bundle.catalogs.inputTypes.shapeGuides);
+  bundle.catalogs.inputTypes.shapeGuides[firstType!] += "\nUse exactly {{cotSteps}} steps.";
+  expectIssue(bundle, "FORBIDDEN_PROMPT_CONTENT");
+});
+
 test("rejects a technique var the including role does not cover as a non-payload var", () => {
   const bundle = freshBundle();
   const technique = bundle.skills["deep-understanding"]!;

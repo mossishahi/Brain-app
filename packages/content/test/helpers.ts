@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,8 +21,24 @@ interface RegistryIndexBundle {
   readonly versions: readonly string[];
 }
 
+const brainRepoRoot = fileURLToPath(new URL("../../../../../brain/", import.meta.url));
+let storeMaterialized = false;
+
+/**
+ * The registry's serving store, materialized from the brain repo's release
+ * tags (the repo itself carries only the editable source tree). Idempotent
+ * and append-only, so sharing the store across suites is safe.
+ */
 function registryRoot(): string {
-  return fileURLToPath(new URL("../../../../../brain/content/", import.meta.url));
+  if (!storeMaterialized) {
+    execFileSync(
+      process.execPath,
+      [join(brainRepoRoot, "scripts", "materialize-store.mjs"), "--quiet"],
+      { stdio: "inherit" },
+    );
+    storeMaterialized = true;
+  }
+  return join(brainRepoRoot, ".registry-store");
 }
 
 function brainstormIndexEntry(): RegistryIndexBundle {

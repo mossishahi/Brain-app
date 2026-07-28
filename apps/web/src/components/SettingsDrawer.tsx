@@ -6,7 +6,7 @@ import type {
   ServerSettings,
   ServerSettingsUpdate,
 } from "@brainstorm-agentic/protocol";
-import { errorMessage, getSettings, putSettings } from "../api";
+import { errorMessage, getHealth, getSettings, putSettings } from "../api";
 import { TrashIcon, XIcon } from "./Icons";
 
 type Provider = "anthropic" | "claude-agent" | "offline";
@@ -22,6 +22,11 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
   const [registryUrl, setRegistryUrl] = useState("");
   const [registryBundle, setRegistryBundle] = useState("brainstorm");
   const [registryVersion, setRegistryVersion] = useState("");
+  const [updatePolicy, setUpdatePolicy] = useState<"auto" | "notify">("auto");
+  const [updateCheck, setUpdateCheck] = useState<"off" | "notify">("notify");
+  const [latestPublished, setLatestPublished] = useState<
+    { version: string; notes?: string } | null
+  >(null);
   const [provider, setProvider] = useState<Provider>("anthropic");
   const [model, setModel] = useState("");
   const [apiKey, setApiKey] = useState("");
@@ -76,6 +81,8 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
         setAutoResume(s.creditRecovery.autoResume);
         setSafetyBufferSeconds(String(s.creditRecovery.safetyBufferSeconds));
         setOpenRouterModel(s.creditRecovery.openRouterModel);
+        setUpdatePolicy(s.contentRegistry.updatePolicy ?? "auto");
+        setUpdateCheck(s.updateCheck ?? "notify");
         if (s.hostTools?.enabledToolIds) {
           setEnabledHostTools([...s.hostTools.enabledToolIds]);
         }
@@ -83,6 +90,18 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
       .catch((e: unknown) => {
         if (live) setLoadError(errorMessage(e));
       });
+    getHealth()
+      .then((health) => {
+        if (live && health.contentRegistry.latest) {
+          setLatestPublished({
+            version: health.contentRegistry.latest,
+            ...(health.contentRegistry.latestNotes
+              ? { notes: health.contentRegistry.latestNotes }
+              : {}),
+          });
+        }
+      })
+      .catch(() => undefined);
     return () => {
       live = false;
     };
@@ -167,7 +186,9 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
           ...(registryVersion.trim()
             ? { version: registryVersion.trim() }
             : {}),
+          updatePolicy,
         },
+        updateCheck,
         llm: {
           provider,
           model: model.trim() ? model.trim() : undefined,
@@ -351,6 +372,40 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                     onChange={(e) => setRegistryVersion(e.target.value)}
                     placeholder="latest"
                   />
+                </div>
+              </div>
+              {latestPublished && (
+                <span className="field-note">
+                  Latest published: <strong>{latestPublished.version}</strong>
+                  {latestPublished.notes ? <> — {latestPublished.notes}</> : null}
+                </span>
+              )}
+              <div className="field-grid-two">
+                <div className="field">
+                  <label className="field-label" htmlFor="settings-update-policy">
+                    New bundle versions
+                  </label>
+                  <select
+                    id="settings-update-policy"
+                    value={updatePolicy}
+                    onChange={(e) => setUpdatePolicy(e.target.value as "auto" | "notify")}
+                  >
+                    <option value="auto">use latest for new runs</option>
+                    <option value="notify">notify in the dashboard</option>
+                  </select>
+                </div>
+                <div className="field">
+                  <label className="field-label" htmlFor="settings-update-check">
+                    App update check
+                  </label>
+                  <select
+                    id="settings-update-check"
+                    value={updateCheck}
+                    onChange={(e) => setUpdateCheck(e.target.value as "off" | "notify")}
+                  >
+                    <option value="notify">notify when a release tag appears</option>
+                    <option value="off">off</option>
+                  </select>
                 </div>
               </div>
             </section>

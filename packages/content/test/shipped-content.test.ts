@@ -298,12 +298,13 @@ test("skills split into 8 roles and 3 techniques, with clean prompt bodies", () 
  */
 test("the merged input-type reference defines every projection for every type", () => {
   const bundle = freshBundle();
-  const { types, shapes, guidance, outlines } = bundle.catalogs.inputTypes;
+  const { types, shapes, guidance, outlines, shapeGuides } = bundle.catalogs.inputTypes;
   const names = Object.keys(types);
   assert.ok(names.length >= 2, "the shipped catalog defines a real set of types");
   assert.deepEqual(Object.keys(shapes).sort(), [...names].sort());
   assert.deepEqual(Object.keys(guidance).sort(), [...names].sort());
   assert.deepEqual(Object.keys(outlines).sort(), [...names].sort());
+  assert.deepEqual(Object.keys(shapeGuides).sort(), [...names].sort());
 
   for (const [name, outline] of Object.entries(outlines)) {
     assert.deepEqual(
@@ -342,7 +343,7 @@ test("a broken hand edit of the reference file fails load-time validation with a
   );
 });
 
-test("the developing skills read outline and shape from the reference catalog", () => {
+test("the developing skills read outline, shape, and shape rules from the reference catalog", () => {
   const bundle = freshBundle();
   const root = bundle.workflows["brainstorm"]!.root;
   for (const [nodeId, skillName] of [
@@ -360,6 +361,11 @@ test("the developing skills read outline and shape from the reference catalog", 
       "catalog.inputTypes.shapes[input.type]",
       `${nodeId} binds the shape for the submission's type`,
     );
+    assert.equal(
+      node.bind?.["shapeGuide"],
+      "catalog.inputTypes.shapeGuides[input.type]",
+      `${nodeId} binds the mechanical rules of the submission's shape`,
+    );
     const skill = bundle.skills[skillName]!;
     assert.ok(skill.meta.vars.includes("outline"));
     assert.ok(
@@ -368,6 +374,12 @@ test("the developing skills read outline and shape from the reference catalog", 
     );
     assert.match(skill.body, /\{\{outline\}\}/);
     assert.match(skill.body, /\{\{shape\}\}/);
+    assert.match(skill.body, /\{\{shapeGuide\}\}/);
+    assert.doesNotMatch(
+      skill.body,
+      /## If `\{\{shape\}\}` is/,
+      "per-shape rule blocks live in the catalog, not the skill body",
+    );
   }
 });
 

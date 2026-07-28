@@ -486,6 +486,17 @@ input[type="radio"] {
   color: var(--bad);
 }
 
+.update-notices {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.update-notices .banner {
+  margin: 0;
+}
+
 .credit-banner,
 .inline-actions {
   display: flex;

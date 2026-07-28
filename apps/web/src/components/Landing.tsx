@@ -1,11 +1,12 @@
 /** View 1 — prompt entry plus live job cards. */
 import { useEffect, useState } from "react";
-import type { JobSummary } from "@brainstorm-agentic/protocol";
+import type { HealthResponse, JobSummary } from "@brainstorm-agentic/protocol";
 import {
   cacheJobs,
   cachedJobs,
   cancelJob,
   errorMessage,
+  getHealth,
   getJobs,
   jobsStreamUrl,
   prefetchJobDetail,
@@ -136,6 +137,60 @@ function JobCard({ job }: { readonly job: JobSummary }) {
   );
 }
 
+/**
+ * Pull-based update notices: a newer published bundle while runs are pinned
+ * behind it, and a newer app release tag. Purely informational — nothing is
+ * applied automatically.
+ */
+function UpdateNotices() {
+  const [health, setHealth] = useState<HealthResponse | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    const poll = () => {
+      getHealth()
+        .then((response) => {
+          if (live) setHealth(response);
+        })
+        .catch(() => undefined);
+    };
+    poll();
+    const timer = window.setInterval(poll, 5 * 60_000);
+    return () => {
+      live = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  if (!health) return null;
+  const registry = health.contentRegistry;
+  const bundleBehind =
+    registry.latest !== undefined &&
+    registry.pinnedVersion !== undefined &&
+    registry.latest !== registry.pinnedVersion;
+  if (!bundleBehind && !health.appUpdate) return null;
+  return (
+    <div className="update-notices">
+      {bundleBehind && (
+        <div className="banner">
+          Bundle <strong>{registry.latest}</strong> is published — runs are
+          pinned to {registry.pinnedVersion}.
+          {registry.latestNotes ? <> {registry.latestNotes}</> : null}
+        </div>
+      )}
+      {health.appUpdate && (
+        <div className="banner">
+          App <strong>{health.appUpdate.version}</strong> is available
+          (running {health.version}).
+          {health.appUpdate.notes ? <> {health.appUpdate.notes}</> : null}{" "}
+          Update with <code>git pull</code>, rebuild, and restart — active
+          runs resume from their checkpoints.
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function Landing({
   onOpenSettings,
 }: {
@@ -191,6 +246,7 @@ export function Landing({
   return (
     <main className="landing">
       <div className="landing-column">
+        <UpdateNotices />
         <SubmissionBox
           onSubmit={submit}
           onOpenSettings={onOpenSettings}

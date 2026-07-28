@@ -22,6 +22,8 @@ export interface ContentRegistryIndexBundle {
   readonly id: string;
   readonly latest: string;
   readonly versions: readonly string[];
+  /** Release notes by version (from the publisher's tag annotations), when served. */
+  readonly releaseNotes?: Readonly<Record<string, string>>;
 }
 
 export interface ContentRegistryIndex {
@@ -115,7 +117,18 @@ export function parseContentRegistryIndex(value: unknown): ContentRegistryIndex 
       throw new Error("content-registry index has duplicate bundle/version entries");
     }
     seen.add(id);
-    return { id, latest, versions };
+    // Optional release metadata: {version: {notes}} entries for listed versions.
+    let releaseNotes: Record<string, string> | undefined;
+    if (typeof item.releases === "object" && item.releases !== null && !Array.isArray(item.releases)) {
+      for (const [version, release] of Object.entries(item.releases as Record<string, unknown>)) {
+        if (!versions.includes(version)) continue;
+        const notes = (release as { notes?: unknown } | null)?.notes;
+        if (typeof notes === "string" && notes.length > 0) {
+          (releaseNotes ??= {})[version] = notes;
+        }
+      }
+    }
+    return { id, latest, versions, ...(releaseNotes ? { releaseNotes } : {}) };
   });
   return { schemaVersion: INDEX_SCHEMA, bundles };
 }

@@ -620,7 +620,15 @@ export interface ServerSettings {
     readonly bundle: string;
     /** Omit to resolve latest once per new run. */
     readonly version?: string;
+    /**
+     * "auto" (default): new runs silently take the latest published version.
+     * "notify": run behavior is unchanged, but the dashboard surfaces newer
+     * published versions with their release notes. Purely a UI policy.
+     */
+    readonly updatePolicy?: "auto" | "notify";
   };
+  /** App self-update surfacing: "notify" (default) shows available updates. */
+  readonly updateCheck?: "off" | "notify";
   readonly creditRecovery: {
     readonly autoResume: boolean;
     readonly safetyBufferSeconds: number;
@@ -718,7 +726,9 @@ export interface ServerSettingsUpdate {
     readonly url: string;
     readonly bundle: string;
     readonly version?: string;
+    readonly updatePolicy?: "auto" | "notify";
   };
+  readonly updateCheck?: "off" | "notify";
   readonly creditRecovery: {
     readonly autoResume: boolean;
     readonly safetyBufferSeconds: number;
@@ -855,6 +865,12 @@ export interface ContentRegistryStatus {
   readonly url?: string;
   readonly skills?: number;
   readonly workflows?: number;
+  /** Newest published bundle version the registry index lists. */
+  readonly latest?: string;
+  /** Release notes of `latest` (the publisher's tag annotation). */
+  readonly latestNotes?: string;
+  /** The explicit version pin from settings, when one is set. */
+  readonly pinnedVersion?: string;
 }
 
 export interface HealthResponse {
@@ -862,6 +878,11 @@ export interface HealthResponse {
   readonly version: string;
   readonly workspace: string;
   readonly contentRegistry: ContentRegistryStatus;
+  /** A newer app release tag exists (checked against the git remote). */
+  readonly appUpdate?: {
+    readonly version: string;
+    readonly notes?: string;
+  };
 }
 
 /** Server-sent events. `jobs` streams on /api/stream; `job` on /api/jobs/:id/stream. */

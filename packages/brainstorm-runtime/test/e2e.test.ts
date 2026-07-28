@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
@@ -23,11 +24,25 @@ import {
 
 type JudgeMode = "pass" | "build-step-2" | "repeat-build" | "cap-step-1";
 
+const brainRepoRoot = fileURLToPath(
+  new URL("../../../../../brain/", import.meta.url),
+);
+let storeMaterialized = false;
+function registryStoreRoot(): string {
+  if (!storeMaterialized) {
+    execFileSync(
+      process.execPath,
+      [join(brainRepoRoot, "scripts", "materialize-store.mjs"), "--quiet"],
+      { stdio: "inherit" },
+    );
+    storeMaterialized = true;
+  }
+  return join(brainRepoRoot, ".registry-store");
+}
+
 /** The version the registry index publishes as latest, like a real submission. */
 function latestPublishedBundleDir(): string {
-  const root = fileURLToPath(
-    new URL("../../../../../brain/content/", import.meta.url),
-  );
+  const root = registryStoreRoot();
   const index = JSON.parse(readFileSync(join(root, "index.json"), "utf8")) as {
     readonly bundles: readonly { readonly id: string; readonly latest: string }[];
   };

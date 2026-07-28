@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import {
   appendFileSync,
   chmodSync,
@@ -42,11 +43,25 @@ function tempRoot(prefix = "brain-server-"): string {
   return mkdtempSync(join(tmpdir(), prefix));
 }
 
-const staticRegistryRoot =
-  process.env.BRAIN_TEST_REGISTRY_DIR ??
-  fileURLToPath(
-    new URL("../../../../../brain/content/", import.meta.url),
+const brainRepoRoot = fileURLToPath(new URL("../../../../../brain/", import.meta.url));
+function materializedStoreRoot(): string {
+  execFileSync(
+    process.execPath,
+    [join(brainRepoRoot, "scripts", "materialize-store.mjs"), "--quiet"],
+    { stdio: "inherit" },
   );
+  return join(brainRepoRoot, ".registry-store");
+}
+const staticRegistryRoot =
+  process.env.BRAIN_TEST_REGISTRY_DIR ?? materializedStoreRoot();
+
+/** The version the registry index publishes as latest — what a new run pins. */
+function latestPublishedVersion(): string {
+  const index = JSON.parse(
+    readFileSync(join(staticRegistryRoot, "index.json"), "utf8"),
+  ) as { bundles: Array<{ id: string; latest: string }> };
+  return index.bundles.find((bundle) => bundle.id === "brainstorm")!.latest;
+}
 
 async function startTestBrainServer(
   options: Omit<StartBrainServerOptions, "contentRegistryUrl" | "contentRegistryStatus">,
@@ -604,7 +619,7 @@ test("local offline job completes with every dashboard artifact", async () => {
       manifestSha256: string;
     };
     assert.equal(storedPin.bundle, "brainstorm");
-    assert.equal(storedPin.version, "0.3.0");
+    assert.equal(storedPin.version, latestPublishedVersion());
     assert.match(storedPin.manifestSha256, /^[a-f0-9]{64}$/);
     appendFileSync(
       join(workspace, "workspace", "jobs", jobId, "events.jsonl"),

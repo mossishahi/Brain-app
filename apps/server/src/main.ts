@@ -239,6 +239,7 @@ async function main(): Promise<void> {
         : {}),
       contentRegistryUrl: spawned.url,
       contentRegistryStatus,
+      selfUpdateCheck: true,
     });
   } catch (error) {
     spawned.child?.kill("SIGTERM");

@@ -194,6 +194,7 @@ function projectInputTypes(catalog: InputTypesCatalog): LoadedInputTypes {
   const shapes: Record<string, OutputShape> = {};
   const guidance: Record<string, string> = {};
   const outlines: Record<string, Record<string, string>> = {};
+  const shapeGuides: Record<string, string> = {};
   for (const [name, entry] of Object.entries(catalog.types)) {
     if (typeof entry === "string") {
       types[name] = entry;
@@ -203,8 +204,10 @@ function projectInputTypes(catalog: InputTypesCatalog): LoadedInputTypes {
     shapes[name] = entry.shape;
     guidance[name] = entry.guidance;
     outlines[name] = entry.outline;
+    const rule = catalog.shapeRules?.[entry.shape];
+    if (rule !== undefined) shapeGuides[name] = rule;
   }
-  return { version: catalog.version, types, shapes, guidance, outlines };
+  return { version: catalog.version, types, shapes, guidance, outlines, shapeGuides };
 }
 
 /**

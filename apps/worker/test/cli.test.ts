@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -18,14 +18,17 @@ function tempRoot(): string {
   return mkdtempSync(join(tmpdir(), "bsa-cli-"));
 }
 
-const registryContentDir =
-  process.env.BRAIN_TEST_CONTENT_DIR ??
-  fileURLToPath(
-    new URL(
-      "../../../../../brain/content/bundles/brainstorm/0.1.0/",
-      import.meta.url,
-    ),
+const brainRepoRoot = fileURLToPath(new URL("../../../../../brain/", import.meta.url));
+function materializedVersionDir(version: string): string {
+  execFileSync(
+    process.execPath,
+    [join(brainRepoRoot, "scripts", "materialize-store.mjs"), "--quiet"],
+    { stdio: "inherit" },
   );
+  return `${join(brainRepoRoot, ".registry-store", "bundles", "brainstorm", version)}/`;
+}
+const registryContentDir =
+  process.env.BRAIN_TEST_CONTENT_DIR ?? materializedVersionDir("0.1.0");
 const registryBundle = loadContent(registryContentDir);
 
 test("Agent SDK environment settings map to executor configuration", () => {

@@ -243,6 +243,48 @@ function validateInputTypes(inputTypes: ContentBundle["catalogs"]["inputTypes"],
     });
   }
 
+  // Shape rules are all-or-nothing: once the catalog carries any, every
+  // mapped shape must resolve to one — a partially covered dictionary would
+  // leave some runs with an unresolvable {{shapeGuide}} binding.
+  const guided = Object.keys(inputTypes.shapeGuides);
+  if (guided.length > 0 && guided.length !== Object.keys(inputTypes.shapes).length) {
+    const uncovered = Object.entries(inputTypes.shapes)
+      .filter(([typeName]) => !(typeName in inputTypes.shapeGuides))
+      .map(([typeName, shape]) => `"${typeName}" (${shape})`);
+    issues.push({
+      code: "INPUT_TYPES_MIXED_FORMAT",
+      path: at,
+      message: `shapeRules must cover every mapped shape; no rule resolves for: ${uncovered.join(", ")}`,
+    });
+  }
+  const ruleByShape = new Map<string, string>();
+  for (const [typeName, guide] of Object.entries(inputTypes.shapeGuides)) {
+    const shape = inputTypes.shapes[typeName];
+    if (shape !== undefined && !ruleByShape.has(shape)) ruleByShape.set(shape, guide);
+  }
+  for (const [shape, guide] of ruleByShape) {
+    const where = `${at} > shapeRules.${shape}`;
+    // Rules are injected into already-rendered instructions, so template
+    // syntax inside one would surface as an unresolved-variable error at
+    // task-compile time; reject it at load time instead.
+    if (/\{\{/.test(guide)) {
+      issues.push({
+        code: "FORBIDDEN_PROMPT_CONTENT",
+        path: where,
+        message: "shape rules must not contain template syntax ({{...}}); they are injected after rendering",
+      });
+    }
+    for (const { name, pattern } of FORBIDDEN_PROMPT_PATTERNS) {
+      if (pattern.test(guide)) {
+        issues.push({
+          code: "FORBIDDEN_PROMPT_CONTENT",
+          path: where,
+          message: `matches forbidden pattern "${name}" (${pattern})`,
+        });
+      }
+    }
+  }
+
   for (const [typeName, outline] of Object.entries(inputTypes.outlines)) {
     const shape = inputTypes.shapes[typeName];
     if (!shape) continue; // unreachable per the loader's projection, guarded above
