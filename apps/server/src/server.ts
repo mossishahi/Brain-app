@@ -351,7 +351,10 @@ export async function startBrainServer(
     let latest: string | undefined;
     let latestNotes: string | undefined;
     try {
-      const response = await fetch(`${contentRegistryUrl}/v1/index.json`, {
+      // The configured URL may be the MCP endpoint; the HTTP API lives at
+      // the same origin without the /mcp suffix.
+      const httpBase = contentRegistryUrl.replace(/\/+$/, "").replace(/\/mcp$/, "");
+      const response = await fetch(`${httpBase}/v1/index.json`, {
         signal: AbortSignal.timeout(2_000),
       });
       if (response.ok) {
