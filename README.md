@@ -34,9 +34,15 @@ npm run build
 npm test
 ```
 
-While this directory is inside the umbrella, integration tests use `../brain/content`. After the
+While this directory is inside the umbrella, integration tests materialize `../brain`'s serving
+store from its release tags, so they need that repository checked out with its tags. After the
 repositories are split, point tests at a checked-out/pinned registry fixture with
 `BRAIN_TEST_REGISTRY_DIR` and `BRAIN_TEST_CONTENT_DIR`.
+
+`BRAIN_TEST_CONTENT_DIR` runs the content, runtime, and worker suites against an editable content
+tree instead of a published version — the pre-release check in `ARCHITECTURE.md` uses it. The
+registry-client suite ignores it: it verifies files against a manifest, and only a published version
+has one.
 
 ## Launch
 

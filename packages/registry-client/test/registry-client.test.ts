@@ -22,6 +22,10 @@ import {
 } from "../src/index.js";
 
 const brainRepoRoot = fileURLToPath(new URL("../../../../../brain/", import.meta.url));
+
+/** The published version these tests pin; immutable, so it never drifts. */
+const FIXTURE_VERSION = "0.1.0";
+
 function materializedVersionDir(version: string): string {
   execFileSync(
     process.execPath,
@@ -30,14 +34,22 @@ function materializedVersionDir(version: string): string {
   );
   return `${join(brainRepoRoot, ".registry-store", "bundles", "brainstorm", version)}/`;
 }
-const versionRoot =
-  process.env.BRAIN_TEST_CONTENT_DIR ?? materializedVersionDir("0.1.0");
+
+/**
+ * Deliberately NOT overridable through BRAIN_TEST_CONTENT_DIR, unlike the
+ * content and runtime suites. Those load a bundle, so the editable source tree
+ * works for them; this suite verifies that the client fetches files and checks
+ * them against a manifest, and only a *published* version has one — the source
+ * tree carries no manifest.json by design, because manifests are generated
+ * from immutable tags.
+ */
+const versionRoot = materializedVersionDir(FIXTURE_VERSION);
 
 function fixturePin(): ContentRegistryPin {
   const manifest = parseContentRegistryManifest(
     JSON.parse(readFileSync(join(versionRoot, "manifest.json"), "utf8")),
     "brainstorm",
-    "0.1.0",
+    FIXTURE_VERSION,
   );
   return {
     registryUrl: "https://registry.test/mcp",
@@ -55,7 +67,7 @@ test("pin roundtrip rejects modified manifest metadata", () => {
   const path = join(root, "pin.json");
   try {
     writeContentPin(path, fixturePin());
-    assert.equal(readContentPin(path).version, "0.1.0");
+    assert.equal(readContentPin(path).version, FIXTURE_VERSION);
     const tampered = JSON.parse(readFileSync(path, "utf8"));
     tampered.manifest.version = "9.9.9";
     writeFileSync(path, JSON.stringify(tampered));
