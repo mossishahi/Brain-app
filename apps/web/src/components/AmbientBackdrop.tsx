@@ -31,6 +31,58 @@ function effectFactory(module: unknown): VantaFactory {
 /** Matches the .ambient-vanta opacity transition in theme.css, plus margin. */
 const DISPOSE_AFTER_MS = 700;
 
+/**
+ * Frames per second the halo renders at, versus the display's usual 60.
+ *
+ * Its visible drift comes from a feedback buffer — each frame resamples the
+ * previous one at a slightly rotated and zoomed offset — which advances once per
+ * rendered frame no matter what `speed` says (`speed` only scales the shader's
+ * iTime). Rendering less often is the only thing that slows that drift, and it
+ * cuts the GPU cost of a viewport-sized shader at the same time.
+ */
+const HALO_FPS = 15;
+
+/** The Vanta internals the throttle needs; both names survive minification. */
+interface VantaLoop {
+  animationLoop?: () => unknown;
+  req?: number;
+}
+
+/**
+ * Takes over an effect's animation loop and runs it at `fps`. Vanta schedules
+ * each frame by passing its bound loop straight to requestAnimationFrame, so
+ * replacing the instance property would not intercept anything: the only
+ * reliable seam is to cancel the pending frame and call the loop ourselves.
+ */
+function throttleRenderRate(effect: VantaInstance, fps: number): void {
+  const internals = effect as VantaInstance & VantaLoop;
+  const loop = internals.animationLoop;
+  if (fps <= 0 || typeof loop !== "function" || typeof internals.req !== "number") {
+    return; // Unrecognized build: leave Vanta's own 60fps loop alone.
+  }
+  const interval = Math.round(1000 / fps);
+  let timer: number | undefined;
+  const step = () => {
+    try {
+      loop(); // Renders one frame and schedules its own next one, which we drop.
+    } catch (error) {
+      // Never leave a timer spinning on a broken loop.
+      console.warn("Vanta background stopped", error);
+      return;
+    }
+    if (typeof internals.req === "number") window.cancelAnimationFrame(internals.req);
+    timer = window.setTimeout(step, interval);
+  };
+  window.cancelAnimationFrame(internals.req);
+  timer = window.setTimeout(step, interval);
+
+  const destroy = effect.destroy.bind(effect);
+  (effect as { destroy: () => void }).destroy = () => {
+    window.clearTimeout(timer);
+    destroy();
+  };
+}
+
 async function createEffect(
   theme: Theme,
   host: HTMLDivElement,
@@ -41,7 +93,7 @@ async function createEffect(
       import("three"),
     ]);
     const factory = effectFactory(module);
-    return factory({
+    const halo = factory({
       el: host,
       THREE,
       mouseControls: false,
@@ -54,9 +106,10 @@ async function createEffect(
       amplitudeFactor: 0.4,
       ringFactor: 0.9,
       // Rotation and speed are what make the rings read as concentric motion
-      // rather than a still image; kept low enough to stay peripheral.
-      rotationFactor: 0.3,
-      speed: 0.45,
+      // rather than a still image. Both are time multipliers: slow enough that
+      // the drift is only noticeable if you look for it, but not frozen.
+      rotationFactor: 0.12,
+      speed: 0.11,
       // Centred: the vignette hides the dark core, so the rings radiate out of
       // the page's middle and reach every margin together.
       xOffset: 0,
@@ -68,6 +121,8 @@ async function createEffect(
       scale: 2,
       scaleMobile: 2,
     });
+    throttleRenderRate(halo, HALO_FPS);
+    return halo;
   }
   const [module, THREE] = await Promise.all([
     import("vanta/dist/vanta.clouds.min"),
@@ -88,7 +143,7 @@ async function createEffect(
     sunColor: 0xfff2cf,
     sunGlareColor: 0xffead0,
     sunlightColor: 0xffffff,
-    speed: 0.4,
+    speed: 0.14,
     mouseEase: false,
     scale: 4,
     scaleMobile: 4,
