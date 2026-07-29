@@ -131,12 +131,17 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
               name: "Computer Science",
               umbrellas: [
                 {
-                  name: "Machine Learning",
-                  subfields: ["representation learning", "graph learning"],
+                  name: "Graph Representation Learning",
+                  count: 3,
+                  subfields: [
+                    { name: "graph learning", count: 2 },
+                    { name: "representation learning", count: 1 },
+                  ],
                 },
                 {
                   name: "Algorithms & Theory",
-                  subfields: ["approximation algorithms"],
+                  count: 1,
+                  subfields: [{ name: "approximation algorithms", count: 1 }],
                 },
               ],
             },
@@ -145,7 +150,11 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
               umbrellas: [
                 {
                   name: "Optimization",
-                  subfields: ["convex optimization", "optimal transport"],
+                  count: 2,
+                  subfields: [
+                    { name: "optimal transport", count: 2 },
+                    { name: "convex optimization", count: 1 },
+                  ],
                 },
               ],
             },
@@ -154,7 +163,8 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
               umbrellas: [
                 {
                   name: "Statistical Learning Theory",
-                  subfields: ["generalization bounds"],
+                  count: 1,
+                  subfields: [{ name: "generalization bounds", count: 1 }],
                 },
               ],
             },

@@ -33,7 +33,9 @@ export function selectPanel(
       (umbrella): Omit<PanelMember, "id"> => ({
         department: department.name,
         umbrella: umbrella.name,
-        subfields: [...umbrella.subfields],
+        // The tree's subfields carry their support counts; a seat needs only
+        // the names it will name as its research focuses.
+        subfields: umbrella.subfields.map((subfield) => subfield.name),
       }),
     ),
   }));

@@ -12,6 +12,7 @@ import {
   OUTPUT_SHAPES,
   STAGE_IDS,
   type AnnotatedFileView,
+  type ExpertAreaView,
   type AssessFeasibilityOutputView,
   type BrainIdeaView,
   type BridgeReportView,
@@ -361,30 +362,45 @@ function annotatedFiles(value: unknown): AnnotatedFileView[] {
   });
 }
 
+/**
+ * One tree area. Counted areas arrive as `{name, count}`; trees produced
+ * before the decomposer counted carry bare strings, which stay readable
+ * without a count.
+ */
+function expertArea(value: unknown): ExpertAreaView | undefined {
+  if (typeof value === "string") return value.length > 0 ? { name: value } : undefined;
+  const area = object(value);
+  if (typeof area?.name !== "string" || area.name.length === 0) return undefined;
+  return {
+    name: area.name,
+    ...(typeof area.count === "number" ? { count: area.count } : {}),
+  };
+}
+
 function experts(value: unknown): ExpertsTreeView | undefined {
   const tree = object(value);
   if (!tree) return undefined;
-  if (
-    Array.isArray(tree.departments) &&
-    tree.departments.every((department) => {
+  if (Array.isArray(tree.departments)) {
+    const departments = tree.departments.flatMap((department) => {
       const item = object(department);
-      return (
-        typeof item?.name === "string" &&
-        Array.isArray(item.umbrellas) &&
-        item.umbrellas.every((umbrella) => {
-          const leaf = object(umbrella);
-          return (
-            typeof leaf?.name === "string" &&
-            Array.isArray(leaf.subfields) &&
-            leaf.subfields.every((field) => typeof field === "string")
-          );
-        })
-      );
-    })
-  ) {
+      if (typeof item?.name !== "string" || !Array.isArray(item.umbrellas)) return [];
+      const umbrellas = item.umbrellas.flatMap((umbrella) => {
+        const leaf = object(umbrella);
+        if (typeof leaf?.name !== "string" || !Array.isArray(leaf.subfields)) return [];
+        return [{
+          name: leaf.name,
+          ...(typeof leaf.count === "number" ? { count: leaf.count } : {}),
+          subfields: leaf.subfields.flatMap((field) => {
+            const area = expertArea(field);
+            return area ? [area] : [];
+          }),
+        }];
+      });
+      return umbrellas.length > 0 ? [{ name: item.name, umbrellas }] : [];
+    });
     // The artifact may also carry the literature grounding; the tree view is
     // just the departments (grounding is extracted separately).
-    return { departments: tree.departments } as unknown as ExpertsTreeView;
+    if (departments.length > 0) return { departments };
   }
 
   // Backward compatibility for jobs produced before the constrained-output
@@ -397,7 +413,10 @@ function experts(value: unknown): ExpertsTreeView | undefined {
         ([umbrellaName, subfields]) =>
           Array.isArray(subfields) &&
           subfields.every((field) => typeof field === "string")
-            ? [{ name: umbrellaName, subfields }]
+            ? [{
+                name: umbrellaName,
+                subfields: subfields.map((field: string) => ({ name: field })),
+              }]
             : [],
       );
       return umbrellas.length > 0

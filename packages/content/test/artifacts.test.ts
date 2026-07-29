@@ -116,14 +116,19 @@ test("experts and panel are separate artifacts", () => {
         umbrellas: [
           {
             name: "Graph Neural Networks",
-            subfields: ["graph structure learning"],
+            count: 7,
+            subfields: [{ name: "graph structure learning", count: 3 }],
           },
         ],
       },
       {
         name: "Mathematics",
         umbrellas: [
-          { name: "Optimization", subfields: ["optimal transport"] },
+          {
+            name: "Optimization",
+            count: 3,
+            subfields: [{ name: "optimal transport", count: 2 }],
+          },
         ],
       },
     ],
@@ -137,12 +142,43 @@ test("experts and panel are separate artifacts", () => {
   assert.equal(
     expertsTreeSchema.safeParse({
       departments: [
-        { name: "Computer Science", umbrellas: [{ name: "ML", subfields: [] }] },
-        { name: "Computer Science", umbrellas: [{ name: "GNN", subfields: [] }] },
+        { name: "Computer Science", umbrellas: [{ name: "ML", count: 1, subfields: [] }] },
+        { name: "Computer Science", umbrellas: [{ name: "GNN", count: 1, subfields: [] }] },
       ],
     }).success,
     false,
     "department names must be unique",
+  );
+  // Every area carries measured support, and support is a positive integer.
+  assert.equal(
+    expertsTreeSchema.safeParse({
+      departments: [
+        { name: "Computer Science", umbrellas: [{ name: "ML", subfields: [] }] },
+      ],
+    }).success,
+    false,
+    "an umbrella without a count has no measured support",
+  );
+  assert.equal(
+    expertsTreeSchema.safeParse({
+      departments: [
+        {
+          name: "Computer Science",
+          umbrellas: [{ name: "ML", count: 1, subfields: ["graph learning"] }],
+        },
+      ],
+    }).success,
+    false,
+    "subfields are counted areas, not bare names",
+  );
+  assert.equal(
+    expertsTreeSchema.safeParse({
+      departments: [
+        { name: "Computer Science", umbrellas: [{ name: "ML", count: 0, subfields: [] }] },
+      ],
+    }).success,
+    false,
+    "a count of zero means nobody stated it, so it does not belong in the tree",
   );
 
   const grounded = {

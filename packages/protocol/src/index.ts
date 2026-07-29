@@ -87,9 +87,20 @@ export interface FilePartitionView {
   readonly ignored: readonly AnnotatedFileView[];
 }
 
+/**
+ * One area of the tree. `count` is the measured support — distinct people in
+ * the grounding pool who stated it — and is absent for trees produced before
+ * the decomposer counted.
+ */
+export interface ExpertAreaView {
+  readonly name: string;
+  readonly count?: number;
+}
+
 export interface ExpertUmbrellaView {
   readonly name: string;
-  readonly subfields: readonly string[];
+  readonly count?: number;
+  readonly subfields: readonly ExpertAreaView[];
 }
 
 export interface ExpertDepartmentView {
@@ -97,7 +108,7 @@ export interface ExpertDepartmentView {
   readonly umbrellas: readonly ExpertUmbrellaView[];
 }
 
-/** Ordered department → umbrella → subfields tree. */
+/** Department → umbrella → subfields, ordered by descending support. */
 export interface ExpertsTreeView {
   readonly departments: readonly ExpertDepartmentView[];
 }

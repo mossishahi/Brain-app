@@ -152,15 +152,31 @@ class FakeBrainstormExecutor implements AgentExecutor {
             {
               name: "Physics",
               umbrellas: [
-                { name: "Quantum Optics", subfields: ["photon counting"] },
-                { name: "Condensed Matter", subfields: ["transport"] },
+                {
+                  name: "Quantum Optics",
+                  count: 4,
+                  subfields: [{ name: "photon counting", count: 2 }],
+                },
+                {
+                  name: "Condensed Matter",
+                  count: 3,
+                  subfields: [{ name: "transport", count: 1 }],
+                },
               ],
             },
             {
               name: "Biology",
               umbrellas: [
-                { name: "Systems Biology", subfields: ["network inference"] },
-                { name: "Biophysics", subfields: ["single-molecule methods"] },
+                {
+                  name: "Systems Biology",
+                  count: 3,
+                  subfields: [{ name: "network inference", count: 2 }],
+                },
+                {
+                  name: "Biophysics",
+                  count: 2,
+                  subfields: [{ name: "single-molecule methods", count: 1 }],
+                },
               ],
             },
             {
@@ -168,7 +184,8 @@ class FakeBrainstormExecutor implements AgentExecutor {
               umbrellas: [
                 {
                   name: "Machine Learning",
-                  subfields: ["representation learning"],
+                  count: 2,
+                  subfields: [{ name: "representation learning", count: 1 }],
                 },
               ],
             },

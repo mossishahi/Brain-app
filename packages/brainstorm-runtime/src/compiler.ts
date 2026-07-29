@@ -332,16 +332,58 @@ async function writeValidatedOutput(
       }
     }
   }
-  const write = writeDataReference(state, target, parsed, scope);
+  const stored = schemaName === "experts" ? sortExpertsBySupport(parsed) : parsed;
+  const write = writeDataReference(state, target, stored, scope);
   let next = write.state;
   if (schemaName === "redevelopment") {
     next = applyRedevelopment(next, scope, parsed, nodeId);
   }
-  return persistArtifact(next, write.path, schemaName, nodeId, parsed, context);
+  return persistArtifact(next, write.path, schemaName, nodeId, stored, context);
 }
 
 function isJsonRecord(value: JsonValue | undefined): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Canonical order for the expertise tree: descending measured support, ties
+ * keeping the order the model emitted (which the decomposer defines as first
+ * appearance in the grounding pool). The orchestrator applies it rather than
+ * trusting the model to, for the same reason it assembles the reviewed chain
+ * itself — the ordering is computable, so it is not left to a judgement.
+ *
+ * Departments carry no count of their own; they rank by their strongest
+ * umbrella, which is what `panel.select` walks in round-robin order.
+ */
+function sortExpertsBySupport(tree: JsonValue): JsonValue {
+  if (!isJsonRecord(tree) || !Array.isArray(tree.departments)) return tree;
+  const count = (entry: JsonValue): number =>
+    isJsonRecord(entry) && typeof entry.count === "number" ? entry.count : 0;
+  /** Stable descending sort: Array.prototype.sort is stable, so ties hold. */
+  const byCount = <T extends JsonValue>(entries: readonly T[]): T[] =>
+    [...entries].sort((left, right) => count(right) - count(left));
+
+  const departments = tree.departments.map((department) => {
+    if (!isJsonRecord(department) || !Array.isArray(department.umbrellas)) {
+      return department;
+    }
+    const umbrellas = byCount(department.umbrellas).map((umbrella) =>
+      isJsonRecord(umbrella) && Array.isArray(umbrella.subfields)
+        ? { ...umbrella, subfields: byCount(umbrella.subfields) }
+        : umbrella,
+    );
+    return { ...department, umbrellas };
+  });
+  const strongest = (department: JsonValue): number =>
+    isJsonRecord(department) && Array.isArray(department.umbrellas)
+      ? Math.max(0, ...department.umbrellas.map(count))
+      : 0;
+  return {
+    ...tree,
+    departments: [...departments].sort(
+      (left, right) => strongest(right) - strongest(left),
+    ),
+  };
 }
 
 /**

@@ -206,6 +206,22 @@ export type Paper = z.infer<typeof paperSchema>;
 // ---------------------------------------------------------------------------
 
 /**
+ * One area of the expertise tree: its name plus the measured support behind
+ * it — how many distinct people in the grounding pool stated it as a research
+ * interest. The count is what orders the tree; the runtime sorts by it on
+ * write, so a consumer can read the order as the ranking.
+ */
+export const expertAreaSchema = z
+  .object({
+    name: nonEmpty,
+    /** Distinct people in the grounding pool who stated this area. */
+    count: z.number().int().min(1),
+  })
+  .strict();
+
+export type ExpertArea = z.infer<typeof expertAreaSchema>;
+
+/**
  * Ordered three-level expertise tree in constrained-output-safe form.
  * Arrays preserve relevance order without arbitrary JSON object keys (dynamic
  * property names are not reliably supported by provider structured outputs).
@@ -213,7 +229,9 @@ export type Paper = z.infer<typeof paperSchema>;
 export const expertUmbrellaSchema = z
   .object({
     name: nonEmpty,
-    subfields: z.array(nonEmpty).max(30),
+    /** Distinct people in the grounding pool who stated this umbrella. */
+    count: z.number().int().min(1),
+    subfields: z.array(expertAreaSchema).max(30),
   })
   .strict();
 
@@ -308,6 +326,11 @@ export const expertsTreeSchema = z
 
 export type ExpertsTree = z.infer<typeof expertsTreeSchema>;
 
+/**
+ * A seated member. Subfields are plain names here, not the tree's counted
+ * areas: pool statistics decided who sits, and carry no meaning for a seat
+ * that renders them into its own role instructions.
+ */
 export const panelMemberSchema = z
   .object({
     id: nonEmpty,

@@ -293,7 +293,11 @@ function TreeBrowser({
                 onClick={() => setUmbSel(umbrellaItem.name)}
               >
                 <span className="tree-row-name">{umbrellaItem.name}</span>
-                <span className="tree-count">{umbrellaItem.subfields.length}</span>
+                <span className="tree-count">
+                  {umbrellaItem.count !== undefined
+                    ? `${umbrellaItem.count}×`
+                    : umbrellaItem.subfields.length}
+                </span>
               </button>
             ))}
             {umbrellas.length === 0 && <p className="dim small">no umbrella terms</p>}
@@ -304,8 +308,8 @@ function TreeBrowser({
           {subfields.length > 0 ? (
             <div className="tag-row">
               {subfields.map((s) => (
-                <span key={s} className="tag">
-                  {s}
+                <span key={s.name} className="tag">
+                  {s.count !== undefined ? `${s.name} · ${s.count}×` : s.name}
                 </span>
               ))}
             </div>

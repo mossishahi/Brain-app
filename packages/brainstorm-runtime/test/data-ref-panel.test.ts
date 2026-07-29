@@ -107,31 +107,16 @@ test("writes materialize bracket variables immutably and reject prototype paths"
 });
 
 test("panel.select implements stable chunked round-robin semantics", () => {
+  const leaf = (name: string) => ({
+    name,
+    count: 1,
+    subfields: [{ name: name.toLowerCase(), count: 1 }],
+  });
   const experts = {
     departments: [
-      {
-        name: "A",
-        umbrellas: [
-          { name: "A1", subfields: ["a1"] },
-          { name: "A2", subfields: ["a2"] },
-          { name: "A3", subfields: ["a3"] },
-        ],
-      },
-      {
-        name: "B",
-        umbrellas: [
-          { name: "B1", subfields: ["b1"] },
-          { name: "B2", subfields: ["b2"] },
-          { name: "B3", subfields: ["b3"] },
-        ],
-      },
-      {
-        name: "C",
-        umbrellas: [
-          { name: "C1", subfields: ["c1"] },
-          { name: "C2", subfields: ["c2"] },
-        ],
-      },
+      { name: "A", umbrellas: [leaf("A1"), leaf("A2"), leaf("A3")] },
+      { name: "B", umbrellas: [leaf("B1"), leaf("B2"), leaf("B3")] },
+      { name: "C", umbrellas: [leaf("C1"), leaf("C2")] },
     ],
   };
 
