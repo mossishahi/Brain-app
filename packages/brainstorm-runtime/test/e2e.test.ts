@@ -126,9 +126,12 @@ class FakeBrainstormExecutor implements AgentExecutor {
       case "processor":
         output = {
           type: "research idea",
-          title: "Test question",
-          question: "Can the mechanism be tested?",
-          context: "Deterministic context",
+          // Deterministic but not degenerate: processorOutput refuses
+          // placeholder values, because a probe reaching this artifact silently
+          // replaces the submission for every later stage.
+          title: "Distributional message passing over graphs",
+          question: "Can the mechanism be tested against a held-out graph?",
+          context: "A deterministic fixture standing in for a real submission.",
           attachments: [],
           assumptions: [],
           cotSteps: 3,

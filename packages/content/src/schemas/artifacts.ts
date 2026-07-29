@@ -19,6 +19,35 @@ const paragraphArray = (n: number) =>
 const nonEmpty = z.string().min(1);
 
 /**
+ * What a model submits while probing a failing tool instead of answering it.
+ *
+ * A structured-output transport that rejects a valid payload invites exactly
+ * this: the model shrinks its submission until something is accepted. A bare
+ * "test-title" satisfies a non-empty string, so the probe becomes the artifact,
+ * and every later stage reads a placeholder as the research input — the
+ * decomposer then searches the literature for "test" and seats a panel of
+ * software-testing experts. Only a whole degenerate value matches; a real title
+ * that merely begins with one of these words ("Test-time adaptation for graph
+ * networks") does not.
+ */
+const PLACEHOLDER_VALUE =
+  /^(?:test|tests|todo|tbd|placeholder|example|sample|dummy|lorem|ipsum|foo|bar|baz|qux|n\/?a|none|null|unknown|undefined|string|value|text|title|question|context|name|note|xxx+|\.+|-+)(?:[-_\s]?(?:title|question|context|value|name|note|text|string|here|\d+))?$/i;
+
+/**
+ * A field whose value must be an actual answer: long enough to carry one, and
+ * not one of the probe values above. The floor stays low enough that a terse
+ * but real answer passes; the pattern is what rejects a probe.
+ */
+function answered(minLength: number, label: string) {
+  return z
+    .string()
+    .min(minLength, `${label} must be a real answer (at least ${minLength} characters)`)
+    .refine((value) => !PLACEHOLDER_VALUE.test(value.trim()), {
+      message: `${label} is a placeholder, not an answer derived from the submission`,
+    });
+}
+
+/**
  * The closed catalog of output SHAPES — the structural forms a member's
  * finished output can take. Shapes are code: each one has a body schema
  * below, a dashboard view, and prompt mechanics. Which submission types
@@ -112,11 +141,19 @@ export const processorOutputSchema = z
     type: nonEmpty.describe(
       "One category name from the option set in the instructions, copied verbatim.",
     ),
-    title: nonEmpty,
+    title: answered(4, "title"),
     /** The core scientific question, stated precisely. */
-    question: nonEmpty,
-    /** Background needed to understand the question; empty string when none can be determined. */
-    context: z.string(),
+    question: answered(12, "question"),
+    /**
+     * Background needed to understand the question. Legitimately empty when the
+     * submission carries none, so there is no length floor — but a placeholder
+     * is still refused, since it means the field was invented rather than left
+     * blank.
+     */
+    context: z.string().refine(
+      (value) => value.trim() === "" || !PLACEHOLDER_VALUE.test(value.trim()),
+      { message: "context is a placeholder; leave it empty instead of inventing one" },
+    ),
     /** One entry per submitted attachment; empty when there are none. */
     attachments: z.array(z.object({ name: nonEmpty, note: nonEmpty }).strict()),
     /** Implied-but-unstated assumptions; empty when there are none. */

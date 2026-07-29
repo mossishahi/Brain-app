@@ -94,6 +94,45 @@ test("annotated file map: labels are closed, NA notes may be empty, partitions a
     "a useful file requires a relation note",
   );
 
+  // A structured-output transport that rejects a valid payload makes the model
+  // shrink its submission until something is accepted. One real run got through
+  // with {title: "test-title", question: "test-question"}, which every later
+  // stage then read as the research input — the decomposer searched the
+  // literature for "test" and seated six software-testing experts.
+  const probe = {
+    type: "research idea",
+    attachments: [],
+    assumptions: [],
+    cotSteps: 4,
+  };
+  for (const [title, question, context] of [
+    ["test-title", "test-question", "test-context"],
+    ["test", "test", "test"],
+    ["Test Title", "Test Question", ""],
+    ["Title", "Question", ""],
+    ["TODO", "TODO", ""],
+    ["n/a", "n/a", ""],
+    ["placeholder", "placeholder", ""],
+  ] as const) {
+    assert.equal(
+      processorOutputSchema.safeParse({ ...probe, title, question, context }).success,
+      false,
+      `a probe value must never pass as an answer: ${title} / ${question}`,
+    );
+  }
+  // Real answers that merely start with one of those words still pass.
+  for (const [title, question] of [
+    ["Test-time adaptation for graph networks", "Can test-time adaptation stabilise a GNN?"],
+    ["A/B testing of ranking models", "Which ranking metric predicts retention?"],
+    ["Sample complexity of contrastive learning", "What sample complexity is required?"],
+    ["Context-aware recommendation", "Does context improve cold-start ranking?"],
+  ] as const) {
+    assert.ok(
+      processorOutputSchema.safeParse({ ...probe, title, question, context: "" }).success,
+      `a real answer must not be mistaken for a probe: ${title}`,
+    );
+  }
+
   assert.ok(usefulFilesSchema.safeParse({ files: [useful] }).success);
   assert.equal(
     usefulFilesSchema.safeParse({ files: [ignored] }).success,

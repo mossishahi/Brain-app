@@ -189,8 +189,10 @@ test("generic agent adapter consumes compiled request descriptions and content s
 
   const value = {
     type: "research idea",
-    title: "Title",
-    question: "Question",
+    // processorOutput refuses degenerate values, so a fixture standing in for a
+    // real submission has to look like one.
+    title: "Gaussian node states in message passing",
+    question: "Can message passing carry a distribution per node?",
     context: "",
     attachments: [],
     assumptions: [],
