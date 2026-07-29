@@ -29,15 +29,19 @@ export function selectPanel(
 
   const queues = experts.departments.map((department) => ({
     position: 0,
-    members: department.umbrellas.map(
-      (umbrella): Omit<PanelMember, "id"> => ({
+    members: department.umbrellas.map((umbrella): Omit<PanelMember, "id"> => {
+      // The tree's subfields carry their support counts; a seat needs only the
+      // names it will state as its research focuses. An umbrella can reach a
+      // seat with no subfield under it — the pool surfaced the field but
+      // nothing narrower — and the seat still has to name a focus, so it falls
+      // back to the field itself rather than an empty list.
+      const focuses = umbrella.subfields.map((subfield) => subfield.name);
+      return {
         department: department.name,
         umbrella: umbrella.name,
-        // The tree's subfields carry their support counts; a seat needs only
-        // the names it will name as its research focuses.
-        subfields: umbrella.subfields.map((subfield) => subfield.name),
-      }),
-    ),
+        subfields: focuses.length > 0 ? focuses : [umbrella.name],
+      };
+    }),
   }));
 
   const members: PanelMember[] = [];

@@ -9,8 +9,25 @@ import { BrainstormRuntimeError } from "./errors.js";
 
 const MUSTACHE = /\{\{\s*([A-Za-z][A-Za-z0-9_]*)\s*\}\}/g;
 
+/** "a", "a and b", "a, b and c" — a list read aloud rather than printed. */
+function listPhrase(entries: readonly string[]): string {
+  if (entries.length <= 1) return entries[0] ?? "";
+  return `${entries.slice(0, -1).join(", ")} and ${entries.at(-1)!}`;
+}
+
+/**
+ * Skills render a variable wherever it belongs in their prose, so how a value
+ * reads matters. A list of names appears mid-sentence ("your main research
+ * focuses are …") and has to read as English; a structure the skill presents
+ * as reference material — the department catalog, an output outline — is meant
+ * to be read as data and stays JSON.
+ */
 function renderValue(value: JsonValue): string {
-  return typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  if (typeof value === "string") return value;
+  if (Array.isArray(value) && value.every((entry) => typeof entry === "string")) {
+    return listPhrase(value as readonly string[]);
+  }
+  return JSON.stringify(value, null, 2);
 }
 
 function unique(values: readonly string[]): readonly string[] {
