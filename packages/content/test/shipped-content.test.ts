@@ -259,7 +259,7 @@ test("verdict catalog preserves the Pass/Build/Interrupt contract", () => {
   assert.deepEqual(catalog.sequencing.noImmediateRepeat, ["Build"]);
 });
 
-test("skills split into 8 roles and 3 techniques, with clean prompt bodies", () => {
+test("skills split into 8 roles and 4 techniques, with clean prompt bodies", () => {
   const bundle = freshBundle();
   const roles = Object.values(bundle.skills).filter((s) => s.meta.kind === "role");
   const techniques = Object.values(bundle.skills).filter((s) => s.meta.kind === "technique");
@@ -269,7 +269,7 @@ test("skills split into 8 roles and 3 techniques, with clean prompt bodies", () 
   );
   assert.deepEqual(
     techniques.map((s) => s.meta.name).sort(),
-    ["academic-profile-lookup", "deep-understanding", "literature-review"],
+    ["academic-profile-lookup", "deep-understanding", "literature-review", "term-unification"],
   );
   for (const role of roles) {
     assert.ok(role.meta.output, `role ${role.meta.name} declares an output schema`);
@@ -285,6 +285,7 @@ test("skills split into 8 roles and 3 techniques, with clean prompt bodies", () 
   );
   assert.deepEqual(bundle.skills["deep-understanding"]!.meta.vars, []);
   assert.deepEqual(bundle.skills["academic-profile-lookup"]!.meta.vars, []);
+  assert.deepEqual(bundle.skills["term-unification"]!.meta.vars, []);
   // Executable needs are declared as capabilities, never prose-only:
   assert.ok(bundle.skills["commentor"]!.meta.capabilities.includes("code-execution"));
   assert.ok(bundle.skills["literature-review"]!.meta.capabilities.includes("web-search"));
