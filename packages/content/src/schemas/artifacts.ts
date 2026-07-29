@@ -275,7 +275,20 @@ export const expertUmbrellaSchema = z
 export const expertDepartmentSchema = z
   .object({
     name: nonEmpty,
-    umbrellas: z.array(expertUmbrellaSchema).min(1).max(30),
+    /** The catalog group this department belongs to (the tree's top level). */
+    domain: nonEmpty.optional(),
+    /**
+     * k — how many distinct people stated this department itself as an
+     * interest, or 1 when nobody did but an umbrella was housed here.
+     * Departments whose count stayed zero are pruned before the tree is
+     * returned, so every entry carries at least 1.
+     */
+    count: z.number().int().min(1),
+    /**
+     * May be empty: a department mentioned in the pool keeps its count even
+     * when no umbrella landed under it.
+     */
+    umbrellas: z.array(expertUmbrellaSchema).max(30),
   })
   .strict()
   .superRefine((department, ctx) => {
@@ -381,9 +394,11 @@ export type PanelMember = z.infer<typeof panelMemberSchema>;
 
 /**
  * The seated panel produced by the deterministic panel-selection activity.
- * The experts tree remains a separate upstream artifact; panel members copy
- * their expertise from its (department, umbrella) leaves. At least two members
- * are required so that every review step has at least one commentor.
+ * The experts tree remains a separate upstream artifact; a member is one
+ * subfield LEAF of that tree — (department, umbrella, subfield) — chosen by
+ * descending i×j×k score, so two members may share an umbrella as long as
+ * they sit on different leaves. At least two members are required so that
+ * every review step has at least one commentor.
  */
 export const panelSchema = z
   .object({
@@ -398,12 +413,12 @@ export const panelSchema = z
         ctx.addIssue({ code: "custom", path: ["members", i, "id"], message: `duplicate member id "${m.id}"` });
       }
       ids.add(m.id);
-      const seat = `${m.department}\u0000${m.umbrella}`;
+      const seat = [m.department, m.umbrella, ...m.subfields].join("\u0000");
       if (seats.has(seat)) {
         ctx.addIssue({
           code: "custom",
           path: ["members", i],
-          message: `duplicate seat for (${m.department}, ${m.umbrella}) — one member per leaf`,
+          message: `duplicate seat for (${m.department}, ${m.umbrella}, ${m.subfields.join("/")}) — one member per leaf`,
         });
       }
       seats.add(seat);

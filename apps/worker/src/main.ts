@@ -14,6 +14,7 @@ import { appendFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } fr
 import { dirname, join } from "node:path";
 import process from "node:process";
 
+import { scoreExpertiseTree } from "@brainstorm-agentic/brainstorm-runtime";
 import { loadContent } from "@brainstorm-agentic/content";
 import type {
   ArtifactStore,
@@ -87,37 +88,59 @@ function loadAttachmentsManifest(
 }
 
 /**
- * Writes the run's expertise tree to `<sessionRoot>/<runId>/experts.json`.
+ * Writes the run's expertise trees beside `checkpoint.json`:
+ *
+ * - `raw_expertise.json` — the validated tree exactly as stored (counts per
+ *   department, umbrella, and subfield);
+ * - `mul_expertise.json` — the same tree with every subfield leaf scored by
+ *   the product of its own count and its parents' counts (i × j × k), which is
+ *   the ranking panel selection seats from.
  *
  * The artifact store keys every payload by an opaque id, so the tree is
  * otherwise reachable only by looking its id up in `artifacts/index.json`.
- * This is a readable copy beside `checkpoint.json`, pretty-printed; the
- * artifact and the checkpoint journal remain the authoritative records. When
- * the node ran more than once (a retry or a credit-block resume) the latest
- * version wins.
+ * These are readable copies; the artifact and the checkpoint journal remain
+ * the authoritative records. When the node ran more than once (a retry or a
+ * credit-block resume) the latest version wins.
  */
-async function writeExpertsTree(
+async function writeExpertiseTrees(
   artifacts: ArtifactStore,
   sessionRoot: string,
   runId: string,
-): Promise<string | undefined> {
+): Promise<readonly string[]> {
   const ref = [...(await artifacts.list())]
     .reverse()
     .find((candidate) => candidate.metadata?.schema === "experts");
-  if (!ref) return undefined;
+  if (!ref) return [];
   const stored = await artifacts.get(ref.id);
-  if (!stored) return undefined;
-  let body = stored.data;
+  if (!stored) return [];
+
+  const writeAtomic = (name: string, body: string): string => {
+    const path = join(sessionRoot, runId, name);
+    const tmp = `${path}.tmp-${process.pid}`;
+    writeFileSync(tmp, body, "utf8");
+    renameSync(tmp, path);
+    return path;
+  };
+
+  let tree: unknown;
   try {
-    body = `${JSON.stringify(JSON.parse(stored.data) as unknown, null, 2)}\n`;
+    tree = JSON.parse(stored.data);
   } catch {
     // A payload that does not parse is still worth copying verbatim.
+    return [writeAtomic("raw_expertise.json", stored.data)];
   }
-  const path = join(sessionRoot, runId, "experts.json");
-  const tmp = `${path}.tmp-${process.pid}`;
-  writeFileSync(tmp, body, "utf8");
-  renameSync(tmp, path);
-  return path;
+  const written = [
+    writeAtomic("raw_expertise.json", `${JSON.stringify(tree, null, 2)}\n`),
+  ];
+  try {
+    const scored = scoreExpertiseTree(tree as Parameters<typeof scoreExpertiseTree>[0]);
+    written.push(
+      writeAtomic("mul_expertise.json", `${JSON.stringify(scored, null, 2)}\n`),
+    );
+  } catch {
+    // A pre-count tree (an old run resumed under new code) has no scores.
+  }
+  return written;
 }
 
 function logEvent(event: RunEvent): void {
@@ -285,9 +308,9 @@ async function main(): Promise<void> {
           attachments: (manifest?.attachments ?? []) as unknown as JsonValue,
         },
       });
-      const tree = await writeExpertsTree(artifacts, sessionRoot, runId);
+      const trees = await writeExpertiseTrees(artifacts, sessionRoot, runId);
       reportResult(result, sessionRoot);
-      if (tree) console.log(`Expertise tree: ${tree}`);
+      for (const tree of trees) console.log(`Expertise tree: ${tree}`);
     } finally {
       await lazy?.close();
     }
@@ -334,9 +357,9 @@ async function main(): Promise<void> {
       const result = await runtime.resume(runId, {
         ...(Object.keys(responses).length > 0 ? { responses } : {}),
       });
-      const tree = await writeExpertsTree(artifacts, sessionRoot, runId);
+      const trees = await writeExpertiseTrees(artifacts, sessionRoot, runId);
       reportResult(result, sessionRoot);
-      if (tree) console.log(`Expertise tree: ${tree}`);
+      for (const tree of trees) console.log(`Expertise tree: ${tree}`);
     } finally {
       await lazy?.close();
     }

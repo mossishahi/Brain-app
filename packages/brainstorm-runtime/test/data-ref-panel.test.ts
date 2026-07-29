@@ -106,40 +106,69 @@ test("writes materialize bracket variables immutably and reject prototype paths"
   );
 });
 
-test("panel.select implements stable chunked round-robin semantics", () => {
-  const leaf = (name: string) => ({
-    name,
-    count: 1,
-    subfields: [{ name: name.toLowerCase(), count: 1 }],
-  });
+test("panel.select seats the highest i*j*k leaves, ties keeping tree order", () => {
   const experts = {
     departments: [
-      { name: "A", umbrellas: [leaf("A1"), leaf("A2"), leaf("A3")] },
-      { name: "B", umbrellas: [leaf("B1"), leaf("B2"), leaf("B3")] },
-      { name: "C", umbrellas: [leaf("C1"), leaf("C2")] },
+      {
+        name: "Computer Science",
+        count: 5,
+        umbrellas: [
+          {
+            name: "Graph Neural Networks",
+            count: 7,
+            subfields: [
+              { name: "graph structure learning", count: 3 }, // 3*7*5 = 105
+              { name: "latent graph inference", count: 1 },   // 1*7*5 = 35
+            ],
+          },
+          {
+            name: "Generative Models",
+            count: 2,
+            subfields: [{ name: "diffusion models", count: 4 }], // 4*2*5 = 40
+          },
+        ],
+      },
+      {
+        name: "Mathematics",
+        count: 1,
+        umbrellas: [
+          {
+            name: "Optimization",
+            count: 5,
+            subfields: [
+              { name: "optimal transport", count: 7 },     // 7*5*1 = 35 (ties leaf 2; later in tree order)
+              { name: "bilevel programming", count: 2 },   // 2*5*1 = 10
+            ],
+          },
+        ],
+      },
     ],
   };
 
   assert.deepEqual(
-    selectPanel(experts, 7, 2).members.map((member) => [
+    selectPanel(experts, 3).members.map((member) => [
       member.id,
       member.department,
       member.umbrella,
+      member.subfields,
     ]),
     [
-      ["member-1", "A", "A1"],
-      ["member-2", "A", "A2"],
-      ["member-3", "B", "B1"],
-      ["member-4", "B", "B2"],
-      ["member-5", "C", "C1"],
-      ["member-6", "C", "C2"],
-      ["member-7", "A", "A3"],
+      ["member-1", "Computer Science", "Graph Neural Networks", ["graph structure learning"]],
+      ["member-2", "Computer Science", "Generative Models", ["diffusion models"]],
+      // 35-point tie: the leaf that appears earlier in tree order wins.
+      ["member-3", "Computer Science", "Graph Neural Networks", ["latent graph inference"]],
     ],
   );
-  assert.deepEqual(
-    selectPanel(experts, 5, 1).members.map((member) => member.umbrella),
-    ["A1", "B1", "C1", "A2", "B2"],
-  );
+  // Two leaves may share one umbrella — a seat is a leaf, not an umbrella.
+  const four = selectPanel(experts, 4).members;
+  assert.deepEqual(four[3], {
+    id: "member-4",
+    department: "Mathematics",
+    umbrella: "Optimization",
+    subfields: ["optimal transport"],
+  });
+  // panelSize beyond the leaf supply returns every leaf, highest first.
+  assert.equal(selectPanel(experts, 12).members.length, 5);
 });
 
 test("artifact schemas become structural JSON Schema descriptions", () => {

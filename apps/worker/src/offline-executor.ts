@@ -129,6 +129,8 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
           departments: [
             {
               name: "Computer Science",
+              domain: "engineering_and_applied_sciences",
+              count: 3,
               umbrellas: [
                 {
                   name: "Graph Representation Learning",
@@ -147,6 +149,8 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
             },
             {
               name: "Mathematics",
+              domain: "natural_sciences",
+              count: 2,
               umbrellas: [
                 {
                   name: "Optimization",
@@ -160,6 +164,8 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
             },
             {
               name: "Statistics",
+              domain: "natural_sciences",
+              count: 1,
               umbrellas: [
                 {
                   name: "Statistical Learning Theory",

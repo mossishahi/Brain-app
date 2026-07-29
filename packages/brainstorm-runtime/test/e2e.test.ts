@@ -151,9 +151,15 @@ class FakeBrainstormExecutor implements AgentExecutor {
         break;
       case "decomposer":
         output = {
+          // Leaf scores (i*j*k): photon counting 2*4*4=32, network inference
+          // 3*3*3=27, representation learning 2*4*2=16, transport 1*1*4=4,
+          // single-molecule 1*1*3=3 — so panelSize 3 seats QO, SysBio, ML in
+          // that order and panelSize 2 seats the first two.
           departments: [
             {
               name: "Physics",
+              domain: "natural_sciences",
+              count: 4,
               umbrellas: [
                 {
                   name: "Quantum Optics",
@@ -162,33 +168,37 @@ class FakeBrainstormExecutor implements AgentExecutor {
                 },
                 {
                   name: "Condensed Matter",
-                  count: 3,
+                  count: 1,
                   subfields: [{ name: "transport", count: 1 }],
                 },
               ],
             },
             {
               name: "Biology",
+              domain: "life_sciences_and_medicine",
+              count: 3,
               umbrellas: [
                 {
                   name: "Systems Biology",
                   count: 3,
-                  subfields: [{ name: "network inference", count: 2 }],
+                  subfields: [{ name: "network inference", count: 3 }],
                 },
                 {
                   name: "Biophysics",
-                  count: 2,
+                  count: 1,
                   subfields: [{ name: "single-molecule methods", count: 1 }],
                 },
               ],
             },
             {
               name: "Computer Science",
+              domain: "engineering_and_applied_sciences",
+              count: 2,
               umbrellas: [
                 {
                   name: "Machine Learning",
-                  count: 2,
-                  subfields: [{ name: "representation learning", count: 1 }],
+                  count: 4,
+                  subfields: [{ name: "representation learning", count: 2 }],
                 },
               ],
             },
@@ -377,7 +387,7 @@ test("Pass path executes member -> step -> round order and keeps C-O-T from chai
   const result = await app.run({
     runId: "pass-path",
     submission: { prompt: "Investigate the mechanism", attachments: [] },
-    params: { panelSize: 3, moduleSize: 1 },
+    params: { panelSize: 3 },
   });
 
   assert.equal(
@@ -509,7 +519,7 @@ test("instructions stay in a cacheable system prefix; submitted data rides the t
   const result = await runtime(executor).run({
     runId: "prompt-split",
     submission: { prompt: topic, attachments: [] },
-    params: { panelSize: 2, moduleSize: 1 },
+    params: { panelSize: 2 },
   });
   assert.equal(result.status, "completed");
 
@@ -561,7 +571,7 @@ test("Build redevelops the current tail, freezes earlier steps, and cannot immed
   const app = runtime(executor);
   const result = await app.run({
     submission: "Build-path test",
-    params: { panelSize: 2, moduleSize: 1 },
+    params: { panelSize: 2 },
   });
   assert.equal(
     result.status,
@@ -602,7 +612,7 @@ test("round cap force-proceeds after four decisions and only three redevelopment
   const app = runtime(executor);
   const result = await app.run({
     submission: "Cap-path test",
-    params: { panelSize: 2, moduleSize: 1 },
+    params: { panelSize: 2 },
   });
   assert.equal(
     result.status,
@@ -621,7 +631,7 @@ test("a model cannot issue Build twice consecutively even if it ignores the prom
   const executor = new FakeBrainstormExecutor("repeat-build");
   const result = await runtime(executor).run({
     submission: "Invalid repeated Build",
-    params: { panelSize: 2, moduleSize: 1 },
+    params: { panelSize: 2 },
   });
   assert.equal(result.status, "failed");
   assert.match(result.status === "failed" ? result.error.message : "", /not allowed this round/);
@@ -634,7 +644,7 @@ test("manual panel gate suspends and checkpoint resume does not repeat prior age
   const first = await app.run({
     runId: "manual-resume",
     submission: "Checkpoint test",
-    params: { panelSize: 2, moduleSize: 1 },
+    params: { panelSize: 2 },
   });
   assert.equal(first.status, "suspended");
   if (first.status !== "suspended") throw new Error("unreachable");
@@ -664,7 +674,7 @@ test("invalid agent artifacts fail before downstream state updates", async () =>
   };
   const result = await runtime(invalid).run({
     submission: "Invalid output",
-    params: { panelSize: 2, moduleSize: 1 },
+    params: { panelSize: 2 },
   });
   assert.equal(result.status, "failed");
   assert.equal(result.status === "failed" && result.error.name, "ArtifactValidationError");
@@ -686,7 +696,7 @@ test("a classification outside the input-type catalog fails the run with a named
   })();
   const result = await runtime(inventsType).run({
     submission: "Invented type",
-    params: { panelSize: 2, moduleSize: 1 },
+    params: { panelSize: 2 },
   });
   assert.equal(result.status, "failed");
   assert.match(

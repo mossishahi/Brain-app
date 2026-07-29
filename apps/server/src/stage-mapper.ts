@@ -384,6 +384,10 @@ function experts(value: unknown): ExpertsTreeView | undefined {
     const departments = tree.departments.flatMap((department) => {
       const item = object(department);
       if (typeof item?.name !== "string" || !Array.isArray(item.umbrellas)) return [];
+      const meta = {
+        ...(typeof item.domain === "string" ? { domain: item.domain } : {}),
+        ...(typeof item.count === "number" ? { count: item.count } : {}),
+      };
       const umbrellas = item.umbrellas.flatMap((umbrella) => {
         const leaf = object(umbrella);
         if (typeof leaf?.name !== "string" || !Array.isArray(leaf.subfields)) return [];
@@ -396,7 +400,9 @@ function experts(value: unknown): ExpertsTreeView | undefined {
           }),
         }];
       });
-      return umbrellas.length > 0 ? [{ name: item.name, umbrellas }] : [];
+      // A pool-mentioned department legitimately holds no umbrella under the
+      // count-based tree, so an empty list no longer disqualifies the entry.
+      return [{ name: item.name, ...meta, umbrellas }];
     });
     // The artifact may also carry the literature grounding; the tree view is
     // just the departments (grounding is extracted separately).

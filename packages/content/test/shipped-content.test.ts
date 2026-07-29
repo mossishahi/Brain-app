@@ -113,7 +113,6 @@ test("decomposer returns experts only, then panel.select seats the panel determi
   assert.deepEqual(selector.bind, {
     experts: "experts",
     panelSize: "params.panelSize",
-    moduleSize: "params.moduleSize",
   });
   assert.deepEqual(selector.output, { key: "panel", schema: "panel" });
 
@@ -122,7 +121,6 @@ test("decomposer returns experts only, then panel.select seats the panel determi
   assert.deepEqual(handler.inputs, {
     experts: { kind: "artifact", schema: "experts" },
     panelSize: { kind: "positiveInteger" },
-    moduleSize: { kind: "positiveInteger" },
   });
   assert.equal(handler.outputSchema, "panel");
   assert.deepEqual(handler.bounds, {
@@ -138,7 +136,11 @@ test("decomposer returns experts only, then panel.select seats the panel determi
   ]);
 
   assert.equal(bundle.workflows["brainstorm"]!.params["panelSize"]!.default, 6);
-  assert.equal(bundle.workflows["brainstorm"]!.params["moduleSize"]!.default, 2);
+  assert.equal(
+    bundle.workflows["brainstorm"]!.params["moduleSize"],
+    undefined,
+    "leaf-product selection replaced round-robin, so no moduleSize knob exists",
+  );
 });
 
 test("panel confirmation is an optional, shrink-only human gate", () => {

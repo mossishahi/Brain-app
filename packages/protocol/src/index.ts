@@ -105,6 +105,10 @@ export interface ExpertUmbrellaView {
 
 export interface ExpertDepartmentView {
   readonly name: string;
+  /** The catalog group the department belongs to; absent on older trees. */
+  readonly domain?: string;
+  /** k — direct pool mentions of the department; absent on older trees. */
+  readonly count?: number;
   readonly umbrellas: readonly ExpertUmbrellaView[];
 }
 

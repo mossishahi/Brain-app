@@ -8,60 +8,98 @@ function positiveInteger(value: number, name: string): void {
   }
 }
 
+/** One scored leaf of the expertise tree: subfield i × umbrella j × department k. */
+export interface ScoredLeaf {
+  readonly department: string;
+  readonly umbrella: string;
+  readonly subfield: string;
+  /** i — distinct people who stated the subfield itself. */
+  readonly count: number;
+  /** i × j × k. */
+  readonly score: number;
+}
+
 /**
- * Original stable chunked round-robin panel selection:
- * - one seat per (department, umbrella) leaf;
- * - take up to moduleSize leaves from each department per pass;
- * - skip exhausted departments;
- * - preserve declared array/relevance order;
- * - stop at panelSize or tree exhaustion.
- *
- * moduleSize=1 is breadth-first round-robin, while a sufficiently large
- * moduleSize exhausts each department in depth-first order.
+ * The tree with every subfield's frequency multiplied through its parents:
+ * new i = i (subfield) × j (its umbrella) × k (its department). Counts at the
+ * umbrella and department levels are reported unchanged — only the leaves are
+ * scored, because only leaves become seats.
  */
-export function selectPanel(
-  experts: ExpertsTree,
-  panelSize: number,
-  moduleSize: number,
-): Panel {
-  positiveInteger(panelSize, "panelSize");
-  positiveInteger(moduleSize, "moduleSize");
+export interface ScoredExpertiseTree {
+  readonly departments: readonly {
+    readonly name: string;
+    readonly domain?: string;
+    readonly count: number;
+    readonly umbrellas: readonly {
+      readonly name: string;
+      readonly count: number;
+      readonly subfields: readonly { readonly name: string; readonly count: number; readonly score: number }[];
+    }[];
+  }[];
+}
 
-  const queues = experts.departments.map((department) => ({
-    position: 0,
-    members: department.umbrellas.map((umbrella): Omit<PanelMember, "id"> => {
-      // The tree's subfields carry their support counts; a seat needs only the
-      // names it will state as its research focuses. An umbrella can reach a
-      // seat with no subfield under it — the pool surfaced the field but
-      // nothing narrower — and the seat still has to name a focus, so it falls
-      // back to the field itself rather than an empty list.
-      const focuses = umbrella.subfields.map((subfield) => subfield.name);
-      return {
-        department: department.name,
-        umbrella: umbrella.name,
-        subfields: focuses.length > 0 ? focuses : [umbrella.name],
-      };
-    }),
-  }));
-
-  const members: PanelMember[] = [];
-  let progressed = true;
-  while (members.length < panelSize && progressed) {
-    progressed = false;
-    for (const queue of queues) {
-      let taken = 0;
-      while (
-        taken < moduleSize &&
-        queue.position < queue.members.length &&
-        members.length < panelSize
-      ) {
-        const seat = queue.members[queue.position++]!;
-        members.push({ id: `member-${members.length + 1}`, ...seat });
-        taken += 1;
-        progressed = true;
+/**
+ * Flattens the tree into leaves in tree order (department, then umbrella,
+ * then subfield), each scored i×j×k. Tree order is the tie-break for
+ * selection, so one tree always yields one panel.
+ */
+export function scoredLeaves(tree: ExpertsTree): ScoredLeaf[] {
+  const leaves: ScoredLeaf[] = [];
+  for (const department of tree.departments) {
+    for (const umbrella of department.umbrellas) {
+      for (const subfield of umbrella.subfields) {
+        leaves.push({
+          department: department.name,
+          umbrella: umbrella.name,
+          subfield: subfield.name,
+          count: subfield.count,
+          score: subfield.count * umbrella.count * department.count,
+        });
       }
-      if (members.length >= panelSize) break;
     }
   }
+  return leaves;
+}
+
+/** The mul_expertise view: the raw tree with per-leaf i×j×k scores attached. */
+export function scoreExpertiseTree(tree: ExpertsTree): ScoredExpertiseTree {
+  return {
+    departments: tree.departments.map((department) => ({
+      name: department.name,
+      ...(department.domain !== undefined ? { domain: department.domain } : {}),
+      count: department.count,
+      umbrellas: department.umbrellas.map((umbrella) => ({
+        name: umbrella.name,
+        count: umbrella.count,
+        subfields: umbrella.subfields.map((subfield) => ({
+          name: subfield.name,
+          count: subfield.count,
+          score: subfield.count * umbrella.count * department.count,
+        })),
+      })),
+    })),
+  };
+}
+
+/**
+ * Panel selection: one member per subfield LEAF, the panelSize highest
+ * i×j×k scores across the whole tree. Equal scores keep tree order
+ * (departments are count-sorted upstream, so ties resolve toward the
+ * stronger department first). No breadth balancing of any kind — the
+ * product is the whole rule.
+ */
+export function selectPanel(experts: ExpertsTree, panelSize: number): Panel {
+  positiveInteger(panelSize, "panelSize");
+
+  const members: PanelMember[] = [...scoredLeaves(experts)]
+    // Array.prototype.sort is stable, so equal scores keep tree order.
+    .sort((left, right) => right.score - left.score)
+    .slice(0, panelSize)
+    .map((leaf, index) => ({
+      id: `member-${index + 1}`,
+      department: leaf.department,
+      umbrella: leaf.umbrella,
+      subfields: [leaf.subfield],
+    }));
   return { members };
 }

@@ -152,6 +152,8 @@ test("experts and panel are separate artifacts", () => {
     departments: [
       {
         name: "Computer Science",
+        domain: "engineering_and_applied_sciences",
+        count: 5,
         umbrellas: [
           {
             name: "Graph Neural Networks",
@@ -162,6 +164,7 @@ test("experts and panel are separate artifacts", () => {
       },
       {
         name: "Mathematics",
+        count: 1,
         umbrellas: [
           {
             name: "Optimization",
@@ -181,8 +184,8 @@ test("experts and panel are separate artifacts", () => {
   assert.equal(
     expertsTreeSchema.safeParse({
       departments: [
-        { name: "Computer Science", umbrellas: [{ name: "ML", count: 1, subfields: [] }] },
-        { name: "Computer Science", umbrellas: [{ name: "GNN", count: 1, subfields: [] }] },
+        { name: "Computer Science", count: 1, umbrellas: [{ name: "ML", count: 1, subfields: [] }] },
+        { name: "Computer Science", count: 1, umbrellas: [{ name: "GNN", count: 1, subfields: [] }] },
       ],
     }).success,
     false,
@@ -192,7 +195,7 @@ test("experts and panel are separate artifacts", () => {
   assert.equal(
     expertsTreeSchema.safeParse({
       departments: [
-        { name: "Computer Science", umbrellas: [{ name: "ML", subfields: [] }] },
+        { name: "Computer Science", count: 1, umbrellas: [{ name: "ML", subfields: [] }] },
       ],
     }).success,
     false,
@@ -203,6 +206,7 @@ test("experts and panel are separate artifacts", () => {
       departments: [
         {
           name: "Computer Science",
+          count: 1,
           umbrellas: [{ name: "ML", count: 1, subfields: ["graph learning"] }],
         },
       ],
@@ -213,7 +217,7 @@ test("experts and panel are separate artifacts", () => {
   assert.equal(
     expertsTreeSchema.safeParse({
       departments: [
-        { name: "Computer Science", umbrellas: [{ name: "ML", count: 0, subfields: [] }] },
+        { name: "Computer Science", count: 1, umbrellas: [{ name: "ML", count: 0, subfields: [] }] },
       ],
     }).success,
     false,

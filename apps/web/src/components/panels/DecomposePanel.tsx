@@ -276,7 +276,11 @@ function TreeBrowser({
                 }}
               >
                 <span className="tree-row-name">{departmentItem.name}</span>
-                <span className="tree-count">{departmentItem.umbrellas.length}</span>
+                <span className="tree-count">
+                  {departmentItem.count !== undefined
+                    ? `${departmentItem.count}×`
+                    : departmentItem.umbrellas.length}
+                </span>
               </button>
             ))}
             {departments.length === 0 && <p className="dim small">no departments</p>}

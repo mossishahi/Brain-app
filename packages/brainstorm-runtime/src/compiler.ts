@@ -332,7 +332,7 @@ async function writeValidatedOutput(
       }
     }
   }
-  const stored = schemaName === "experts" ? sortExpertsBySupport(parsed) : parsed;
+  const stored = schemaName === "experts" ? canonicalizeExpertsTree(parsed) : parsed;
   const write = writeDataReference(state, target, stored, scope);
   let next = write.state;
   if (schemaName === "redevelopment") {
@@ -346,16 +346,18 @@ function isJsonRecord(value: JsonValue | undefined): value is JsonObject {
 }
 
 /**
- * Canonical order for the expertise tree: descending measured support, ties
- * keeping the order the model emitted (which the decomposer defines as first
- * appearance in the grounding pool). The orchestrator applies it rather than
- * trusting the model to, for the same reason it assembles the reviewed chain
- * itself — the ordering is computable, so it is not left to a judgement.
+ * Canonical form for the expertise tree, applied by the orchestrator on write
+ * rather than trusted to the model, because both operations are computable:
  *
- * Departments carry no count of their own; they rank by their strongest
- * umbrella, which is what `panel.select` walks in round-robin order.
+ * - every umbrella with no subfield gains the catch-all leaf
+ *   "all topics under <department> topic" with count 1, so every umbrella has
+ *   at least one scoreable leaf and every seat has a focus to state;
+ * - departments sort by their own count k (how many people stated the
+ *   department itself, or the 1 it gained by housing an umbrella), umbrellas
+ *   by j, subfields by i — descending, ties keeping the order the model
+ *   emitted (first appearance in the grounding pool).
  */
-function sortExpertsBySupport(tree: JsonValue): JsonValue {
+function canonicalizeExpertsTree(tree: JsonValue): JsonValue {
   if (!isJsonRecord(tree) || !Array.isArray(tree.departments)) return tree;
   const count = (entry: JsonValue): number =>
     isJsonRecord(entry) && typeof entry.count === "number" ? entry.count : 0;
@@ -367,22 +369,21 @@ function sortExpertsBySupport(tree: JsonValue): JsonValue {
     if (!isJsonRecord(department) || !Array.isArray(department.umbrellas)) {
       return department;
     }
-    const umbrellas = byCount(department.umbrellas).map((umbrella) =>
-      isJsonRecord(umbrella) && Array.isArray(umbrella.subfields)
-        ? { ...umbrella, subfields: byCount(umbrella.subfields) }
-        : umbrella,
-    );
+    const umbrellas = byCount(department.umbrellas).map((umbrella) => {
+      if (!isJsonRecord(umbrella) || !Array.isArray(umbrella.subfields)) {
+        return umbrella;
+      }
+      const subfields =
+        umbrella.subfields.length > 0
+          ? byCount(umbrella.subfields)
+          : [{ name: `all topics under ${String(department.name)} topic`, count: 1 }];
+      return { ...umbrella, subfields };
+    });
     return { ...department, umbrellas };
   });
-  const strongest = (department: JsonValue): number =>
-    isJsonRecord(department) && Array.isArray(department.umbrellas)
-      ? Math.max(0, ...department.umbrellas.map(count))
-      : 0;
   return {
     ...tree,
-    departments: [...departments].sort(
-      (left, right) => strongest(right) - strongest(left),
-    ),
+    departments: byCount(departments),
   };
 }
 
@@ -556,17 +557,15 @@ function builtinActivities(): Readonly<Record<string, DeterministicActivityHandl
     "panel.select": (input) => {
       const experts = validateArtifact("experts", "panel.select", input.experts!);
       const panelSize = input.panelSize;
-      const moduleSize = input.moduleSize;
-      if (typeof panelSize !== "number" || typeof moduleSize !== "number") {
+      if (typeof panelSize !== "number") {
         throw new BrainstormRuntimeError(
-          "panel.select requires numeric panelSize and moduleSize",
+          "panel.select requires a numeric panelSize",
           "INVALID_ACTIVITY_INPUT",
         );
       }
       return selectPanel(
         experts as unknown as Parameters<typeof selectPanel>[0],
         panelSize,
-        moduleSize,
       ) as unknown as JsonValue;
     },
   };

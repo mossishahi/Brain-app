@@ -50,7 +50,7 @@ test("rejects an activity whose logical handler is not registered", () => {
 test("rejects an activity missing or adding registered handler inputs", () => {
   const bundle = freshBundle();
   const selector = findActivity(bundle.workflows["brainstorm"]!.root, "select-panel");
-  delete selector.bind["moduleSize"];
+  delete selector.bind["panelSize"];
   selector.bind["policy"] = "params.panelSize";
   expectIssue(bundle, "ACTIVITY_INPUT_MISMATCH");
 });
@@ -81,9 +81,18 @@ test("rejects activity bindings with the wrong artifact or parameter type", () =
   const bundle = freshBundle();
   const selector = findActivity(bundle.workflows["brainstorm"]!.root, "select-panel");
   selector.bind["experts"] = "input";
-  selector.bind["moduleSize"] = "input.cotSteps";
-  const issues = validateBundle(bundle).filter((issue) => issue.code === "ACTIVITY_INPUT_TYPE_MISMATCH");
-  assert.equal(issues.length, 2);
+  selector.bind["panelSize"] = "input.cotSteps";
+  const issues = validateBundle(bundle);
+  assert.equal(
+    issues.filter((issue) => issue.code === "ACTIVITY_INPUT_TYPE_MISMATCH").length,
+    1,
+    "an artifact input bound to the wrong schema is a type mismatch",
+  );
+  assert.equal(
+    issues.filter((issue) => issue.code === "UNBOUNDED_ACTIVITY").length,
+    1,
+    "the output-bound input mis-bound is an unbounded activity, not a plain type mismatch",
+  );
 });
 
 test("rejects an activity whose output bound param has no finite maximum", () => {
