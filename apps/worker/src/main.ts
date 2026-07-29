@@ -10,12 +10,18 @@
  * (default ~/.brainstorm-agentic/workspace/sessions), one directory per run.
  */
 import { randomUUID } from "node:crypto";
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import process from "node:process";
 
 import { loadContent } from "@brainstorm-agentic/content";
-import type { JsonValue, RunEvent, RunEventListener, RunResult } from "@brainstorm-agentic/core";
+import type {
+  ArtifactStore,
+  JsonValue,
+  RunEvent,
+  RunEventListener,
+  RunResult,
+} from "@brainstorm-agentic/core";
 
 import { defaultSessionRoot, loadDotEnv } from "./env.js";
 import { FsArtifactStore, FsCheckpointStore } from "./fs-stores.js";
@@ -78,6 +84,40 @@ function loadAttachmentsManifest(
     baseDir: parsed.baseDir,
     attachments: parsed.attachments as readonly JsonValue[],
   };
+}
+
+/**
+ * Writes the run's expertise tree to `<sessionRoot>/<runId>/experts.json`.
+ *
+ * The artifact store keys every payload by an opaque id, so the tree is
+ * otherwise reachable only by looking its id up in `artifacts/index.json`.
+ * This is a readable copy beside `checkpoint.json`, pretty-printed; the
+ * artifact and the checkpoint journal remain the authoritative records. When
+ * the node ran more than once (a retry or a credit-block resume) the latest
+ * version wins.
+ */
+async function writeExpertsTree(
+  artifacts: ArtifactStore,
+  sessionRoot: string,
+  runId: string,
+): Promise<string | undefined> {
+  const ref = [...(await artifacts.list())]
+    .reverse()
+    .find((candidate) => candidate.metadata?.schema === "experts");
+  if (!ref) return undefined;
+  const stored = await artifacts.get(ref.id);
+  if (!stored) return undefined;
+  let body = stored.data;
+  try {
+    body = `${JSON.stringify(JSON.parse(stored.data) as unknown, null, 2)}\n`;
+  } catch {
+    // A payload that does not parse is still worth copying verbatim.
+  }
+  const path = join(sessionRoot, runId, "experts.json");
+  const tmp = `${path}.tmp-${process.pid}`;
+  writeFileSync(tmp, body, "utf8");
+  renameSync(tmp, path);
+  return path;
 }
 
 function logEvent(event: RunEvent): void {
@@ -226,10 +266,11 @@ async function main(): Promise<void> {
             : {}),
         })
       : undefined;
+    const artifacts = new FsArtifactStore(sessionRoot, runId);
     const runtime = buildRuntime({
       providerConfig: providerConfigFromEnv(process.env, offline),
       checkpoints: new FsCheckpointStore(sessionRoot),
-      artifacts: new FsArtifactStore(sessionRoot, runId),
+      artifacts,
       autoApproveGates: autoApprove,
       ...(manifest ? { attachmentRoots: [manifest.baseDir] } : {}),
       bundle: lazy?.bundle ?? loadContent(contentDir!),
@@ -244,7 +285,9 @@ async function main(): Promise<void> {
           attachments: (manifest?.attachments ?? []) as unknown as JsonValue,
         },
       });
+      const tree = await writeExpertsTree(artifacts, sessionRoot, runId);
       reportResult(result, sessionRoot);
+      if (tree) console.log(`Expertise tree: ${tree}`);
     } finally {
       await lazy?.close();
     }
@@ -277,10 +320,11 @@ async function main(): Promise<void> {
     // shrink. The run only suspends on gates in manual mode anyway, so a
     // gate-answering resume is by definition a manual-mode continuation.
     const resumeAutoApprove = autoApprove && Object.keys(responses).length === 0;
+    const artifacts = new FsArtifactStore(sessionRoot, runId);
     const runtime = buildRuntime({
       providerConfig: providerConfigFromEnv(process.env, offline),
       checkpoints: new FsCheckpointStore(sessionRoot),
-      artifacts: new FsArtifactStore(sessionRoot, runId),
+      artifacts,
       autoApproveGates: resumeAutoApprove,
       bundle: lazy?.bundle ?? loadContent(contentDir!),
       ...(lazy ? { skillResolver: lazy.skillResolver } : {}),
@@ -290,7 +334,9 @@ async function main(): Promise<void> {
       const result = await runtime.resume(runId, {
         ...(Object.keys(responses).length > 0 ? { responses } : {}),
       });
+      const tree = await writeExpertsTree(artifacts, sessionRoot, runId);
       reportResult(result, sessionRoot);
+      if (tree) console.log(`Expertise tree: ${tree}`);
     } finally {
       await lazy?.close();
     }
