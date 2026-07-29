@@ -151,9 +151,9 @@ class FakeBrainstormExecutor implements AgentExecutor {
         break;
       case "decomposer":
         output = {
-          // Leaf scores (i*j*k): photon counting 2*4*4=32, network inference
-          // 3*3*3=27, representation learning 2*4*2=16, transport 1*1*4=4,
-          // single-molecule 1*1*3=3 — so panelSize 3 seats QO, SysBio, ML in
+          // Umbrella scores (new j = j * sum(i)): Quantum Optics 4*3=12,
+          // Systems Biology 3*3=9, Machine Learning 4*2=8, Condensed Matter
+          // 1*1=1, Biophysics 1*1=1 — so panelSize 3 seats QO, SysBio, ML in
           // that order and panelSize 2 seats the first two.
           departments: [
             {
@@ -164,7 +164,7 @@ class FakeBrainstormExecutor implements AgentExecutor {
                 {
                   name: "Quantum Optics",
                   count: 4,
-                  subfields: [{ name: "photon counting", count: 2 }],
+                  subfields: [{ name: "photon counting", count: 3 }],
                 },
                 {
                   name: "Condensed Matter",

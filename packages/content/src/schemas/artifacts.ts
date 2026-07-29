@@ -395,10 +395,10 @@ export type PanelMember = z.infer<typeof panelMemberSchema>;
 /**
  * The seated panel produced by the deterministic panel-selection activity.
  * The experts tree remains a separate upstream artifact; a member is one
- * subfield LEAF of that tree — (department, umbrella, subfield) — chosen by
- * descending i×j×k score, so two members may share an umbrella as long as
- * they sit on different leaves. At least two members are required so that
- * every review step has at least one commentor.
+ * UMBRELLA of that tree, chosen by descending re-weighted support
+ * (j × the sum of its subfields' counts), and carries every subfield of that
+ * umbrella as its stated research focuses. At least two members are required
+ * so that every review step has at least one commentor.
  */
 export const panelSchema = z
   .object({
@@ -413,12 +413,12 @@ export const panelSchema = z
         ctx.addIssue({ code: "custom", path: ["members", i, "id"], message: `duplicate member id "${m.id}"` });
       }
       ids.add(m.id);
-      const seat = [m.department, m.umbrella, ...m.subfields].join("\u0000");
+      const seat = `${m.department}\u0000${m.umbrella}`;
       if (seats.has(seat)) {
         ctx.addIssue({
           code: "custom",
           path: ["members", i],
-          message: `duplicate seat for (${m.department}, ${m.umbrella}, ${m.subfields.join("/")}) — one member per leaf`,
+          message: `duplicate seat for (${m.department}, ${m.umbrella}) — one member per umbrella`,
         });
       }
       seats.add(seat);

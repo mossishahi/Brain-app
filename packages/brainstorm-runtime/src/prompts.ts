@@ -9,10 +9,9 @@ import { BrainstormRuntimeError } from "./errors.js";
 
 const MUSTACHE = /\{\{\s*([A-Za-z][A-Za-z0-9_]*)\s*\}\}/g;
 
-/** "a", "a and b", "a, b and c" — a list read aloud rather than printed. */
+/** "a", "a and b", "a and b and c" — a sentence with "and" between entries. */
 function listPhrase(entries: readonly string[]): string {
-  if (entries.length <= 1) return entries[0] ?? "";
-  return `${entries.slice(0, -1).join(", ")} and ${entries.at(-1)!}`;
+  return entries.join(" and ");
 }
 
 /**

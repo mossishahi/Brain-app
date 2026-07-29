@@ -291,7 +291,7 @@ test("experts and panel are separate artifacts", () => {
 
   const duplicateSeat = structuredClone(good);
   duplicateSeat.members[1] = { ...duplicateSeat.members[0]!, id: "cs-gnn-2" };
-  assert.equal(panelSchema.safeParse(duplicateSeat).success, false, "one member per leaf");
+  assert.equal(panelSchema.safeParse(duplicateSeat).success, false, "one member per umbrella");
 
   const single = { members: [good.members[0]] };
   assert.equal(panelSchema.safeParse(single).success, false, "a reviewable panel needs at least two members");

@@ -350,8 +350,8 @@ function isJsonRecord(value: JsonValue | undefined): value is JsonObject {
  * rather than trusted to the model, because both operations are computable:
  *
  * - every umbrella with no subfield gains the catch-all leaf
- *   "all topics under <department> topic" with count 1, so every umbrella has
- *   at least one scoreable leaf and every seat has a focus to state;
+ *   "various topics under <umbrella>" with count 1, so every umbrella has a
+ *   subfield sum to score with and every seat has a focus to state;
  * - departments sort by their own count k (how many people stated the
  *   department itself, or the 1 it gained by housing an umbrella), umbrellas
  *   by j, subfields by i — descending, ties keeping the order the model
@@ -376,7 +376,7 @@ function canonicalizeExpertsTree(tree: JsonValue): JsonValue {
       const subfields =
         umbrella.subfields.length > 0
           ? byCount(umbrella.subfields)
-          : [{ name: `all topics under ${String(department.name)} topic`, count: 1 }];
+          : [{ name: `various topics under ${String(umbrella.name)}`, count: 1 }];
       return { ...umbrella, subfields };
     });
     return { ...department, umbrellas };

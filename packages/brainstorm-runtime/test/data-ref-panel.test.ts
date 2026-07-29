@@ -106,7 +106,7 @@ test("writes materialize bracket variables immutably and reject prototype paths"
   );
 });
 
-test("panel.select seats the highest i*j*k leaves, ties keeping tree order", () => {
+test("panel.select seats umbrellas by j times the sum of their subfield counts", () => {
   const experts = {
     departments: [
       {
@@ -117,15 +117,15 @@ test("panel.select seats the highest i*j*k leaves, ties keeping tree order", () 
             name: "Graph Neural Networks",
             count: 7,
             subfields: [
-              { name: "graph structure learning", count: 3 }, // 3*7*5 = 105
-              { name: "latent graph inference", count: 1 },   // 1*7*5 = 35
+              { name: "graph structure learning", count: 3 },
+              { name: "latent graph inference", count: 1 },
             ],
-          },
+          }, // new j = 7 * (3+1) = 28
           {
             name: "Generative Models",
             count: 2,
-            subfields: [{ name: "diffusion models", count: 4 }], // 4*2*5 = 40
-          },
+            subfields: [{ name: "diffusion models", count: 4 }],
+          }, // new j = 2 * 4 = 8
         ],
       },
       {
@@ -136,39 +136,51 @@ test("panel.select seats the highest i*j*k leaves, ties keeping tree order", () 
             name: "Optimization",
             count: 5,
             subfields: [
-              { name: "optimal transport", count: 7 },     // 7*5*1 = 35 (ties leaf 2; later in tree order)
-              { name: "bilevel programming", count: 2 },   // 2*5*1 = 10
+              { name: "optimal transport", count: 7 },
+              { name: "bilevel programming", count: 2 },
             ],
-          },
+          }, // new j = 5 * (7+2) = 45 — department k plays no role
+          {
+            name: "Numerical Analysis",
+            count: 4,
+            subfields: [{ name: "various topics under Numerical Analysis", count: 2 }],
+          }, // new j = 4 * 2 = 8, tied with Generative Models but later in tree order
         ],
       },
     ],
   };
 
   assert.deepEqual(
-    selectPanel(experts, 3).members.map((member) => [
-      member.id,
-      member.department,
-      member.umbrella,
-      member.subfields,
-    ]),
+    selectPanel(experts, 3).members,
     [
-      ["member-1", "Computer Science", "Graph Neural Networks", ["graph structure learning"]],
-      ["member-2", "Computer Science", "Generative Models", ["diffusion models"]],
-      // 35-point tie: the leaf that appears earlier in tree order wins.
-      ["member-3", "Computer Science", "Graph Neural Networks", ["latent graph inference"]],
+      {
+        id: "member-1",
+        department: "Mathematics",
+        umbrella: "Optimization",
+        // A seat carries every subfield of its umbrella.
+        subfields: ["optimal transport", "bilevel programming"],
+      },
+      {
+        id: "member-2",
+        department: "Computer Science",
+        umbrella: "Graph Neural Networks",
+        subfields: ["graph structure learning", "latent graph inference"],
+      },
+      // 8-point tie: Generative Models appears earlier in tree order.
+      {
+        id: "member-3",
+        department: "Computer Science",
+        umbrella: "Generative Models",
+        subfields: ["diffusion models"],
+      },
     ],
   );
-  // Two leaves may share one umbrella — a seat is a leaf, not an umbrella.
-  const four = selectPanel(experts, 4).members;
-  assert.deepEqual(four[3], {
-    id: "member-4",
-    department: "Mathematics",
-    umbrella: "Optimization",
-    subfields: ["optimal transport"],
-  });
-  // panelSize beyond the leaf supply returns every leaf, highest first.
-  assert.equal(selectPanel(experts, 12).members.length, 5);
+  // The catch-all leaf is a valid stated focus for a subfield-less umbrella.
+  assert.deepEqual(selectPanel(experts, 4).members[3]!.subfields, [
+    "various topics under Numerical Analysis",
+  ]);
+  // panelSize beyond the umbrella supply returns every umbrella, highest first.
+  assert.equal(selectPanel(experts, 12).members.length, 4);
 });
 
 test("artifact schemas become structural JSON Schema descriptions", () => {
