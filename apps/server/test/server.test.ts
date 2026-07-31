@@ -662,6 +662,27 @@ test("local offline job completes with every dashboard artifact", async () => {
         (scholar) => scholar.profile === "ok" && scholar.interests.length > 0,
       ),
     );
+    // Review members are named by seat (umbrella terms may repeat across
+    // seats), and every recorded round carries the chain-of-thought step
+    // text exactly as its reviewers saw it.
+    const reviewStage = detail.stages.find((stage) => stage.id === "review-members");
+    assert.ok(reviewStage && reviewStage.id === "review-members");
+    assert.ok(reviewStage.members.length > 0);
+    reviewStage.members.forEach((member, index) => {
+      assert.equal(member.label, `Seat ${index + 1}`);
+      assert.ok(member.umbrella, "the seat keeps its umbrella as secondary detail");
+    });
+    const reviewedRound = reviewStage.members[0]!.steps[0]!.rounds[0];
+    assert.ok(reviewedRound, "the first step records at least one round");
+    assert.ok(
+      typeof reviewedRound.cot === "string" && reviewedRound.cot.length > 0,
+      "each round carries the reviewed chain-of-thought text",
+    );
+    assert.ok(
+      reviewedRound.comments.every((comment) => /^Seat \d+$/.test(comment.commentorLabel)),
+      "commentors are named by seat",
+    );
+
     // The split pipeline surfaces its sub-steps on the stage, each completed
     // and carrying a one-line result from its artifact.
     const decomposeSteps = detail.stages[1].steps;
