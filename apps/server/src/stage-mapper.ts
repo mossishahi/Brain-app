@@ -55,6 +55,7 @@ import {
   type StageBase,
   type StageId,
   type StageStatus,
+  type DecomposeStepView,
   type StageView,
 } from "@brainstorm-agentic/protocol";
 
@@ -200,9 +201,25 @@ function journalStateField(
   return undefined;
 }
 
+/**
+ * The decomposer split's workflow nodes: they all surface on the dashboard's
+ * single Decompose stage (their agent activity, timing, and sub-step views).
+ */
+const DECOMPOSE_SUBNODES = [
+  "build-pool",
+  "match-taxonomy",
+  "place-fields",
+  "submit-decisions",
+  "bridge-experts",
+] as const;
+
 function stageForPath(path: string): StageId | undefined {
   const segments = path.split("/");
-  return STAGE_IDS.find((id) => segments.includes(id));
+  const direct = STAGE_IDS.find((id) => segments.includes(id));
+  if (direct) return direct;
+  return DECOMPOSE_SUBNODES.some((node) => segments.includes(node))
+    ? "decompose-experts"
+    : undefined;
 }
 
 function timings(events: readonly RunEvent[]): Map<StageId, StageTiming> {
@@ -259,7 +276,19 @@ function timings(events: readonly RunEvent[]): Map<StageId, StageTiming> {
       continue;
     }
     const stage = stageForPath(event.path);
-    if (!stage || event.path !== `brainstorm-root/${stage}`) continue;
+    const leaf = event.path.split("/").pop() ?? "";
+    if (!stage || event.path !== `brainstorm-root/${leaf}`) continue;
+    // A decompose sub-node finishing is stage progress, not stage completion:
+    // only the last sub-node (bridge-experts) closes the stage. Failures
+    // close it from any sub-node.
+    if (
+      event.type === "node:completed" &&
+      stage === "decompose-experts" &&
+      leaf !== stage &&
+      leaf !== "bridge-experts"
+    ) {
+      continue;
+    }
     const timing = result.get(stage)!;
     if (event.type === "node:started") {
       if (timing.finishedAt !== undefined || timing.error !== undefined) {
@@ -1525,10 +1554,14 @@ export function buildJobDetail(input: MapperInput): JobDetail {
     ["synthesize-proposal", proposalOutput !== undefined],
     ["done", checkpoint?.status === "completed"],
   ]);
+  const journalNodesFor = (id: StageId): readonly string[] =>
+    id === "decompose-experts" ? [id, ...DECOMPOSE_SUBNODES] : [id];
   const journalPresent = new Map<StageId, boolean>(
     STAGE_IDS.map((id) => [
       id,
-      entries.some((entry) => entry.key.includes(`/${id}`)) ||
+      entries.some((entry) =>
+        journalNodesFor(id).some((node) => entry.key.includes(`/${node}`)),
+      ) ||
         (checkpoint?.pendingGates.some((gate) => stageForPath(gate.path) === id) ??
           false),
     ]),
@@ -1682,6 +1715,108 @@ export function buildJobDetail(input: MapperInput): JobDetail {
       }
     : undefined;
 
+  // The split decompose pipeline's sub-steps: completion is read from the
+  // journal, one line of live progress from each step's artifact, and while
+  // the stage is active the first incomplete step is the running one (the
+  // sequence is strictly ordered). Absent on single-decomposer bundles.
+  const nodeDone = (node: string): boolean =>
+    entries.some(
+      (entry) => entry.key.includes(`/${node}`) && entry.key.endsWith("::result"),
+    );
+  const poolValue = object(artifact(artifacts, "pool"));
+  const poolMatchesValue = object(artifact(artifacts, "poolMatches"));
+  const placementsValue = object(artifact(artifacts, "placements"));
+  const receiptValue = object(artifact(artifacts, "suggestionReceipt"));
+  const decomposeIsSplit =
+    DECOMPOSE_SUBNODES.some((node) =>
+      entries.some((entry) => entry.key.includes(`/${node}`)),
+    ) ||
+    events.some(
+      (event) =>
+        "path" in event &&
+        typeof event.path === "string" &&
+        DECOMPOSE_SUBNODES.some((node) => event.path.split("/").includes(node)),
+    ) ||
+    poolValue !== undefined;
+  let decomposeSteps: DecomposeStepView[] | undefined;
+  if (decomposeIsSplit) {
+    const poolMembers = Array.isArray(poolValue?.members)
+      ? poolValue.members.length
+      : undefined;
+    const poolPapers = Array.isArray(object(poolValue?.grounding)?.papers)
+      ? (object(poolValue?.grounding)!.papers as unknown[]).length
+      : undefined;
+    const matchedCount = Array.isArray(poolMatchesValue?.members)
+      ? poolMatchesValue.members.filter((member) => object(member)?.matched === true).length
+      : undefined;
+    const unmatchedCount = Array.isArray(poolMatchesValue?.unmatched)
+      ? poolMatchesValue.unmatched.length
+      : undefined;
+    const decisionCount = Array.isArray(placementsValue?.decisions)
+      ? placementsValue.decisions.length
+      : undefined;
+    const queuedCount =
+      typeof receiptValue?.queued === "number" ? receiptValue.queued : undefined;
+    const definitions: readonly {
+      id: DecomposeStepView["id"];
+      label: string;
+      detail: string | undefined;
+    }[] = [
+      {
+        id: "build-pool",
+        label: "Build expertise pool",
+        detail:
+          poolMembers !== undefined
+            ? `${poolMembers} member${poolMembers === 1 ? "" : "s"}${
+                poolPapers !== undefined ? ` from ${poolPapers} paper${poolPapers === 1 ? "" : "s"}` : ""
+              }`
+            : undefined,
+      },
+      {
+        id: "match-taxonomy",
+        label: "Match shared taxonomy",
+        detail:
+          matchedCount !== undefined || unmatchedCount !== undefined
+            ? `${matchedCount ?? 0} matched · ${unmatchedCount ?? 0} unmatched`
+            : undefined,
+      },
+      {
+        id: "place-fields",
+        label: "Place unmatched fields",
+        detail:
+          decisionCount !== undefined
+            ? `${decisionCount} decision${decisionCount === 1 ? "" : "s"}`
+            : undefined,
+      },
+      {
+        id: "submit-decisions",
+        label: "Submit decisions to registry",
+        detail: queuedCount !== undefined ? `${queuedCount} queued` : undefined,
+      },
+      {
+        id: "bridge-experts",
+        label: "Bridge experts tree",
+        detail: expertCounts
+          ? `${expertCounts.departments} departments · ${expertCounts.umbrellas} umbrellas`
+          : undefined,
+      },
+    ];
+    const decomposeActive = statuses.get("decompose-experts") === "active";
+    let sawIncomplete = false;
+    decomposeSteps = definitions.map((definition) => {
+      const done = nodeDone(definition.id);
+      const status: DecomposeStepView["status"] =
+        done ? "completed" : decomposeActive && !sawIncomplete ? "active" : "pending";
+      if (!done) sawIncomplete = true;
+      return {
+        id: definition.id,
+        label: definition.label,
+        status,
+        ...(definition.detail !== undefined ? { detail: definition.detail } : {}),
+      };
+    });
+  }
+
   const stages: StageView[] = [
     {
       ...processBase,
@@ -1695,6 +1830,7 @@ export function buildJobDetail(input: MapperInput): JobDetail {
       ...(expertsOutput ? { experts: expertsOutput } : {}),
       ...(expertCounts ? { counts: expertCounts } : {}),
       ...(groundingOutput ? { grounding: groundingOutput } : {}),
+      ...(decomposeSteps ? { steps: decomposeSteps } : {}),
     },
     {
       ...panelBase,

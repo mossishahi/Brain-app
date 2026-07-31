@@ -6,10 +6,36 @@
 import { useState } from "react";
 import type {
   DecomposeStage,
+  DecomposeStepView,
   ExpertsTreeView,
   GroundingView,
   ScholarView,
 } from "@brainstorm-agentic/protocol";
+
+/**
+ * The split pipeline's live progress strip: pool -> match -> place ->
+ * suggest -> bridge, each with its status and a one-line result once its
+ * artifact lands. This is what shows while the stage runs, before the
+ * grounding and tree exist.
+ */
+function StepStrip({ steps }: { steps: readonly DecomposeStepView[] }) {
+  return (
+    <ol className="decompose-steps">
+      {steps.map((step) => (
+        <li key={step.id} className={`decompose-step ${step.status}`}>
+          <span className="decompose-step-dot" aria-hidden />
+          <span className="decompose-step-label">{step.label}</span>
+          {step.status === "active" && (
+            <span className="decompose-step-live">running…</span>
+          )}
+          {step.detail && (
+            <span className="decompose-step-detail">{step.detail}</span>
+          )}
+        </li>
+      ))}
+    </ol>
+  );
+}
 
 function computeCounts(experts: ExpertsTreeView) {
   return {
@@ -329,9 +355,28 @@ function TreeBrowser({
 export function DecomposeBody({ stage }: { stage: DecomposeStage }) {
   const experts = stage.experts ?? { departments: [] };
   const counts = stage.counts ?? computeCounts(experts);
-  if (!stage.grounding) return <TreeBrowser experts={experts} counts={counts} />;
+  const steps = stage.steps;
+  const stepsSection = steps ? (
+    <section className="subpanel">
+      <p className="subpanel-title">Pipeline steps</p>
+      <StepStrip steps={steps} />
+    </section>
+  ) : null;
+  if (!stage.grounding) {
+    // While the split stages run there is no grounding or tree yet — the
+    // step strip is the live view; the tree browser appears once bridged.
+    return (
+      <div>
+        {stepsSection}
+        {(stage.experts || !steps) && (
+          <TreeBrowser experts={experts} counts={counts} />
+        )}
+      </div>
+    );
+  }
   return (
     <div>
+      {stepsSection}
       <section className="subpanel">
         <p className="subpanel-title">Literature grounding</p>
         <GroundingBrowser grounding={stage.grounding} />

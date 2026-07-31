@@ -453,12 +453,33 @@ export interface ProcessInputStage extends StageBase {
   readonly files?: FilePartitionView;
 }
 
+/** One sub-step of the split decompose pipeline, in execution order. */
+export type DecomposeStepId =
+  | "build-pool"
+  | "match-taxonomy"
+  | "place-fields"
+  | "submit-decisions"
+  | "bridge-experts";
+
+export interface DecomposeStepView {
+  readonly id: DecomposeStepId;
+  readonly label: string;
+  readonly status: "pending" | "active" | "completed";
+  /** One line of live progress, e.g. "41 members from 10 papers". */
+  readonly detail?: string;
+}
+
 export interface DecomposeStage extends StageBase {
   readonly id: "decompose-experts";
   readonly experts?: ExpertsTreeView;
   readonly counts?: { readonly departments: number; readonly umbrellas: number; readonly subfields: number };
   /** Papers/authors/research-interests the literature search surfaced. */
   readonly grounding?: GroundingView;
+  /**
+   * The split pipeline's sub-steps (pool -> match -> place -> suggest ->
+   * bridge) with live status; absent on jobs from single-decomposer bundles.
+   */
+  readonly steps?: readonly DecomposeStepView[];
 }
 
 export interface SelectPanelStage extends StageBase {

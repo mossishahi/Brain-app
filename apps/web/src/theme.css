@@ -2829,3 +2829,62 @@ button.server-file-name {
   display: inline-flex;
   gap: 8px;
 }
+
+/* ------------------------------------------------ decompose pipeline steps */
+
+.decompose-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.decompose-step {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.decompose-step-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+  align-self: center;
+  background: var(--border);
+}
+
+.decompose-step.completed .decompose-step-dot {
+  background: var(--ok);
+}
+
+.decompose-step.active .decompose-step-dot {
+  background: var(--accent);
+  animation: decompose-step-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes decompose-step-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+.decompose-step.pending {
+  opacity: 0.55;
+}
+
+.decompose-step-label {
+  font-weight: 500;
+}
+
+.decompose-step-live {
+  color: var(--accent);
+  font-size: 12px;
+}
+
+.decompose-step-detail {
+  color: var(--text-dim);
+  font-size: 12px;
+}

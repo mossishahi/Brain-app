@@ -659,6 +659,18 @@ test("local offline job completes with every dashboard artifact", async () => {
         (scholar) => scholar.profile === "ok" && scholar.interests.length > 0,
       ),
     );
+    // The split pipeline surfaces its sub-steps on the stage, each completed
+    // and carrying a one-line result from its artifact.
+    const decomposeSteps = detail.stages[1].steps;
+    assert.ok(decomposeSteps, "the decompose stage carries the split pipeline steps");
+    assert.deepEqual(
+      decomposeSteps.map((step) => step.id),
+      ["build-pool", "match-taxonomy", "place-fields", "submit-decisions", "bridge-experts"],
+    );
+    assert.ok(decomposeSteps.every((step) => step.status === "completed"));
+    assert.match(decomposeSteps[0]!.detail ?? "", /\d+ members from \d+ papers/);
+    assert.match(decomposeSteps[1]!.detail ?? "", /\d+ matched · \d+ unmatched/);
+    assert.match(decomposeSteps[4]!.detail ?? "", /\d+ departments/);
     assert.ok(
       detail.stages[1]!.activity?.some((entry) =>
         entry.message.includes("differentiable graph construction"),
