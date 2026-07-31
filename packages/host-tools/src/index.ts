@@ -34,6 +34,15 @@ export {
 } from "./code-execution.js";
 export type { ExecutionResult, CodeSandbox } from "./code-execution.js";
 
+// Taxonomy read tools (fully implemented over an injected TaxonomyAccess)
+export {
+  taxonomyTools,
+  TAXONOMY_TOOL_NAMES,
+  TAXONOMY_TREE_MANIFEST,
+  TAXONOMY_RESOLVE_MANIFEST,
+  TAXONOMY_MANIFESTS,
+} from "./taxonomy-tools.js";
+
 // Registry
 export {
   ALL_HOST_TOOL_MANIFESTS,

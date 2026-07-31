@@ -239,6 +239,236 @@ export const paperSchema = z
 export type Paper = z.infer<typeof paperSchema>;
 
 // ---------------------------------------------------------------------------
+// expertise pool -> taxonomy matching -> placement (the decomposer split)
+// ---------------------------------------------------------------------------
+
+/** One person's verbatim statement behind a pool member: the provenance unit. */
+export const poolOriginSchema = z
+  .object({
+    /** The author, as enumerated from a retrieved paper's byline. */
+    name: nonEmpty,
+    /** The retrieved paper whose byline surfaced this person. */
+    paper: nonEmpty,
+    /** The interest exactly as the person's profile wrote it. */
+    stated: nonEmpty,
+  })
+  .strict();
+
+export type PoolOrigin = z.infer<typeof poolOriginSchema>;
+
+/**
+ * One unified expertise-pool member: the canonical term, its distinct-people
+ * count, the surface variants unification absorbed, and every origin — so any
+ * later decision can be audited back to a named person on a named paper.
+ */
+export const poolMemberSchema = z
+  .object({
+    term: nonEmpty,
+    /** Distinct people who stated any variant of this term. */
+    count: z.number().int().min(1),
+    /**
+     * How relevant this area is to the input topic, in [0,1]: how often
+     * researchers who state this exact interest do research similar to the
+     * submission. Judged and audited by the pool builder; a separate axis
+     * from count and never altered by it. Sort key of the bridged tree.
+     */
+    relevance: z.number().min(0).max(1),
+    /** Every collected spelling, the canonical term included. */
+    variants: z.array(nonEmpty).min(1).max(12),
+    origins: z.array(poolOriginSchema).min(1).max(60),
+  })
+  .strict();
+
+export type PoolMember = z.infer<typeof poolMemberSchema>;
+
+/** The pool-builder's output: the unified pool plus its literature grounding. */
+export const poolSchema = z
+  .object({
+    members: z.array(poolMemberSchema).min(1).max(200),
+    /** Same contract as the experts tree's grounding (dashboard record). */
+    grounding: z.lazy(() => expertsGroundingSchema).optional(),
+  })
+  .strict()
+  .superRefine((pool, ctx) => {
+    const seen = new Set<string>();
+    pool.members.forEach((member, index) => {
+      if (seen.has(member.term)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["members", index, "term"],
+          message: `duplicate pool term "${member.term}"`,
+        });
+      }
+      seen.add(member.term);
+    });
+  });
+
+export type Pool = z.infer<typeof poolSchema>;
+
+/** A node position in the shared four-level taxonomy, as the registry reports it. */
+export const taxonomyPositionSchema = z
+  .object({
+    id: nonEmpty,
+    name: nonEmpty,
+    level: z.enum(["domain", "field", "subfield", "topic"]),
+    /** Ancestors then self, e.g. ["Physical Sciences","Computer Science","Artificial Intelligence"]. */
+    path: z.array(nonEmpty).min(1).max(4),
+    domain: nonEmpty.optional(),
+    field: nonEmpty.optional(),
+    subfield: nonEmpty.optional(),
+    topic: nonEmpty.optional(),
+    matchedOn: z.enum(["name", "alias"]).optional(),
+    matchedAlias: nonEmpty.optional(),
+  })
+  .strict();
+
+export type TaxonomyPosition = z.infer<typeof taxonomyPositionSchema>;
+
+/** One pool member after the deterministic taxonomy round-trip. */
+export const matchedPoolMemberSchema = poolMemberSchema
+  .safeExtend({
+    matched: z.boolean(),
+    /** The exact node the term resolved to; present iff matched. */
+    position: taxonomyPositionSchema.optional(),
+    /** Candidate node NAMES from the server's revise_query; empty when matched. */
+    options: z.array(nonEmpty).max(100),
+  })
+  .superRefine((member, ctx) => {
+    if (member.matched && member.position === undefined) {
+      ctx.addIssue({ code: "custom", path: ["position"], message: "a matched member carries its position" });
+    }
+    if (!member.matched && member.position !== undefined) {
+      ctx.addIssue({ code: "custom", path: ["position"], message: "an unmatched member carries no position" });
+    }
+    if (member.matched && member.options.length > 0) {
+      ctx.addIssue({ code: "custom", path: ["options"], message: "a matched member carries no candidate options" });
+    }
+  });
+
+export type MatchedPoolMember = z.infer<typeof matchedPoolMemberSchema>;
+
+/**
+ * The deterministic matching artifact: every member annotated, plus the
+ * unmatched projection the placer receives, stamped with the live taxonomy
+ * revision the answers were computed against.
+ */
+export const poolMatchesSchema = z
+  .object({
+    /** The shared taxonomy revision the round-trips were answered from. */
+    revision: z.number().int().min(1),
+    members: z.array(matchedPoolMemberSchema).max(400),
+    /** The unmatched members, verbatim (term/count/variants/origins/options). */
+    unmatched: z.array(matchedPoolMemberSchema).max(400),
+  })
+  .strict()
+  .superRefine((matches, ctx) => {
+    matches.unmatched.forEach((member, index) => {
+      if (member.matched) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["unmatched", index, "matched"],
+          message: "the unmatched projection may only contain unmatched members",
+        });
+      }
+    });
+  });
+
+export type PoolMatches = z.infer<typeof poolMatchesSchema>;
+
+/** One placement decision for a member the taxonomy did not carry. */
+export const placementDecisionSchema = z
+  .object({
+    /** The pool member's term, exactly as given. */
+    term: nonEmpty,
+    outcome: z.enum(["place", "already_present"]),
+    /** place: the canonical field name to inject. */
+    name: nonEmpty.optional(),
+    /** place: an existing node's name at domain/field/subfield depth. */
+    parent: nonEmpty.optional(),
+    /** place: other spellings that should resolve to the new node. */
+    aliases: z.array(nonEmpty).max(12).optional(),
+    /** already_present: the existing node the member resolves to. */
+    node: nonEmpty.optional(),
+    reason: nonEmpty,
+  })
+  .strict()
+  .superRefine((decision, ctx) => {
+    if (decision.outcome === "place") {
+      if (!decision.name) {
+        ctx.addIssue({ code: "custom", path: ["name"], message: "a place decision names the field" });
+      }
+      if (!decision.parent) {
+        ctx.addIssue({ code: "custom", path: ["parent"], message: "a place decision names its parent node" });
+      }
+      if (decision.node) {
+        ctx.addIssue({ code: "custom", path: ["node"], message: "a place decision carries no existing node" });
+      }
+    } else {
+      if (!decision.node) {
+        ctx.addIssue({ code: "custom", path: ["node"], message: "an already_present decision names the existing node" });
+      }
+      if (decision.name || decision.parent) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["name"],
+          message: "an already_present decision carries no new name or parent",
+        });
+      }
+    }
+  });
+
+export type PlacementDecision = z.infer<typeof placementDecisionSchema>;
+
+/** The placer's output: one decision per unmatched member, revision-stamped. */
+export const placementsSchema = z
+  .object({
+    /** The taxonomy revision the placer read before deciding. */
+    revision: z.number().int().min(1),
+    decisions: z.array(placementDecisionSchema).max(400),
+  })
+  .strict()
+  .superRefine((placements, ctx) => {
+    const seen = new Set<string>();
+    placements.decisions.forEach((decision, index) => {
+      if (seen.has(decision.term)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["decisions", index, "term"],
+          message: `duplicate decision for "${decision.term}"`,
+        });
+      }
+      seen.add(decision.term);
+    });
+  });
+
+export type Placements = z.infer<typeof placementsSchema>;
+
+/** The registry's receipt for one run's queued decisions (never applied here). */
+export const suggestionReceiptSchema = z
+  .object({
+    /** Queue record id assigned by the registry. */
+    id: nonEmpty,
+    receivedAt: nonEmpty,
+    /** The taxonomy revision the decisions were recorded against. */
+    revision: z.number().int().min(1),
+    queued: z.number().int().min(0),
+    /** Echo of what was submitted: one entry per pool member. */
+    entries: z
+      .array(
+        z
+          .object({
+            term: nonEmpty,
+            kind: z.enum(["matched", "place", "already_present", "undecided"]),
+          })
+          .strict(),
+      )
+      .max(400),
+  })
+  .strict();
+
+export type SuggestionReceipt = z.infer<typeof suggestionReceiptSchema>;
+
+// ---------------------------------------------------------------------------
 // experts / panel
 // ---------------------------------------------------------------------------
 
@@ -253,6 +483,8 @@ export const expertAreaSchema = z
     name: nonEmpty,
     /** Distinct people in the grounding pool who stated this area. */
     count: z.number().int().min(1),
+    /** Input-topic relevance in [0,1] (max over landed pool members); sort key. */
+    relevance: z.number().min(0).max(1).optional(),
   })
   .strict();
 
@@ -268,6 +500,8 @@ export const expertUmbrellaSchema = z
     name: nonEmpty,
     /** Distinct people in the grounding pool who stated this umbrella. */
     count: z.number().int().min(1),
+    /** Input-topic relevance in [0,1] (max under this umbrella); sort key. */
+    relevance: z.number().min(0).max(1).optional(),
     subfields: z.array(expertAreaSchema).max(30),
   })
   .strict();
@@ -284,6 +518,8 @@ export const expertDepartmentSchema = z
      * returned, so every entry carries at least 1.
      */
     count: z.number().int().min(1),
+    /** Input-topic relevance in [0,1] (max under this department); sort key. */
+    relevance: z.number().min(0).max(1).optional(),
     /**
      * May be empty: a department mentioned in the pool keeps its count even
      * when no umbrella landed under it.
@@ -1150,6 +1386,10 @@ export const artifactSchemas = {
   processorOutput: processorOutputSchema,
   usefulFiles: usefulFilesSchema,
   ignoredFiles: ignoredFilesSchema,
+  pool: poolSchema,
+  poolMatches: poolMatchesSchema,
+  placements: placementsSchema,
+  suggestionReceipt: suggestionReceiptSchema,
   experts: expertsTreeSchema,
   panel: panelSchema,
   brainIdea: brainIdeaSchema,

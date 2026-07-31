@@ -8,4 +8,5 @@ export * from "./agent-adapter.js";
 export * from "./gates.js";
 export * from "./state.js";
 export * from "./compiler.js";
+export * from "./taxonomy-activities.js";
 export * from "./runtime.js";

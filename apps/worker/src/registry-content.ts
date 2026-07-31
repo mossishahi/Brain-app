@@ -57,6 +57,10 @@ export interface LazyRegistryContent {
   readonly bundle: ContentBundle;
   readonly skillResolver: SkillResolver;
   readonly pin: ContentRegistryPin;
+  /** The open registry connection — also carries the taxonomy MCP tools. */
+  readonly client: ContentRegistryClient;
+  /** The on-disk cache root of this pinned bundle (for post-run cleanup). */
+  readonly cacheRoot: string;
   close(): Promise<void>;
 }
 
@@ -106,6 +110,8 @@ export async function openLazyRegistryContent(options: {
     bundle,
     skillResolver: new LazyRegistrySkillResolver(cache),
     pin,
+    client,
+    cacheRoot: cache.root,
     close: () => client.close(),
   };
 }

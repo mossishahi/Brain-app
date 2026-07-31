@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -7,15 +7,29 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { loadContent } from "@brainstorm-agentic/content";
+import type { TaxonomyAccess } from "@brainstorm-agentic/core";
 
 import {
   buildRuntime,
   providerConfigFromEnv,
 } from "../src/wiring.js";
 import { FsArtifactStore, FsCheckpointStore } from "../src/fs-stores.js";
+import {
+  LocalTaxonomyService,
+  localTaxonomySeedPath,
+} from "../src/taxonomy-service.js";
 
 function tempRoot(): string {
   return mkdtempSync(join(tmpdir(), "bsa-cli-"));
+}
+
+/** The bundle-seeded local taxonomy the deterministic activities run over. */
+function testTaxonomy(root: string): { taxonomy: TaxonomyAccess } | Record<string, never> {
+  const seed = localTaxonomySeedPath(registryContentDir);
+  if (!existsSync(seed)) return {};
+  return {
+    taxonomy: new LocalTaxonomyService(seed, join(root, "taxonomy-suggestions.jsonl")),
+  };
 }
 
 const brainRepoRoot = fileURLToPath(new URL("../../../../../brain/", import.meta.url));
@@ -68,6 +82,7 @@ test("offline run completes end to end with file-backed stores and auto-approved
       checkpoints: new FsCheckpointStore(root),
       artifacts: new FsArtifactStore(root, runId),
       autoApproveGates: true,
+      ...testTaxonomy(root),
       bundle: registryBundle,
     });
     const result = await runtime.run({
@@ -97,6 +112,7 @@ test("manual gate suspends; resume across a fresh runtime instance completes fro
       checkpoints: new FsCheckpointStore(root),
       artifacts: new FsArtifactStore(root, runId),
       autoApproveGates: false,
+      ...testTaxonomy(root),
       bundle: registryBundle,
     });
     const suspended = await first.run({
@@ -114,6 +130,7 @@ test("manual gate suspends; resume across a fresh runtime instance completes fro
       checkpoints: new FsCheckpointStore(root),
       artifacts: new FsArtifactStore(root, runId),
       autoApproveGates: false,
+      ...testTaxonomy(root),
       bundle: registryBundle,
     });
     const finished = await second.resume(runId, {
@@ -148,6 +165,7 @@ test("gate shrink action reduces the seated panel before the first pass", async 
       checkpoints: new FsCheckpointStore(root),
       artifacts: new FsArtifactStore(root, runId),
       autoApproveGates: false,
+      ...testTaxonomy(root),
       bundle: registryBundle,
     });
     const suspended = await runtime.run({

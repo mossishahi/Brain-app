@@ -12,6 +12,7 @@ import {
   BrainstormRuntime,
   ContentArtifactOutputValidator,
   StaticCapabilityToolResolver,
+  taxonomyActivities,
   type BrainstormRouteResolver,
   type ResolvedBrainstormRoute,
   type SkillResolver,
@@ -27,6 +28,7 @@ import {
   type JsonObject,
   type JsonValue,
   type RunEventListener,
+  type TaxonomyAccess,
 } from "@brainstorm-agentic/core";
 import type { ContentBundle, LoadedInputTypes } from "@brainstorm-agentic/content";
 import { ClaudeAgentExecutor } from "@brainstorm-agentic/executor-claude-agent";
@@ -36,7 +38,10 @@ import { attachmentTools, ATTACHMENT_TOOL_NAMES } from "./attachment-tools.js";
 import {
   ALL_HOST_TOOL_MANIFESTS,
   ATTACHMENT_MANIFESTS,
+  TAXONOMY_MANIFESTS,
+  TAXONOMY_TOOL_NAMES,
   createHostToolRegistry,
+  taxonomyTools,
 } from "@brainstorm-agentic/host-tools";
 import { OfflineBrainstormExecutor } from "./offline-executor.js";
 
@@ -75,6 +80,12 @@ export interface RuntimeWiringOptions {
   readonly autoApproveGates: boolean;
   /** Ingested attachment store roots; scoped file tools are exposed when set. */
   readonly attachmentRoots?: readonly string[];
+  /**
+   * Shared-taxonomy access (registry-backed in production, local seed as
+   * fallback). Powers the deterministic taxonomy activities and the placer's
+   * taxonomy-access capability tools.
+   */
+  readonly taxonomy?: TaxonomyAccess;
   readonly bundle: ContentBundle;
   readonly skillResolver?: SkillResolver;
   readonly onEvent?: RunEventListener;
@@ -94,6 +105,7 @@ export function buildAgentExecutor(
   config: ProviderConfig,
   attachmentRoots: readonly string[] = [],
   inputTypes?: LoadedInputTypes,
+  taxonomy?: TaxonomyAccess,
 ): AgentExecutor {
   if (config.provider === "offline") {
     return new OfflineBrainstormExecutor({ ...(inputTypes ? { inputTypes } : {}) });
@@ -148,6 +160,9 @@ export function buildAgentExecutor(
   const registry = new InMemoryToolRegistry();
   if (attachmentRoots.length > 0) {
     for (const tool of attachmentTools(attachmentRoots)) registry.register(tool);
+  }
+  if (taxonomy) {
+    for (const tool of taxonomyTools(taxonomy)) registry.register(tool);
   }
   return new ToolLoopAgentExecutor({
     provider,
@@ -253,11 +268,16 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
     options.providerConfig.provider === "anthropic" && attachmentRoots.length > 0
       ? [...ATTACHMENT_TOOL_NAMES]
       : [];
+  // Taxonomy reads are provider-neutral registered tools (Messages API path).
+  const anthropicTaxonomyTools =
+    options.providerConfig.provider === "anthropic" && options.taxonomy
+      ? [...TAXONOMY_TOOL_NAMES]
+      : [];
 
   // Determine enabled host tools from config or defaults
   const enabledHostToolIds = new Set<string>(
     options.providerConfig.enabledHostToolIds ??
-      ATTACHMENT_MANIFESTS
+      [...ATTACHMENT_MANIFESTS, ...TAXONOMY_MANIFESTS]
         .filter((m) => m.defaultEnabled)
         .map((m) => m.toolId),
   );
@@ -268,17 +288,22 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
         options.providerConfig,
         attachmentRoots,
         options.bundle.catalogs.inputTypes,
+        options.taxonomy,
       ),
       options.artifacts,
     ),
     bundle: options.bundle,
     skillResolver: options.skillResolver,
     routeResolver: contentRouteResolver(options.providerConfig),
+    // The deterministic taxonomy activities (match/suggest/bridge) run over
+    // the same shared-taxonomy access the placer's tools read from.
+    ...(options.taxonomy ? { activities: taxonomyActivities(options.taxonomy) } : {}),
     // Legacy capability tool resolver (kept for backward compatibility)
     capabilityTools: new StaticCapabilityToolResolver({
       "web-search": [],
       "code-execution": [],
       "attachment-access": anthropicAttachmentTools,
+      "taxonomy-access": anthropicTaxonomyTools,
     }),
     // Capability broker inputs
     providerOffers: [],

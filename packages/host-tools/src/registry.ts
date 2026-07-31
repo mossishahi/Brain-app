@@ -8,6 +8,8 @@ import { InMemoryToolRegistry } from "@brainstorm-agentic/core";
 import { ATTACHMENT_MANIFESTS, attachmentTools, ATTACHMENT_TOOL_NAMES } from "./attachment-tools.js";
 import { WEB_SEARCH_MANIFESTS } from "./web-search.js";
 import { CODE_EXECUTION_MANIFESTS } from "./code-execution.js";
+import { TAXONOMY_MANIFESTS, TAXONOMY_TOOL_NAMES, taxonomyTools } from "./taxonomy-tools.js";
+import type { TaxonomyAccess } from "@brainstorm-agentic/core";
 
 // ---------------------------------------------------------------------------
 // Complete manifest catalog
@@ -22,6 +24,7 @@ export const ALL_HOST_TOOL_MANIFESTS: readonly HostToolManifest[] = [
   ...ATTACHMENT_MANIFESTS,
   ...WEB_SEARCH_MANIFESTS,
   ...CODE_EXECUTION_MANIFESTS,
+  ...TAXONOMY_MANIFESTS,
 ];
 
 // ---------------------------------------------------------------------------
@@ -31,6 +34,8 @@ export const ALL_HOST_TOOL_MANIFESTS: readonly HostToolManifest[] = [
 export interface HostToolRegistryConfig {
   /** Attachment store roots. Required for attachment tools to be functional. */
   readonly attachmentRoots?: readonly string[];
+  /** Shared-taxonomy access. Required for taxonomy tools to be functional. */
+  readonly taxonomy?: TaxonomyAccess;
   /** User-enabled tool IDs. Only these are registered on the runtime registry. */
   readonly enabledToolIds: ReadonlySet<string>;
 }
@@ -57,6 +62,16 @@ export function createHostToolRegistry(
     }
   }
 
+  // Taxonomy read tools: only register when a shared-taxonomy access is wired
+  if (config.taxonomy) {
+    for (const tool of taxonomyTools(config.taxonomy)) {
+      if (config.enabledToolIds.has(tool.definition.name)) {
+        registry.register(tool);
+        registeredNames.push(tool.definition.name);
+      }
+    }
+  }
+
   // Future: register web-search and code-execution tools here when backends exist
 
   return { registry, registeredToolNames: registeredNames };
@@ -68,10 +83,16 @@ export function createHostToolRegistry(
  */
 export function executableHostToolIds(config: {
   attachmentRoots?: readonly string[];
+  taxonomy?: TaxonomyAccess;
 }): ReadonlySet<string> {
   const ids = new Set<string>();
   if (config.attachmentRoots && config.attachmentRoots.length > 0) {
     for (const name of ATTACHMENT_TOOL_NAMES) {
+      ids.add(name);
+    }
+  }
+  if (config.taxonomy) {
+    for (const name of TAXONOMY_TOOL_NAMES) {
       ids.add(name);
     }
   }
@@ -84,10 +105,14 @@ export function executableHostToolIds(config: {
  */
 export function availableHostToolManifests(config: {
   attachmentRoots?: readonly string[];
+  taxonomy?: TaxonomyAccess;
 }): readonly HostToolManifest[] {
   const available: HostToolManifest[] = [];
   if (config.attachmentRoots && config.attachmentRoots.length > 0) {
     available.push(...ATTACHMENT_MANIFESTS);
+  }
+  if (config.taxonomy) {
+    available.push(...TAXONOMY_MANIFESTS);
   }
   // Web search and code execution manifests are always listed (for settings UI)
   // but marked as non-executable until backends are implemented

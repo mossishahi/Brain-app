@@ -38,7 +38,11 @@ test("workflow phases appear in the canonical order", () => {
       "process-input",
       "partition-files-useful",
       "partition-files-ignored",
-      "decompose-experts",
+      "build-pool",
+      "match-taxonomy",
+      "place-fields",
+      "submit-decisions",
+      "bridge-experts",
       "select-panel",
       "confirm-panel",
       "first-pass",
@@ -71,7 +75,7 @@ test("the processor's file map is partitioned deterministically and NA files nev
   // Every downstream agent that receives the input gets it without the raw
   // file map, plus the useful-file list only.
   for (const id of [
-    "decompose-experts",
+    "build-pool",
     "develop-idea",
     "comment-step",
     "judge-step",
@@ -90,23 +94,58 @@ test("the processor's file map is partitioned deterministically and NA files nev
       `${id} receives the useful files only`,
     );
   }
+
+  // The placer reads the shared taxonomy, not the submission's attachments:
+  // it gets the projected input and the unmatched members only.
+  const placer = findAgent(root, "place-fields");
+  assert.deepEqual(placer.bind?.["input"], { ref: "input", omit: ["files"] });
+  assert.equal(placer.bind?.["files"], undefined, "place-fields receives no file map");
 });
 
-test("decomposer returns experts only, then panel.select seats the panel deterministically", () => {
+test("the decomposer split: pool with provenance, deterministic matching, placer over the live taxonomy, queued suggestions, bridge, then panel.select", () => {
   const bundle = freshBundle();
   const root = bundle.workflows["brainstorm"]!.root as SequenceNode;
-  const decomposerIndex = root.steps.findIndex((step) => step.id === "decompose-experts");
-  const selectorIndex = root.steps.findIndex((step) => step.id === "select-panel");
-  const gateIndex = root.steps.findIndex((step) => step.id === "confirm-panel");
-  assert.equal(selectorIndex, decomposerIndex + 1, "panel selection immediately follows decomposition");
-  assert.equal(gateIndex, selectorIndex + 1, "the human gate immediately follows deterministic selection");
+  const order = ["build-pool", "match-taxonomy", "place-fields", "submit-decisions", "bridge-experts", "select-panel", "confirm-panel"]
+    .map((id) => root.steps.findIndex((step) => step.id === id));
+  for (let i = 1; i < order.length; i += 1) {
+    assert.equal(order[i], order[i - 1]! + 1, "the decompose stages run back to back");
+  }
 
-  const decomposer = findAgent(root, "decompose-experts");
-  assert.equal(decomposer.skill, "decomposer");
-  assert.deepEqual(decomposer.output, { key: "experts", schema: "experts" });
-  assert.deepEqual(Object.keys(decomposer.bind ?? {}).sort(), ["departments", "files", "input"]);
-  assert.equal(bundle.skills["decomposer"]!.meta.output, "experts");
-  assert.deepEqual(bundle.skills["decomposer"]!.meta.vars.sort(), ["departments", "files", "input"]);
+  // Part one of the split: the pool builder returns members with provenance.
+  const poolBuilder = findAgent(root, "build-pool");
+  assert.equal(poolBuilder.skill, "pool-builder");
+  assert.deepEqual(poolBuilder.output, { key: "pool", schema: "pool" });
+  assert.deepEqual(Object.keys(poolBuilder.bind ?? {}).sort(), ["files", "input"]);
+  assert.equal(bundle.skills["pool-builder"]!.meta.output, "pool");
+  assert.deepEqual(bundle.skills["pool-builder"]!.meta.vars.slice().sort(), ["files", "input"]);
+
+  // Deterministic matching: one server round-trip per member, no model call.
+  const matcher = findActivity(root, "match-taxonomy");
+  assert.equal(matcher.handler, "taxonomy.match");
+  assert.deepEqual(matcher.bind, { pool: "pool", maxMembers: "params.maxPoolMembers" });
+  assert.deepEqual(matcher.output, { key: "poolMatches", schema: "poolMatches" });
+  const matchHandler = bundle.activities.handlers["taxonomy.match"]!;
+  assert.equal(matchHandler.deterministic, true);
+  assert.equal(matchHandler.outputSchema, "poolMatches");
+
+  // Part two of the split: the placer reads the LIVE shared taxonomy through
+  // its capability and decides only the unmatched members.
+  const placer = findAgent(root, "place-fields");
+  assert.equal(placer.skill, "placer");
+  assert.equal(placer.bind?.["unmatched"], "poolMatches.unmatched");
+  assert.deepEqual(placer.output, { key: "placements", schema: "placements" });
+  assert.equal(bundle.skills["placer"]!.meta.output, "placements");
+  assert.ok(bundle.skills["placer"]!.meta.capabilities.includes("taxonomy-access"));
+
+  // Every member's decision is queued on the registry, never applied locally.
+  const suggest = findActivity(root, "submit-decisions");
+  assert.equal(suggest.handler, "taxonomy.suggest");
+  assert.deepEqual(suggest.output, { key: "suggestionReceipt", schema: "suggestionReceipt" });
+
+  // The temporary bridge keeps the legacy experts contract alive downstream.
+  const bridge = findActivity(root, "bridge-experts");
+  assert.equal(bridge.handler, "experts.bridge");
+  assert.deepEqual(bridge.output, { key: "experts", schema: "experts" });
 
   const selector = findActivity(root, "select-panel");
   assert.equal(selector.handler, "panel.select");
@@ -261,17 +300,34 @@ test("verdict catalog preserves the Pass/Build/Interrupt contract", () => {
   assert.deepEqual(catalog.sequencing.noImmediateRepeat, ["Build"]);
 });
 
-test("skills split into 8 roles and 4 techniques, with clean prompt bodies", () => {
+test("skills split into 9 roles and 6 techniques, with clean prompt bodies", () => {
   const bundle = freshBundle();
   const roles = Object.values(bundle.skills).filter((s) => s.meta.kind === "role");
   const techniques = Object.values(bundle.skills).filter((s) => s.meta.kind === "technique");
   assert.deepEqual(
     roles.map((s) => s.meta.name).sort(),
-    ["brain", "chair", "commentor", "decomposer", "integrator", "judge", "processor", "redeveloper"],
+    [
+      "brain",
+      "chair",
+      "commentor",
+      "integrator",
+      "judge",
+      "placer",
+      "pool-builder",
+      "processor",
+      "redeveloper",
+    ],
   );
   assert.deepEqual(
     techniques.map((s) => s.meta.name).sort(),
-    ["academic-profile-lookup", "deep-understanding", "literature-review", "term-unification"],
+    [
+      "academic-profile-lookup",
+      "deep-understanding",
+      "field-match",
+      "field-placement",
+      "literature-review",
+      "term-unification",
+    ],
   );
   for (const role of roles) {
     assert.ok(role.meta.output, `role ${role.meta.name} declares an output schema`);
@@ -279,12 +335,15 @@ test("skills split into 8 roles and 4 techniques, with clean prompt bodies", () 
   for (const technique of techniques) {
     assert.equal(technique.meta.output, undefined);
   }
-  // The literature review is parameterized by the seat's expertise; the other
+  // The literature review is parameterized by the seat's expertise, and the two
+  // taxonomy NA-resolution prompts by their per-call task data; the other
   // techniques stay var-free and universal.
   assert.deepEqual(
     bundle.skills["literature-review"]!.meta.vars.sort(),
     ["department", "subfields", "umbrella"],
   );
+  assert.deepEqual(bundle.skills["field-match"]!.meta.vars.slice().sort(), ["options", "query"]);
+  assert.deepEqual(bundle.skills["field-placement"]!.meta.vars.slice().sort(), ["query", "taxonomy"]);
   assert.deepEqual(bundle.skills["deep-understanding"]!.meta.vars, []);
   assert.deepEqual(bundle.skills["academic-profile-lookup"]!.meta.vars, []);
   assert.deepEqual(bundle.skills["term-unification"]!.meta.vars, []);

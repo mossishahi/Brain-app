@@ -1032,6 +1032,7 @@ test("manual gate can shrink, complete, and reload after restart", async () => {
       bundle: string;
       version: string;
       manifestSha256: string;
+      manifest: { files: Array<{ path: string }> };
     };
     const cacheRoot = join(
       contentDir,
@@ -1040,7 +1041,19 @@ test("manual gate can shrink, complete, and reload after restart", async () => {
       pin.manifestSha256,
     );
     assert.ok(existsSync(join(cacheRoot, "skills", "roles", "processor.md")));
-    assert.ok(existsSync(join(cacheRoot, "skills", "roles", "decomposer.md")));
+    // The panel stage runs before the gate, so its roles are fetched by now —
+    // the single decomposer on older published bundles, the pool-builder +
+    // placer split on newer ones.
+    const shippedRoles = new Set(pin.manifest.files.map((file) => file.path));
+    const panelRoles = [
+      "skills/roles/decomposer.md",
+      "skills/roles/pool-builder.md",
+      "skills/roles/placer.md",
+    ].filter((path) => shippedRoles.has(path));
+    assert.ok(panelRoles.length > 0, "the pinned bundle ships a panel-stage role");
+    for (const path of panelRoles) {
+      assert.ok(existsSync(join(cacheRoot, path)), `${path} fetched by suspension`);
+    }
     for (const notReached of ["brain", "commentor", "judge", "chair"]) {
       assert.equal(
         existsSync(join(cacheRoot, "skills", "roles", `${notReached}.md`)),
@@ -1065,7 +1078,14 @@ test("manual gate can shrink, complete, and reload after restart", async () => {
     );
     assert.equal(answered.status, 200);
     const completed = await waitFor(server, jobId, "completed");
-    assert.ok(existsSync(join(cacheRoot, "skills", "roles", "chair.md")));
+    // Fetched content is ephemeral: a terminal run deletes its cached bundle
+    // copies, keeping only the pin as the provenance record.
+    assert.equal(
+      existsSync(cacheRoot),
+      false,
+      "the cached bundle copies are deleted once the run completes",
+    );
+    assert.ok(existsSync(join(contentDir, "content-pin.json")));
     const confirm = completed.stages[3]!;
     assert.equal(confirm.id, "confirm-panel");
     assert.equal(confirm.id === "confirm-panel" && confirm.gate.state, "shrunk");

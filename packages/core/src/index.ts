@@ -25,6 +25,7 @@ export * from "./agent/tool.js";
 
 // Capability broker
 export * from "./capability/index.js";
+export * from "./taxonomy.js";
 
 // Stores
 export * from "./store/artifacts.js";

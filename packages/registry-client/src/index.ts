@@ -302,6 +302,37 @@ export class ContentRegistryClient {
     };
   }
 
+  /**
+   * Invoke one of the registry's MCP tools (the taxonomy service) and return
+   * its parsed JSON payload. Tool errors surface as thrown Errors carrying the
+   * server's message.
+   */
+  async callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
+    await this.connect();
+    const result = (await this.client.callTool({ name, arguments: args })) as {
+      content?: Array<{ type?: string; text?: string }>;
+      isError?: boolean;
+    };
+    const first = result.content?.[0];
+    if (!first || first.type !== "text" || typeof first.text !== "string") {
+      throw new Error(`Brain Registry tool "${name}" returned no text content`);
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(first.text);
+    } catch {
+      throw new Error(`Brain Registry tool "${name}" returned non-JSON content`);
+    }
+    if (result.isError) {
+      const message =
+        typeof parsed === "object" && parsed !== null && "message" in parsed
+          ? String((parsed as { message: unknown }).message)
+          : first.text;
+      throw new Error(`Brain Registry tool "${name}" failed: ${message}`);
+    }
+    return parsed;
+  }
+
   async close(): Promise<void> {
     if (!this.connected) return;
     this.connected = false;

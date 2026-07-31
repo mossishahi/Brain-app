@@ -124,26 +124,156 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
         };
         break;
       }
+      case "pool-builder":
+        // Terms chosen to resolve against the bundle's real taxonomy seed
+        // (names or curated aliases), plus one unmatched member the placer
+        // decides. Deterministic offline stand-in for the literature pool.
+        output = {
+          members: [
+            {
+              term: "Graph Neural Networks",
+              count: 2,
+              relevance: 0.95,
+              variants: ["Graph Neural Networks", "GNNs"],
+              origins: [
+                { name: "Ada Lovelace", paper: "Offline Survey of Graph Representation Learning", stated: "Graph Neural Networks" },
+                { name: "Norbert Wiener", paper: "Optimal Transport for Structured Prediction", stated: "GNNs" },
+              ],
+            },
+            {
+              term: "Deep Learning",
+              count: 2,
+              relevance: 0.8,
+              variants: ["Deep Learning"],
+              origins: [
+                { name: "Ada Lovelace", paper: "Offline Survey of Graph Representation Learning", stated: "Deep Learning" },
+                { name: "Norbert Wiener", paper: "Optimal Transport for Structured Prediction", stated: "Deep Learning" },
+              ],
+            },
+            {
+              term: "Mathematical Optimization",
+              count: 2,
+              relevance: 0.55,
+              variants: ["Mathematical Optimization", "Optimization"],
+              origins: [
+                { name: "Norbert Wiener", paper: "Optimal Transport for Structured Prediction", stated: "Optimization" },
+                { name: "Ada Lovelace", paper: "Offline Survey of Graph Representation Learning", stated: "Mathematical Optimization" },
+              ],
+            },
+            {
+              term: "Variational Autoencoders",
+              count: 1,
+              relevance: 0.75,
+              variants: ["Variational Autoencoders", "VAEs"],
+              origins: [
+                { name: "Ada Lovelace", paper: "Offline Survey of Graph Representation Learning", stated: "VAEs" },
+              ],
+            },
+            {
+              term: "Statistics",
+              count: 1,
+              relevance: 0.45,
+              variants: ["Statistics"],
+              origins: [
+                { name: "Norbert Wiener", paper: "Optimal Transport for Structured Prediction", stated: "Statistics" },
+              ],
+            },
+            {
+              term: "Offline Curiosity Studies",
+              count: 1,
+              relevance: 0.3,
+              variants: ["Offline Curiosity Studies"],
+              origins: [
+                { name: "Ada Lovelace", paper: "Offline Survey of Graph Representation Learning", stated: "Offline Curiosity Studies" },
+              ],
+            },
+          ],
+          grounding: {
+            papers: [
+              {
+                title: "Offline Survey of Graph Representation Learning",
+                authors: ["Ada Lovelace", "Norbert Wiener"],
+                year: 2024,
+                venue: "Offline Proceedings",
+                url: "https://example.org/grounding-paper-1",
+                relation: "Surveys the fields the pool is drawn from.",
+              },
+              {
+                title: "Optimal Transport for Structured Prediction",
+                authors: ["Norbert Wiener", "Unlisted Author"],
+                year: 2023,
+                venue: "Offline Journal",
+                relation: "Connects the optimization members to the topic.",
+              },
+            ],
+            scholars: [
+              {
+                name: "Ada Lovelace",
+                affiliation: "Offline Institute of Technology",
+                url: "https://scholar.example.org/ada-lovelace",
+                profile: "ok",
+                interests: ["Graph Neural Networks", "Deep Learning", "Variational Autoencoders"],
+              },
+              {
+                name: "Norbert Wiener",
+                affiliation: "Offline State University",
+                url: "https://scholar.example.org/norbert-wiener",
+                profile: "ok",
+                interests: ["Optimization", "Statistics", "Deep Learning"],
+              },
+              {
+                name: "Unlisted Author",
+                affiliation: "",
+                url: "",
+                profile: "no_profile",
+                interests: [],
+              },
+            ],
+          },
+        };
+        break;
+      case "placer":
+        output = {
+          revision: 1,
+          decisions: [
+            {
+              term: "Offline Curiosity Studies",
+              outcome: "place",
+              name: "Offline Curiosity Studies",
+              parent: "Artificial Intelligence",
+              aliases: [],
+              reason: "Offline deterministic placement: a machine-learning research area housed with its peers.",
+            },
+          ],
+        };
+        break;
       case "decomposer":
+        // Legacy fixture: kept so older published bundle versions (whose
+        // workflow still carries the single decomposer) stay runnable offline.
+        // Relevance is present because seating strictly requires it — real
+        // pre-relevance history is unsupported and restarted instead.
         output = {
           departments: [
             {
               name: "Computer Science",
               domain: "engineering_and_applied_sciences",
               count: 3,
+              relevance: 0.9,
               umbrellas: [
                 {
                   name: "Graph Representation Learning",
                   count: 3,
+                  relevance: 0.9,
                   subfields: [
-                    { name: "graph learning", count: 2 },
-                    { name: "representation learning", count: 1 },
+                    { name: "graph learning", count: 2, relevance: 0.9 },
+                    { name: "representation learning", count: 1, relevance: 0.7 },
                   ],
                 },
                 {
                   name: "Algorithms & Theory",
                   count: 1,
-                  subfields: [{ name: "approximation algorithms", count: 1 }],
+                  relevance: 0.4,
+                  subfields: [{ name: "approximation algorithms", count: 1, relevance: 0.4 }],
                 },
               ],
             },
@@ -151,13 +281,15 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
               name: "Mathematics",
               domain: "natural_sciences",
               count: 2,
+              relevance: 0.6,
               umbrellas: [
                 {
                   name: "Optimization",
                   count: 2,
+                  relevance: 0.6,
                   subfields: [
-                    { name: "optimal transport", count: 2 },
-                    { name: "convex optimization", count: 1 },
+                    { name: "optimal transport", count: 2, relevance: 0.6 },
+                    { name: "convex optimization", count: 1, relevance: 0.5 },
                   ],
                 },
               ],
@@ -166,11 +298,13 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
               name: "Statistics",
               domain: "natural_sciences",
               count: 1,
+              relevance: 0.45,
               umbrellas: [
                 {
                   name: "Statistical Learning Theory",
                   count: 1,
-                  subfields: [{ name: "generalization bounds", count: 1 }],
+                  relevance: 0.45,
+                  subfields: [{ name: "generalization bounds", count: 1, relevance: 0.45 }],
                 },
               ],
             },

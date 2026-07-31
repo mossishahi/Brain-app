@@ -17,10 +17,89 @@ import {
   type JsonValue,
 } from "@brainstorm-agentic/core";
 
+import type {
+  TaxonomyAccess,
+  TaxonomyNodePosition,
+  TaxonomyResolveResult,
+} from "@brainstorm-agentic/core";
+
 import {
   BrainstormRuntime,
   StaticBrainstormRouteResolver,
+  taxonomyActivities,
 } from "../src/index.js";
+
+/**
+ * Deterministic stand-in for the registry's shared taxonomy. Terms of the
+ * pool fixture resolve to fixed four-level positions; everything else is NA.
+ * Engineered so the experts bridge produces a tree with a known seating
+ * order: department Σcxr values Physics 4.2 > Computer Science 2.6 >
+ * Biology 2.35, each seated through its best umbrella (Quantum Optics,
+ * Machine Learning, Systems Biology), Condensed Matter and Biophysics
+ * trailing.
+ */
+const STUB_PATHS: Readonly<Record<string, readonly string[]>> = {
+  "photon counting": ["Natural Sciences", "Physics", "Quantum Optics", "photon counting"],
+  "quantum optics": ["Natural Sciences", "Physics", "Quantum Optics"],
+  "transport": ["Natural Sciences", "Physics", "Condensed Matter", "transport"],
+  "condensed matter": ["Natural Sciences", "Physics", "Condensed Matter"],
+  "network inference": ["Life Sciences", "Biology", "Systems Biology", "network inference"],
+  "single-molecule methods": ["Life Sciences", "Biology", "Biophysics", "single-molecule methods"],
+  "machine learning": ["Engineering", "Computer Science", "Machine Learning"],
+  "representation learning": ["Engineering", "Computer Science", "Machine Learning", "representation learning"],
+};
+
+class StubTaxonomy implements TaxonomyAccess {
+  async resolve(query: string): Promise<TaxonomyResolveResult> {
+    const path = STUB_PATHS[query.trim().toLowerCase()];
+    if (!path) {
+      return {
+        query,
+        found: false,
+        status: "NA",
+        revision: 7,
+        beta: query.toLowerCase().split(/\s+/),
+        options: ["Machine Learning"],
+        total: 1,
+      };
+    }
+    const levels = ["domain", "field", "subfield", "topic"] as const;
+    const position: TaxonomyNodePosition = {
+      id: `S:${path[path.length - 1]!.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+      name: path[path.length - 1]!,
+      level: levels[path.length - 1]!,
+      path,
+      domain: path[0]!,
+      ...(path[1] ? { field: path[1] } : {}),
+      ...(path[2] ? { subfield: path[2] } : {}),
+      ...(path[3] ? { topic: path[3] } : {}),
+      matchedOn: "name",
+    };
+    return { query, found: true, revision: 7, position };
+  }
+
+  async tree(): Promise<{ revision: number; nodeCount: number; outline: string }> {
+    return {
+      revision: 7,
+      nodeCount: Object.keys(STUB_PATHS).length,
+      outline: "Natural Sciences\n  Physics\n    Quantum Optics\n    Condensed Matter",
+    };
+  }
+
+  async suggest(entries: readonly { term: string; kind: string }[]): Promise<{
+    id: string;
+    receivedAt: string;
+    revision: number;
+    queued: number;
+  }> {
+    return {
+      id: "stub-receipt",
+      receivedAt: new Date(0).toISOString(),
+      revision: 7,
+      queued: entries.length,
+    };
+  }
+}
 
 type JudgeMode = "pass" | "build-step-2" | "repeat-build" | "cap-step-1";
 
@@ -149,69 +228,36 @@ class FakeBrainstormExecutor implements AgentExecutor {
           ],
         };
         break;
-      case "decomposer":
+      case "pool-builder": {
+        // The pool the deterministic taxonomy.match resolves through the stub
+        // taxonomy. Seating queue (cxr): Physics Σ4.2 > QO 3.6 > CS Σ2.6 >
+        // ML 2.6 > Biology Σ2.35 > SysBio 2.1 — so panelSize 3 seats
+        // Physics/QO, CS/ML, Biology/SysBio in that order and panelSize 2
+        // seats the first two. "chip morphology" is the one unmatched member
+        // the placer decides.
+        const origin = (stated: string) => [
+          { name: "Test Author", paper: "Deterministic Test Paper", stated },
+        ];
         output = {
-          // Umbrella scores (new j = j * sum(i)): Quantum Optics 4*3=12,
-          // Systems Biology 3*3=9, Machine Learning 4*2=8, Condensed Matter
-          // 1*1=1, Biophysics 1*1=1 — so panelSize 3 seats QO, SysBio, ML in
-          // that order and panelSize 2 seats the first two.
-          departments: [
-            {
-              name: "Physics",
-              domain: "natural_sciences",
-              count: 4,
-              umbrellas: [
-                {
-                  name: "Quantum Optics",
-                  count: 4,
-                  subfields: [{ name: "photon counting", count: 3 }],
-                },
-                {
-                  name: "Condensed Matter",
-                  count: 1,
-                  subfields: [{ name: "transport", count: 1 }],
-                },
-              ],
-            },
-            {
-              name: "Biology",
-              domain: "life_sciences_and_medicine",
-              count: 3,
-              umbrellas: [
-                {
-                  name: "Systems Biology",
-                  count: 3,
-                  subfields: [{ name: "network inference", count: 3 }],
-                },
-                {
-                  name: "Biophysics",
-                  count: 1,
-                  subfields: [{ name: "single-molecule methods", count: 1 }],
-                },
-              ],
-            },
-            {
-              name: "Computer Science",
-              domain: "engineering_and_applied_sciences",
-              count: 2,
-              umbrellas: [
-                {
-                  name: "Machine Learning",
-                  count: 4,
-                  subfields: [{ name: "representation learning", count: 2 }],
-                },
-              ],
-            },
+          members: [
+            { term: "photon counting", count: 3, relevance: 0.9, variants: ["photon counting"], origins: origin("photon counting") },
+            { term: "network inference", count: 3, relevance: 0.7, variants: ["network inference"], origins: origin("network inference") },
+            { term: "machine learning", count: 2, relevance: 0.6, variants: ["machine learning", "ML"], origins: origin("machine learning") },
+            { term: "representation learning", count: 2, relevance: 0.65, variants: ["representation learning"], origins: origin("representation learning") },
+            { term: "quantum optics", count: 1, relevance: 0.85, variants: ["quantum optics"], origins: origin("quantum optics") },
+            { term: "transport", count: 1, relevance: 0.3, variants: ["transport"], origins: origin("transport") },
+            { term: "single-molecule methods", count: 1, relevance: 0.25, variants: ["single-molecule methods"], origins: origin("single-molecule methods") },
+            { term: "chip morphology", count: 1, relevance: 0.2, variants: ["chip morphology"], origins: origin("chip morphology") },
           ],
-          // Literature grounding rides on the experts artifact; panel
-          // selection must ignore it.
+          // Literature grounding rides on the pool artifact; matching and
+          // panel selection must ignore it.
           grounding: {
             papers: [
               {
                 title: "Deterministic Test Paper",
                 authors: ["Test Author"],
                 year: 2024,
-                relation: "Grounds the machine-learning umbrella.",
+                relation: "Grounds the machine-learning pool members.",
               },
             ],
             scholars: [
@@ -224,6 +270,22 @@ class FakeBrainstormExecutor implements AgentExecutor {
               },
             ],
           },
+        };
+        break;
+      }
+      case "placer":
+        output = {
+          revision: 7,
+          decisions: [
+            {
+              term: "chip morphology",
+              outcome: "place",
+              name: "Chip Morphology",
+              parent: "Condensed Matter",
+              aliases: ["chip morphologies"],
+              reason: "Fixture: a fabrication-morphology area housed with condensed matter research.",
+            },
+          ],
         };
         break;
       case "brain":
@@ -372,6 +434,7 @@ function runtime(
     bundle: loadContent(registryContentDir),
     agentExecutor: executor,
     humanGateMode,
+    activities: taxonomyActivities(new StubTaxonomy()),
     routeResolver: new StaticBrainstormRouteResolver({
       reasoning: { modelId: "configured-reasoner", providerId: "fake" },
       writing: { modelId: "configured-writer", providerId: "fake" },
@@ -403,9 +466,12 @@ test("Pass path executes member -> step -> round order and keeps C-O-T from chai
       task.bindings.umbrella,
     ]),
     [
+      // One cxr-sorted queue: department Σ values dominate, so seats follow
+      // department order (Physics 4.2, CS 2.6, Biology 2.35), each seated
+      // through its best umbrella.
       ["member-1", "Physics", "Quantum Optics"],
-      ["member-2", "Biology", "Systems Biology"],
-      ["member-3", "Computer Science", "Machine Learning"],
+      ["member-2", "Computer Science", "Machine Learning"],
+      ["member-3", "Biology", "Systems Biology"],
     ],
   );
   assert.deepEqual(executor.judgeOrder, [
@@ -495,11 +561,23 @@ test("Pass path executes member -> step -> round order and keeps C-O-T from chai
   };
   for (const task of executor.seen) {
     if (task.role === "processor") continue;
-    assert.deepEqual(
-      task.bindings.files,
-      [usefulEntry],
-      `${task.role} must receive exactly the useful files`,
-    );
+    if (task.role === "placer") {
+      // The placer reads the shared taxonomy, not the attachments: it gets the
+      // projected input plus the unmatched pool members only.
+      assert.equal(task.bindings.files, undefined, "placer receives no file map");
+      const unmatched = task.bindings.unmatched as readonly { term?: unknown }[];
+      assert.deepEqual(
+        unmatched.map((member) => member.term),
+        ["chip morphology"],
+        "placer receives exactly the unmatched pool members",
+      );
+    } else {
+      assert.deepEqual(
+        task.bindings.files,
+        [usefulEntry],
+        `${task.role} must receive exactly the useful files`,
+      );
+    }
     const boundInput = object(task.bindings.input, `${task.role} input`);
     assert.equal(
       boundInput.files,
@@ -511,6 +589,34 @@ test("Pass path executes member -> step -> round order and keeps C-O-T from chai
   const schemas = artifacts.map((ref) => ref.metadata?.schema);
   assert.ok(schemas.includes("usefulFiles"), "useful-files artifact persisted");
   assert.ok(schemas.includes("ignoredFiles"), "ignored-files artifact persisted");
+
+  // The bridged experts tree is sorted by the pool builder's input-topic
+  // relevance at EVERY level (ties by count), and every node carries the
+  // score: departments Physics 0.9 > Biology 0.7 > Computer Science 0.65,
+  // Physics umbrellas Quantum Optics 0.9 > Condensed Matter 0.3, and inside
+  // Condensed Matter the leaves transport 0.3 > placed Chip Morphology 0.2.
+  const expertsRef = artifacts.find((ref) => ref.metadata?.schema === "experts");
+  assert.ok(expertsRef, "experts artifact persisted");
+  const experts = JSON.parse((await app.artifacts.get(expertsRef.id))!.data) as {
+    departments: Array<{
+      name: string;
+      relevance?: number;
+      umbrellas: Array<{ name: string; relevance?: number; subfields: Array<{ name: string }> }>;
+    }>;
+  };
+  assert.deepEqual(
+    experts.departments.map((department) => [department.name, department.relevance]),
+    [["Physics", 0.9], ["Biology", 0.7], ["Computer Science", 0.65]],
+  );
+  const physics = experts.departments[0]!;
+  assert.deepEqual(
+    physics.umbrellas.map((umbrella) => umbrella.name),
+    ["Quantum Optics", "Condensed Matter"],
+  );
+  assert.deepEqual(
+    physics.umbrellas[1]!.subfields.map((leaf) => leaf.name),
+    ["transport", "Chip Morphology"],
+  );
 });
 
 test("instructions stay in a cacheable system prefix; submitted data rides the task turn", async () => {
@@ -650,7 +756,7 @@ test("manual panel gate suspends and checkpoint resume does not repeat prior age
   if (first.status !== "suspended") throw new Error("unreachable");
   assert.equal(first.pendingGates[0]?.gateKey, "confirm-panel");
   assert.equal(executor.tasks("processor").length, 1);
-  assert.equal(executor.tasks("decomposer").length, 1);
+  assert.equal(executor.tasks("pool-builder").length, 1);
 
   // A fresh runtime instance over the persisted stores proves checkpoint
   // replay does not rely on interpreter memory.
@@ -663,7 +769,7 @@ test("manual panel gate suspends and checkpoint resume does not repeat prior age
   });
   assert.equal(second.status, "completed");
   assert.equal(executor.tasks("processor").length, 1);
-  assert.equal(executor.tasks("decomposer").length, 1);
+  assert.equal(executor.tasks("pool-builder").length, 1);
 });
 
 test("invalid agent artifacts fail before downstream state updates", async () => {

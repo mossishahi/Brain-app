@@ -10,7 +10,15 @@
  * (default ~/.brainstorm-agentic/workspace/sessions), one directory per run.
  */
 import { randomUUID } from "node:crypto";
-import { appendFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import process from "node:process";
 
@@ -22,12 +30,60 @@ import type {
   RunEvent,
   RunEventListener,
   RunResult,
+  TaxonomyAccess,
 } from "@brainstorm-agentic/core";
 
 import { defaultSessionRoot, loadDotEnv } from "./env.js";
 import { FsArtifactStore, FsCheckpointStore } from "./fs-stores.js";
 import { buildRuntime, providerConfigFromEnv } from "./wiring.js";
-import { openLazyRegistryContent } from "./registry-content.js";
+import { openLazyRegistryContent, type LazyRegistryContent } from "./registry-content.js";
+import {
+  LocalTaxonomyService,
+  RegistryTaxonomyService,
+  localTaxonomySeedPath,
+} from "./taxonomy-service.js";
+
+/**
+ * Shared-taxonomy access for a run: registry-backed when the run is connected
+ * to the Brain Registry (the live multi-user store), otherwise a read-only
+ * local service over the bundle's seed catalog with suggestions kept per-run.
+ * Absent only for pre-taxonomy bundles that carry no seed.
+ */
+function taxonomyForRun(
+  lazy: LazyRegistryContent | undefined,
+  contentDir: string,
+  sessionRoot: string,
+  runId: string,
+): TaxonomyAccess | undefined {
+  if (lazy) return new RegistryTaxonomyService(lazy.client);
+  const seed = localTaxonomySeedPath(contentDir);
+  if (!existsSync(seed)) return undefined;
+  return new LocalTaxonomyService(
+    seed,
+    join(sessionRoot, runId, "taxonomy-suggestions.jsonl"),
+  );
+}
+
+/**
+ * Content copies are fetched for the run and deleted after it: once a run
+ * reaches a terminal state the cached bundle files are removed, leaving only
+ * the pin (the provenance record). Suspended and credit-blocked runs keep the
+ * cache — they resume from it, re-fetching nothing.
+ */
+function cleanupContentCache(
+  lazy: LazyRegistryContent | undefined,
+  result: RunResult,
+): void {
+  if (!lazy) return;
+  if (result.status !== "completed" && result.status !== "failed" && result.status !== "cancelled") {
+    return;
+  }
+  try {
+    rmSync(lazy.cacheRoot, { recursive: true, force: true });
+  } catch {
+    // Cache cleanup must never mask the run result.
+  }
+}
 
 interface CliArgs {
   readonly command: string;
@@ -90,11 +146,11 @@ function loadAttachmentsManifest(
 /**
  * Writes the run's expertise trees beside `checkpoint.json`:
  *
- * - `raw_expertise.json` — the validated tree exactly as stored (counts per
- *   department, umbrella, and subfield);
- * - `mul_expertise.json` — the same tree with every subfield leaf scored by
- *   the product of its own count and its parents' counts (i × j × k), which is
- *   the ranking panel selection seats from.
+ * - `raw_expertise.json` — the validated tree exactly as stored (counts and
+ *   relevance per department, umbrella, and subfield);
+ * - `mul_expertise.json` — the same tree annotated with each node's cxr
+ *   seating value (count × relevance; departments carry the sum over their
+ *   umbrellas), which is the queue panel selection seats from.
  *
  * The artifact store keys every payload by an opaque id, so the tree is
  * otherwise reachable only by looking its id up in `artifacts/index.json`.
@@ -138,7 +194,7 @@ async function writeExpertiseTrees(
       writeAtomic("mul_expertise.json", `${JSON.stringify(scored, null, 2)}\n`),
     );
   } catch {
-    // A pre-count tree (an old run resumed under new code) has no scores.
+    // A pre-relevance tree (dead history) cannot be scored; raw copy only.
   }
   return written;
 }
@@ -290,12 +346,14 @@ async function main(): Promise<void> {
         })
       : undefined;
     const artifacts = new FsArtifactStore(sessionRoot, runId);
+    const taxonomy = taxonomyForRun(lazy, contentDir!, sessionRoot, runId);
     const runtime = buildRuntime({
       providerConfig: providerConfigFromEnv(process.env, offline),
       checkpoints: new FsCheckpointStore(sessionRoot),
       artifacts,
       autoApproveGates: autoApprove,
       ...(manifest ? { attachmentRoots: [manifest.baseDir] } : {}),
+      ...(taxonomy ? { taxonomy } : {}),
       bundle: lazy?.bundle ?? loadContent(contentDir!),
       ...(lazy ? { skillResolver: lazy.skillResolver } : {}),
       ...(onEvent !== undefined ? { onEvent } : {}),
@@ -311,6 +369,7 @@ async function main(): Promise<void> {
       const trees = await writeExpertiseTrees(artifacts, sessionRoot, runId);
       reportResult(result, sessionRoot);
       for (const tree of trees) console.log(`Expertise tree: ${tree}`);
+      cleanupContentCache(lazy, result);
     } finally {
       await lazy?.close();
     }
@@ -344,11 +403,13 @@ async function main(): Promise<void> {
     // gate-answering resume is by definition a manual-mode continuation.
     const resumeAutoApprove = autoApprove && Object.keys(responses).length === 0;
     const artifacts = new FsArtifactStore(sessionRoot, runId);
+    const taxonomy = taxonomyForRun(lazy, contentDir!, sessionRoot, runId);
     const runtime = buildRuntime({
       providerConfig: providerConfigFromEnv(process.env, offline),
       checkpoints: new FsCheckpointStore(sessionRoot),
       artifacts,
       autoApproveGates: resumeAutoApprove,
+      ...(taxonomy ? { taxonomy } : {}),
       bundle: lazy?.bundle ?? loadContent(contentDir!),
       ...(lazy ? { skillResolver: lazy.skillResolver } : {}),
       ...(onEvent !== undefined ? { onEvent } : {}),
@@ -360,6 +421,7 @@ async function main(): Promise<void> {
       const trees = await writeExpertiseTrees(artifacts, sessionRoot, runId);
       reportResult(result, sessionRoot);
       for (const tree of trees) console.log(`Expertise tree: ${tree}`);
+      cleanupContentCache(lazy, result);
     } finally {
       await lazy?.close();
     }

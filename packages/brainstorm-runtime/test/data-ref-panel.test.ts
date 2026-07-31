@@ -106,7 +106,166 @@ test("writes materialize bracket variables immutably and reject prototype paths"
   );
 });
 
-test("panel.select seats umbrellas by j times the sum of their subfield counts", () => {
+test("panel.select seats from one cxr-sorted queue over levels 2, 3 and 4 of the pruned tree", () => {
+  // Bridged-tree shape: every node carries count and relevance. cxr values:
+  // Physics Σ = 4×0.9 + 2×0.3 = 4.2 · QO 3.6 · photon counting 2.7 ·
+  // CS Σ = ML 2.6 (dept/umbrella tie: count 4 = 4, tree order keeps the
+  // department first) · Biology Σ = 3×0.7 + 1×0.25 = 2.35 · SysBio 2.1 ·
+  // CM 0.6 · BP 0.25.
+  const experts = {
+    departments: [
+      {
+        name: "Physics",
+        domain: "Natural Sciences",
+        count: 6,
+        relevance: 0.9,
+        umbrellas: [
+          {
+            name: "Quantum Optics",
+            count: 4,
+            relevance: 0.9,
+            subfields: [{ name: "photon counting", count: 3, relevance: 0.9 }],
+          },
+          {
+            name: "Condensed Matter",
+            count: 2,
+            relevance: 0.3,
+            subfields: [
+              { name: "transport", count: 1, relevance: 0.3 },
+              { name: "Chip Morphology", count: 1, relevance: 0.2 },
+            ],
+          },
+        ],
+      },
+      {
+        name: "Biology",
+        domain: "Life Sciences",
+        count: 4,
+        relevance: 0.7,
+        umbrellas: [
+          {
+            name: "Systems Biology",
+            count: 3,
+            relevance: 0.7,
+            subfields: [{ name: "network inference", count: 3, relevance: 0.7 }],
+          },
+          {
+            name: "Biophysics",
+            count: 1,
+            relevance: 0.25,
+            subfields: [{ name: "single-molecule methods", count: 1, relevance: 0.25 }],
+          },
+        ],
+      },
+      {
+        name: "Computer Science",
+        domain: "Physical Sciences",
+        count: 4,
+        relevance: 0.65,
+        umbrellas: [
+          {
+            name: "Machine Learning",
+            count: 4,
+            relevance: 0.65,
+            subfields: [{ name: "representation learning", count: 2, relevance: 0.65 }],
+          },
+        ],
+      },
+    ],
+  };
+
+  // Departments outrank everything beneath them (their Σ dominates), so the
+  // top of the queue seats one member per department, each through its
+  // highest-cxr umbrella — the seat's focuses UNION the umbrella term with
+  // its subfields.
+  assert.deepEqual(selectPanel(experts, 3).members, [
+    {
+      id: "member-1",
+      department: "Physics",
+      umbrella: "Quantum Optics",
+      subfields: ["Quantum Optics", "photon counting"],
+    },
+    {
+      id: "member-2",
+      department: "Computer Science",
+      umbrella: "Machine Learning",
+      subfields: ["Machine Learning", "representation learning"],
+    },
+    {
+      id: "member-3",
+      department: "Biology",
+      umbrella: "Systems Biology",
+      subfields: ["Systems Biology", "network inference"],
+    },
+  ]);
+
+  // Beyond the departments, the queue continues with the remaining
+  // umbrellas (level 3): a seat carries the umbrella's own subfields only,
+  // and consumes the branch's level-4 entries.
+  const five = selectPanel(experts, 5).members;
+  assert.deepEqual(five[3], {
+    id: "member-4",
+    department: "Physics",
+    umbrella: "Condensed Matter",
+    subfields: ["transport", "Chip Morphology"],
+  });
+  assert.deepEqual(five[4], {
+    id: "member-5",
+    department: "Biology",
+    umbrella: "Biophysics",
+    subfields: ["single-molecule methods"],
+  });
+  // Queue exhaustion: every level-4 entry was consumed by its branch's seat.
+  assert.equal(selectPanel(experts, 12).members.length, 5);
+});
+
+test("panel.select seats a topic directly when it tops the queue, and never duplicates a seat", () => {
+  // Hand-made non-monotone values (an artifact can carry them even though
+  // the bridge never produces them): the "hot" topic outranks its own
+  // umbrella, so it seats as a single-focus member (level-4 case). The
+  // umbrella and its remaining topics are then skipped — one member per
+  // (department, umbrella) — and a department whose umbrellas are all
+  // consumed seats nobody without spending capacity.
+  const experts = {
+    departments: [
+      {
+        name: "D",
+        count: 2,
+        relevance: 0.1,
+        umbrellas: [
+          {
+            name: "U",
+            count: 2,
+            relevance: 0.1,
+            subfields: [
+              { name: "hot", count: 1, relevance: 0.9 },
+              { name: "cold", count: 1, relevance: 0.05 },
+            ],
+          },
+        ],
+      },
+      {
+        name: "E",
+        count: 1,
+        relevance: 0.5,
+        umbrellas: [
+          {
+            name: "V",
+            count: 1,
+            relevance: 0.5,
+            subfields: [{ name: "x", count: 1, relevance: 0.5 }],
+          },
+        ],
+      },
+    ],
+  };
+  assert.deepEqual(selectPanel(experts, 4).members, [
+    { id: "member-1", department: "D", umbrella: "U", subfields: ["hot"] },
+    { id: "member-2", department: "E", umbrella: "V", subfields: ["V", "x"] },
+  ]);
+});
+
+test("panel.select refuses pre-relevance trees: their history restarts under the current pipeline", () => {
   const experts = {
     departments: [
       {
@@ -120,12 +279,12 @@ test("panel.select seats umbrellas by j times the sum of their subfield counts",
               { name: "graph structure learning", count: 3 },
               { name: "latent graph inference", count: 1 },
             ],
-          }, // new j = 7 * (3+1) = 28
+          },
           {
             name: "Generative Models",
             count: 2,
             subfields: [{ name: "diffusion models", count: 4 }],
-          }, // new j = 2 * 4 = 8
+          },
         ],
       },
       {
@@ -135,52 +294,61 @@ test("panel.select seats umbrellas by j times the sum of their subfield counts",
           {
             name: "Optimization",
             count: 5,
-            subfields: [
-              { name: "optimal transport", count: 7 },
-              { name: "bilevel programming", count: 2 },
-            ],
-          }, // new j = 5 * (7+2) = 45 — department k plays no role
-          {
-            name: "Numerical Analysis",
-            count: 4,
-            subfields: [{ name: "various topics under Numerical Analysis", count: 2 }],
-          }, // new j = 4 * 2 = 8, tied with Generative Models but later in tree order
+            subfields: [{ name: "optimal transport", count: 7 }],
+          },
         ],
       },
     ],
   };
+  assert.throws(() => selectPanel(experts, 3), /carries no relevance[\s\S]*restart the run/);
+});
 
-  assert.deepEqual(
-    selectPanel(experts, 3).members,
-    [
+test("panel.select removes exhausted parents recursively when their last child is consumed", () => {
+  // Non-monotone values put both topics of D ahead of everything else: each
+  // topic seat exhausts its umbrella (no sibling left in the queue), which
+  // removes the umbrella — and consuming D's second umbrella then removes D
+  // itself, so the department never pops just to be skipped.
+  const experts = {
+    departments: [
       {
-        id: "member-1",
-        department: "Mathematics",
-        umbrella: "Optimization",
-        // A seat carries every subfield of its umbrella.
-        subfields: ["optimal transport", "bilevel programming"],
+        name: "D",
+        count: 2,
+        relevance: 0.05,
+        umbrellas: [
+          {
+            name: "U1",
+            count: 1,
+            relevance: 0.05,
+            subfields: [{ name: "t1", count: 1, relevance: 0.9 }],
+          },
+          {
+            name: "U2",
+            count: 1,
+            relevance: 0.04,
+            subfields: [{ name: "t2", count: 1, relevance: 0.8 }],
+          },
+        ],
       },
       {
-        id: "member-2",
-        department: "Computer Science",
-        umbrella: "Graph Neural Networks",
-        subfields: ["graph structure learning", "latent graph inference"],
-      },
-      // 8-point tie: Generative Models appears earlier in tree order.
-      {
-        id: "member-3",
-        department: "Computer Science",
-        umbrella: "Generative Models",
-        subfields: ["diffusion models"],
+        name: "E",
+        count: 2,
+        relevance: 0.3,
+        umbrellas: [
+          {
+            name: "V",
+            count: 2,
+            relevance: 0.3,
+            subfields: [{ name: "x", count: 1, relevance: 0.3 }],
+          },
+        ],
       },
     ],
-  );
-  // The catch-all leaf is a valid stated focus for a subfield-less umbrella.
-  assert.deepEqual(selectPanel(experts, 4).members[3]!.subfields, [
-    "various topics under Numerical Analysis",
+  };
+  assert.deepEqual(selectPanel(experts, 4).members, [
+    { id: "member-1", department: "D", umbrella: "U1", subfields: ["t1"] },
+    { id: "member-2", department: "D", umbrella: "U2", subfields: ["t2"] },
+    { id: "member-3", department: "E", umbrella: "V", subfields: ["V", "x"] },
   ]);
-  // panelSize beyond the umbrella supply returns every umbrella, highest first.
-  assert.equal(selectPanel(experts, 12).members.length, 4);
 });
 
 test("artifact schemas become structural JSON Schema descriptions", () => {

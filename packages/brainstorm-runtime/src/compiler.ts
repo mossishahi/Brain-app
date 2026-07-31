@@ -352,30 +352,36 @@ function isJsonRecord(value: JsonValue | undefined): value is JsonObject {
  * - every umbrella with no subfield gains the catch-all leaf
  *   "various topics under <umbrella>" with count 1, so every umbrella has a
  *   subfield sum to score with and every seat has a focus to state;
- * - departments sort by their own count k (how many people stated the
- *   department itself, or the 1 it gained by housing an umbrella), umbrellas
- *   by j, subfields by i — descending, ties keeping the order the model
- *   emitted (first appearance in the grounding pool).
+ * - every level sorts by the pool builder's input-topic `relevance` when the
+ *   entries carry one (descending), ties by count; trees without relevance
+ *   (older bundle versions) keep the pure count order — departments by k,
+ *   umbrellas by j, subfields by i — descending, remaining ties keeping the
+ *   order the producer emitted.
  */
 function canonicalizeExpertsTree(tree: JsonValue): JsonValue {
   if (!isJsonRecord(tree) || !Array.isArray(tree.departments)) return tree;
   const count = (entry: JsonValue): number =>
     isJsonRecord(entry) && typeof entry.count === "number" ? entry.count : 0;
+  const relevance = (entry: JsonValue): number =>
+    isJsonRecord(entry) && typeof entry.relevance === "number" ? entry.relevance : 0;
   /** Stable descending sort: Array.prototype.sort is stable, so ties hold. */
-  const byCount = <T extends JsonValue>(entries: readonly T[]): T[] =>
-    [...entries].sort((left, right) => count(right) - count(left));
+  const byRelevanceThenCount = <T extends JsonValue>(entries: readonly T[]): T[] =>
+    [...entries].sort(
+      (left, right) =>
+        relevance(right) - relevance(left) || count(right) - count(left),
+    );
 
   const departments = tree.departments.map((department) => {
     if (!isJsonRecord(department) || !Array.isArray(department.umbrellas)) {
       return department;
     }
-    const umbrellas = byCount(department.umbrellas).map((umbrella) => {
+    const umbrellas = byRelevanceThenCount(department.umbrellas).map((umbrella) => {
       if (!isJsonRecord(umbrella) || !Array.isArray(umbrella.subfields)) {
         return umbrella;
       }
       const subfields =
         umbrella.subfields.length > 0
-          ? byCount(umbrella.subfields)
+          ? byRelevanceThenCount(umbrella.subfields)
           : [{ name: `various topics under ${String(umbrella.name)}`, count: 1 }];
       return { ...umbrella, subfields };
     });
@@ -383,7 +389,7 @@ function canonicalizeExpertsTree(tree: JsonValue): JsonValue {
   });
   return {
     ...tree,
-    departments: byCount(departments),
+    departments: byRelevanceThenCount(departments),
   };
 }
 

@@ -232,7 +232,7 @@ test("rejects loop bounds above the ceiling as effectively unbounded", () => {
 
 test("rejects duplicate node ids", () => {
   const bundle = freshBundle();
-  findNode(bundle.workflows["brainstorm"]!.root, "decompose-experts").id = "process-input";
+  findNode(bundle.workflows["brainstorm"]!.root, "build-pool").id = "process-input";
   expectIssue(bundle, "DUPLICATE_NODE_ID");
 });
 
@@ -254,8 +254,8 @@ test("rejects references to undeclared params and unknown catalogs", () => {
   const bundle = freshBundle();
   const selector = findActivity(bundle.workflows["brainstorm"]!.root, "select-panel");
   selector.bind["panelSize"] = "params.committeeSize";
-  const decomposer = findAgent(bundle.workflows["brainstorm"]!.root, "decompose-experts");
-  decomposer.bind!["departments"] = "catalog.faculties";
+  const processor = findAgent(bundle.workflows["brainstorm"]!.root, "process-input");
+  processor.bind!["typeOptions"] = "catalog.faculties";
   const issues = validateBundle(bundle);
   assert.ok(issues.some((i) => i.code === "UNKNOWN_PARAM"));
   assert.ok(issues.some((i) => i.code === "UNKNOWN_CATALOG"));
