@@ -187,6 +187,9 @@ export function taxonomyActivities(
   };
 
   const bridge: DeterministicActivityHandler = async (input) => {
+    // Optional for one published version's sake: bundles before the pool bind
+    // (v0.9.0) still bridge fine, they just carry no grounding on the tree.
+    const pool = input.pool !== undefined ? asObject(input.pool, "pool") : {};
     const matches = asObject(input.matches, "matches");
     const placements = asObject(input.placements, "placements");
     const maxDepartments = positiveInteger(input.maxDepartments, "maxDepartments");
@@ -346,7 +349,12 @@ export function taxonomyActivities(
         "experts.bridge produced no departments — no pool member landed on a field-bearing taxonomy position",
       );
     }
-    return { departments: tree } as unknown as JsonValue;
+    // The pool's literature grounding rides through onto the tree: the
+    // dashboard's papers/authors/interests record, never used for seating.
+    return {
+      departments: tree,
+      ...(pool.grounding !== undefined ? { grounding: pool.grounding } : {}),
+    } as unknown as JsonValue;
   };
 
   return {

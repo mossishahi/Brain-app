@@ -6,12 +6,13 @@
  *   (this user's or anyone else's) always see the latest committed revision.
  * - LocalTaxonomyService: the no-registry fallback (local --content-dir runs,
  *   offline smoke tests): exact name/alias matching and candidate search over
- *   the bundle's seed catalog, with suggestions appended to a per-run JSONL.
+ *   the bundle's seed catalog, with every suggestion batch saved as its own
+ *   <time>-<user>.json file (the same temporary format the registry uses).
  *   Deliberately read-only over the seed — a local run cannot mutate the
  *   shared reference, it can only record what it would have suggested.
  */
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
 import type {
@@ -112,7 +113,7 @@ export class LocalTaxonomyService implements TaxonomyAccess {
 
   constructor(
     seedPath: string,
-    private readonly suggestionsFile: string,
+    private readonly suggestionsDir: string,
   ) {
     if (!existsSync(seedPath)) {
       throw new Error(`taxonomy seed not found at "${seedPath}"`);
@@ -244,10 +245,19 @@ export class LocalTaxonomyService implements TaxonomyAccess {
       revision: this.revision,
       queued: entries.length,
     };
-    mkdirSync(dirname(this.suggestionsFile), { recursive: true });
-    appendFileSync(
-      this.suggestionsFile,
-      `${JSON.stringify({ ...receipt, submittedBy: submittedBy ?? "", entries })}\n`,
+    // Temporary suggestion handling, same format as the registry: one
+    // <time>-<user>.json file per submitted batch.
+    const time = receipt.receivedAt.replace(/[:.]/g, "-");
+    const user =
+      (submittedBy ?? "").replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "anonymous";
+    mkdirSync(this.suggestionsDir, { recursive: true });
+    let file = `${time}-${user}.json`;
+    for (let n = 2; existsSync(join(this.suggestionsDir, file)); n += 1) {
+      file = `${time}-${user}-${n}.json`;
+    }
+    writeFileSync(
+      join(this.suggestionsDir, file),
+      `${JSON.stringify({ ...receipt, submittedBy: submittedBy ?? "", entries }, null, 2)}\n`,
       "utf8",
     );
     return receipt;

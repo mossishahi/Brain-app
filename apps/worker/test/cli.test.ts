@@ -28,7 +28,7 @@ function testTaxonomy(root: string): { taxonomy: TaxonomyAccess } | Record<strin
   const seed = localTaxonomySeedPath(registryContentDir);
   if (!existsSync(seed)) return {};
   return {
-    taxonomy: new LocalTaxonomyService(seed, join(root, "taxonomy-suggestions.jsonl")),
+    taxonomy: new LocalTaxonomyService(seed, join(root, "taxonomy-suggestions")),
   };
 }
 

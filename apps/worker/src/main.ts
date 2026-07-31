@@ -60,7 +60,7 @@ function taxonomyForRun(
   if (!existsSync(seed)) return undefined;
   return new LocalTaxonomyService(
     seed,
-    join(sessionRoot, runId, "taxonomy-suggestions.jsonl"),
+    join(sessionRoot, runId, "taxonomy-suggestions"),
   );
 }
 
