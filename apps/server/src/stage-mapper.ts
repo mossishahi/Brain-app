@@ -1069,7 +1069,11 @@ function evidence(value: unknown): EvidenceView | undefined {
   return undefined;
 }
 
-function comment(value: unknown, member: PanelMemberView): CommentView | undefined {
+function comment(
+  value: unknown,
+  member: PanelMemberView,
+  label: string,
+): CommentView | undefined {
   const raw = object(value);
   if (
     (raw?.verdict !== "Pass" &&
@@ -1081,7 +1085,7 @@ function comment(value: unknown, member: PanelMemberView): CommentView | undefin
   }
   return {
     commentorId: member.id,
-    commentorLabel: member.umbrella,
+    commentorLabel: label,
     verdict: raw.verdict,
     reason: raw.reason,
     ...(typeof raw.suggestion === "string" && raw.suggestion.length > 0
@@ -1151,6 +1155,7 @@ function buildReviews(
   stageActive: boolean,
 ): { members: ReviewMemberView[]; cursor?: ReviewCursorView; complete: boolean } {
   const rounds = new Map<string, {
+    cot?: string;
     comments: Map<number, CommentView>;
     decision?: JudgeDecisionView;
     revision?: { fromStep: number; revisedStepCount: number };
@@ -1164,6 +1169,21 @@ function buildReviews(
     }
     return found;
   };
+  const seatLabel = (index: number): string => `Seat ${index + 1}`;
+
+  // Working chain per member, replayed in journal order: it starts as the
+  // first-pass chain and every redevelopment replaces steps fromStep..N, so
+  // each round can snapshot the step text exactly as its reviewers saw it.
+  const workingCot = new Map<number, string[]>();
+  const cotFor = (memberIndex: number): string[] => {
+    let chain = workingCot.get(memberIndex);
+    if (!chain) {
+      const member = panel[memberIndex];
+      chain = [...(member ? ideas.get(member.id)?.cot ?? [] : [])];
+      workingCot.set(memberIndex, chain);
+    }
+    return chain;
+  };
 
   for (const entry of entries) {
     const output = agentOutput(entry);
@@ -1171,6 +1191,10 @@ function buildReviews(
     const at = coordinates(entry.key);
     if (at.member === undefined || at.step === undefined || at.round === undefined) continue;
     const round = roundFor(at.member, at.step, at.round);
+    if (round.cot === undefined) {
+      const text = cotFor(at.member)[at.step];
+      if (text !== undefined) round.cot = text;
+    }
     if (
       /\/comment-step(?:\/comment-step-execute)?::result$/.test(entry.key) &&
       at.commentor !== undefined
@@ -1179,7 +1203,7 @@ function buildReviews(
       const commentors = panel.filter((member) => member.id !== thinker?.id);
       const author = commentors[at.commentor];
       if (author) {
-        const view = comment(output, author);
+        const view = comment(output, author, seatLabel(panel.indexOf(author)));
         if (view) round.comments.set(at.commentor, view);
       }
     } else if (/\/judge-step(?:\/judge-step-execute)?::result$/.test(entry.key)) {
@@ -1196,6 +1220,12 @@ function buildReviews(
           fromStep: revision.fromStep,
           revisedStepCount: revision.revisedSteps.length,
         };
+        // Apply the replacement so later rounds snapshot the revised text.
+        const chain = cotFor(at.member);
+        const replacement = revision.revisedSteps.filter(
+          (step): step is string => typeof step === "string",
+        );
+        chain.splice(revision.fromStep - 1, chain.length, ...replacement);
       }
     }
   }
@@ -1210,6 +1240,7 @@ function buildReviews(
           if (m !== memberIndex || s !== stepIndex) return [];
           return [{
             round: r! + 1,
+            ...(value.cot !== undefined ? { cot: value.cot } : {}),
             comments: [...value.comments.entries()]
               .sort(([a], [b]) => a - b)
               .map(([, item]) => item),
@@ -1235,7 +1266,13 @@ function buildReviews(
         rounds: views,
       };
     });
-    return { memberId: member.id, label: member.umbrella, steps };
+    return {
+      memberId: member.id,
+      label: seatLabel(memberIndex),
+      department: member.department,
+      umbrella: member.umbrella,
+      steps,
+    };
   });
 
   let cursor: ReviewCursorView | undefined;

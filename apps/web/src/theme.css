@@ -2888,3 +2888,68 @@ button.server-file-name {
   color: var(--text-dim);
   font-size: 12px;
 }
+
+/* ------------------------------------------------ review round redesign */
+
+.round-cot {
+  border-left: 3px solid var(--accent);
+  background: var(--surface);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  padding: 10px 12px;
+  margin: 8px 0;
+  font-size: 13px;
+  white-space: pre-wrap;
+}
+
+.review-fold {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  margin: 6px 0;
+}
+
+.review-fold-judge {
+  border-color: var(--accent);
+}
+
+.review-fold-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.review-fold-head::before {
+  content: "▸";
+  font-size: 11px;
+  color: var(--text-dim);
+  transition: transform 0.12s ease;
+}
+
+.review-fold[open] > .review-fold-head::before {
+  transform: rotate(90deg);
+}
+
+.review-fold-head::-webkit-details-marker {
+  display: none;
+}
+
+.review-fold-name {
+  font-weight: 500;
+}
+
+.review-fold-body {
+  padding: 0 12px 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.inspector-subtitle {
+  color: var(--text-dim);
+  font-weight: 400;
+}

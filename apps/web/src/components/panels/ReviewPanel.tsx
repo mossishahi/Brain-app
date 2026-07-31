@@ -37,41 +37,28 @@ function cellLabel(member: ReviewMemberView, step: ReviewStepView): string {
   return `${member.label}, step ${step.index}: ${outcome}`;
 }
 
-function CommentChipRow({ comments }: { comments: readonly CommentView[] }) {
-  const [open, setOpen] = useState<string | null>(null);
-  const openComment = open !== null ? comments.find((c) => c.commentorId === open) : undefined;
+/** One reviewer's comment as a stacked, collapsible inner panel (open by default). */
+function CommentFold({ comment: c }: { comment: CommentView }) {
   return (
-    <>
-      <div className="comment-chip-row">
-        {comments.map((c) => (
-          <button
-            key={c.commentorId}
-            type="button"
-            className={`comment-chip${open === c.commentorId ? " open" : ""}`}
-            aria-expanded={open === c.commentorId}
-            onClick={() => setOpen((prev) => (prev === c.commentorId ? null : c.commentorId))}
-          >
-            <span>{c.commentorLabel}</span>
-            <VerdictChip verdict={c.verdict} />
-          </button>
-        ))}
-      </div>
-      {openComment && (
-        <div className="comment-detail">
-          <div>
-            <span className="detail-label">reason</span>
-            <div>{openComment.reason}</div>
-          </div>
-          {openComment.suggestion !== undefined && (
-            <div>
-              <span className="detail-label">suggestion</span>
-              <div>{openComment.suggestion}</div>
-            </div>
-          )}
-          {openComment.evidence && <EvidenceBlock evidence={openComment.evidence} />}
+    <details className="review-fold" open>
+      <summary className="review-fold-head">
+        <span className="review-fold-name">{c.commentorLabel}</span>
+        <VerdictChip verdict={c.verdict} />
+      </summary>
+      <div className="review-fold-body">
+        <div>
+          <span className="detail-label">reason</span>
+          <div>{c.reason}</div>
         </div>
-      )}
-    </>
+        {c.suggestion !== undefined && (
+          <div>
+            <span className="detail-label">suggestion</span>
+            <div>{c.suggestion}</div>
+          </div>
+        )}
+        {c.evidence && <EvidenceBlock evidence={c.evidence} />}
+      </div>
+    </details>
   );
 }
 
@@ -82,34 +69,48 @@ function RoundBlock({ round }: { round: ReviewRoundView }) {
   return (
     <div className="round-block">
       <span className="round-head">Round {round.round}</span>
-      <CommentChipRow comments={round.comments} />
-      {round.decision && (
-        <div className="judge-card">
-          <div className="judge-head">
-            <strong>Judge</strong>
-            <VerdictChip verdict={round.decision.verdict} />
-          </div>
-          <div>{round.decision.reason}</div>
-          {round.decision.suggestion !== undefined && (
-            <div>
-              <span className="detail-label">suggestion</span>
-              <div>{round.decision.suggestion}</div>
-            </div>
-          )}
-          {Object.keys(round.decision.assessment).length > 0 && (
-            <div className="assessment-row">
-              {Object.entries(round.decision.assessment).map(([commentorId, kind]) => (
-                <span
-                  key={commentorId}
-                  className={`badge${kind === "verified" ? " badge-accent" : ""}`}
-                >
-                  {labelOf(commentorId)} · {kind}
-                </span>
-              ))}
-            </div>
-          )}
-          {round.decision.evidence && <EvidenceBlock evidence={round.decision.evidence} />}
+      {round.cot !== undefined && (
+        <div className="round-cot">
+          <span className="detail-label">
+            chain-of-thought step under review{round.round > 1 ? " (as revised)" : ""}
+          </span>
+          <div>{round.cot}</div>
         </div>
+      )}
+      {round.comments.map((c) => (
+        <CommentFold key={c.commentorId} comment={c} />
+      ))}
+      {round.decision && (
+        <details className="review-fold review-fold-judge" open>
+          <summary className="review-fold-head">
+            <span className="review-fold-name">
+              <strong>Judge</strong>
+            </span>
+            <VerdictChip verdict={round.decision.verdict} />
+          </summary>
+          <div className="review-fold-body">
+            <div>{round.decision.reason}</div>
+            {round.decision.suggestion !== undefined && (
+              <div>
+                <span className="detail-label">suggestion</span>
+                <div>{round.decision.suggestion}</div>
+              </div>
+            )}
+            {Object.keys(round.decision.assessment).length > 0 && (
+              <div className="assessment-row">
+                {Object.entries(round.decision.assessment).map(([commentorId, kind]) => (
+                  <span
+                    key={commentorId}
+                    className={`badge${kind === "verified" ? " badge-accent" : ""}`}
+                  >
+                    {labelOf(commentorId)} · {kind}
+                  </span>
+                ))}
+              </div>
+            )}
+            {round.decision.evidence && <EvidenceBlock evidence={round.decision.evidence} />}
+          </div>
+        </details>
       )}
       {revision && (
         <div className="redev-bar">
@@ -140,7 +141,14 @@ export function ReviewBody({ stage }: { stage: ReviewStage }) {
       <div className="matrix">
         {stage.members.map((member) => (
           <div key={member.memberId} className="matrix-row">
-            <span className="matrix-label" title={member.label}>
+            <span
+              className="matrix-label"
+              title={
+                member.department && member.umbrella
+                  ? `${member.label} — ${member.department} / ${member.umbrella}`
+                  : member.label
+              }
+            >
               {member.label}
             </span>
             <div className="cells">
@@ -171,6 +179,9 @@ export function ReviewBody({ stage }: { stage: ReviewStage }) {
           <div className="inspector-head">
             <span className="inspector-title">
               {selMember.label} · step {selStep.index}
+              {selMember.umbrella ? (
+                <span className="inspector-subtitle"> — {selMember.umbrella}</span>
+              ) : null}
             </span>
             <button type="button" className="btn btn-ghost btn-small" onClick={() => setSel(null)}>
               close
@@ -179,8 +190,9 @@ export function ReviewBody({ stage }: { stage: ReviewStage }) {
           {selStep.rounds.length === 0 ? (
             <p className="dim small">no review rounds recorded for this step yet</p>
           ) : (
+            // Chronological: round 1 first, later rounds beneath it.
             [...selStep.rounds]
-              .sort((a, b) => b.round - a.round)
+              .sort((a, b) => a.round - b.round)
               .map((round) => <RoundBlock key={round.round} round={round} />)
           )}
         </div>

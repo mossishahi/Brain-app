@@ -354,6 +354,8 @@ export interface JudgeDecisionView {
 export interface ReviewRoundView {
   /** 1-based round on the current step. Round 1 is the initial review. */
   readonly round: number;
+  /** The chain-of-thought step text exactly as it stood under this round's review. */
+  readonly cot?: string;
   readonly comments: readonly CommentView[];
   readonly decision?: JudgeDecisionView;
   /** Present when this round ended in a redevelopment. */
@@ -371,7 +373,10 @@ export interface ReviewStepView {
 
 export interface ReviewMemberView {
   readonly memberId: string;
+  /** Seat name in pick order ("Seat 1"); umbrella terms may repeat across seats. */
   readonly label: string;
+  readonly department?: string;
+  readonly umbrella?: string;
   readonly steps: readonly ReviewStepView[];
 }
 
