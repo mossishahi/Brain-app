@@ -159,22 +159,27 @@ export function seatingQueue(tree: ExpertsTree): SeatingQueueEntry[] {
  * 3. with capacity = panelSize, pop the head of the queue while capacity
  *    remains:
  *    - a TOPIC (level 4) seats a member with that single focus;
- *    - an UMBRELLA (level 3) seats a member with itself as the umbrella and
- *      ALL of its subfields as the stated focuses, and removes the branch's
+ *    - an UMBRELLA (level 3) first LOOKS AHEAD: if any of its own topics sit
+ *      within the next `capacity` live queue entries, the umbrella is
+ *      skipped without spending capacity — its topics will seat themselves.
+ *      Otherwise it seats a member with itself as the umbrella and ALL of
+ *      its subfields as the stated focuses, and removes the branch's
  *      remaining level-4 entries from the queue;
- *    - a DEPARTMENT (level 2) picks its highest-cxr umbrella still in the
- *      queue, seats a member with that umbrella and the union of the
- *      umbrella term and its subfields as focuses, and removes the picked
- *      umbrella and its level-4 entries from the queue. A department whose
- *      umbrellas are all consumed (or that houses none) seats nobody and the
- *      loop moves on without spending capacity.
+ *    - a DEPARTMENT (level 2) looks ahead the same way: if any of its own
+ *      umbrellas sit within the next `capacity` live entries, the department
+ *      is skipped without spending capacity. Otherwise it picks its
+ *      highest-cxr umbrella still in the queue, seats a member with that
+ *      umbrella and the union of the umbrella term and its subfields as
+ *      focuses, and removes the picked umbrella and its level-4 entries. A
+ *      department whose umbrellas are all consumed (or that houses none)
+ *      seats nobody and the loop moves on without spending capacity.
  *
  * Exhausted branches leave the queue recursively: whenever a node is
  * consumed, its parent is checked — a parent with no remaining children in
- * the queue is removed too, and the check repeats one level up. One member
- * per (department, umbrella) seat: a would-be duplicate is skipped, never
- * seated twice. Selection stops at panelSize or queue exhaustion; member ids
- * follow pick order.
+ * the queue is removed too, and the check repeats one level up. Seats are
+ * exact: several members may share an umbrella (topic-level seats under one
+ * branch), but the identical focus set is never seated twice. Selection
+ * stops at panelSize or queue exhaustion; member ids follow pick order.
  */
 export function selectPanel(experts: ExpertsTree, panelSize: number): Panel {
   positiveInteger(panelSize, "panelSize");
@@ -183,7 +188,8 @@ export function selectPanel(experts: ExpertsTree, panelSize: number): Panel {
   const removed = new Set<string>();
   const seated = new Set<string>();
   const members: PanelMember[] = [];
-  const seatOf = (department: string, umbrella: string): string => `${department}\u0000${umbrella}`;
+  const seatOf = (department: string, umbrella: string, subfields: readonly string[]): string =>
+    `${department}\u0000${umbrella}\u0000${subfields.join("\u0001")}`;
 
   const seat = (department: string, umbrella: string, subfields: readonly string[]): void => {
     members.push({
@@ -192,7 +198,7 @@ export function selectPanel(experts: ExpertsTree, panelSize: number): Panel {
       umbrella,
       subfields: [...subfields],
     });
-    seated.add(seatOf(department, umbrella));
+    seated.add(seatOf(department, umbrella, subfields));
   };
 
   const inQueue = (level: 2 | 3 | 4, departmentIndex: number, umbrellaIndex: number): boolean =>
@@ -245,17 +251,36 @@ export function selectPanel(experts: ExpertsTree, panelSize: number): Panel {
   };
 
   let capacity = panelSize;
-  for (const entry of queue) {
+  for (let index = 0; index < queue.length; index += 1) {
+    const entry = queue[index]!;
     if (capacity <= 0) break;
     if (removed.has(entryKey(entry))) continue;
     removed.add(entryKey(entry)); // popped
     const department = experts.departments[entry.departmentIndex]!;
 
+    /**
+     * The look-ahead of the corrected algorithm: does any entry satisfying
+     * `predicate` sit within the next `capacity` LIVE queue entries after
+     * the current one? (Working on the 3rd item with capacity 4 checks the
+     * 4th through 7th live items.)
+     */
+    const withinNextCapacityItems = (
+      predicate: (candidate: SeatingQueueEntry) => boolean,
+    ): boolean => {
+      let inspected = 0;
+      for (let ahead = index + 1; ahead < queue.length && inspected < capacity; ahead += 1) {
+        const candidate = queue[ahead]!;
+        if (removed.has(entryKey(candidate))) continue;
+        inspected += 1;
+        if (predicate(candidate)) return true;
+      }
+      return false;
+    };
+
     if (entry.level === 4) {
       const umbrella = department.umbrellas[entry.umbrellaIndex]!;
-      const taken = seated.has(seatOf(department.name, umbrella.name));
-      if (!taken) {
-        const subfield = umbrella.subfields[entry.subfieldIndex]!;
+      const subfield = umbrella.subfields[entry.subfieldIndex]!;
+      if (!seated.has(seatOf(department.name, umbrella.name, [subfield.name]))) {
         seat(department.name, umbrella.name, [subfield.name]);
         capacity -= 1;
       }
@@ -266,13 +291,23 @@ export function selectPanel(experts: ExpertsTree, panelSize: number): Panel {
     }
 
     if (entry.level === 3) {
+      // Skip the umbrella when any of its own topics are close enough to
+      // seat themselves — the more specific seats win; capacity unchanged.
+      if (
+        withinNextCapacityItems(
+          (candidate) =>
+            candidate.level === 4 &&
+            candidate.departmentIndex === entry.departmentIndex &&
+            candidate.umbrellaIndex === entry.umbrellaIndex,
+        )
+      ) {
+        cascadeFromDepartment(entry.departmentIndex);
+        continue;
+      }
       const umbrella = department.umbrellas[entry.umbrellaIndex]!;
-      if (!seated.has(seatOf(department.name, umbrella.name))) {
-        seat(
-          department.name,
-          umbrella.name,
-          umbrella.subfields.map((subfield) => subfield.name),
-        );
+      const focuses = umbrella.subfields.map((subfield) => subfield.name);
+      if (!seated.has(seatOf(department.name, umbrella.name, focuses))) {
+        seat(department.name, umbrella.name, focuses);
         removeSubfieldEntries(entry.departmentIndex, entry.umbrellaIndex);
         capacity -= 1;
       }
@@ -280,22 +315,29 @@ export function selectPanel(experts: ExpertsTree, panelSize: number): Panel {
       continue;
     }
 
-    // Level 2: seat through the department's best umbrella still available.
+    // Level 2: skip the department when any of its own umbrellas are close
+    // enough to seat themselves; capacity unchanged.
+    if (
+      withinNextCapacityItems(
+        (candidate) =>
+          candidate.level === 3 && candidate.departmentIndex === entry.departmentIndex,
+      )
+    ) {
+      continue;
+    }
+    // Otherwise seat through the department's best umbrella still available.
     let picked: SeatingQueueEntry | undefined;
     for (const candidate of queue) {
       if (candidate.level !== 3 || candidate.departmentIndex !== entry.departmentIndex) continue;
       if (removed.has(entryKey(candidate))) continue;
-      const candidateUmbrella = department.umbrellas[candidate.umbrellaIndex]!;
-      if (seated.has(seatOf(department.name, candidateUmbrella.name))) continue;
       picked = candidate; // the queue is sorted, so the first hit is the max
       break;
     }
     if (!picked) continue; // nothing left to represent this department with
     const umbrella = department.umbrellas[picked.umbrellaIndex]!;
-    seat(department.name, umbrella.name, [
-      umbrella.name,
-      ...umbrella.subfields.map((subfield) => subfield.name),
-    ]);
+    const focuses = [umbrella.name, ...umbrella.subfields.map((subfield) => subfield.name)];
+    if (seated.has(seatOf(department.name, umbrella.name, focuses))) continue;
+    seat(department.name, umbrella.name, focuses);
     removed.add(entryKey(picked));
     removeSubfieldEntries(entry.departmentIndex, picked.umbrellaIndex);
     capacity -= 1;

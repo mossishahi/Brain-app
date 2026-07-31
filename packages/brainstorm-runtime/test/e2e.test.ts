@@ -466,9 +466,11 @@ test("Pass path executes member -> step -> round order and keeps C-O-T from chai
       task.bindings.umbrella,
     ]),
     [
-      // One cxr-sorted queue: department Σ values dominate, so seats follow
-      // department order (Physics 4.2, CS 2.6, Biology 2.35), each seated
-      // through its best umbrella.
+      // One cxr-sorted queue with look-ahead: departments and umbrellas
+      // defer to children sitting within the remaining capacity, so Physics
+      // surfaces through the photon-counting topic, Machine Learning seats
+      // as an umbrella (its topic is outside the window), and Biology
+      // surfaces through network inference — in queue order.
       ["member-1", "Physics", "Quantum Optics"],
       ["member-2", "Computer Science", "Machine Learning"],
       ["member-3", "Biology", "Systems Biology"],

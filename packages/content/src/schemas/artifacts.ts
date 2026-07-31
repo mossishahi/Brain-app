@@ -649,12 +649,14 @@ export const panelSchema = z
         ctx.addIssue({ code: "custom", path: ["members", i, "id"], message: `duplicate member id "${m.id}"` });
       }
       ids.add(m.id);
-      const seat = `${m.department}\u0000${m.umbrella}`;
+      // Several members may share an umbrella (topic-level seats under the
+      // same branch), but the exact same focus set is one seat, never two.
+      const seat = `${m.department}\u0000${m.umbrella}\u0000${m.subfields.join("\u0001")}`;
       if (seats.has(seat)) {
         ctx.addIssue({
           code: "custom",
           path: ["members", i],
-          message: `duplicate seat for (${m.department}, ${m.umbrella}) — one member per umbrella`,
+          message: `duplicate seat for (${m.department}, ${m.umbrella}, ${m.subfields.join(" and ")})`,
         });
       }
       seats.add(seat);

@@ -134,7 +134,10 @@ async function waitFor(
   server: RunningBrainServer,
   jobId: string,
   status: string,
-  timeoutMs = 60_000,
+  // Look-ahead seating fills every topic-level seat, so offline pipelines
+  // legitimately review twice the members they used to; suite-parallel load
+  // stretches that further.
+  timeoutMs = 180_000,
 ): Promise<JobDetail> {
   const deadline = Date.now() + timeoutMs;
   let latest: JobDetail | undefined;

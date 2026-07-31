@@ -291,7 +291,22 @@ test("experts and panel are separate artifacts", () => {
 
   const duplicateSeat = structuredClone(good);
   duplicateSeat.members[1] = { ...duplicateSeat.members[0]!, id: "cs-gnn-2" };
-  assert.equal(panelSchema.safeParse(duplicateSeat).success, false, "one member per umbrella");
+  assert.equal(
+    panelSchema.safeParse(duplicateSeat).success,
+    false,
+    "the identical focus set is one seat, never two",
+  );
+
+  // Sibling topics may seat separately under one umbrella: same department
+  // and umbrella, different exact focus — the look-ahead seating produces
+  // these when a branch's topics outrank the umbrella seat.
+  const siblingSeats = structuredClone(good);
+  siblingSeats.members[1] = {
+    ...siblingSeats.members[0]!,
+    id: "cs-gnn-2",
+    subfields: ["latent graph inference"],
+  };
+  assert.ok(panelSchema.safeParse(siblingSeats).success);
 
   const single = { members: [good.members[0]] };
   assert.equal(panelSchema.safeParse(single).success, false, "a reviewable panel needs at least two members");

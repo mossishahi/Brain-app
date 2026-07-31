@@ -174,58 +174,60 @@ test("panel.select seats from one cxr-sorted queue over levels 2, 3 and 4 of the
     ],
   };
 
-  // Departments outrank everything beneath them (their Σ dominates), so the
-  // top of the queue seats one member per department, each through its
-  // highest-cxr umbrella — the seat's focuses UNION the umbrella term with
-  // its subfields.
+  // The look-ahead keeps parents from swallowing imminent children: with
+  // capacity 3, Physics is skipped (Quantum Optics is within the next 3 live
+  // entries), Quantum Optics is skipped (photon counting is imminent), and
+  // the TOPIC seats. Machine Learning's topic is NOT within its window, so
+  // the umbrella seats with all of its subfields.
   assert.deepEqual(selectPanel(experts, 3).members, [
     {
       id: "member-1",
       department: "Physics",
       umbrella: "Quantum Optics",
-      subfields: ["Quantum Optics", "photon counting"],
+      subfields: ["photon counting"],
     },
     {
       id: "member-2",
       department: "Computer Science",
       umbrella: "Machine Learning",
-      subfields: ["Machine Learning", "representation learning"],
+      subfields: ["representation learning"],
     },
     {
       id: "member-3",
       department: "Biology",
       umbrella: "Systems Biology",
-      subfields: ["Systems Biology", "network inference"],
+      subfields: ["network inference"],
     },
   ]);
 
-  // Beyond the departments, the queue continues with the remaining
-  // umbrellas (level 3): a seat carries the umbrella's own subfields only,
-  // and consumes the branch's level-4 entries.
-  const five = selectPanel(experts, 5).members;
-  assert.deepEqual(five[3], {
-    id: "member-4",
+  // With more capacity the windows widen, every parent defers to its
+  // children, and the panel becomes topic-level seats in queue order.
+  assert.deepEqual(selectPanel(experts, 5).members, [
+    { id: "member-1", department: "Physics", umbrella: "Quantum Optics", subfields: ["photon counting"] },
+    { id: "member-2", department: "Biology", umbrella: "Systems Biology", subfields: ["network inference"] },
+    { id: "member-3", department: "Computer Science", umbrella: "Machine Learning", subfields: ["representation learning"] },
+    { id: "member-4", department: "Physics", umbrella: "Condensed Matter", subfields: ["transport"] },
+    { id: "member-5", department: "Biology", umbrella: "Biophysics", subfields: ["single-molecule methods"] },
+  ]);
+  // Queue exhaustion: the sixth seat is Condensed Matter's second topic —
+  // two members under one umbrella, each with its own exact focus.
+  const twelve = selectPanel(experts, 12).members;
+  assert.equal(twelve.length, 6);
+  assert.deepEqual(twelve[5], {
+    id: "member-6",
     department: "Physics",
     umbrella: "Condensed Matter",
-    subfields: ["transport", "Chip Morphology"],
+    subfields: ["Chip Morphology"],
   });
-  assert.deepEqual(five[4], {
-    id: "member-5",
-    department: "Biology",
-    umbrella: "Biophysics",
-    subfields: ["single-molecule methods"],
-  });
-  // Queue exhaustion: every level-4 entry was consumed by its branch's seat.
-  assert.equal(selectPanel(experts, 12).members.length, 5);
 });
 
-test("panel.select seats a topic directly when it tops the queue, and never duplicates a seat", () => {
+test("panel.select seats sibling topics as separate members under the same umbrella", () => {
   // Hand-made non-monotone values (an artifact can carry them even though
   // the bridge never produces them): the "hot" topic outranks its own
-  // umbrella, so it seats as a single-focus member (level-4 case). The
-  // umbrella and its remaining topics are then skipped — one member per
-  // (department, umbrella) — and a department whose umbrellas are all
-  // consumed seats nobody without spending capacity.
+  // umbrella and seats alone; the look-ahead then skips U while "cold" is
+  // imminent, so the second topic seats as its own member of the same
+  // (department, umbrella) branch — exact seats, never the identical focus
+  // set twice.
   const experts = {
     departments: [
       {
@@ -261,7 +263,8 @@ test("panel.select seats a topic directly when it tops the queue, and never dupl
   };
   assert.deepEqual(selectPanel(experts, 4).members, [
     { id: "member-1", department: "D", umbrella: "U", subfields: ["hot"] },
-    { id: "member-2", department: "E", umbrella: "V", subfields: ["V", "x"] },
+    { id: "member-2", department: "E", umbrella: "V", subfields: ["x"] },
+    { id: "member-3", department: "D", umbrella: "U", subfields: ["cold"] },
   ]);
 });
 
@@ -347,7 +350,8 @@ test("panel.select removes exhausted parents recursively when their last child i
   assert.deepEqual(selectPanel(experts, 4).members, [
     { id: "member-1", department: "D", umbrella: "U1", subfields: ["t1"] },
     { id: "member-2", department: "D", umbrella: "U2", subfields: ["t2"] },
-    { id: "member-3", department: "E", umbrella: "V", subfields: ["V", "x"] },
+    // E defers to V (look-ahead), V defers to its imminent topic.
+    { id: "member-3", department: "E", umbrella: "V", subfields: ["x"] },
   ]);
 });
 
