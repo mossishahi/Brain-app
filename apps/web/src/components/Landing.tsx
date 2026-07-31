@@ -65,9 +65,7 @@ function JobCard({ job }: { readonly job: JobSummary }) {
       {confirming !== null ? (
         <div className="cancel-zone">
           <span className="cancel-question">
-            {confirming === "cancel"
-              ? "Are you sure you want to cancel this job?"
-              : "Move this job to the view-only trash?"}
+            {confirming === "cancel" ? "Cancel this job?" : "Move to trash?"}
           </span>
           {confirming === "cancel" ? (
             <button

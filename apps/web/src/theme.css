@@ -1408,7 +1408,7 @@ button.server-file-name {
 .cancel-question {
   font-size: 12px;
   color: var(--text-dim);
-  max-width: 220px;
+  white-space: nowrap;
   text-align: right;
   line-height: 1.3;
 }
