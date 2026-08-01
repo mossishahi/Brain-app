@@ -30,6 +30,22 @@ test("parses Claude session reset clock in its explicit timezone", async () => {
   );
 });
 
+test("recognizes developer-API credit exhaustion, which carries no reset time", async () => {
+  const message =
+    "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.";
+  assert.equal(isCreditLimitMessage(message), true);
+  assert.equal(isCreditLimitMessage("insufficient credits for this request"), true);
+  assert.equal(isCreditLimitMessage("connection reset by peer"), false);
+  assert.equal(
+    parseCreditResetDeterministically(message, new Date("2026-07-22T15:14:00.000Z")),
+    undefined,
+  );
+  await assert.rejects(
+    resolveCreditReset({ message, now: new Date("2026-07-22T15:14:00.000Z") }),
+    /Could not determine provider credit reset time/,
+  );
+});
+
 test("rolls an already-passed reset clock to the next local day", () => {
   const parsed = parseCreditResetDeterministically(
     "resets 5:30pm (Europe/Berlin)",

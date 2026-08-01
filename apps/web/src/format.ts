@@ -98,11 +98,11 @@ export function jobStatusLine(job: JobSummary): string {
     case "suspended":
       return "waiting for your panel confirmation";
     case "credit-blocked": {
-      const remaining = Math.max(
-        0,
-        (job.creditBlock?.retryAt ?? Date.now()) - Date.now(),
-      );
-      return `credit blocked · resumes in ${formatDuration(remaining)}`;
+      const retryAt = job.creditBlock?.retryAt;
+      if (retryAt === undefined) {
+        return "credit blocked · top up, then resume";
+      }
+      return `credit blocked · resumes in ${formatDuration(Math.max(0, retryAt - Date.now()))}`;
     }
     case "completed":
       return "completed";

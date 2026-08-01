@@ -124,6 +124,25 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
         };
         break;
       }
+      case "code-annotator": {
+        // One deterministic summary per bound code file, in the given order,
+        // mirroring the completeness-and-order contract the runtime enforces.
+        const files = Array.isArray(bindings.files) ? bindings.files : [];
+        output = {
+          files: files.flatMap((candidate) => {
+            const file = asObject(candidate as JsonValue);
+            if (typeof file.path !== "string") return [];
+            const base = file.path.split("/").pop() ?? file.path;
+            return [
+              {
+                path: file.path,
+                summary: `Offline deterministic summary of ${base}: module contents related to the input topic.`,
+              },
+            ];
+          }),
+        };
+        break;
+      }
       case "pool-builder":
         // Terms chosen to resolve against the bundle's real taxonomy seed
         // (names or curated aliases), plus one unmatched member the placer
@@ -376,14 +395,17 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
           ],
         };
         break;
-      case "commentor":
+      case "commentor": {
+        const currentStep = typeof bindings.currentStep === "number" ? bindings.currentStep : 1;
         output = {
           verdict: "Pass",
-          reason: `${agentId} finds the step sound and complete for its position in the chain.`,
+          step: currentStep,
+          reason: `${agentId} finds no demonstrable flaw standing in the reviewed steps.`,
           suggestion: "",
           evidence: noEvidence,
         };
         break;
+      }
       case "judge": {
         const comments = asObject(bindings.comments as JsonValue);
         const assessment = Object.keys(comments).map((commentorId) => ({
@@ -392,23 +414,28 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
         }));
         output = {
           verdict: "Pass",
-          reason: "No comment raises a point that would materially improve the next steps.",
+          reason: "No comment demonstrates a flaw or a necessary gap in the reviewed steps.",
           suggestion: "",
           evidence: noEvidence,
+          issues: [],
           assessment,
         };
         break;
       }
       case "redeveloper": {
-        const fromStep = typeof bindings.currentStep === "number" ? bindings.currentStep : 1;
-        const total = this.cotSteps;
+        // Full-chain re-emission: the offline reviser rewrites the current
+        // step and copies the rest of the previous chain verbatim, mirroring
+        // the minimal-edit contract the runtime diffs against.
+        const currentStep = typeof bindings.currentStep === "number" ? bindings.currentStep : 1;
+        const previous = Array.isArray(bindings.chain) ? bindings.chain : [];
         output = {
-          fromStep,
           output: this.developedOutput(`${agentId} revised`),
-          revisedSteps: Array.from(
-            { length: total - fromStep + 1 },
-            (_, i) => `${agentId} revised step ${fromStep + i} paragraph.`,
-          ),
+          steps: Array.from({ length: this.cotSteps }, (_, i) => {
+            const carried = previous[i];
+            return i + 1 === currentStep || typeof carried !== "string"
+              ? `${agentId} revised step ${i + 1} paragraph.`
+              : carried;
+          }),
           novelty: `${agentId} revised novelty paragraph.`,
         };
         break;

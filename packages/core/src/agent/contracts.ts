@@ -107,6 +107,12 @@ export interface AgentProgress {
   readonly toolName?: string;
   readonly turn?: number;
   readonly elapsedMs?: number;
+  /**
+   * Optional structured payload for machine aggregation (e.g. the resolved
+   * capability plan at task start). Same sanitation rules as `message`:
+   * operational facts only, never content.
+   */
+  readonly data?: JsonObject;
 }
 
 export interface AgentExecutionContext {

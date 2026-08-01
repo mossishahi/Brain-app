@@ -80,7 +80,14 @@ export function createInitialState(
     review: {
       round: 0,
       allowedVerdicts: object(verdicts.verdicts, "catalog verdicts"),
+      history: [],
     },
+    // The per-member objection ledger: one compact, ANONYMIZED record per
+    // review round (judge verdict, its issues content-only, and the
+    // change-set of the redevelopment that followed, when one did). The
+    // runtime — never a model — writes it; review.history is the per-round
+    // projection bound into commentor/judge/redeveloper tasks.
+    reviewLog: {},
     _runtime: {
       artifacts: {},
       gates: {},
@@ -116,6 +123,16 @@ export function validateArtifact(
   return asJson<JsonValue>(parsed.data);
 }
 
+/**
+ * Applies a full-chain redevelopment: the reviser re-emitted the COMPLETE
+ * chain (touched steps rewritten, unaffected steps copied verbatim), and the
+ * runtime — never the model — computes the change-set by exact per-step
+ * comparison against the previous chain. Chain length is invariant. The
+ * change-set is stashed on `round` so finishReviewRound can fold it into the
+ * member's review-ledger record, and the previous idea's `literature` rides
+ * through unchanged (the reviser reworks reasoning, not its grounding
+ * record).
+ */
 export function applyRedevelopment(
   state: JsonObject,
   scope: ScopeReader,
@@ -123,31 +140,18 @@ export function applyRedevelopment(
   nodeId: string,
 ): JsonObject {
   const revision = object(revisionValue, "redevelopment");
-  const currentStep = resolveDataReference("stepIndex", scope, state, { required: true });
   const totalSteps = resolveDataReference("input.cotSteps", scope, state, { required: true });
   const memberId = resolveDataReference("member.id", scope, state, { required: true });
-  if (
-    typeof currentStep !== "number" ||
-    typeof totalSteps !== "number" ||
-    typeof memberId !== "string"
-  ) {
+  if (typeof totalSteps !== "number" || typeof memberId !== "string") {
     throw new BrainstormRuntimeError(
-      `node "${nodeId}" cannot apply redevelopment without member.id, stepIndex, and input.cotSteps`,
+      `node "${nodeId}" cannot apply redevelopment without member.id and input.cotSteps`,
       "INVALID_REDEVELOPMENT",
     );
   }
-  const fromStep = revision.fromStep;
-  const revisedSteps = revision.revisedSteps;
-  if (fromStep !== currentStep || !Array.isArray(revisedSteps)) {
+  const steps = revision.steps;
+  if (!Array.isArray(steps) || steps.length !== totalSteps) {
     throw new BrainstormRuntimeError(
-      `node "${nodeId}" redevelopment must start at current step ${currentStep}`,
-      "INVALID_REDEVELOPMENT",
-    );
-  }
-  const expectedTail = totalSteps - currentStep + 1;
-  if (revisedSteps.length !== expectedTail) {
-    throw new BrainstormRuntimeError(
-      `node "${nodeId}" redevelopment needs ${expectedTail} revised steps, got ${revisedSteps.length}`,
+      `node "${nodeId}" redevelopment must carry the complete ${totalSteps}-step chain`,
       "INVALID_REDEVELOPMENT",
     );
   }
@@ -162,12 +166,25 @@ export function applyRedevelopment(
       "INVALID_REDEVELOPMENT",
     );
   }
+  const touched: number[] = [];
+  const untouched: number[] = [];
+  steps.forEach((step, index) => {
+    (step === previousCot[index] ? untouched : touched).push(index + 1);
+  });
   const revisedIdea: JsonObject = {
     output: revision.output!,
-    cot: [...previousCot.slice(0, currentStep - 1), ...revisedSteps],
-    novelty: revision.novelty!,
+    cot: structuredClone(steps),
+    ...(revision.novelty !== undefined ? { novelty: revision.novelty } : {}),
+    ...(previous.literature !== undefined
+      ? { literature: structuredClone(previous.literature) }
+      : {}),
   };
-  return writeDataReference(state, "ideas[member.id]", revisedIdea, scope).state;
+  const next = writeDataReference(state, "ideas[member.id]", revisedIdea, scope).state;
+  const round = object(next.round, "round");
+  return {
+    ...next,
+    round: { ...round, touched, untouched },
+  };
 }
 
 function isObject(value: JsonValue | undefined): value is JsonObject {
@@ -230,19 +247,63 @@ function mutableState(state: JsonObject): MutableJsonObject {
   return structuredClone(state) as MutableJsonObject;
 }
 
-export function initializeReview(state: JsonObject): JsonObject {
+/**
+ * The member whose chain the current review loop walks, resolved from scope.
+ */
+function reviewMemberId(state: JsonObject, scope: ScopeReader): string {
+  const memberId = resolveDataReference("member.id", scope, state, { required: true });
+  if (typeof memberId !== "string") {
+    throw new BrainstormRuntimeError("review loop has no member.id in scope", "INVALID_REVIEW_STATE");
+  }
+  return memberId;
+}
+
+/**
+ * The member's review ledger so far: chronological, compact, and ANONYMOUS
+ * (objection content, never commentor identity), cloned for binding as
+ * review.history. An empty array is the valid first-round view.
+ */
+function memberHistory(state: JsonObject, memberId: string): JsonValue[] {
+  const log = state.reviewLog;
+  if (typeof log !== "object" || log === null || Array.isArray(log)) return [];
+  const entries = (log as JsonObject)[memberId];
+  return Array.isArray(entries) ? (structuredClone(entries) as JsonValue[]) : [];
+}
+
+/** An issue as the ledger keeps it: the content, with evidence collapsed to its kind. */
+function ledgerIssue(value: JsonValue): JsonObject {
+  const issue = typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as JsonObject)
+    : {};
+  const evidence = issue.evidence;
+  const evidenceKind =
+    typeof evidence === "object" && evidence !== null && !Array.isArray(evidence)
+      ? (evidence as JsonObject).kind
+      : undefined;
+  return {
+    step: typeof issue.step === "number" ? issue.step : 0,
+    point: typeof issue.point === "string" ? issue.point : "",
+    basis: typeof issue.basis === "string" ? issue.basis : "authority",
+    evidenceKind: typeof evidenceKind === "string" ? evidenceKind : "none",
+    mustAddress: issue.mustAddress === true,
+    suggestion: typeof issue.suggestion === "string" ? issue.suggestion : "",
+  };
+}
+
+export function initializeReview(state: JsonObject, scope: ScopeReader): JsonObject {
   const next = mutableState(state);
   const catalog = object(next.catalog, "catalog");
   const verdictCatalog = object(catalog.verdicts, "catalog.verdicts");
   next.review = {
     round: 0,
     allowedVerdicts: object(verdictCatalog.verdicts, "catalog.verdicts.verdicts"),
+    history: memberHistory(next, reviewMemberId(next, scope)),
   };
   next.round = { comments: {} };
   return next;
 }
 
-export function prepareReviewRound(state: JsonObject): JsonObject {
+export function prepareReviewRound(state: JsonObject, scope: ScopeReader): JsonObject {
   const next = mutableState(state);
   const review = object(next.review, "review");
   const catalog = object(next.catalog, "catalog");
@@ -261,12 +322,19 @@ export function prepareReviewRound(state: JsonObject): JsonObject {
     ...review,
     round: typeof review.round === "number" ? review.round + 1 : 1,
     allowedVerdicts: allowed,
+    history: memberHistory(next, reviewMemberId(next, scope)),
   };
   next.round = { comments: {} };
   return next;
 }
 
-export function finishReviewRound(state: JsonObject): JsonObject {
+/**
+ * Closes one review round: records the judge's verdict for the sequencing
+ * rule, and appends the round's ANONYMIZED record — walk position, round
+ * number, verdict, reason, content-only issues, and the change-set of the
+ * redevelopment that followed (when one did) — to the member's ledger.
+ */
+export function finishReviewRound(state: JsonObject, scope: ScopeReader): JsonObject {
   const next = mutableState(state);
   const review = object(next.review, "review");
   const round = object(next.round, "round");
@@ -275,5 +343,31 @@ export function finishReviewRound(state: JsonObject): JsonObject {
     throw new BrainstormRuntimeError("review round has no decision verdict", "INVALID_REVIEW_STATE");
   }
   next.review = { ...review, lastVerdict: decision.verdict };
+
+  const memberId = reviewMemberId(next, scope);
+  const stepIndex = resolveDataReference("stepIndex", scope, next, { required: true });
+  if (typeof stepIndex !== "number") {
+    throw new BrainstormRuntimeError("review loop has no stepIndex in scope", "INVALID_REVIEW_STATE");
+  }
+  const record: JsonObject = {
+    step: stepIndex,
+    round: typeof review.round === "number" ? review.round : 0,
+    verdict: decision.verdict,
+    reason: typeof decision.reason === "string" ? decision.reason : "",
+    issues: (Array.isArray(decision.issues) ? decision.issues : []).map(ledgerIssue),
+    ...(Array.isArray(round.touched)
+      ? {
+          touched: structuredClone(round.touched),
+          untouched: Array.isArray(round.untouched) ? structuredClone(round.untouched) : [],
+        }
+      : {}),
+  };
+  const log =
+    typeof next.reviewLog === "object" && next.reviewLog !== null && !Array.isArray(next.reviewLog)
+      ? (next.reviewLog as MutableJsonObject)
+      : {};
+  const entries = Array.isArray(log[memberId]) ? (log[memberId] as JsonValue[]) : [];
+  log[memberId] = [...entries, record];
+  next.reviewLog = log;
   return next;
 }

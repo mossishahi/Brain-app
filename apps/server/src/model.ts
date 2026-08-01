@@ -19,7 +19,8 @@ export interface JobRecord {
   error?: string;
   submissionCount?: number;
   autoResumePending?: {
-    readonly retryAt: number;
+    /** Absent when the resume was claimed manually (no reset time known). */
+    readonly retryAt?: number;
     readonly submittedAt: number;
   };
   /** Immutable remote content snapshot used by this job. */

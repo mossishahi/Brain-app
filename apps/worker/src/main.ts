@@ -262,8 +262,14 @@ function reportResult(result: RunResult, sessionRoot: string): void {
   if (result.status === "credit_blocked") {
     console.log(`Run ${result.runId} is credit blocked.`);
     console.log(`Provider message: ${result.providerMessage}`);
-    console.log(`Automatic resume time: ${new Date(result.retryAt).toISOString()}`);
-    console.log("The brain server will resume it automatically unless it is cancelled.");
+    if (result.retryAt !== undefined) {
+      console.log(`Automatic resume time: ${new Date(result.retryAt).toISOString()}`);
+      console.log("The brain server will resume it automatically unless it is cancelled.");
+    } else {
+      console.log(
+        "No reset time was announced (a top-up is likely needed); resume it from the dashboard when ready.",
+      );
+    }
     return;
   }
   if (result.status === "failed") {

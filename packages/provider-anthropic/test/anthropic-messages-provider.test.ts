@@ -641,3 +641,159 @@ test("rejects pre-aborted calls with AbortError before the SDK boundary", async 
   );
   assert.equal(called, false);
 });
+
+test("native operations become server tools; their activity round-trips and is surfaced", async () => {
+  const bodies: Record<string, unknown>[] = [];
+  const client: AnthropicMessagesClient = {
+    messages: {
+      async create(body) {
+        bodies.push(body);
+        return {
+          id: "msg_native",
+          model: "claude-response",
+          content: [
+            {
+              type: "server_tool_use",
+              id: "srvtoolu_1",
+              name: "web_search",
+              input: { query: "photon counting" },
+            },
+            {
+              type: "web_search_tool_result",
+              tool_use_id: "srvtoolu_1",
+              content: [{ type: "web_search_result", url: "https://example.org", title: "Result" }],
+            },
+            { type: "text", text: '{"answer":1}' },
+          ],
+          stop_reason: "end_turn",
+          usage: { input_tokens: 5, output_tokens: 2 },
+        };
+      },
+    },
+  };
+  const provider = new AnthropicMessagesProvider({
+    apiKey: "not-used-by-mock",
+    model: "claude-default",
+    client,
+  });
+  const response = await provider.complete({
+    modelId: "claude-request",
+    messages: [{ role: "user", content: [{ type: "text", text: "Search." }] }],
+    nativeOperations: ["web_search", "code_execution"],
+  });
+
+  const tools = bodies[0]!.tools as Record<string, unknown>[];
+  assert.deepEqual(
+    tools.map((tool) => tool.name),
+    ["web_search", "code_execution"],
+    "each selected native operation ships as one server tool",
+  );
+  assert.match(String(tools[0]!.type), /^web_search_\d+$/);
+  assert.match(String(tools[1]!.type), /^code_execution_\d+$/);
+
+  // Server-tool activity is invisible to text extraction but preserved for
+  // round-trips, and surfaced for observability.
+  assert.deepEqual(response.metadata?.serverToolUses, ["web_search"]);
+  const passthrough = response.content.filter(
+    (block) => block.type === "text" && block.metadata?.anthropicRaw !== undefined,
+  );
+  assert.equal(passthrough.length, 2, "server blocks ride as raw passthrough");
+  const visibleText = response.content
+    .filter((block) => block.type === "text")
+    .map((block) => (block as { text: string }).text)
+    .join("");
+  assert.equal(visibleText, '{"answer":1}', "passthrough blocks add no visible text");
+
+  // Resending the assistant content must reproduce the wire blocks verbatim.
+  await provider.complete({
+    modelId: "claude-request",
+    messages: [
+      { role: "user", content: [{ type: "text", text: "Search." }] },
+      { role: "assistant", content: response.content },
+      { role: "user", content: [{ type: "text", text: "Continue." }] },
+    ],
+  });
+  const resent = bodies[1]!.messages as { role: string; content: Record<string, unknown>[] }[];
+  const assistant = resent.find((message) => message.role === "assistant")!;
+  assert.deepEqual(
+    assistant.content.map((block) => block.type),
+    ["server_tool_use", "web_search_tool_result", "text"],
+    "server blocks round-trip byte-identical on the next turn",
+  );
+});
+
+test("an unmapped native operation key fails loudly instead of dropping the capability", async () => {
+  const client: AnthropicMessagesClient = {
+    messages: {
+      async create() {
+        throw new Error("must not be called");
+      },
+    },
+  };
+  const provider = new AnthropicMessagesProvider({
+    apiKey: "not-used-by-mock",
+    model: "claude-default",
+    client,
+  });
+  await assert.rejects(
+    provider.complete({
+      modelId: "claude-request",
+      messages: [{ role: "user", content: [{ type: "text", text: "Hi." }] }],
+      nativeOperations: ["not_a_real_tool"],
+    }),
+    (error: AnthropicProviderError) =>
+      error.category === "validation" && /not_a_real_tool/.test(error.message),
+  );
+});
+
+test("pause_turn responses continue automatically and concatenate the full turn", async () => {
+  const bodies: Record<string, unknown>[] = [];
+  const client: AnthropicMessagesClient = {
+    messages: {
+      async create(body) {
+        bodies.push(body);
+        if (bodies.length === 1) {
+          return {
+            id: "msg_paused",
+            model: "claude-response",
+            content: [
+              { type: "server_tool_use", id: "srvtoolu_2", name: "web_search", input: { query: "q" } },
+            ],
+            stop_reason: "pause_turn",
+            usage: { input_tokens: 4, output_tokens: 1 },
+          };
+        }
+        return {
+          id: "msg_final",
+          model: "claude-response",
+          content: [{ type: "text", text: "done" }],
+          stop_reason: "end_turn",
+          usage: { input_tokens: 6, output_tokens: 2 },
+        };
+      },
+    },
+  };
+  const provider = new AnthropicMessagesProvider({
+    apiKey: "not-used-by-mock",
+    model: "claude-default",
+    client,
+  });
+  const response = await provider.complete({
+    modelId: "claude-request",
+    messages: [{ role: "user", content: [{ type: "text", text: "Go." }] }],
+    nativeOperations: ["web_search"],
+  });
+
+  assert.equal(bodies.length, 2, "the paused turn is resent once");
+  const continuation = bodies[1]!.messages as { role: string }[];
+  assert.equal(continuation[continuation.length - 1]!.role, "assistant");
+  assert.equal(response.stopReason, "end_turn");
+  assert.equal(response.usage.inputTokens, 10, "usage sums across continuations");
+  assert.equal(response.usage.outputTokens, 3);
+  assert.deepEqual(response.metadata?.serverToolUses, ["web_search"]);
+  const visibleText = response.content
+    .filter((block) => block.type === "text")
+    .map((block) => (block as { text: string }).text)
+    .join("");
+  assert.equal(visibleText, "done", "the caller sees one concatenated turn");
+});

@@ -17,7 +17,11 @@ export interface ResolveCreditResetOptions {
 const MAX_RESET_DISTANCE_MS = 7 * 24 * 60 * 60 * 1000;
 
 export function isCreditLimitMessage(message: string): boolean {
-  return /session limit|usage limit|credit(?:s)? (?:exhausted|limit)|rate limit.*reset|resets?\s+(?:at\s+)?\d/i.test(
+  // "credit balance is too low" / "insufficient credits" / "out of credits"
+  // are the developer-API exhaustion messages: they carry no reset time (a
+  // top-up clears them), so callers must expect resolveCreditReset to fail
+  // for them and fall back to a manually claimed block.
+  return /session limit|usage limit|credit(?:s)? (?:exhausted|limit)|credit balance is too low|insufficient credits?|out of credits|rate limit.*reset|resets?\s+(?:at\s+)?\d/i.test(
     message,
   );
 }

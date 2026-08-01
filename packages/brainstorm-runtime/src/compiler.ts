@@ -295,6 +295,29 @@ async function writeValidatedOutput(
       );
     }
   }
+  if (schemaName === "codeAnnotations") {
+    // The code-file list is run data, so the static schema cannot pin the
+    // paths; completeness and order are enforced against the live projection
+    // here (the task schema is additionally enum-narrowed per run). One
+    // annotation per code file, in the projection's order, no inventions.
+    const bound = resolveDataReference("codeFiles.files", scope, state, { required: true });
+    const expected = (Array.isArray(bound) ? bound : []).flatMap((entry) => {
+      const path = (entry as { readonly path?: JsonValue }).path;
+      return typeof path === "string" ? [path] : [];
+    });
+    const returned = (asObject(parsed, "code annotations").files as JsonValue[]).map(
+      (entry) => (entry as { readonly path?: JsonValue }).path,
+    );
+    if (
+      returned.length !== expected.length ||
+      returned.some((path, index) => path !== expected[index])
+    ) {
+      throw new BrainstormRuntimeError(
+        `node "${nodeId}" must annotate exactly the ${expected.length} code files it was given, in their given order`,
+        "CODE_ANNOTATION_MISMATCH",
+      );
+    }
+  }
   if (schemaName === "comment" || schemaName === "judgeDecision") {
     const verdict = asObject(parsed, schemaName).verdict;
     const allowed = resolveDataReference("review.allowedVerdicts", scope, state, { required: true });
@@ -309,6 +332,29 @@ async function writeValidatedOutput(
         `node "${nodeId}" returned verdict "${String(verdict)}" which is not allowed this round`,
         "VERDICT_NOT_ALLOWED",
       );
+    }
+    // Reviewers may target the current step or any earlier one — never a
+    // step the walk has not reached. Enforced against the live walk cursor,
+    // since the static schema cannot know the review position.
+    const reviewedThrough = resolveDataReference("stepIndex", scope, state, { required: true });
+    if (typeof reviewedThrough === "number") {
+      const targets: JsonValue[] =
+        schemaName === "comment"
+          ? [asObject(parsed, schemaName).step ?? null]
+          : (() => {
+              const issues = asObject(parsed, schemaName).issues;
+              return (Array.isArray(issues) ? issues : []).map(
+                (issue) => asObject(issue, "judge issue").step ?? null,
+              );
+            })();
+      for (const target of targets) {
+        if (typeof target !== "number" || target < 1 || target > reviewedThrough) {
+          throw new BrainstormRuntimeError(
+            `node "${nodeId}" targeted step ${String(target)}, but the review has only reached step ${reviewedThrough}`,
+            "STEP_TARGET_OUT_OF_RANGE",
+          );
+        }
+      }
     }
   }
   if (schemaName === "bridgeReport") {
@@ -343,6 +389,49 @@ async function writeValidatedOutput(
 
 function isJsonRecord(value: JsonValue | undefined): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** FNV-1a 32-bit hash of a seed string (stable across processes and runs). */
+function hashSeed(text: string): number {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return hash >>> 0;
+}
+
+/** mulberry32: tiny deterministic PRNG over a 32-bit seed. */
+function mulberry32(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 0x100000000;
+  };
+}
+
+/**
+ * The record with its key insertion order deterministically permuted by the
+ * seed (Fisher–Yates over a seeded PRNG). Every key survives with its value
+ * untouched; records with fewer than two keys are returned as-is. Used to
+ * decouple the order in which the judge reads the round's comments from
+ * panel seating order (LLM judges carry position bias), while staying a pure
+ * function of the seed so a resumed or retried task rebuilds byte-identical.
+ */
+export function shuffleKeyOrder(record: JsonObject, seedText: string): JsonObject {
+  const keys = Object.keys(record);
+  if (keys.length < 2) return record;
+  const random = mulberry32(hashSeed(seedText));
+  for (let index = keys.length - 1; index > 0; index -= 1) {
+    const swap = Math.floor(random() * (index + 1));
+    [keys[index], keys[swap]] = [keys[swap]!, keys[index]!];
+  }
+  const shuffled: Record<string, JsonValue> = {};
+  for (const key of keys) shuffled[key] = record[key]!;
+  return shuffled;
 }
 
 /**
@@ -422,6 +511,34 @@ function patchSchemaProperty(
 }
 
 /**
+ * Returns a clone of a JSON schema with a property of an ARRAY property's
+ * item schema replaced by `patch`'s result (properties.<array>.items
+ * .properties.<name>), or undefined when the path does not have that shape.
+ * Used to narrow per-task bounds inside array entries (the step targets of
+ * the judge's issues).
+ */
+function patchArrayItemProperty(
+  schema: JsonObject,
+  arrayName: string,
+  propertyName: string,
+  patch: (property: JsonObject) => JsonObject,
+): JsonObject | undefined {
+  const cloned = structuredClone(schema);
+  const properties = cloned.properties;
+  if (!isJsonRecord(properties)) return undefined;
+  const arrayProperty = properties[arrayName];
+  if (!isJsonRecord(arrayProperty)) return undefined;
+  const items = arrayProperty.items;
+  if (!isJsonRecord(items)) return undefined;
+  const itemProperties = items.properties;
+  if (!isJsonRecord(itemProperties)) return undefined;
+  const property = itemProperties[propertyName];
+  if (!isJsonRecord(property)) return undefined;
+  (itemProperties as Record<string, JsonValue>)[propertyName] = patch(property);
+  return cloned;
+}
+
+/**
  * Returns a clone of an object JSON schema with the named top-level
  * properties removed from `properties` and `required`. Used for stepwise
  * agent tasks: fields the runtime assembles from submit_step tool calls must
@@ -468,26 +585,20 @@ function stepwiseContract(
     };
   }
   if (schemaName === "redevelopment") {
-    const currentStep = bindings.currentStep;
+    // The reviser re-emits the COMPLETE chain (touched steps rewritten,
+    // untouched steps copied verbatim); the runtime computes the change-set
+    // by comparison, so the model never self-reports what it revised.
     const totalSteps = bindings.totalSteps;
     if (
-      typeof currentStep !== "number" ||
       typeof totalSteps !== "number" ||
-      !Number.isSafeInteger(currentStep) ||
-      !Number.isSafeInteger(totalSteps)
+      !Number.isSafeInteger(totalSteps) ||
+      totalSteps < 1
     ) {
       return undefined;
     }
-    const count = totalSteps - currentStep + 1;
-    if (count < 1) return undefined;
     return {
-      spec: {
-        tool: "submit_step",
-        field: "revisedSteps",
-        count,
-        inject: { fromStep: currentStep },
-      },
-      removed: ["revisedSteps", "fromStep"],
+      spec: { tool: "submit_step", field: "steps", count: totalSteps },
+      removed: ["steps"],
     };
   }
   return undefined;
@@ -546,6 +657,18 @@ function partitionAnnotatedFiles(
   };
 }
 
+/** Relation labels that mark a useful file as source code to annotate. */
+const CODE_LABELS = new Set(["code", "implementation"]);
+
+function annotatedEntries(
+  handler: string,
+  value: JsonValue | undefined,
+): readonly JsonObject[] {
+  const parsed = validateArtifact("usefulFiles", handler, value!);
+  const files = (parsed as { readonly files?: readonly JsonValue[] }).files ?? [];
+  return files.filter(isJsonRecord);
+}
+
 function builtinActivities(): Readonly<Record<string, DeterministicActivityHandler>> {
   return {
     "attachments.useful": (input) =>
@@ -560,6 +683,44 @@ function builtinActivities(): Readonly<Record<string, DeterministicActivityHandl
         input.input,
         (label) => label === "NA",
       ),
+    "attachments.code": (input) => {
+      const files = annotatedEntries("attachments.code", input.files).filter(
+        (file) => typeof file.label === "string" && CODE_LABELS.has(file.label),
+      );
+      return { count: files.length, files: files as unknown as JsonValue };
+    },
+    "attachments.annotate": (input) => {
+      const files = annotatedEntries("attachments.annotate", input.files);
+      const annotations = validateArtifact(
+        "codeAnnotations",
+        "attachments.annotate",
+        input.annotations!,
+      );
+      const known = new Set(
+        files.flatMap((file) => (typeof file.path === "string" ? [file.path] : [])),
+      );
+      const summaryByPath = new Map<string, string>();
+      const entries = (annotations as { readonly files: readonly JsonValue[] }).files;
+      for (const raw of entries) {
+        if (!isJsonRecord(raw)) continue;
+        const { path, summary } = raw;
+        if (typeof path !== "string" || typeof summary !== "string") continue;
+        if (!known.has(path)) {
+          throw new BrainstormRuntimeError(
+            `attachments.annotate received a summary for "${path}", which is not a useful file of this run`,
+            "CODE_ANNOTATION_UNKNOWN_PATH",
+          );
+        }
+        summaryByPath.set(path, summary);
+      }
+      return {
+        files: files.map((file) =>
+          typeof file.path === "string" && summaryByPath.has(file.path)
+            ? { ...file, codeSummary: summaryByPath.get(file.path)! }
+            : file,
+        ) as unknown as JsonValue,
+      };
+    },
     "panel.select": (input) => {
       const experts = validateArtifact("experts", "panel.select", input.experts!);
       const panelSize = input.panelSize;
@@ -710,6 +871,21 @@ class ContentCompiler {
         );
       }
       const bindings = resolveBindings(node.bind, scope);
+      if (node.output.schema === "judgeDecision" && isJsonRecord(bindings.comments)) {
+        // The merged comments object arrives in panel seating order every
+        // round; re-key it in a deterministic per-round order so the judge's
+        // weighing cannot correlate with seat position. The permutation is a
+        // pure function of the review coordinates (member, walk position,
+        // round), so a resumed or retried run rebuilds the identical task.
+        const state = stateFrom(scope);
+        const member = resolveDataReference("member.id", scope, state, { required: false });
+        const step = resolveDataReference("stepIndex", scope, state, { required: false });
+        const round = resolveDataReference("review.round", scope, state, { required: false });
+        (bindings as Record<string, JsonValue>).comments = shuffleKeyOrder(
+          bindings.comments,
+          `${String(member)}|${String(step)}|${String(round)}|${Object.keys(bindings.comments).join("|")}`,
+        );
+      }
       let taskJsonSchema = jsonSchema;
       if (
         (node.output.schema === "comment" ||
@@ -722,6 +898,30 @@ class ContentCompiler {
             ...verdict,
             enum: allowed,
           })) ?? taskJsonSchema;
+      }
+      // Step targets are bounded by the live walk position, which only the
+      // task knows: narrow the schema maxima so a constrained model cannot
+      // emit a step the review has not reached.
+      if (
+        (node.output.schema === "comment" ||
+          node.output.schema === "judgeDecision") &&
+        typeof bindings.currentStep === "number" &&
+        Number.isSafeInteger(bindings.currentStep) &&
+        bindings.currentStep >= 1
+      ) {
+        const reviewedThrough = bindings.currentStep;
+        taskJsonSchema =
+          node.output.schema === "comment"
+            ? (patchSchemaProperty(taskJsonSchema, ["step"], (step) => ({
+                ...step,
+                maximum: reviewedThrough,
+              })) ?? taskJsonSchema)
+            : (patchArrayItemProperty(
+                taskJsonSchema,
+                "issues",
+                "step",
+                (step) => ({ ...step, maximum: reviewedThrough }),
+              ) ?? taskJsonSchema);
       }
       // The submission types are catalog data, so the static artifact schemas
       // leave `type` as an open string; each task narrows it to what is
@@ -756,6 +956,36 @@ class ContentCompiler {
             ...type,
             enum: labels,
           })) ?? taskJsonSchema;
+      }
+      // The code annotator must cover exactly the code files it was given:
+      // the entry count is pinned and the path field is narrowed to the
+      // given paths, so a schema-constrained model cannot skip or invent a
+      // file. Completeness and order are re-checked on write.
+      if (node.output.schema === "codeAnnotations" && Array.isArray(bindings.files)) {
+        const paths = bindings.files.flatMap((entry) => {
+          const path = (entry as { readonly path?: JsonValue }).path;
+          return typeof path === "string" ? [path] : [];
+        });
+        if (paths.length > 0) {
+          taskJsonSchema =
+            patchSchemaProperty(taskJsonSchema, ["files"], (files) => {
+              const items = isJsonRecord(files.items) ? files.items : {};
+              const properties = isJsonRecord(items.properties) ? items.properties : {};
+              const pathProperty = isJsonRecord(properties.path) ? properties.path : {};
+              return {
+                ...files,
+                minItems: paths.length,
+                maxItems: paths.length,
+                items: {
+                  ...items,
+                  properties: {
+                    ...properties,
+                    path: { ...pathProperty, enum: paths },
+                  },
+                },
+              };
+            }) ?? taskJsonSchema;
+        }
       }
       const stepwise = stepwiseContract(node.output.schema, bindings);
       if (stepwise !== undefined) {
@@ -1009,9 +1239,9 @@ class ContentCompiler {
     const finishName = this.functionName(node.id, "finish");
     const conditionName = this.functionName(node.id, "until");
     this.functions
-      .registerActivity(initializeName, (_input, scope) => initializeReview(stateFrom(scope)))
-      .registerActivity(prepareName, (_input, scope) => prepareReviewRound(stateFrom(scope)))
-      .registerActivity(finishName, (_input, scope) => finishReviewRound(stateFrom(scope)))
+      .registerActivity(initializeName, (_input, scope) => initializeReview(stateFrom(scope), scope))
+      .registerActivity(prepareName, (_input, scope) => prepareReviewRound(stateFrom(scope), scope))
+      .registerActivity(finishName, (_input, scope) => finishReviewRound(stateFrom(scope), scope))
       .registerCondition(conditionName, (scope) => evaluateCondition(node.until, scope));
 
     const iterationBody = sequence(

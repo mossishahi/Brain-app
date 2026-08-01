@@ -1171,6 +1171,23 @@ export class ClaudeAgentExecutor implements AgentExecutor {
   ): Promise<AgentResult> {
     const attempts = this.config.maxValidationAttempts ?? 3;
     const stepwise = stepwiseSpecOf(task);
+    // One machine-readable record of how the broker resolved this task's
+    // capabilities, mirroring the generic tool loop, so both executor paths
+    // feed the same usage ledger.
+    if (task.capabilityPlan !== undefined) {
+      progress(context, {
+        kind: "status",
+        message: "Capability plan resolved",
+        data: {
+          capabilityPlan: task.capabilityPlan.operations.map((operation) => ({
+            operation: operation.operationId,
+            capability: operation.capabilityId,
+            source: operation.source,
+            tools: [...operation.toolNames],
+          })),
+        },
+      });
+    }
     const wantsTrace =
       routeTraits(task).includes(TRACE_TRAIT) &&
       this.config.thinking !== "disabled";
@@ -1313,21 +1330,27 @@ export class ClaudeAgentExecutor implements AgentExecutor {
         const message = error instanceof Error ? error.message : String(error);
         if (isCreditLimitMessage(message)) {
           const recovery = this.config.creditRecovery;
-          const resolved = recovery?.resolver
-            ? await recovery.resolver(message)
-            : await resolveCreditReset({
-                message,
-                now: recovery?.now?.(),
-                timeZone: recovery?.timeZone,
-                safetyBufferSeconds: recovery?.safetyBufferSeconds,
-                openRouterApiKey: recovery?.openRouterApiKey,
-                openRouterModel: recovery?.openRouterModel,
-              });
-          throw new CreditBlockedError(
-            resolved.retryAt,
-            message,
-            resolved.source,
-          );
+          let resolved: CreditResetResolution | undefined;
+          try {
+            resolved = recovery?.resolver
+              ? await recovery.resolver(message)
+              : await resolveCreditReset({
+                  message,
+                  now: recovery?.now?.(),
+                  timeZone: recovery?.timeZone,
+                  safetyBufferSeconds: recovery?.safetyBufferSeconds,
+                  openRouterApiKey: recovery?.openRouterApiKey,
+                  openRouterModel: recovery?.openRouterModel,
+                });
+          } catch {
+            // The message names no reset time (e.g. "credit balance is too
+            // low", which only a top-up clears): still a credit block, but
+            // one the user must claim manually instead of the scheduler.
+            resolved = undefined;
+          }
+          throw resolved !== undefined
+            ? new CreditBlockedError(resolved.retryAt, message, resolved.source)
+            : new CreditBlockedError(undefined, message, "manual");
         }
         if (
           task.outputSchema &&

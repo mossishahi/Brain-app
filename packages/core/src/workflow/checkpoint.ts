@@ -11,9 +11,14 @@ export type RunStatus =
   | "cancelled";
 
 export interface CreditBlock {
-  readonly retryAt: number;
+  /**
+   * Epoch ms when an automatic resume may be submitted; absent when the
+   * provider message carried no reset time (e.g. a top-up is needed) and the
+   * block must be claimed manually instead of by the scheduler.
+   */
+  readonly retryAt?: number;
   readonly providerMessage: string;
-  readonly source: "deterministic" | "openrouter";
+  readonly source: "deterministic" | "openrouter" | "manual";
 }
 
 /** A human gate the run is blocked on. */

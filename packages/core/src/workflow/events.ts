@@ -20,9 +20,10 @@ export type RunEventBody =
   | { readonly type: "run:cancelled" }
   | {
       readonly type: "run:credit_blocked";
-      readonly retryAt: number;
+      /** Absent when the block awaits a manual resume (no reset time known). */
+      readonly retryAt?: number;
       readonly providerMessage: string;
-      readonly source: "deterministic" | "openrouter";
+      readonly source: "deterministic" | "openrouter" | "manual";
     }
   | { readonly type: "node:started"; readonly path: string; readonly kind: string }
   | { readonly type: "node:completed"; readonly path: string; readonly kind: string }

@@ -18,6 +18,7 @@ import {
   errorMessage,
   getJob,
   jobStreamUrl,
+  resumeJob,
   useServerEvents,
 } from "../api";
 import {
@@ -36,6 +37,7 @@ import { ProcessInputBody } from "./panels/ProcessInputPanel";
 import { DecomposeBody } from "./panels/DecomposePanel";
 import { SelectPanelBody } from "./panels/SelectPanelPanel";
 import { GateCard, GateDecided } from "./panels/ConfirmPanelPanel";
+import { ToolUsagePanel } from "./panels/ToolUsagePanel";
 import { FirstPassBody } from "./panels/FirstPassPanel";
 import { ReviewBody } from "./panels/ReviewPanel";
 import { BridgeAuditBody } from "./panels/BridgeAuditPanel";
@@ -177,6 +179,8 @@ export function Dashboard({ jobId }: { jobId: string }) {
   const [collapsed, setCollapsed] = useState<ReadonlySet<StageId>>(() => new Set());
   const [confirmCancelResume, setConfirmCancelResume] = useState(false);
   const [cancellingResume, setCancellingResume] = useState(false);
+  const [resumingNow, setResumingNow] = useState(false);
+  const [resumeError, setResumeError] = useState<string | null>(null);
   const stageRefs = useRef(new Map<StageId, HTMLElement | null>());
   const followedOnce = useRef(false);
 
@@ -267,6 +271,19 @@ export function Dashboard({ jobId }: { jobId: string }) {
     } finally {
       setCancellingResume(false);
       setConfirmCancelResume(false);
+    }
+  }, [jobId]);
+
+  const resumeCreditBlocked = useCallback(async () => {
+    setResumingNow(true);
+    setResumeError(null);
+    try {
+      await resumeJob(jobId);
+      setJob(await getJob(jobId));
+    } catch (error) {
+      setResumeError(errorMessage(error));
+    } finally {
+      setResumingNow(false);
     }
   }, [jobId]);
 
@@ -372,9 +389,19 @@ export function Dashboard({ jobId }: { jobId: string }) {
         <div className="banner credit-banner">
           <span>
             <strong>Credit blocked.</strong>{" "}
-            Automatic resume in{" "}
-            {formatDuration(Math.max(0, job.creditBlock.retryAt - now))} at{" "}
-            {formatClock(job.creditBlock.retryAt)}.
+            {job.creditBlock.retryAt !== undefined ? (
+              <>
+                Automatic resume in{" "}
+                {formatDuration(Math.max(0, job.creditBlock.retryAt - now))} at{" "}
+                {formatClock(job.creditBlock.retryAt)}.
+              </>
+            ) : (
+              <>
+                The provider announced no reset time — top up your credits,
+                then resume.
+              </>
+            )}
+            {resumeError && <> Resume failed: {resumeError}.</>}
           </span>
           {confirmCancelResume ? (
             <span className="inline-actions">
@@ -396,13 +423,25 @@ export function Dashboard({ jobId }: { jobId: string }) {
               </button>
             </span>
           ) : (
-            <button
-              type="button"
-              className="btn"
-              onClick={() => setConfirmCancelResume(true)}
-            >
-              Cancel auto-resume
-            </button>
+            <span className="inline-actions">
+              <button
+                type="button"
+                className="btn"
+                disabled={resumingNow}
+                onClick={() => void resumeCreditBlocked()}
+              >
+                {resumingNow ? "Resuming…" : "Resume now"}
+              </button>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => setConfirmCancelResume(true)}
+              >
+                {job.creditBlock.retryAt !== undefined
+                  ? "Cancel auto-resume"
+                  : "Cancel job"}
+              </button>
+            </span>
           )}
         </div>
       )}
@@ -451,7 +490,39 @@ export function Dashboard({ jobId }: { jobId: string }) {
             </StageFrame>
           );
         })}
+        <ToolUsageSection jobId={jobId} updatedAt={job.updatedAt} />
       </div>
     </div>
+  );
+}
+
+/** Collapsible capability & tool usage section below the pipeline stages. */
+function ToolUsageSection({ jobId, updatedAt }: { jobId: string; updatedAt: number }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <section className="stage">
+      <header
+        className={`stage-head${expanded ? "" : " stage-head-collapsed"}`}
+        onClick={(event) => {
+          if ((event.target as HTMLElement).closest("button, a")) return;
+          setExpanded((prev) => !prev);
+        }}
+      >
+        <button
+          type="button"
+          className="stage-toggle"
+          aria-expanded={expanded}
+          aria-controls="stage-body-tool-usage"
+          aria-label={`${expanded ? "collapse" : "expand"} tool usage panel`}
+          onClick={() => setExpanded((prev) => !prev)}
+        >
+          <ChevronIcon />
+        </button>
+        <span className="stage-title">Capability & tool usage</span>
+      </header>
+      <div id="stage-body-tool-usage">
+        {expanded && <ToolUsagePanel jobId={jobId} updatedAt={updatedAt} />}
+      </div>
+    </section>
   );
 }

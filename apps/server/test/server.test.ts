@@ -1527,3 +1527,127 @@ test("legacy failed Claude limit checkpoints migrate to credit-blocked waits", a
   assert.equal(migrated.error, undefined);
   rmSync(workspace, { recursive: true, force: true });
 });
+
+test("credit exhaustion without a reset time becomes a manual block resumed on demand", async () => {
+  const workspace = tempRoot();
+  const marker = join(workspace, "manual-resume-marker.txt");
+  const fakeCli = join(workspace, "fake-cli.mjs");
+  writeFileSync(
+    fakeCli,
+    `import fs from "node:fs"; import path from "node:path";
+const args = process.argv.slice(2);
+const value = (name) => args[args.indexOf(name) + 1];
+fs.appendFileSync(${JSON.stringify(marker)}, args[0] + "\\n");
+const checkpointPath = path.join(value("--session-root"), value("--run-id"), "checkpoint.json");
+const checkpoint = JSON.parse(fs.readFileSync(checkpointPath, "utf8"));
+checkpoint.status = "completed"; checkpoint.output = { resumed: true }; delete checkpoint.creditBlock;
+checkpoint.updatedAt = Date.now(); fs.writeFileSync(checkpointPath, JSON.stringify(checkpoint, null, 2));
+`,
+  );
+  const now = Date.parse("2026-07-22T15:31:00.000Z");
+  const manager = new JobManager({ workspace, workerPath: fakeCli, now: () => now });
+  const settings = await manager.settings.put({
+    ...manager.settings.get(),
+    runner: "local",
+    llm: { provider: "offline" },
+    creditRecovery: {
+      autoResume: true,
+      safetyBufferSeconds: 60,
+      openRouterModel: "openrouter/free",
+    },
+  });
+  const jobId = "manual-credit-job";
+  const jobDir = join(workspace, "workspace", "jobs", jobId);
+  const sessionDir = join(workspace, "workspace", "sessions", jobId);
+  mkdirSync(jobDir, { recursive: true });
+  mkdirSync(sessionDir, { recursive: true });
+  writeFileSync(
+    join(jobDir, "job.json"),
+    JSON.stringify({
+      jobId,
+      topic: "developer API top-up",
+      status: "failed",
+      runner: "local",
+      createdAt: now - 5_000,
+      updatedAt: now - 1_000,
+      submissionCount: 1,
+      executionSettings: settings,
+    }),
+  );
+  writeFileSync(
+    join(sessionDir, "checkpoint.json"),
+    JSON.stringify({
+      runId: jobId,
+      workflowId: "brainstorm",
+      status: "failed",
+      input: {},
+      journal: [],
+      pendingGates: [],
+      error: {
+        name: "AgentTaskFailedError",
+        message:
+          "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.",
+      },
+      seq: 1,
+      updatedAt: now - 1_000,
+    }),
+  );
+  manager.reload();
+  // The failure migrates to a credit block with no reset time (manual).
+  const detail = await manager.detail(jobId);
+  assert.equal(detail.status, "credit-blocked");
+  assert.equal(detail.creditBlock?.retryAt, undefined);
+  assert.equal(detail.creditBlock?.source, "manual");
+  // The scheduler never claims a manual block, even with auto-resume on.
+  await manager.resumeDueCreditBlocks();
+  assert.equal(existsSync(marker), false, "manual blocks are not auto-claimed");
+  // A user claim submits the deterministic resume command.
+  assert.equal(await manager.resumeCreditBlocked(jobId), "queued");
+  await waitUntil(() => existsSync(marker), 5_000);
+  await waitUntil(() => {
+    try {
+      const checkpoint = JSON.parse(
+        readFileSync(join(sessionDir, "checkpoint.json"), "utf8"),
+      ) as { status: string };
+      return checkpoint.status === "completed";
+    } catch {
+      return false;
+    }
+  }, 5_000);
+  assert.equal((await manager.detail(jobId)).status, "completed");
+  // A job that is no longer credit blocked cannot be claimed again.
+  await assert.rejects(
+    manager.resumeCreditBlocked(jobId),
+    /not credit blocked/,
+  );
+  rmSync(workspace, { recursive: true, force: true });
+});
+
+test("POST /api/jobs/:id/resume rejects unknown and non-blocked jobs", async () => {
+  const workspace = tempRoot();
+  const server = await startTestBrainServer({ workspace, port: 0 });
+  try {
+    const missing = await requestJson<{ error: string }>(
+      server,
+      "/api/jobs/no-such-job/resume",
+      { method: "POST" },
+    );
+    assert.equal(missing.status, 404);
+    await putSettings(server, {
+      runner: "local",
+      panelConfirmation: "auto",
+      llm: { provider: "offline" },
+    });
+    const jobId = await submit(server, "Resume endpoint conflict check");
+    const conflict = await requestJson<{ error: string }>(
+      server,
+      `/api/jobs/${jobId}/resume`,
+      { method: "POST" },
+    );
+    assert.equal(conflict.status, 409);
+    await server.manager.cancel(jobId);
+  } finally {
+    await server.close();
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});

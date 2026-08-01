@@ -44,6 +44,7 @@ function CommentFold({ comment: c }: { comment: CommentView }) {
       <summary className="review-fold-head">
         <span className="review-fold-name">{c.commentorLabel}</span>
         <VerdictChip verdict={c.verdict} />
+        {c.step !== undefined && <span className="badge">step {c.step}</span>}
       </summary>
       <div className="review-fold-body">
         <div>
@@ -96,6 +97,25 @@ function RoundBlock({ round }: { round: ReviewRoundView }) {
                 <div>{round.decision.suggestion}</div>
               </div>
             )}
+            {round.decision.issues !== undefined && round.decision.issues.length > 0 && (
+              <div>
+                <span className="detail-label">confirmed issues</span>
+                {round.decision.issues.map((issue, index) => (
+                  <div key={index} className="comment-detail">
+                    <div className="assessment-row">
+                      <span className="badge">step {issue.step}</span>
+                      <span className={`badge${issue.basis === "verified" ? " badge-accent" : ""}`}>
+                        {issue.basis}
+                      </span>
+                      {issue.mustAddress && <span className="badge">must address</span>}
+                    </div>
+                    <div>{issue.point}</div>
+                    {issue.suggestion !== undefined && <div className="dim small">{issue.suggestion}</div>}
+                    {issue.evidence && <EvidenceBlock evidence={issue.evidence} />}
+                  </div>
+                ))}
+              </div>
+            )}
             {Object.keys(round.decision.assessment).length > 0 && (
               <div className="assessment-row">
                 {Object.entries(round.decision.assessment).map(([commentorId, kind]) => (
@@ -114,9 +134,9 @@ function RoundBlock({ round }: { round: ReviewRoundView }) {
       )}
       {revision && (
         <div className="redev-bar">
-          Re-developed from step {revision.fromStep} —{" "}
-          {revision.fromStep > 1 ? `steps 1..${revision.fromStep - 1} frozen` : "no earlier steps frozen"}{" "}
-          · {revision.revisedStepCount} step{revision.revisedStepCount === 1 ? "" : "s"} replaced
+          {revision.touchedSteps.length === 0
+            ? "Re-developed — no step text changed"
+            : `Re-developed — step${revision.touchedSteps.length === 1 ? "" : "s"} ${revision.touchedSteps.join(", ")} rewritten, the rest carried verbatim`}
         </div>
       )}
     </div>

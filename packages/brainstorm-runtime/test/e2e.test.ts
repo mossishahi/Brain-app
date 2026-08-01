@@ -228,6 +228,18 @@ class FakeBrainstormExecutor implements AgentExecutor {
           ],
         };
         break;
+      case "code-annotator": {
+        // One deterministic summary per bound code file, in the given order —
+        // the runtime cross-checks completeness and order on write.
+        const files = Array.isArray(bindings.files) ? bindings.files : [];
+        output = {
+          files: files.map((file) => ({
+            path: object(file, "code file").path,
+            summary: `Deterministic summary for ${String(object(file, "code file").path)}: prototype module relevant to the mechanism.`,
+          })),
+        };
+        break;
+      }
       case "pool-builder": {
         // The pool the deterministic taxonomy.match resolves through the stub
         // taxonomy. Seating queue (cxr): Physics Σ4.2 > QO 3.6 > CS Σ2.6 >
@@ -298,6 +310,7 @@ class FakeBrainstormExecutor implements AgentExecutor {
       case "commentor":
         output = {
           verdict: "Pass",
+          step: bindings.currentStep,
           reason: `Comment from ${agentId}: the step is sound as developed.`,
           suggestion: "",
           evidence: noEvidence,
@@ -365,49 +378,71 @@ class FakeBrainstormExecutor implements AgentExecutor {
     ) {
       return {
         verdict: "Build",
-        reason: "A complementary point is needed",
+        reason: "A necessary justification is missing from this step",
         suggestion: "Add the missing control",
         evidence: noEvidence,
+        issues: [
+          {
+            step,
+            point: "The step relies on an uncontrolled comparison it never justifies.",
+            basis: "authority",
+            evidence: noEvidence,
+            suggestion: "Add the missing control",
+            mustAddress: true,
+          },
+        ],
         assessment,
       };
     }
     if (this.mode === "cap-step-1" && memberId === "member-1" && step === 1) {
+      const mathEvidence = {
+        kind: "math",
+        code: "",
+        result: "",
+        derivation: "Assume A; derive not-A.",
+        citation: "",
+        locator: "",
+        shows: "",
+      };
       return {
         verdict: "Interrupt",
         reason: "The premise needs repair before the chain can continue",
         suggestion: "",
-        evidence: {
-          kind: "math",
-          code: "",
-          result: "",
-          derivation: "Assume A; derive not-A.",
-          citation: "",
-          locator: "",
-          shows: "",
-        },
+        evidence: mathEvidence,
+        issues: [
+          {
+            step,
+            point: "The opening premise contradicts itself under expansion.",
+            basis: "verified",
+            evidence: mathEvidence,
+            suggestion: "",
+            mustAddress: true,
+          },
+        ],
         assessment,
       };
     }
     return {
       verdict: "Pass",
-      reason: "The step is sound and no comment would materially improve it",
+      reason: "The step is sound and no comment demonstrates a flaw in it",
       suggestion: "",
       evidence: noEvidence,
+      issues: [],
       assessment,
     };
   }
 
   private redevelop(memberId: string, bindings: JsonObject): JsonValue {
     const step = bindings.currentStep as number;
-    const total = bindings.totalSteps as number;
     const key = `${memberId}:${step}`;
     this.revisionCalls.set(key, (this.revisionCalls.get(key) ?? 0) + 1);
+    // Full-chain re-emission with minimal edits: rewrite the issue's step,
+    // copy every other step verbatim from the bound complete chain.
+    const chain = Array.isArray(bindings.chain) ? bindings.chain : [];
     return {
-      fromStep: step,
       output: developedOutput(`${memberId} revised at ${step}`),
-      revisedSteps: Array.from(
-        { length: total - step + 1 },
-        (_unused, offset) => `REVISED:${memberId}:${step + offset}`,
+      steps: chain.map((text, index) =>
+        index + 1 === step ? `REVISED:${memberId}:${index + 1}` : text,
       ),
       novelty: `Revised novelty for ${memberId}`,
     };
@@ -423,6 +458,20 @@ let publishedBundle: ContentBundle | undefined;
 function payloadVars(role: string): readonly string[] {
   publishedBundle ??= loadContent(registryContentDir);
   return publishedBundle.skills[role]?.meta.payload ?? [];
+}
+
+/** A role's effective capabilities: its own plus its techniques', in declared order. */
+function roleCapabilities(role: string): readonly string[] {
+  publishedBundle ??= loadContent(registryContentDir);
+  const skill = publishedBundle.skills[role];
+  if (!skill) return [];
+  const capabilities = [...skill.meta.capabilities];
+  for (const technique of skill.meta.techniques) {
+    for (const capability of publishedBundle.skills[technique]?.meta.capabilities ?? []) {
+      if (!capabilities.includes(capability)) capabilities.push(capability);
+    }
+  }
+  return capabilities;
 }
 
 function runtime(
@@ -514,7 +563,13 @@ test("Pass path executes member -> step -> round order and keeps C-O-T from chai
   );
 
   for (const task of executor.seen) {
-    assert.equal(task.task.logicalRoute, task.role === "chair" ? "writing" : "reasoning");
+    const expectedRoute =
+      task.role === "chair"
+        ? "writing"
+        : task.role === "code-annotator"
+          ? "balanced"
+          : "reasoning";
+    assert.equal(task.task.logicalRoute, expectedRoute);
     assert.equal(task.task.outputSchema?.name, (object(task.task.input, "input").outputSchema as JsonObject).name);
     assert.ok(task.task.modelRequest?.responseFormat?.type === "jsonSchema");
   }
@@ -546,12 +601,15 @@ test("Pass path executes member -> step -> round order and keeps C-O-T from chai
     "the run's shape body is required in the delivered schema",
   );
   assert.ok((await app.artifacts.list()).length > 0);
-  assert.deepEqual(executor.tasks("processor")[0]!.task.allowedCapabilities, [
-    "attachment-access",
-  ]);
-  assert.deepEqual(executor.tasks("processor")[0]!.task.tools, ["attachment-access"]);
-  assert.deepEqual(chair.task.allowedCapabilities, ["attachment-access"]);
-  assert.deepEqual(chair.task.tools, ["attachment-access"]);
+  // Capabilities are declared by the content, so the expectation reads the
+  // loaded bundle: each task carries exactly its role's effective set.
+  assert.deepEqual(
+    executor.tasks("processor")[0]!.task.allowedCapabilities,
+    roleCapabilities("processor"),
+  );
+  assert.deepEqual(executor.tasks("processor")[0]!.task.tools, roleCapabilities("processor"));
+  assert.deepEqual(chair.task.allowedCapabilities, roleCapabilities("chair"));
+  assert.deepEqual(chair.task.tools, roleCapabilities("chair"));
 
   // The orchestrator partitions the processor's file map deterministically:
   // every later model call receives the useful files only, and the raw map is
@@ -561,6 +619,17 @@ test("Pass path executes member -> step -> round order and keeps C-O-T from chai
     label: "code",
     note: "Prototype the question refers to.",
   };
+  // With the code-annotation pass (workflow 0.11.0+), the runtime folds the
+  // annotator's one-line summary into the shared map, so every task after the
+  // merge reads the annotated entry; the annotator itself sees the pre-merge
+  // code projection.
+  const annotationRan = executor.tasks("code-annotator").length > 0;
+  const mergedEntry = annotationRan
+    ? {
+        ...usefulEntry,
+        codeSummary: `Deterministic summary for ${usefulEntry.path}: prototype module relevant to the mechanism.`,
+      }
+    : usefulEntry;
   for (const task of executor.seen) {
     if (task.role === "processor") continue;
     if (task.role === "placer") {
@@ -573,10 +642,16 @@ test("Pass path executes member -> step -> round order and keeps C-O-T from chai
         ["chip morphology"],
         "placer receives exactly the unmatched pool members",
       );
-    } else {
+    } else if (task.role === "code-annotator") {
       assert.deepEqual(
         task.bindings.files,
         [usefulEntry],
+        "the annotator receives the code projection before any summary exists",
+      );
+    } else {
+      assert.deepEqual(
+        task.bindings.files,
+        [mergedEntry],
         `${task.role} must receive exactly the useful files`,
       );
     }
@@ -586,6 +661,27 @@ test("Pass path executes member -> step -> round order and keeps C-O-T from chai
       undefined,
       `${task.role} must not see the unpartitioned file map`,
     );
+  }
+  if (annotationRan) {
+    // The annotator's task schema is narrowed to the exact code files: entry
+    // count pinned, path enum-limited — a constrained model cannot skip or
+    // invent a file.
+    const annotatorSchema = (() => {
+      const format = executor.tasks("code-annotator")[0]!.task.modelRequest?.responseFormat;
+      if (format?.type !== "jsonSchema") throw new Error("annotator has no jsonSchema format");
+      return format.schema;
+    })();
+    const filesProperty = object(
+      object(annotatorSchema.properties, "annotator properties").files,
+      "annotator files property",
+    );
+    assert.equal(filesProperty.minItems, 1);
+    assert.equal(filesProperty.maxItems, 1);
+    const pathProperty = object(
+      object(object(filesProperty.items, "files items").properties, "item properties").path,
+      "item path property",
+    );
+    assert.deepEqual(pathProperty.enum, [usefulEntry.path]);
   }
   const artifacts = await app.artifacts.list();
   const schemas = artifacts.map((ref) => ref.metadata?.schema);
@@ -674,7 +770,7 @@ test("instructions stay in a cacheable system prefix; submitted data rides the t
   );
 });
 
-test("Build redevelops the current tail, freezes earlier steps, and cannot immediately repeat", async () => {
+test("Build redevelops minimally: change-set computed, ledger carried, no immediate repeat", async () => {
   const executor = new FakeBrainstormExecutor("build-step-2");
   const app = runtime(executor);
   const result = await app.run({
@@ -688,6 +784,18 @@ test("Build redevelops the current tail, freezes earlier steps, and cannot immed
   );
   assert.equal(executor.revisionCalls.get("member-1:2"), 1);
 
+  // The reviser receives the COMPLETE chain plus the judge's issues.
+  const redevelopment = executor.tasks("redeveloper")[0]!;
+  assert.deepEqual(redevelopment.bindings.chain, [
+    "COT:member-1:1",
+    "COT:member-1:2",
+    "COT:member-1:3",
+  ]);
+  const feedback = object(redevelopment.bindings.feedback, "redeveloper feedback");
+  const issues = feedback.issues as readonly JsonValue[];
+  assert.ok(Array.isArray(issues) && issues.length === 1, "the issues[] repair signal rides the feedback");
+  assert.equal(object(issues[0], "issue").step, 2);
+
   const secondRoundJudge = executor
     .tasks("judge")
     .find((task) => task.agentId === "member-1" && task.bindings.currentStep === 2 &&
@@ -698,6 +806,11 @@ test("Build redevelops the current tail, freezes earlier steps, and cannot immed
   assert.equal(options.Build, undefined, "Build must be removed after a Build verdict");
   assert.ok(options.Pass);
   assert.ok(options.Interrupt);
+  // The judge is grounded in the chain it rules on, revised text included.
+  assert.deepEqual(secondRoundJudge.bindings.chain, [
+    "COT:member-1:1",
+    "REVISED:member-1:2",
+  ]);
 
   const roundTwoComment = executor.tasks("commentor").find((task) => {
     if (task.bindings.currentStep !== 2) return false;
@@ -709,10 +822,51 @@ test("Build redevelops the current tail, freezes earlier steps, and cannot immed
     "COT:member-1:1",
     "REVISED:member-1:2",
   ]);
+  // The anonymized ledger reaches the next round: the Build record carries
+  // its issues (content only) and the runtime-computed change-set.
+  const history = roundTwoComment!.bindings.history as readonly JsonValue[];
+  assert.ok(Array.isArray(history), "review.history is bound into commentor tasks");
+  const buildRecord = history
+    .map((entry) => object(entry, "ledger record"))
+    .find((entry) => entry.verdict === "Build");
+  assert.ok(buildRecord, "the ledger carries the Build round");
+  assert.deepEqual(buildRecord!.touched, [2], "the change-set names exactly the rewritten step");
+  assert.deepEqual(buildRecord!.untouched, [1, 3]);
+  const ledgerIssues = buildRecord!.issues as readonly JsonValue[];
+  assert.equal(object(ledgerIssues[0], "ledger issue").evidenceKind, "none");
+  assert.ok(
+    !JSON.stringify(history).includes("commentorId"),
+    "the ledger never carries commentor identity",
+  );
+
   const roundTwoSchema = roundTwoComment!.task.outputSchema!.schema;
   const verdictSchema = (roundTwoSchema.properties as JsonObject)
     .verdict as JsonObject;
   assert.deepEqual(verdictSchema.enum, ["Pass", "Interrupt"]);
+  // Step targets are narrowed to the walk position in the delivered schema.
+  const stepSchema = (roundTwoSchema.properties as JsonObject).step as JsonObject;
+  assert.equal(stepSchema.maximum, 2, "comment step targets are capped at the reviewed step");
+});
+
+test("a verdict targeting a step beyond the review position fails the run with a named error", async () => {
+  const overshoots = new (class extends FakeBrainstormExecutor {
+    override async execute(task: AgentTask): Promise<AgentResult> {
+      const result = await super.execute(task);
+      const input = object(task.input, "task input");
+      if (input.role !== "commentor" || result.status !== "ok") return result;
+      const output = object(result.output as JsonValue, "comment output");
+      return { ...result, output: { ...output, step: 5 } };
+    }
+  })();
+  const result = await runtime(overshoots).run({
+    submission: "Overshooting step target",
+    params: { panelSize: 2 },
+  });
+  assert.equal(result.status, "failed");
+  assert.match(
+    result.status === "failed" ? result.error.message : "",
+    /targeted step 5.*only reached step/,
+  );
 });
 
 test("round cap force-proceeds after four decisions and only three redevelopments", async () => {

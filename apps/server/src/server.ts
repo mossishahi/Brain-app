@@ -26,6 +26,7 @@ import type {
 
 import { JobConflictError, JobManager } from "./job-manager.js";
 import type { ContentRegistryRuntimeStatus } from "./model.js";
+import { aggregateToolUsage } from "./tool-usage.js";
 import { checkAppUpdate } from "./self-update.js";
 import { RouteCatalog, loadModelCatalog } from "./route-catalog.js";
 import {
@@ -678,6 +679,22 @@ export async function startBrainServer(
         return;
       }
 
+      const resumeMatch = /^\/api\/jobs\/([^/]+)\/resume$/.exec(path);
+      if (req.method === "POST" && resumeMatch) {
+        const jobId = decodeURIComponent(resumeMatch[1]!);
+        try {
+          const status = await manager.resumeCreditBlocked(jobId);
+          broadcast();
+          sendJson(res, 200, { jobId, status });
+        } catch (error) {
+          if (error instanceof JobConflictError) {
+            throw new HttpError(409, error.message);
+          }
+          throw error; // "was not found" maps to 404 in the outer handler
+        }
+        return;
+      }
+
       // Must precede the ":jobId" detail route, which would match "trash".
       if (req.method === "GET" && path === "/api/jobs/trash") {
         sendJson(res, 200, await manager.listTrashed());
@@ -727,6 +744,14 @@ export async function startBrainServer(
         }
         broadcast();
         sendJson(res, 200, detail);
+        return;
+      }
+
+      const usageMatch = /^\/api\/jobs\/([^/]+)\/tool-usage$/.exec(path);
+      if (req.method === "GET" && usageMatch) {
+        const jobId = decodeURIComponent(usageMatch[1]!);
+        await manager.detail(jobId); // "was not found" maps to 404 in the outer handler
+        sendJson(res, 200, aggregateToolUsage(manager.jobDir(jobId)));
         return;
       }
 

@@ -363,27 +363,52 @@ test("brain idea: paragraph counts and chain length limits are enforced", () => 
   );
 });
 
-test("comment: Build requires a suggestion; Interrupt requires structured evidence", () => {
+test("comment: targets a step; Build requires a suggestion; Interrupt requires structured evidence", () => {
   assert.ok(
+    commentSchema.safeParse({
+      verdict: "Pass",
+      step: 2,
+      reason: "The step is sound and nothing I could raise would improve it.",
+      suggestion: "",
+      evidence: noEvidence,
+    }).success,
+  );
+  assert.equal(
     commentSchema.safeParse({
       verdict: "Pass",
       reason: "The step is sound and nothing I could raise would improve it.",
       suggestion: "",
       evidence: noEvidence,
     }).success,
+    false,
+    "a comment must name the step its verdict targets",
+  );
+  assert.equal(
+    commentSchema.safeParse({
+      verdict: "Pass",
+      step: 0,
+      reason: "The step is sound and nothing I could raise would improve it.",
+      suggestion: "",
+      evidence: noEvidence,
+    }).success,
+    false,
+    "step targets are 1-based",
   );
   assert.ok(
     commentSchema.safeParse({
       verdict: "Build",
-      reason: "Sound but improvable: the variance term is left unbounded.",
+      step: 1,
+      reason: "Sound but incomplete: the variance term is left unbounded.",
       suggestion: "Also bound the variance.",
       evidence: noEvidence,
     }).success,
+    "a Build may target an earlier step than the current one",
   );
   assert.equal(
     commentSchema.safeParse({
       verdict: "Build",
-      reason: "Sound but improvable: the variance term is left unbounded.",
+      step: 2,
+      reason: "Sound but incomplete: the variance term is left unbounded.",
     }).success,
     false,
     "Build without a suggestion is rejected",
@@ -391,7 +416,8 @@ test("comment: Build requires a suggestion; Interrupt requires structured eviden
   assert.equal(
     commentSchema.safeParse({
       verdict: "Build",
-      reason: "Sound but improvable: the variance term is left unbounded.",
+      step: 2,
+      reason: "Sound but incomplete: the variance term is left unbounded.",
       suggestion: "ok",
       evidence: noEvidence,
     }).success,
@@ -401,6 +427,7 @@ test("comment: Build requires a suggestion; Interrupt requires structured eviden
   assert.equal(
     commentSchema.safeParse({
       verdict: "Pass",
+      step: 1,
       reason: "test",
       suggestion: "",
       evidence: noEvidence,
@@ -411,6 +438,7 @@ test("comment: Build requires a suggestion; Interrupt requires structured eviden
   assert.equal(
     commentSchema.safeParse({
       verdict: "Interrupt",
+      step: 2,
       reason: "The gradient estimate is biased under the stated sampling scheme.",
     }).success,
     false,
@@ -419,6 +447,7 @@ test("comment: Build requires a suggestion; Interrupt requires structured eviden
   assert.ok(
     commentSchema.safeParse({
       verdict: "Interrupt",
+      step: 2,
       reason: "The gradient estimate is biased under the stated sampling scheme.",
       suggestion: "",
       evidence: {
@@ -435,6 +464,7 @@ test("comment: Build requires a suggestion; Interrupt requires structured eviden
   assert.ok(
     commentSchema.safeParse({
       verdict: "Interrupt",
+      step: 3,
       reason: "The gradient estimate is biased under the stated sampling scheme.",
       suggestion: "Recompute the estimator with a control variate before step 3.",
       evidence: {
@@ -452,6 +482,7 @@ test("comment: Build requires a suggestion; Interrupt requires structured eviden
   assert.ok(
     commentSchema.safeParse({
       verdict: "Interrupt",
+      step: 3,
       reason: "This exact problem is already solved in published prior work.",
       suggestion: "",
       evidence: {
@@ -468,6 +499,7 @@ test("comment: Build requires a suggestion; Interrupt requires structured eviden
   assert.equal(
     commentSchema.safeParse({
       verdict: "Interrupt",
+      step: 3,
       reason: "This step is flawed in a way the cited work already demonstrates.",
       suggestion: "",
       evidence: {
@@ -485,17 +517,35 @@ test("comment: Build requires a suggestion; Interrupt requires structured eviden
   );
 });
 
-test("judge decision: always carries the per-commentor assessment", () => {
+test("judge decision: carries the assessment and the issues[] repair signal", () => {
   const assessment = [
     { commentorId: "cs-gnn", basis: "verified" },
     { commentorId: "math-opt", basis: "authority" },
   ];
+  const mathEvidence = {
+    kind: "math",
+    code: "",
+    result: "",
+    derivation: "Expanding the expectation term by term shows the bias.",
+    citation: "",
+    locator: "",
+    shows: "",
+  };
+  const verifiedIssue = {
+    step: 2,
+    point: "The estimator's bias is demonstrated by the expansion below.",
+    basis: "verified",
+    evidence: mathEvidence,
+    suggestion: "",
+    mustAddress: true,
+  };
   assert.ok(
     judgeDecisionSchema.safeParse({
       verdict: "Pass",
       reason: "No commentor raised a verified objection to this step.",
       suggestion: "",
       evidence: noEvidence,
+      issues: [],
       assessment,
     }).success,
   );
@@ -509,6 +559,18 @@ test("judge decision: always carries the per-commentor assessment", () => {
   );
   assert.equal(
     judgeDecisionSchema.safeParse({
+      verdict: "Pass",
+      reason: "No commentor raised a verified objection to this step.",
+      suggestion: "",
+      evidence: noEvidence,
+      issues: [{ ...verifiedIssue, mustAddress: false }],
+      assessment,
+    }).success,
+    false,
+    "Pass carries no issues — an open issue rules out Pass",
+  );
+  assert.equal(
+    judgeDecisionSchema.safeParse({
       verdict: "Interrupt",
       reason: "A commentor demonstrated a verified flaw in the derivation.",
       suggestion: "",
@@ -517,23 +579,78 @@ test("judge decision: always carries the per-commentor assessment", () => {
     false,
     "judge Interrupt needs evidence too",
   );
+  assert.equal(
+    judgeDecisionSchema.safeParse({
+      verdict: "Interrupt",
+      reason: "A commentor demonstrated a verified flaw in the derivation.",
+      suggestion: "",
+      evidence: mathEvidence,
+      issues: [],
+      assessment,
+    }).success,
+    false,
+    "Interrupt requires at least one verified must-address issue",
+  );
+  assert.equal(
+    judgeDecisionSchema.safeParse({
+      verdict: "Interrupt",
+      reason: "A commentor demonstrated a verified flaw in the derivation.",
+      suggestion: "",
+      evidence: mathEvidence,
+      issues: [
+        {
+          ...verifiedIssue,
+          basis: "authority",
+          evidence: noEvidence,
+        },
+      ],
+      assessment,
+    }).success,
+    false,
+    "an authority-only issue cannot sustain an Interrupt",
+  );
+  assert.equal(
+    judgeDecisionSchema.safeParse({
+      verdict: "Interrupt",
+      reason: "A commentor demonstrated a verified flaw in the derivation.",
+      suggestion: "",
+      evidence: mathEvidence,
+      issues: [{ ...verifiedIssue, evidence: noEvidence }],
+      assessment,
+    }).success,
+    false,
+    "a verified issue must carry evidence",
+  );
   assert.ok(
     judgeDecisionSchema.safeParse({
       verdict: "Interrupt",
       reason: "A commentor demonstrated a verified flaw in the derivation.",
       suggestion: "Drop the shared temperature or correct the closed form.",
       assessment,
-      evidence: {
-        kind: "math",
-        code: "",
-        result: "",
-        derivation: "Expanding the expectation term by term shows the bias.",
-        citation: "",
-        locator: "",
-        shows: "",
-      },
+      issues: [verifiedIssue],
+      evidence: mathEvidence,
     }).success,
     "an Interrupt carrying a repair hint is accepted, never a task failure",
+  );
+  assert.ok(
+    judgeDecisionSchema.safeParse({
+      verdict: "Build",
+      reason: "A necessary justification is missing from the second step.",
+      suggestion: "State and bound the variance term explicitly.",
+      evidence: noEvidence,
+      issues: [
+        {
+          step: 2,
+          point: "The variance term is used but never bounded anywhere.",
+          basis: "authority",
+          evidence: noEvidence,
+          suggestion: "State and bound the variance term explicitly.",
+          mustAddress: true,
+        },
+      ],
+      assessment,
+    }).success,
+    "a Build stands on at least one must-address issue",
   );
   assert.equal(
     judgeDecisionSchema.safeParse({
@@ -541,6 +658,7 @@ test("judge decision: always carries the per-commentor assessment", () => {
       reason: "test",
       suggestion: "",
       evidence: noEvidence,
+      issues: [],
       assessment,
     }).success,
     false,
@@ -548,11 +666,23 @@ test("judge decision: always carries the per-commentor assessment", () => {
   );
 });
 
-test("redevelopment: revised steps start at a positive step and replace the tail only", () => {
-  const good = { fromStep: 3, output: validDevelopedOutput, revisedSteps: [para(1), para(1), para(1)], novelty: para(1) };
+test("redevelopment: re-emits the complete chain within the fixed step bounds", () => {
+  const good = {
+    output: validDevelopedOutput,
+    steps: [para(1), para(1), para(1)],
+    novelty: para(1),
+  };
   assert.ok(redevelopmentSchema.safeParse(good).success);
-  assert.equal(redevelopmentSchema.safeParse({ ...good, fromStep: 0 }).success, false);
-  assert.equal(redevelopmentSchema.safeParse({ ...good, revisedSteps: [] }).success, false);
+  assert.equal(
+    redevelopmentSchema.safeParse({ ...good, steps: [para(1)] }).success,
+    false,
+    "a chain below the minimum step count is rejected",
+  );
+  assert.equal(
+    redevelopmentSchema.safeParse({ ...good, fromStep: 2 }).success,
+    false,
+    "the retired tail-splice fields are no longer accepted",
+  );
   assert.equal(
     redevelopmentSchema.safeParse({ ...good, output: validDevelopedOutput, novelty: undefined }).success,
     false,

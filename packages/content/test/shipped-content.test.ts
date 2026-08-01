@@ -32,12 +32,16 @@ test("workflow phases appear in the canonical order", () => {
   const bundle = freshBundle();
   const root = bundle.workflows["brainstorm"]!.root as SequenceNode;
   assert.equal(root.kind, "sequence");
+  // The code-annotation pass ships from workflow 0.11.0; earlier published
+  // bundles stay valid without it, so the expected spine is presence-aware.
+  const hasCodeAnnotation = root.steps.some((step) => step.id === "partition-files-code");
   assert.deepEqual(
     root.steps.map((s) => s.id),
     [
       "process-input",
       "partition-files-useful",
       "partition-files-ignored",
+      ...(hasCodeAnnotation ? ["partition-files-code", "maybe-annotate-code"] : []),
       "build-pool",
       "match-taxonomy",
       "place-fields",
@@ -53,6 +57,77 @@ test("workflow phases appear in the canonical order", () => {
     ],
   );
   assert.equal(root.steps[root.steps.length - 1]!.kind, "terminal");
+});
+
+test("the code-annotation pass is gated on code files and folds summaries into the shared map", () => {
+  const bundle = freshBundle();
+  const root = bundle.workflows["brainstorm"]!.root as SequenceNode;
+  if (!root.steps.some((step) => step.id === "partition-files-code")) {
+    return; // pre-annotation published bundle
+  }
+
+  // Deterministic projection: the code-labeled useful files plus their count.
+  const projection = findActivity(root, "partition-files-code");
+  assert.equal(projection.handler, "attachments.code");
+  assert.deepEqual(projection.bind, {
+    files: "usefulFiles",
+    maxFiles: "params.maxAttachmentFiles",
+  });
+  assert.deepEqual(projection.output, { key: "codeFiles", schema: "codeFiles" });
+
+  // The pass runs only when the run actually carries code files.
+  const gate = findNode(root, "maybe-annotate-code");
+  assert.equal(gate.kind, "condition");
+  if (gate.kind !== "condition") return;
+  assert.deepEqual(gate.if, { ref: "codeFiles.count", notEquals: 0 });
+
+  // The annotator reads the code projection only, never the raw file map.
+  const annotator = findAgent(root, "annotate-code");
+  assert.equal(annotator.skill, "code-annotator");
+  assert.deepEqual(annotator.bind?.["input"], { ref: "input", omit: ["files"] });
+  assert.equal(annotator.bind?.["files"], "codeFiles.files");
+  assert.deepEqual(annotator.output, { key: "codeAnnotations", schema: "codeAnnotations" });
+
+  // The deterministic merge REPLACES usefulFiles, so every later task binds
+  // the annotated map without any downstream wiring change.
+  const merge = findActivity(root, "merge-code-annotations");
+  assert.equal(merge.handler, "attachments.annotate");
+  assert.deepEqual(merge.bind, {
+    files: "usefulFiles",
+    annotations: "codeAnnotations",
+    maxFiles: "params.maxAttachmentFiles",
+  });
+  assert.deepEqual(merge.output, { key: "usefulFiles", schema: "usefulFiles" });
+
+  const skill = bundle.skills["code-annotator"]!;
+  assert.equal(skill.meta.kind, "role");
+  assert.equal(skill.meta.output, "codeAnnotations");
+  assert.ok(skill.meta.capabilities.includes("attachment-access"));
+  assert.ok(skill.meta.capabilities.includes("code-execution"));
+
+  // Every role can run light scripts and read single attached files on demand.
+  for (const name of [
+    "processor",
+    "pool-builder",
+    "placer",
+    "code-annotator",
+    "brain",
+    "commentor",
+    "judge",
+    "redeveloper",
+    "integrator",
+    "chair",
+  ]) {
+    const role = bundle.skills[name]!;
+    assert.ok(
+      role.meta.capabilities.includes("code-execution"),
+      `${name} carries the code-execution capability`,
+    );
+    assert.ok(
+      role.meta.capabilities.includes("attachment-access"),
+      `${name} carries the attachment-access capability`,
+    );
+  }
 });
 
 test("the processor's file map is partitioned deterministically and NA files never reach later calls", () => {
@@ -287,7 +362,7 @@ test("verdict catalog preserves the Pass/Build/Interrupt contract", () => {
   const bundle = freshBundle();
   const catalog = bundle.catalogs.verdicts;
   assert.deepEqual(Object.keys(catalog.verdicts).sort(), ["Build", "Interrupt", "Pass"]);
-  const fixedFields = ["verdict", "reason", "suggestion", "evidence"];
+  const fixedFields = ["verdict", "step", "reason", "suggestion", "evidence"];
   assert.deepEqual(catalog.verdicts["Pass"]!.requires, fixedFields);
   assert.deepEqual(catalog.verdicts["Build"]!.requires, fixedFields);
   assert.deepEqual(catalog.verdicts["Interrupt"]!.requires, fixedFields);
@@ -300,7 +375,7 @@ test("verdict catalog preserves the Pass/Build/Interrupt contract", () => {
   assert.deepEqual(catalog.sequencing.noImmediateRepeat, ["Build"]);
 });
 
-test("skills split into 9 roles and 6 techniques, with clean prompt bodies", () => {
+test("skills split into the expected roles and 6 techniques, with clean prompt bodies", () => {
   const bundle = freshBundle();
   const roles = Object.values(bundle.skills).filter((s) => s.meta.kind === "role");
   const techniques = Object.values(bundle.skills).filter((s) => s.meta.kind === "technique");
@@ -309,6 +384,9 @@ test("skills split into 9 roles and 6 techniques, with clean prompt bodies", () 
     [
       "brain",
       "chair",
+      // The code annotator ships with the code-annotation pass (0.11.0+);
+      // earlier published bundles carry the nine original roles.
+      ...(bundle.skills["code-annotator"] ? ["code-annotator"] : []),
       "commentor",
       "integrator",
       "judge",

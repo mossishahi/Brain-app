@@ -77,9 +77,10 @@ export type RunResult =
   | {
       readonly status: "credit_blocked";
       readonly runId: string;
-      readonly retryAt: number;
+      /** Absent when the block awaits a manual resume (no reset time known). */
+      readonly retryAt?: number;
       readonly providerMessage: string;
-      readonly source: "deterministic" | "openrouter";
+      readonly source: "deterministic" | "openrouter" | "manual";
     }
   | { readonly status: "failed"; readonly runId: string; readonly error: SerializedError }
   | { readonly status: "cancelled"; readonly runId: string };
@@ -253,7 +254,7 @@ class RunExecution {
       }
       if (isCreditBlocked(error)) {
         const creditBlock: CreditBlock = {
-          retryAt: error.retryAt,
+          ...(error.retryAt !== undefined ? { retryAt: error.retryAt } : {}),
           providerMessage: error.providerMessage,
           source: error.source,
         };

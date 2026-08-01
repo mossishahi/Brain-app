@@ -63,7 +63,15 @@ export const ANTHROPIC_ADAPTER: ProviderAdapterDescriptor = {
   providerId: "anthropic",
   displayName: "Anthropic API",
   kind: "model-loop",
-  staticOffers: [],
+  // Server tools executed on Anthropic's infrastructure: the broker prefers
+  // these over host tools, and the provider adapter translates each native
+  // key into its wire tool object. Attachment and taxonomy operations stay
+  // host-side by design.
+  staticOffers: [
+    { operationId: "web.search", nativeKey: "web_search" },
+    { operationId: "web.fetch", nativeKey: "web_fetch" },
+    { operationId: "code.execute", nativeKey: "code_execution" },
+  ],
   richToolResults: true,
 };
 

@@ -47,27 +47,38 @@ export class AgentTaskFailedError extends WorkflowError {
   }
 }
 
-/** Deferred execution when a provider reports a known credit/session reset. */
+/** Deferred execution when a provider reports a known credit/session limit. */
 export class CreditBlockedError extends Error {
   readonly name = "CreditBlockedError";
 
   constructor(
-    readonly retryAt: number,
+    /**
+     * Epoch ms when an automatic resume may be submitted. Undefined when the
+     * provider message carries no reset time (e.g. a developer-API "credit
+     * balance is too low", which only a top-up clears): the block must then
+     * be claimed manually instead of by the scheduler.
+     */
+    readonly retryAt: number | undefined,
     readonly providerMessage: string,
-    readonly source: "deterministic" | "openrouter",
+    readonly source: "deterministic" | "openrouter" | "manual",
   ) {
     super(
-      `Provider credit blocked until ${new Date(retryAt).toISOString()}: ${providerMessage}`,
+      retryAt !== undefined
+        ? `Provider credit blocked until ${new Date(retryAt).toISOString()}: ${providerMessage}`
+        : `Provider credit blocked until manually resumed: ${providerMessage}`,
     );
   }
 }
 
 export function isCreditBlocked(error: unknown): error is CreditBlockedError {
+  if (error instanceof CreditBlockedError) return true;
+  if (!(error instanceof Error) || error.name !== "CreditBlockedError") {
+    return false;
+  }
+  const candidate = error as Partial<CreditBlockedError>;
   return (
-    error instanceof CreditBlockedError ||
-    (error instanceof Error &&
-      error.name === "CreditBlockedError" &&
-      typeof (error as Partial<CreditBlockedError>).retryAt === "number")
+    typeof candidate.providerMessage === "string" &&
+    (typeof candidate.retryAt === "number" || candidate.retryAt === undefined)
   );
 }
 

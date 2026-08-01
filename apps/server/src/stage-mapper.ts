@@ -34,6 +34,7 @@ import {
   type JobDetail,
   type JobStatus,
   type JudgeDecisionView,
+  type JudgeIssueView,
   type NoveltyAuditView,
   type PaperView,
   type ResolveOutputView,
@@ -172,6 +173,29 @@ function artifact(
   )?.value;
 }
 
+/**
+ * Latest-wins variant of artifact(): used where the runtime re-writes the
+ * same artifact path during the run (the useful-file map gains code
+ * summaries after the code-annotation pass), so the dashboard shows the
+ * version every later task actually read.
+ */
+function artifactLatest(
+  values: readonly ArtifactValue[],
+  schema: string,
+  path?: string,
+): unknown {
+  for (let index = values.length - 1; index >= 0; index -= 1) {
+    const { ref, value } = values[index]!;
+    if (
+      ref.metadata?.schema === schema &&
+      (path === undefined || ref.metadata.path === path)
+    ) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
 function agentOutput(entry: JournalEntry): unknown {
   if (entry.kind !== "agent") return undefined;
   const value = object(entry.value);
@@ -206,6 +230,9 @@ function journalStateField(
  * single Decompose stage (their agent activity, timing, and sub-step views).
  */
 const DECOMPOSE_SUBNODES = [
+  "partition-files-code",
+  "annotate-code",
+  "merge-code-annotations",
   "build-pool",
   "match-taxonomy",
   "place-fields",
@@ -213,7 +240,7 @@ const DECOMPOSE_SUBNODES = [
   "bridge-experts",
 ] as const;
 
-function stageForPath(path: string): StageId | undefined {
+export function stageForPath(path: string): StageId | undefined {
   const segments = path.split("/");
   const direct = STAGE_IDS.find((id) => segments.includes(id));
   if (direct) return direct;
@@ -386,6 +413,9 @@ function annotatedFiles(value: unknown): AnnotatedFileView[] {
           path: file.path,
           label: file.label,
           note: typeof file.note === "string" ? file.note : "",
+          ...(typeof file.codeSummary === "string"
+            ? { codeSummary: file.codeSummary }
+            : {}),
         }]
       : [];
   });
@@ -1087,12 +1117,40 @@ function comment(
     commentorId: member.id,
     commentorLabel: label,
     verdict: raw.verdict,
+    ...(typeof raw.step === "number" ? { step: raw.step } : {}),
     reason: raw.reason,
     ...(typeof raw.suggestion === "string" && raw.suggestion.length > 0
       ? { suggestion: raw.suggestion }
       : {}),
     ...(evidence(raw.evidence) ? { evidence: evidence(raw.evidence)! } : {}),
   };
+}
+
+/** The judge's issues[] repair signal, projected for the dashboard. */
+function issueViews(value: unknown): JudgeIssueView[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((candidate) => {
+    const item = object(candidate);
+    if (
+      typeof item?.step !== "number" ||
+      typeof item.point !== "string" ||
+      (item.basis !== "verified" && item.basis !== "authority")
+    ) {
+      return [];
+    }
+    return [
+      {
+        step: item.step,
+        point: item.point,
+        basis: item.basis,
+        mustAddress: item.mustAddress === true,
+        ...(typeof item.suggestion === "string" && item.suggestion.length > 0
+          ? { suggestion: item.suggestion }
+          : {}),
+        ...(evidence(item.evidence) ? { evidence: evidence(item.evidence)! } : {}),
+      },
+    ];
+  });
 }
 
 function decision(value: unknown): JudgeDecisionView | undefined {
@@ -1124,6 +1182,7 @@ function decision(value: unknown): JudgeDecisionView | undefined {
   } else {
     return undefined;
   }
+  const issues = issueViews(raw.issues);
   return {
     verdict: raw.verdict,
     reason: raw.reason,
@@ -1131,6 +1190,7 @@ function decision(value: unknown): JudgeDecisionView | undefined {
       ? { suggestion: raw.suggestion }
       : {}),
     ...(evidence(raw.evidence) ? { evidence: evidence(raw.evidence)! } : {}),
+    ...(issues.length > 0 ? { issues } : {}),
     assessment,
   };
 }
@@ -1158,7 +1218,7 @@ function buildReviews(
     cot?: string;
     comments: Map<number, CommentView>;
     decision?: JudgeDecisionView;
-    revision?: { fromStep: number; revisedStepCount: number };
+    revision?: { touchedSteps: number[] };
   }>();
   const roundFor = (member: number, step: number, round: number) => {
     const key = `${member}:${step}:${round}`;
@@ -1172,7 +1232,7 @@ function buildReviews(
   const seatLabel = (index: number): string => `Seat ${index + 1}`;
 
   // Working chain per member, replayed in journal order: it starts as the
-  // first-pass chain and every redevelopment replaces steps fromStep..N, so
+  // first-pass chain and every redevelopment re-emits the complete chain, so
   // each round can snapshot the step text exactly as its reviewers saw it.
   const workingCot = new Map<number, string[]>();
   const cotFor = (memberIndex: number): string[] => {
@@ -1212,20 +1272,18 @@ function buildReviews(
       /\/redevelop-idea(?:\/redevelop-idea-execute)?::result$/.test(entry.key)
     ) {
       const revision = object(output);
-      if (
-        typeof revision?.fromStep === "number" &&
-        Array.isArray(revision.revisedSteps)
-      ) {
-        round.revision = {
-          fromStep: revision.fromStep,
-          revisedStepCount: revision.revisedSteps.length,
-        };
-        // Apply the replacement so later rounds snapshot the revised text.
-        const chain = cotFor(at.member);
-        const replacement = revision.revisedSteps.filter(
+      if (Array.isArray(revision?.steps)) {
+        const replacement = revision.steps.filter(
           (step): step is string => typeof step === "string",
         );
-        chain.splice(revision.fromStep - 1, chain.length, ...replacement);
+        // The change-set mirrors the runtime's own diff: exact per-step
+        // comparison of the re-emitted chain against the working chain.
+        const chain = cotFor(at.member);
+        const touchedSteps = replacement
+          .map((step, index) => (step === chain[index] ? 0 : index + 1))
+          .filter((index) => index > 0);
+        round.revision = { touchedSteps };
+        chain.splice(0, chain.length, ...replacement);
       }
     }
   }
@@ -1390,7 +1448,7 @@ export function buildJobDetail(input: MapperInput): JobDetail {
       /\/process-input(?:-execute)?::result$/.test(key)
     ));
   const usefulFilesView = annotatedFiles(
-    artifact(artifacts, "usefulFiles") ??
+    artifactLatest(artifacts, "usefulFiles") ??
       journalStateField(
         entries,
         (key) => key.endsWith("/partition-files-useful::result"),
@@ -1925,7 +1983,9 @@ export function buildJobDetail(input: MapperInput): JobDetail {
     ...(checkpoint?.creditBlock
       ? {
           creditBlock: {
-            retryAt: checkpoint.creditBlock.retryAt,
+            ...(checkpoint.creditBlock.retryAt !== undefined
+              ? { retryAt: checkpoint.creditBlock.retryAt }
+              : {}),
             providerMessage: checkpoint.creditBlock.providerMessage,
             source: checkpoint.creditBlock.source,
           },

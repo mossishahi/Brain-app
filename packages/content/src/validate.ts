@@ -19,7 +19,7 @@ export const MAX_REPEAT_BOUND = 10;
 /** Runtime-provided reference roots that are always in scope. */
 const SESSION_ROOT = "session";
 /** Runtime-provided reference roots that only exist inside a repeatUntil review round. */
-const REVIEW_FIELDS = new Set(["allowedVerdicts", "round"]);
+const REVIEW_FIELDS = new Set(["allowedVerdicts", "round", "history"]);
 
 export interface ContentBundle {
   workflows: Record<string, WorkflowDefinition>;

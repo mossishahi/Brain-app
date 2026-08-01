@@ -77,6 +77,8 @@ export interface AnnotatedFileView {
   readonly path: string;
   readonly label: string;
   readonly note: string;
+  /** The code annotator's one-line content summary; code files only. */
+  readonly codeSummary?: string;
 }
 
 /** The orchestrator's partition of the processor's file map. */
@@ -337,7 +339,19 @@ export interface CommentView {
   readonly commentorId: string;
   readonly commentorLabel: string;
   readonly verdict: Verdict;
+  /** The 1-based chain step the verdict targets (current or earlier). */
+  readonly step?: number;
   readonly reason: string;
+  readonly suggestion?: string;
+  readonly evidence?: EvidenceView;
+}
+
+/** One confirmed problem in the judge's repair signal, pinned to a step. */
+export interface JudgeIssueView {
+  readonly step: number;
+  readonly point: string;
+  readonly basis: "verified" | "authority";
+  readonly mustAddress: boolean;
   readonly suggestion?: string;
   readonly evidence?: EvidenceView;
 }
@@ -347,6 +361,8 @@ export interface JudgeDecisionView {
   readonly reason: string;
   readonly suggestion?: string;
   readonly evidence?: EvidenceView;
+  /** The distinct confirmed problems of the round; empty on Pass. */
+  readonly issues?: readonly JudgeIssueView[];
   /** commentor id -> verified | authority */
   readonly assessment: Readonly<Record<string, "verified" | "authority">>;
 }
@@ -358,8 +374,8 @@ export interface ReviewRoundView {
   readonly cot?: string;
   readonly comments: readonly CommentView[];
   readonly decision?: JudgeDecisionView;
-  /** Present when this round ended in a redevelopment. */
-  readonly revision?: { readonly fromStep: number; readonly revisedStepCount: number };
+  /** Present when this round ended in a redevelopment: the runtime-computed change-set. */
+  readonly revision?: { readonly touchedSteps: readonly number[] };
 }
 
 export type ReviewStepOutcome = "pending" | "under-review" | "passed" | "force-passed";
@@ -586,9 +602,14 @@ export interface JobSummary {
   };
   readonly error?: string;
   readonly creditBlock?: {
-    readonly retryAt: number;
+    /**
+     * Epoch ms of the automatic resume; absent when the provider message
+     * named no reset time (e.g. a top-up is needed) and the job waits for a
+     * manual resume instead.
+     */
+    readonly retryAt?: number;
     readonly providerMessage: string;
-    readonly source: "deterministic" | "openrouter";
+    readonly source: "deterministic" | "openrouter" | "manual";
   };
 }
 
@@ -896,6 +917,12 @@ export interface CancelJobResponse {
   readonly status: JobStatus;
 }
 
+/** Response of POST /api/jobs/:jobId/resume (credit-blocked jobs only). */
+export interface ResumeJobResponse {
+  readonly jobId: string;
+  readonly status: JobStatus;
+}
+
 export interface TrashJobResponse {
   readonly jobId: string;
   readonly trashedAt: number;
@@ -933,6 +960,26 @@ export type ServerEvent =
   | { readonly type: "error"; readonly message: string };
 
 /**
+ * Aggregated capability/tool usage of one job, computed from the event log.
+ * Counts are completed tool calls (host tools and provider-native server
+ * tools alike); capabilityResolution counts, per normalized operation, how
+ * many agent tasks resolved it to each source — surfacing at a glance when a
+ * capability silently ran in "unavailable" honesty mode.
+ */
+export interface ToolUsageReport {
+  /** tool name -> completed calls, across the whole job. */
+  readonly totals: Readonly<Record<string, number>>;
+  /** role (task kind minus the workflow prefix) -> tool name -> calls. */
+  readonly byRole: Readonly<Record<string, Readonly<Record<string, number>>>>;
+  /** dashboard stage id (or "other") -> tool name -> calls. */
+  readonly byStage: Readonly<Record<string, Readonly<Record<string, number>>>>;
+  /** operation id -> source ("provider" | "host" | "unavailable") -> tasks. */
+  readonly capabilityResolution: Readonly<
+    Record<string, Readonly<Record<string, number>>>
+  >;
+}
+
+/**
  * REST surface (all JSON):
  *   GET  /api/health                          -> HealthResponse
  *   GET  /api/settings                        -> ServerSettings
@@ -948,8 +995,10 @@ export type ServerEvent =
  *   GET  /api/jobs/trash                      -> JobSummary[]       (view-only trash, newest first)
  *   GET  /api/jobs/:jobId                     -> JobDetail
  *   POST /api/jobs/:jobId/cancel              -> CancelJobResponse
+ *   POST /api/jobs/:jobId/resume              -> ResumeJobResponse  (credit-blocked jobs only; 409 otherwise)
  *   POST /api/jobs/:jobId/trash               -> TrashJobResponse   (409 while the job is still live)
  *   POST /api/jobs/:jobId/gate                -> JobDetail           (body: GateAnswerRequest; submits a resume job)
+ *   GET  /api/jobs/:jobId/tool-usage          -> ToolUsageReport     (aggregated from the job's event log)
  *   GET  /api/stream                          -> SSE of ServerEvent{type:"jobs"}
  *   GET  /api/jobs/:jobId/stream              -> SSE of ServerEvent{type:"job"}
  * Static: everything else serves the webapp build (SPA fallback to index.html).

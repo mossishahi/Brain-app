@@ -579,6 +579,24 @@ export class ToolLoopAgentExecutor<
       );
     }
 
+    // One machine-readable record of how the broker resolved this task's
+    // capabilities (provider-native / host tool / unavailable), so the event
+    // log doubles as a per-role, per-node capability-usage ledger.
+    if (task.capabilityPlan !== undefined) {
+      context.reportProgress?.({
+        kind: "status",
+        message: "Capability plan resolved",
+        data: {
+          capabilityPlan: task.capabilityPlan.operations.map((operation) => ({
+            operation: operation.operationId,
+            capability: operation.capabilityId,
+            source: operation.source,
+            tools: [...operation.toolNames],
+          })),
+        },
+      });
+    }
+
     let validationRetries = 0;
     for (let turn = 1; turn <= maxTurns; turn += 1) {
       throwIfAborted(context.signal);
@@ -605,6 +623,20 @@ export class ToolLoopAgentExecutor<
       for (const block of response.content) {
         if (block.type === "thinking" && block.text.trim().length > 0) {
           thinkingSegments.push({ turn, text: block.text });
+        }
+      }
+      // Server tools ran inside the provider; surface each use as a tool
+      // event so provider-native and host tools land in one usage ledger.
+      const serverToolUses = response.metadata?.serverToolUses;
+      if (Array.isArray(serverToolUses)) {
+        for (const name of serverToolUses) {
+          if (typeof name !== "string") continue;
+          context.reportProgress?.({
+            kind: "tool_end",
+            toolName: name,
+            turn,
+            message: `${name} executed by the provider`,
+          });
         }
       }
 

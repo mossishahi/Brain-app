@@ -54,8 +54,18 @@ describe("ProviderAdapterRegistry", () => {
 });
 
 describe("built-in adapter descriptors", () => {
-  it("Anthropic adapter has no static native offers (host tools only)", () => {
-    assert.equal(ANTHROPIC_ADAPTER.staticOffers.length, 0);
+  it("Anthropic adapter offers web search, web fetch, and code execution natively", () => {
+    const offers = new Map(
+      ANTHROPIC_ADAPTER.staticOffers.map((offer) => [offer.operationId, offer.nativeKey]),
+    );
+    assert.equal(offers.get("web.search"), "web_search");
+    assert.equal(offers.get("web.fetch"), "web_fetch");
+    assert.equal(offers.get("code.execute"), "code_execution");
+    assert.equal(
+      ANTHROPIC_ADAPTER.staticOffers.length,
+      3,
+      "attachment and taxonomy operations stay host-side by design",
+    );
     assert.equal(ANTHROPIC_ADAPTER.kind, "model-loop");
   });
 

@@ -613,6 +613,39 @@ test("turns session limits into credit blocks and removes partial task files", a
   rmSync(root, { recursive: true, force: true });
 });
 
+test("credit exhaustion without a reset time blocks for a manual resume", async () => {
+  const root = mkdtempSync(join(tmpdir(), "brain-claude-manual-credit-"));
+  const executor = new ClaudeAgentExecutor({
+    token: "setup-token-secret",
+    taskWorkspaceRoot: root,
+    queryFn: () => ({
+      async *[Symbol.asyncIterator]() {
+        yield {
+          type: "result",
+          subtype: "error_during_execution",
+          is_error: true,
+          errors: [
+            "Your credit balance is too low to access the Anthropic API.",
+          ],
+          usage: {},
+        };
+      },
+    }),
+  });
+  await assert.rejects(
+    executor.execute(structuredTask, {
+      runId: "manual-credit-run",
+      nodePath: "root/brain",
+    }),
+    (error: unknown) =>
+      error instanceof Error &&
+      error.name === "CreditBlockedError" &&
+      (error as { retryAt?: number }).retryAt === undefined &&
+      (error as { source?: string }).source === "manual",
+  );
+  rmSync(root, { recursive: true, force: true });
+});
+
 test("returns a normalized error when Agent SDK execution fails", async () => {
   const executor = new ClaudeAgentExecutor({
     token: "setup-token-secret",

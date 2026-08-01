@@ -14,6 +14,7 @@ import type {
   JobSummary,
   ModelOptionsResponse,
   ModelsByRouteUpdate,
+  ResumeJobResponse,
   ServerEvent,
   ServerAttachmentRootsResponse,
   ServerSettings,
@@ -21,6 +22,7 @@ import type {
   SearchServerFilesResponse,
   SubmitJobRequest,
   SubmitJobResponse,
+  ToolUsageReport,
   TrashJobResponse,
   ValidateAttachmentsResponse,
 } from "@brainstorm-agentic/protocol";
@@ -167,6 +169,13 @@ export const getJob = async (jobId: string): Promise<JobDetail> => {
 
 export const cancelJob = (jobId: string): Promise<CancelJobResponse> =>
   request(`/jobs/${encodeURIComponent(jobId)}/cancel`, { method: "POST" });
+
+/** Claims a credit-blocked job for resume (manual blocks, or an early claim). */
+export const resumeJob = (jobId: string): Promise<ResumeJobResponse> =>
+  request(`/jobs/${encodeURIComponent(jobId)}/resume`, { method: "POST" });
+
+export const getToolUsage = (jobId: string): Promise<ToolUsageReport> =>
+  request(`/jobs/${encodeURIComponent(jobId)}/tool-usage`);
 
 export const trashJob = (jobId: string): Promise<TrashJobResponse> =>
   request(`/jobs/${encodeURIComponent(jobId)}/trash`, { method: "POST" });

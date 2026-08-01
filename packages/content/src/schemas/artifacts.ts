@@ -104,10 +104,32 @@ export const FILE_LABELS = [
 
 export type FileLabel = (typeof FILE_LABELS)[number];
 
+/** File relation labels that mark an entry as source code to annotate. */
+export const CODE_FILE_LABELS: readonly FileLabel[] = ["code", "implementation"];
+
+/**
+ * The code annotator's one-line account of a code file: what the file
+ * contains plus how it bears on the input topic. Exactly one line, long
+ * enough to carry an actual description, and never a placeholder probe.
+ */
+const codeSummaryValue = z
+  .string()
+  .min(10, "codeSummary must be a real one-line description (at least 10 characters)")
+  .max(400, "codeSummary must stay one line (at most 400 characters)")
+  .refine((value) => !/[\r\n]/.test(value), {
+    message: "codeSummary must be exactly one line",
+  })
+  .refine((value) => !PLACEHOLDER_VALUE.test(value.trim()), {
+    message: "codeSummary is a placeholder, not a description derived from the file",
+  });
+
 /**
  * One attached file, annotated by the processor: the exact inventory path,
  * one closed relation label, and a one-line note on how the file relates to
- * the prompt (empty only for NA).
+ * the prompt (empty only for NA). Code files additionally gain a
+ * `codeSummary` when the code-annotation pass has run: the annotator's
+ * one-line account of what the file contains, folded in deterministically by
+ * the runtime (attachments.annotate) — never self-reported by a later model.
  */
 export const annotatedFileSchema = z
   .object({
@@ -116,6 +138,8 @@ export const annotatedFileSchema = z
     label: z.enum(FILE_LABELS),
     /** How this file relates to the prompt; empty only when label is NA. */
     note: z.string(),
+    /** The code annotator's one-line content summary; code files only. */
+    codeSummary: codeSummaryValue.optional(),
   })
   .strict()
   .superRefine((file, ctx) => {
@@ -213,6 +237,79 @@ export const ignoredFilesSchema = z
   });
 
 export type IgnoredFiles = z.infer<typeof ignoredFilesSchema>;
+
+/**
+ * The deterministic projection of the useful files to the code-labeled
+ * entries (`code` / `implementation`), plus their count — the count is what
+ * the workflow's condition node tests to decide whether the code-annotation
+ * pass runs at all.
+ */
+export const codeFilesSchema = z
+  .object({
+    /** Number of code-labeled useful files; equals files.length. */
+    count: z.number().int().min(0),
+    files: z.array(annotatedFileSchema).max(400),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.count !== value.files.length) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["count"],
+        message: "count must equal the number of projected files",
+      });
+    }
+    value.files.forEach((file, index) => {
+      if (!CODE_FILE_LABELS.includes(file.label)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["files", index, "label"],
+          message: "the code-file projection may only contain code or implementation entries",
+        });
+      }
+    });
+  });
+
+export type CodeFiles = z.infer<typeof codeFilesSchema>;
+
+/**
+ * The code annotator's output: one entry per code file it was given, in the
+ * given order, each carrying the file's verbatim path and a one-line summary
+ * of what the file contains and how it bears on the input topic. The runtime
+ * cross-checks the paths against the bound code-file list on write and folds
+ * the summaries into the shared file map deterministically.
+ */
+export const codeAnnotationsSchema = z
+  .object({
+    files: z
+      .array(
+        z
+          .object({
+            /** Copied verbatim from the code-file list this task received. */
+            path: nonEmpty,
+            summary: codeSummaryValue,
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(400),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    const seen = new Set<string>();
+    value.files.forEach((file, index) => {
+      if (seen.has(file.path)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["files", index, "path"],
+          message: `duplicate annotation for "${file.path}"`,
+        });
+      }
+      seen.add(file.path);
+    });
+  });
+
+export type CodeAnnotations = z.infer<typeof codeAnnotationsSchema>;
 
 // ---------------------------------------------------------------------------
 // shared literature shapes
@@ -1093,15 +1190,20 @@ export const brainIdeaSchema = z
 export type BrainIdea = z.infer<typeof brainIdeaSchema>;
 
 /**
- * A member's revision after a Build/Interrupt on one step: the runtime keeps
- * chain steps before `fromStep` frozen and replaces everything from `fromStep`
- * on with `revisedSteps`; `output` and `novelty` replace the previous ones.
+ * A member's revision after a Build/Interrupt: the COMPLETE revised chain,
+ * re-emitted step by step. The reviser fixes the steps the confirmed issues
+ * implicate (any step, including ones before the current review position)
+ * and copies every unaffected step verbatim; the runtime — never the model —
+ * computes which steps were touched by exact comparison against the previous
+ * chain, and records that change-set in the review ledger. Chain LENGTH is
+ * invariant: `steps` must carry exactly the run's fixed step count. `output`
+ * and `novelty` replace the previous ones.
  */
 export const redevelopmentSchema = z
   .object({
-    fromStep: z.number().int().min(1),
     output: developedOutputSchema,
-    revisedSteps: z.array(paragraphs(1)).min(1),
+    /** The complete revised chain, one paragraph per step, in order. */
+    steps: z.array(paragraphs(1)).min(3).max(9),
     novelty: paragraphs(1).optional(),
   })
   .strict()
@@ -1156,7 +1258,13 @@ const requireConcreteSuggestion = (
 };
 
 /**
- * One commentor's verdict on a single chain-of-thought step.
+ * One commentor's verdict on the reviewed chain so far.
+ *
+ * `step` names the 1-based chain step the verdict targets. A commentor may
+ * target the current step or any earlier one it can now fault (a flaw at
+ * step 2 is often only visible from the vantage of step 5); for Pass the
+ * field carries the current review position. The runtime rejects targets
+ * beyond the step under review.
  *
  * Suggestion tolerance is deliberate: only Build REQUIRES a suggestion; a
  * suggestion accompanying Pass/Interrupt is accepted and simply carried as
@@ -1167,6 +1275,8 @@ const requireConcreteSuggestion = (
 export const commentSchema = z
   .object({
     verdict: z.enum(VERDICTS),
+    /** The 1-based chain step this verdict targets (current position for Pass). */
+    step: z.number().int().min(1),
     reason: substantiveReason,
     suggestion: z.string(),
     evidence: evidenceSchema,
@@ -1216,9 +1326,56 @@ const assessmentSchema = z
   );
 
 /**
- * The judge's single decision for a step, aggregating the commentors'
- * verdicts. Same suggestion tolerance as commentSchema: required-and-concrete
- * for Build, otherwise accepted as extra context for the redeveloper.
+ * One distinct problem the judge confirms in the reviewed chain: which step
+ * it sits at, the point itself, whether it is backed by verification or
+ * stands on authority, its evidence, and whether the redeveloper must
+ * address it. Issues are deliberately authorless — the objection ledger and
+ * the repair signal carry content, never commentor identity — so the
+ * existing `assessment` field remains the only place commentors are named.
+ */
+export const judgeIssueSchema = z
+  .object({
+    /** The 1-based chain step the issue sits at (never beyond the reviewed step). */
+    step: z.number().int().min(1),
+    /** The problem, stated substantively (at least 30 characters). */
+    point: substantiveReason,
+    /** "verified" = backed by the evidence object; "authority" = assertion only. */
+    basis: z.enum(["verified", "authority"]),
+    evidence: evidenceSchema,
+    /** Concrete repair direction; may be empty when the evidence speaks for itself. */
+    suggestion: z.string(),
+    /** True when the revision cannot stand without resolving this issue. */
+    mustAddress: z.boolean(),
+  })
+  .strict()
+  .superRefine((issue, ctx) => {
+    if (issue.basis === "verified" && issue.evidence.kind === "none") {
+      ctx.addIssue({
+        code: "custom",
+        path: ["evidence"],
+        message: 'a "verified" issue requires script, math, or reference evidence',
+      });
+    }
+    if (issue.basis === "authority" && issue.evidence.kind !== "none") {
+      ctx.addIssue({
+        code: "custom",
+        path: ["evidence"],
+        message: 'an "authority" issue must use {kind:"none"} evidence',
+      });
+    }
+  });
+
+export type JudgeIssue = z.infer<typeof judgeIssueSchema>;
+
+/**
+ * The judge's single decision for a review round, aggregating the
+ * commentors' verdicts. `issues` is the de-duplicated repair signal: one
+ * entry per distinct confirmed problem (several commentors making the same
+ * point are one issue), each pinned to a step. Pass carries no issues;
+ * Build/Interrupt carry at least one that must be addressed, and an
+ * Interrupt requires at least one verified must-address issue. Same
+ * suggestion tolerance as commentSchema: required-and-concrete for Build,
+ * otherwise accepted as extra context for the redeveloper.
  */
 export const judgeDecisionSchema = z
   .object({
@@ -1226,6 +1383,8 @@ export const judgeDecisionSchema = z
     reason: substantiveReason,
     suggestion: z.string(),
     evidence: evidenceSchema,
+    /** The distinct confirmed problems this round; empty exactly when Pass. */
+    issues: z.array(judgeIssueSchema).max(12),
     assessment: assessmentSchema,
   })
   .strict()
@@ -1252,6 +1411,34 @@ export const judgeDecisionSchema = z
         path: ["evidence"],
         message: `${decision.verdict} must use {kind:"none"} evidence`,
       });
+    }
+    if (decision.verdict === "Pass" && decision.issues.length > 0) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["issues"],
+        message: "Pass carries no issues; an open issue rules out Pass",
+      });
+    }
+    if (decision.verdict !== "Pass") {
+      if (!decision.issues.some((issue) => issue.mustAddress)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["issues"],
+          message: `${decision.verdict} requires at least one must-address issue`,
+        });
+      }
+      if (
+        decision.verdict === "Interrupt" &&
+        !decision.issues.some(
+          (issue) => issue.mustAddress && issue.basis === "verified",
+        )
+      ) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["issues"],
+          message: "Interrupt requires at least one verified must-address issue",
+        });
+      }
     }
   });
 
@@ -1388,6 +1575,8 @@ export const artifactSchemas = {
   processorOutput: processorOutputSchema,
   usefulFiles: usefulFilesSchema,
   ignoredFiles: ignoredFilesSchema,
+  codeFiles: codeFilesSchema,
+  codeAnnotations: codeAnnotationsSchema,
   pool: poolSchema,
   poolMatches: poolMatchesSchema,
   placements: placementsSchema,

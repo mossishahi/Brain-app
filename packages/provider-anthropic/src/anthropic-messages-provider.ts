@@ -76,6 +76,15 @@ export interface AnthropicMessagesProviderConfig {
   readonly clientOptions?: WireRecord;
   readonly providerOptions?: WireRecord;
   /**
+   * Wire tool objects for the provider-native operations this deployment
+   * offers, keyed by native key (the ProviderNativeOffer.nativeKey the
+   * capability broker selects, e.g. "web_search"). Merged over the built-in
+   * defaults, so a deployment can pin newer dated tool versions without a
+   * code change. A request whose nativeOperations name a key with no entry
+   * fails loudly rather than silently dropping the capability.
+   */
+  readonly nativeTools?: Readonly<Record<string, WireRecord>>;
+  /**
    * Deployment-level thinking configuration applied to every request from
    * this provider instance. The API renders the thinking configuration (and
    * effort) into the prompt itself, so changing it between calls invalidates
@@ -104,6 +113,24 @@ const BASE_CAPABILITIES: ModelCapabilities = {
   systemPrompt: true,
   stopSequences: true,
 };
+
+/**
+ * Server tools executed on Anthropic's infrastructure, keyed by the native
+ * key the capability broker selects. Conservative GA versions with bounded
+ * per-request use; deployments pin newer dated versions via
+ * config.nativeTools.
+ */
+const DEFAULT_NATIVE_TOOLS: Readonly<Record<string, WireRecord>> = {
+  web_search: { type: "web_search_20250305", name: "web_search", max_uses: 8 },
+  web_fetch: { type: "web_fetch_20250910", name: "web_fetch", max_uses: 12 },
+  code_execution: { type: "code_execution_20250825", name: "code_execution" },
+};
+
+/**
+ * How many times complete() resends a `pause_turn` response to let a
+ * long-running server tool finish before giving the turn back to the caller.
+ */
+const MAX_PAUSE_TURN_CONTINUATIONS = 4;
 
 function asWireRecord(value: unknown): WireRecord {
   return value !== null && typeof value === "object"
@@ -205,8 +232,17 @@ function mapToolResultContent(
 
 function mapRequestBlock(block: ContentBlock): WireRecord | undefined {
   switch (block.type) {
-    case "text":
+    case "text": {
+      // Server-tool activity (server_tool_use and its result blocks) is
+      // carried through the neutral model as an empty text block holding the
+      // raw wire block in metadata; multi-turn requests must resend it
+      // byte-identical or the API rejects the conversation.
+      const raw = block.metadata?.anthropicRaw;
+      if (typeof raw === "object" && raw !== null && !Array.isArray(raw)) {
+        return structuredClone(raw) as WireRecord;
+      }
       return { type: "text", text: block.text };
+    }
     case "image":
       return mapImage(block);
     case "document":
@@ -504,9 +540,34 @@ function mapResponseContent(value: unknown): readonly ContentBlock[] {
         text: "",
         metadata: { redactedData: block.data },
       });
+      continue;
+    }
+    // Server-tool blocks (server_tool_use and the various *_tool_result
+    // types) round-trip as raw wire payloads: invisible to text extraction
+    // and to the client tool loop, but resent byte-identical on the next
+    // turn. Blocks that are not JSON-safe are dropped rather than corrupted.
+    if (typeof block.type === "string" && isJsonValue(block)) {
+      content.push({
+        type: "text",
+        text: "",
+        metadata: { anthropicRaw: block as JsonObject },
+      });
     }
   }
   return content;
+}
+
+/** Names of the server tools the response ran, in order (observability). */
+function serverToolUses(value: unknown): readonly string[] {
+  if (!Array.isArray(value)) return [];
+  const names: string[] = [];
+  for (const item of value) {
+    const block = asWireRecord(item);
+    if (block.type === "server_tool_use" && typeof block.name === "string") {
+      names.push(block.name);
+    }
+  }
+  return names;
 }
 
 function numberOrZero(value: unknown): number {
@@ -584,6 +645,7 @@ export class AnthropicMessagesProvider implements ModelProvider {
   readonly #capabilities: ModelCapabilities;
   readonly #providerOptions: WireRecord;
   readonly #thinking: WireRecord | undefined;
+  readonly #nativeTools: Readonly<Record<string, WireRecord>>;
 
   public constructor(config: AnthropicMessagesProviderConfig) {
     if (config.model.trim() === "") {
@@ -603,6 +665,7 @@ export class AnthropicMessagesProvider implements ModelProvider {
       ...(config.capabilities ?? {}),
     };
     this.#providerOptions = { ...(config.providerOptions ?? {}) };
+    this.#nativeTools = { ...DEFAULT_NATIVE_TOOLS, ...(config.nativeTools ?? {}) };
     this.#thinking =
       config.thinking !== undefined
         ? mapThinkingConfig(config.thinking)
@@ -694,10 +757,27 @@ export class AnthropicMessagesProvider implements ModelProvider {
     if (request.system !== undefined) {
       params.system = mapSystem(request.system);
     }
-    const tools =
-      request.toolChoice?.type === "none" ? [] : (request.tools ?? []);
-    if (tools.length > 0) {
-      params.tools = tools.map(mapTool);
+    const suppressTools = request.toolChoice?.type === "none";
+    const clientTools = suppressTools ? [] : (request.tools ?? []);
+    // Provider-native operations selected by the capability broker become
+    // server tools: executed on Anthropic's infrastructure within this same
+    // request, never dispatched to the host tool loop. An offer naming an
+    // unmapped key fails loudly instead of silently dropping the capability.
+    const nativeKeys = suppressTools ? [] : (request.nativeOperations ?? []);
+    const nativeTools = nativeKeys.map((key) => {
+      const tool = this.#nativeTools[key];
+      if (tool === undefined) {
+        throw new AnthropicProviderError(
+          `No native tool mapping is configured for operation key "${key}".`,
+          "validation",
+          false,
+        );
+      }
+      return structuredClone(tool);
+    });
+    const wireTools = [...clientTools.map(mapTool), ...nativeTools];
+    if (wireTools.length > 0) {
+      params.tools = wireTools;
       const choice =
         request.toolChoice === undefined
           ? undefined
@@ -743,20 +823,77 @@ export class AnthropicMessagesProvider implements ModelProvider {
     }
 
     try {
-      const rawResponse = await this.#client.messages.create(
-        params,
-        signal === undefined ? undefined : { signal },
-      );
-      throwIfAborted(signal);
-      const raw = asWireRecord(rawResponse);
+      // Long-running server tools may return stop_reason "pause_turn"; the
+      // documented protocol is to resend the paused assistant content and
+      // let the turn continue. The caller sees ONE response whose content is
+      // the full concatenated turn, so multi-turn round-trips stay intact.
+      const requestMessages: WireMessage[] = [...messages];
+      const collectedContent: unknown[] = [];
+      const usages: TokenUsage[] = [];
+      let raw: WireRecord;
+      let continuations = 0;
+      for (;;) {
+        params.messages = requestMessages;
+        const rawResponse = await this.#client.messages.create(
+          params,
+          signal === undefined ? undefined : { signal },
+        );
+        throwIfAborted(signal);
+        raw = asWireRecord(rawResponse);
+        const contentArray = Array.isArray(raw.content) ? raw.content : [];
+        collectedContent.push(...contentArray);
+        usages.push(mapUsage(raw.usage));
+        if (
+          raw.stop_reason === "pause_turn" &&
+          continuations < MAX_PAUSE_TURN_CONTINUATIONS
+        ) {
+          continuations += 1;
+          const previous = requestMessages.at(-1);
+          if (previous?.role === "assistant") {
+            previous.content.push(...(contentArray as WireRecord[]));
+          } else {
+            requestMessages.push({
+              role: "assistant",
+              content: [...(contentArray as WireRecord[])],
+            });
+          }
+          continue;
+        }
+        break;
+      }
+      const usage = usages.reduce((total, entry) => ({
+        inputTokens: total.inputTokens + entry.inputTokens,
+        outputTokens: total.outputTokens + entry.outputTokens,
+        totalTokens: (total.totalTokens ?? 0) + (entry.totalTokens ?? 0),
+        ...(total.cacheReadInputTokens !== undefined ||
+        entry.cacheReadInputTokens !== undefined
+          ? {
+              cacheReadInputTokens:
+                (total.cacheReadInputTokens ?? 0) +
+                (entry.cacheReadInputTokens ?? 0),
+            }
+          : {}),
+        ...(total.cacheWriteInputTokens !== undefined ||
+        entry.cacheWriteInputTokens !== undefined
+          ? {
+              cacheWriteInputTokens:
+                (total.cacheWriteInputTokens ?? 0) +
+                (entry.cacheWriteInputTokens ?? 0),
+            }
+          : {}),
+      }));
+      const uses = serverToolUses(collectedContent);
       return {
         providerId: this.providerId,
         modelId:
           typeof raw.model === "string" ? raw.model : request.modelId,
-        content: mapResponseContent(raw.content),
+        content: mapResponseContent(collectedContent),
         stopReason: mapStopReason(raw.stop_reason),
-        usage: mapUsage(raw.usage),
-        metadata: responseMetadata(raw),
+        usage,
+        metadata: {
+          ...responseMetadata(raw),
+          ...(uses.length > 0 ? { serverToolUses: [...uses] } : {}),
+        },
       };
     } catch (error) {
       throw classifyAnthropicError(error, signal);

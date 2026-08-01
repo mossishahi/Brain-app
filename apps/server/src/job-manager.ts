@@ -384,21 +384,30 @@ export class JobManager {
       return false;
     }
     const settings = this.settings.get();
-    const resolution = await resolveCreditReset({
-      message,
-      now: new Date(checkpoint.updatedAt),
-      safetyBufferSeconds: settings.creditRecovery.safetyBufferSeconds,
-      openRouterApiKey: this.settings.getOpenRouterApiKey(),
-      openRouterModel: settings.creditRecovery.openRouterModel,
-    });
-    const migrated: WorkflowCheckpoint = {
-      ...checkpoint,
-      status: "credit_blocked",
-      creditBlock: {
+    let creditBlock: WorkflowCheckpoint["creditBlock"];
+    try {
+      const resolution = await resolveCreditReset({
+        message,
+        now: new Date(checkpoint.updatedAt),
+        safetyBufferSeconds: settings.creditRecovery.safetyBufferSeconds,
+        openRouterApiKey: this.settings.getOpenRouterApiKey(),
+        openRouterModel: settings.creditRecovery.openRouterModel,
+      });
+      creditBlock = {
         retryAt: resolution.retryAt,
         providerMessage: message,
         source: resolution.source,
-      },
+      };
+    } catch {
+      // The message names no reset time (e.g. "credit balance is too low"):
+      // still a credit block, but one the user claims manually after a
+      // top-up instead of the scheduler claiming it at a reset time.
+      creditBlock = { providerMessage: message, source: "manual" };
+    }
+    const migrated: WorkflowCheckpoint = {
+      ...checkpoint,
+      status: "credit_blocked",
+      creditBlock,
       error: undefined,
       updatedAt: this.now(),
     };
@@ -644,6 +653,8 @@ export class JobManager {
    * Called by the server poller and once at startup. Claims due credit-blocked
    * checkpoints exactly once, submits the same deterministic resume command,
    * and persists the claim so a server restart cannot double-submit it.
+   * Manual blocks (no retryAt — e.g. a top-up is needed) are never claimed
+   * here; they wait for resumeCreditBlocked().
    */
   async resumeDueCreditBlocks(): Promise<void> {
     const recovery = this.settings.get().creditRecovery;
@@ -659,6 +670,7 @@ export class JobManager {
       if (
         checkpoint?.status !== "credit_blocked" ||
         !checkpoint.creditBlock ||
+        checkpoint.creditBlock.retryAt === undefined ||
         checkpoint.creditBlock.retryAt > this.now()
       ) {
         continue;
@@ -679,25 +691,7 @@ export class JobManager {
       }
       this.autoResuming.add(record.jobId);
       try {
-        const executionSettings =
-          record.executionSettings ?? this.settings.get();
-        const command = this.command(record, "resume", executionSettings);
-        const number = (record.submissionCount ?? 1) + 1;
-        const script = this.writeScript(
-          record,
-          `submit-credit-resume-${number - 1}.sh`,
-          command,
-          executionSettings.slurmTemplate,
-        );
-        await this.submitScript(record, script, executionSettings);
-        record.status = "queued";
-        record.submissionCount = number;
-        record.autoResumePending = {
-          retryAt: checkpoint.creditBlock.retryAt,
-          submittedAt: this.now(),
-        };
-        record.updatedAt = this.now();
-        this.write(record);
+        await this.submitCreditResume(record, checkpoint.creditBlock.retryAt);
       } catch (error) {
         this.warning(
           record,
@@ -711,6 +705,76 @@ export class JobManager {
         this.autoResuming.delete(record.jobId);
       }
     }
+  }
+
+  /**
+   * User-initiated resume of a credit-blocked job: the only way to claim a
+   * manual block (whose provider message named no reset time — a top-up
+   * recovery), and an early claim for timed blocks once the user has
+   * restored credit. Refuses jobs that are not credit blocked (409) and
+   * claims that are already in flight.
+   */
+  async resumeCreditBlocked(jobId: string): Promise<JobStatus> {
+    const record = this.record(jobId);
+    if (record.trashedAt !== undefined) {
+      throw new JobConflictError(`job "${jobId}" is in the trash`);
+    }
+    if (record.status === "cancelled") {
+      throw new JobConflictError(`job "${jobId}" is cancelled`);
+    }
+    if (this.autoResuming.has(jobId)) {
+      throw new JobConflictError(
+        `job "${jobId}" already has a resume submission in progress`,
+      );
+    }
+    const checkpoint = this.checkpoint(jobId);
+    if (checkpoint?.status !== "credit_blocked" || !checkpoint.creditBlock) {
+      throw new JobConflictError(`job "${jobId}" is not credit blocked`);
+    }
+    if (record.autoResumePending) {
+      const alive =
+        record.runner === "local"
+          ? this.localAlive(record.pid)
+          : await this.slurmAlive(record.slurmJobId);
+      if (alive || this.now() - record.autoResumePending.submittedAt < 30_000) {
+        throw new JobConflictError(
+          `job "${jobId}" already has a resume submission in progress`,
+        );
+      }
+      delete record.autoResumePending;
+    }
+    this.autoResuming.add(jobId);
+    try {
+      await this.submitCreditResume(record, checkpoint.creditBlock.retryAt);
+    } finally {
+      this.autoResuming.delete(jobId);
+    }
+    return record.status;
+  }
+
+  /** Submits the deterministic credit-resume command and persists the claim. */
+  private async submitCreditResume(
+    record: JobRecord,
+    retryAt: number | undefined,
+  ): Promise<void> {
+    const executionSettings = record.executionSettings ?? this.settings.get();
+    const command = this.command(record, "resume", executionSettings);
+    const number = (record.submissionCount ?? 1) + 1;
+    const script = this.writeScript(
+      record,
+      `submit-credit-resume-${number - 1}.sh`,
+      command,
+      executionSettings.slurmTemplate,
+    );
+    await this.submitScript(record, script, executionSettings);
+    record.status = "queued";
+    record.submissionCount = number;
+    record.autoResumePending = {
+      ...(retryAt !== undefined ? { retryAt } : {}),
+      submittedAt: this.now(),
+    };
+    record.updatedAt = this.now();
+    this.write(record);
   }
 
   async answerGate(jobId: string, answer: GateAnswerRequest): Promise<JobDetail> {

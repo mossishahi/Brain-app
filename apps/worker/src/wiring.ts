@@ -18,7 +18,11 @@ import {
   type SkillResolver,
 } from "@brainstorm-agentic/brainstorm-runtime";
 import {
+  ANTHROPIC_ADAPTER,
+  CLAUDE_AGENT_ADAPTER,
+  CreditBlockedError,
   InMemoryToolRegistry,
+  isCreditBlocked,
   type AgentExecutionContext,
   type AgentExecutor,
   type AgentResult,
@@ -27,9 +31,14 @@ import {
   type CheckpointStore,
   type JsonObject,
   type JsonValue,
+  type ProviderNativeOffer,
   type RunEventListener,
   type TaxonomyAccess,
 } from "@brainstorm-agentic/core";
+import {
+  isCreditLimitMessage,
+  resolveCreditReset,
+} from "@brainstorm-agentic/credit-recovery";
 import type { ContentBundle, LoadedInputTypes } from "@brainstorm-agentic/content";
 import { ClaudeAgentExecutor } from "@brainstorm-agentic/executor-claude-agent";
 import { AnthropicMessagesProvider } from "@brainstorm-agentic/provider-anthropic";
@@ -209,6 +218,67 @@ function contentRouteResolver(config: ProviderConfig): BrainstormRouteResolver {
 }
 
 /**
+ * Converts provider credit/limit failures into the typed CreditBlockedError
+ * so the runner checkpoints `credit_blocked` (auto-resumed at the parsed
+ * reset time, or claimed manually when the message names none — e.g. the
+ * developer API's "credit balance is too low", which only a top-up clears).
+ * The Claude Agent executor raises the typed error itself; this wrapper
+ * covers the Messages API path, where the tool loop reports provider errors
+ * as plain task failures.
+ */
+export class CreditBlockDetectingAgentExecutor implements AgentExecutor {
+  constructor(
+    private readonly inner: AgentExecutor,
+    private readonly recovery?: ProviderConfig["creditRecovery"],
+  ) {}
+
+  async execute(
+    task: AgentTask,
+    context: AgentExecutionContext,
+  ): Promise<AgentResult> {
+    let result: AgentResult;
+    try {
+      result = await this.inner.execute(task, context);
+    } catch (error) {
+      if (isCreditBlocked(error)) throw error;
+      const blocked = await this.creditBlockFrom(error);
+      if (blocked) throw blocked;
+      throw error;
+    }
+    if (result.status === "error") {
+      const blocked = await this.creditBlockFrom(result.error.message);
+      if (blocked) throw blocked;
+    }
+    return result;
+  }
+
+  private async creditBlockFrom(
+    reason: unknown,
+  ): Promise<CreditBlockedError | undefined> {
+    const message =
+      typeof reason === "string"
+        ? reason
+        : reason instanceof Error
+          ? reason.message
+          : String(reason);
+    if (!isCreditLimitMessage(message)) return undefined;
+    try {
+      const resolved = await resolveCreditReset({
+        message,
+        timeZone: this.recovery?.timeZone,
+        safetyBufferSeconds: this.recovery?.safetyBufferSeconds,
+        openRouterApiKey: this.recovery?.openRouterApiKey,
+        openRouterModel: this.recovery?.openRouterModel,
+      });
+      return new CreditBlockedError(resolved.retryAt, message, resolved.source);
+    } catch {
+      // No reset time in the message: block for a manual resume (top-up).
+      return new CreditBlockedError(undefined, message, "manual");
+    }
+  }
+}
+
+/**
  * Persists reasoning-trace capture (thinking segments and stepwise chain
  * turns) as a per-task artifact, then strips it from the journaled result so
  * checkpoints stay lean. Traces reach the job owner through the artifact
@@ -282,13 +352,27 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
         .map((m) => m.toolId),
   );
 
+  // Provider-native operation offers for the capability broker: web search,
+  // web fetch, and code execution run natively on both provider paths (as
+  // Anthropic server tools, or as Claude Code's own built-ins). Offline runs
+  // offer nothing and fall back to the capability catalog's honesty rules.
+  const providerOffers: readonly ProviderNativeOffer[] =
+    options.providerConfig.provider === "anthropic"
+      ? ANTHROPIC_ADAPTER.staticOffers
+      : options.providerConfig.provider === "claude-agent"
+        ? CLAUDE_AGENT_ADAPTER.staticOffers
+        : [];
+
   return new BrainstormRuntime({
     agentExecutor: new ThinkingArtifactAgentExecutor(
-      buildAgentExecutor(
-        options.providerConfig,
-        attachmentRoots,
-        options.bundle.catalogs.inputTypes,
-        options.taxonomy,
+      new CreditBlockDetectingAgentExecutor(
+        buildAgentExecutor(
+          options.providerConfig,
+          attachmentRoots,
+          options.bundle.catalogs.inputTypes,
+          options.taxonomy,
+        ),
+        options.providerConfig.creditRecovery,
       ),
       options.artifacts,
     ),
@@ -306,7 +390,7 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
       "taxonomy-access": anthropicTaxonomyTools,
     }),
     // Capability broker inputs
-    providerOffers: [],
+    providerOffers,
     hostTools: ALL_HOST_TOOL_MANIFESTS,
     enabledHostToolIds,
     humanGateMode: options.autoApproveGates ? "autoApproveSkippable" : "manual",
