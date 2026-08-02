@@ -11,6 +11,8 @@ import type {
 import {
   OUTPUT_SHAPES,
   STAGE_IDS,
+  type ActivityCapability,
+  type ActivityDetailView,
   type AnnotatedFileView,
   type ExpertAreaView,
   type AssessFeasibilityOutputView,
@@ -270,6 +272,45 @@ export function stageForPath(path: string): StageId | undefined {
     : undefined;
 }
 
+/**
+ * Which semantic capability each logged tool resolves through, across both
+ * execution backends (host tools, Claude Code built-ins, Anthropic server
+ * tools). Tools that transport artifacts (StructuredOutput, submit_step)
+ * are deliberately absent — their rows carry no capability icon.
+ */
+const TOOL_CAPABILITY: Readonly<Record<string, ActivityCapability>> = {
+  attachment_list: "attachment-access",
+  attachment_read: "attachment-access",
+  Read: "attachment-access",
+  Glob: "attachment-access",
+  Grep: "attachment-access",
+  Bash: "code-execution",
+  code_execution: "code-execution",
+  bash_code_execution: "code-execution",
+  text_editor_code_execution: "code-execution",
+  WebSearch: "web-search",
+  web_search: "web-search",
+  WebFetch: "web-search",
+  web_fetch: "web-search",
+  taxonomy_tree: "taxonomy-access",
+  taxonomy_resolve: "taxonomy-access",
+};
+
+const DETAIL_KINDS = new Set(["code", "query", "url", "path", "text"]);
+
+/** The executor-attached call detail, when present and well-formed. */
+function activityDetail(progress: {
+  readonly data?: JsonObject;
+}): ActivityDetailView | undefined {
+  const detail = object(progress.data)?.detail;
+  const record = object(detail);
+  if (!record) return undefined;
+  const { kind, value } = record;
+  if (typeof kind !== "string" || !DETAIL_KINDS.has(kind)) return undefined;
+  if (typeof value !== "string" || value.length === 0) return undefined;
+  return { kind: kind as ActivityDetailView["kind"], value };
+}
+
 function timings(events: readonly RunEvent[]): Map<StageId, StageTiming> {
   const result = new Map<StageId, StageTiming>(
     STAGE_IDS.map((id) => [id, { active: false, activity: [] }]),
@@ -284,6 +325,10 @@ function timings(events: readonly RunEvent[]): Map<StageId, StageTiming> {
       if (!stage) continue;
       const timing = result.get(stage)!;
       if (event.type === "agent:progress") {
+        const capability = event.progress.toolName
+          ? TOOL_CAPABILITY[event.progress.toolName]
+          : undefined;
+        const detail = activityDetail(event.progress);
         timing.activity.push({
           id: String(event.seq),
           at: event.at,
@@ -298,6 +343,8 @@ function timings(events: readonly RunEvent[]): Map<StageId, StageTiming> {
           ...(event.progress.elapsedMs !== undefined
             ? { elapsedMs: event.progress.elapsedMs }
             : {}),
+          ...(capability ? { capability } : {}),
+          ...(detail ? { detail } : {}),
         });
       } else {
         const role = event.taskKind.replace(/^brainstorm\./, "");
@@ -411,6 +458,14 @@ function processor(value: unknown): ProcessorOutputView | undefined {
   ) {
     return undefined;
   }
+  const requestedOutputs = Array.isArray(output.requestedOutputs)
+    ? output.requestedOutputs.flatMap((candidate) => {
+        const entry = object(candidate);
+        return typeof entry?.title === "string" && typeof entry.ask === "string"
+          ? [{ title: entry.title, ask: entry.ask }]
+          : [];
+      })
+    : [];
   // The raw artifact may also carry the annotated file map; the view exposes
   // the clean structured input only (files surface via the partition view).
   return {
@@ -421,6 +476,7 @@ function processor(value: unknown): ProcessorOutputView | undefined {
     attachments: output.attachments,
     assumptions: output.assumptions,
     cotSteps: output.cotSteps,
+    ...(requestedOutputs.length > 0 ? { requestedOutputs } : {}),
   } as ProcessorOutputView;
 }
 
@@ -973,11 +1029,27 @@ function brainIdea(value: unknown): BrainIdeaView | undefined {
     }
   }
 
+  // The member's responses to the submitter's explicitly requested outputs
+  // sit on the envelope next to the shape body; paragraphs join for display.
+  const requested = Array.isArray(envelope.requested)
+    ? envelope.requested.flatMap((candidate) => {
+        const section = object(candidate);
+        if (typeof section?.title !== "string" || !Array.isArray(section.response)) return [];
+        return [
+          {
+            title: section.title,
+            response: section.response.filter((entry) => typeof entry === "string").join("\n\n"),
+          },
+        ];
+      })
+    : [];
+
   const literature = paperViews(idea.literature);
   return {
     type: label,
     shape: shape ?? "paper",
     ...shaped,
+    ...(requested.length > 0 ? { requested } : {}),
     cot: idea.cot as string[],
     ...(typeof idea.novelty === "string" ? { novelty: idea.novelty } : {}),
     ...(literature.length > 0 ? { literature } : {}),
@@ -1263,6 +1335,7 @@ function activePaths(events: readonly RunEvent[]): Set<string> {
 function buildReviews(
   panel: readonly PanelMemberView[],
   ideas: ReadonlyMap<string, BrainIdeaView>,
+  rawIdeas: ReadonlyMap<string, unknown>,
   processorOutput: ProcessorOutputView | undefined,
   entries: readonly JournalEntry[],
   events: readonly RunEvent[],
@@ -1274,6 +1347,9 @@ function buildReviews(
     decision?: JudgeDecisionView;
     revision?: { touchedSteps: number[] };
   }>();
+  // Per-member revision replay: how many redevelopments landed, and the last
+  // one's raw record — the source of the member's final output envelope.
+  const memberRevisions = new Map<number, { count: number; last: Record<string, unknown> }>();
   const roundFor = (member: number, step: number, round: number) => {
     const key = `${member}:${step}:${round}`;
     let found = rounds.get(key);
@@ -1338,6 +1414,11 @@ function buildReviews(
           .filter((index) => index > 0);
         round.revision = { touchedSteps };
         chain.splice(0, chain.length, ...replacement);
+        const state = memberRevisions.get(at.member);
+        memberRevisions.set(at.member, {
+          count: (state?.count ?? 0) + 1,
+          last: revision,
+        });
       }
     }
   }
@@ -1378,12 +1459,35 @@ function buildReviews(
         rounds: views,
       };
     });
+    // The member's output as the review leaves it: with no redevelopments it
+    // IS the first pass; otherwise the last revision's envelope over the
+    // fully replayed chain, with the first pass's literature record riding
+    // along (revisions rework reasoning, never its grounding record). This
+    // replay works for every run the journal reaches, old artifacts or new.
+    const revisionState = memberRevisions.get(memberIndex);
+    let finalIdea = ideas.get(member.id);
+    if (revisionState) {
+      const firstRaw = object(rawIdeas.get(member.id));
+      const composed = brainIdea({
+        output: revisionState.last.output,
+        cot: cotFor(memberIndex),
+        ...(revisionState.last.novelty !== undefined
+          ? { novelty: revisionState.last.novelty }
+          : {}),
+        ...(firstRaw?.literature !== undefined
+          ? { literature: firstRaw.literature }
+          : {}),
+      });
+      if (composed) finalIdea = composed;
+    }
     return {
       memberId: member.id,
       label: seatLabel(memberIndex),
       department: member.department,
       umbrella: member.umbrella,
       steps,
+      ...(finalIdea ? { finalIdea } : {}),
+      revisionCount: revisionState?.count ?? 0,
     };
   });
 
@@ -1559,16 +1663,26 @@ export function buildJobDetail(input: MapperInput): JobDetail {
       : [];
   const addedMemberIds = gate.added.map((member) => member.id);
 
+  // First-pass ideas stay pinned to the FIRST artifact under each member's
+  // idea path: the runtime appends a new version there after every
+  // redevelopment, and those later versions belong to the review stage's
+  // final view, never to the first-pass record. The raw values are kept
+  // alongside the views so the review builder can compose finals from them.
   const ideas = new Map<string, BrainIdeaView>();
+  const rawIdeas = new Map<string, unknown>();
   for (const member of finalPanel) {
-    const value =
-      brainIdea(artifact(artifacts, "brainIdea", `ideas.${member.id}`)) ??
-      brainIdea(journalAgent(entries, (key) =>
+    const raw =
+      artifact(artifacts, "brainIdea", `ideas.${member.id}`) ??
+      journalAgent(entries, (key) =>
         key.includes("/first-pass/") &&
         key.includes(`/member[${finalPanel.indexOf(member)}]/`) &&
         /\/develop-idea(?:\/develop-idea-execute)?::result$/.test(key)
-      ));
-    if (value) ideas.set(member.id, value);
+      );
+    const value = brainIdea(raw);
+    if (value) {
+      ideas.set(member.id, value);
+      rawIdeas.set(member.id, raw);
+    }
   }
 
   const firstPassActive = activePaths(events);
@@ -1642,6 +1756,7 @@ export function buildJobDetail(input: MapperInput): JobDetail {
   const review = buildReviews(
     finalPanel,
     ideas,
+    rawIdeas,
     processorOutput,
     entries,
     events,

@@ -32,9 +32,11 @@ test("workflow phases appear in the canonical order", () => {
   const bundle = freshBundle();
   const root = bundle.workflows["brainstorm"]!.root as SequenceNode;
   assert.equal(root.kind, "sequence");
-  // The code-annotation pass ships from workflow 0.11.0; earlier published
-  // bundles stay valid without it, so the expected spine is presence-aware.
+  // The code-annotation pass ships from workflow 0.11.0 and the woven
+  // interdisciplinary seat from 0.12.0; earlier published bundles stay valid
+  // without them, so the expected spine is presence-aware.
   const hasCodeAnnotation = root.steps.some((step) => step.id === "partition-files-code");
+  const hasWeave = root.steps.some((step) => step.id === "weave-panel");
   assert.deepEqual(
     root.steps.map((s) => s.id),
     [
@@ -48,6 +50,7 @@ test("workflow phases appear in the canonical order", () => {
       "submit-decisions",
       "bridge-experts",
       "select-panel",
+      ...(hasWeave ? ["weave-panel"] : []),
       "confirm-panel",
       "first-pass",
       "review-members",
@@ -113,6 +116,9 @@ test("the code-annotation pass is gated on code files and folds summaries into t
     "code-annotator",
     "brain",
     "commentor",
+    ...(bundle.skills["interdisciplinary-commentor"]
+      ? ["interdisciplinary-commentor"]
+      : []),
     "judge",
     "redeveloper",
     "integrator",
@@ -153,6 +159,9 @@ test("the processor's file map is partitioned deterministically and NA files nev
     "build-pool",
     "develop-idea",
     "comment-step",
+    ...(root.steps.some((step) => step.id === "weave-panel")
+      ? ["comment-step-bridge"]
+      : []),
     "judge-step",
     "redevelop-idea",
     "synthesize-proposal",
@@ -180,8 +189,18 @@ test("the processor's file map is partitioned deterministically and NA files nev
 test("the decomposer split: pool with provenance, deterministic matching, placer over the live taxonomy, queued suggestions, bridge, then panel.select", () => {
   const bundle = freshBundle();
   const root = bundle.workflows["brainstorm"]!.root as SequenceNode;
-  const order = ["build-pool", "match-taxonomy", "place-fields", "submit-decisions", "bridge-experts", "select-panel", "confirm-panel"]
-    .map((id) => root.steps.findIndex((step) => step.id === id));
+  const order = [
+    "build-pool",
+    "match-taxonomy",
+    "place-fields",
+    "submit-decisions",
+    "bridge-experts",
+    "select-panel",
+    // The interdisciplinary seat weave (0.12.0+) sits between selection and
+    // the confirmation gate, so the seat is human-confirmable like any other.
+    ...(root.steps.some((step) => step.id === "weave-panel") ? ["weave-panel"] : []),
+    "confirm-panel",
+  ].map((id) => root.steps.findIndex((step) => step.id === id));
   for (let i = 1; i < order.length; i += 1) {
     assert.equal(order[i], order[i - 1]! + 1, "the decompose stages run back to back");
   }
@@ -255,6 +274,61 @@ test("the decomposer split: pool with provenance, deterministic matching, placer
     undefined,
     "leaf-product selection replaced round-robin, so no moduleSize knob exists",
   );
+});
+
+test("the interdisciplinary seat is woven deterministically and comments through its own skill", () => {
+  const bundle = freshBundle();
+  const root = bundle.workflows["brainstorm"]!.root as SequenceNode;
+  if (!root.steps.some((step) => step.id === "weave-panel")) {
+    return; // pre-weave published bundle
+  }
+
+  // Deterministic weave: one appended full member whose expertise is the
+  // space between the seated fields, bounded and confirmable at the gate.
+  const weave = findActivity(root, "weave-panel");
+  assert.equal(weave.handler, "panel.weave");
+  assert.deepEqual(weave.bind, { panel: "panel", maxSeats: "params.maxSeats" });
+  assert.deepEqual(weave.output, { key: "panel", schema: "panel" });
+  const weaveIndex = root.steps.findIndex((step) => step.id === "weave-panel");
+  const gateIndex = root.steps.findIndex((step) => step.id === "confirm-panel");
+  assert.ok(weaveIndex >= 0 && weaveIndex < gateIndex, "the seat is woven before the human gate");
+
+  const handler = bundle.activities.handlers["panel.weave"]!;
+  assert.equal(handler.deterministic, true);
+  assert.deepEqual(handler.inputs, {
+    panel: { kind: "artifact", schema: "panel" },
+    maxSeats: { kind: "positiveInteger" },
+  });
+  assert.equal(handler.outputSchema, "panel");
+  assert.deepEqual(handler.bounds, {
+    outputField: "members",
+    maxItemsFromInput: "maxSeats",
+  });
+
+  // Commenting dispatches on the seat marker; both arms return the same
+  // comment artifact into the same round slot, so the judge and the ledger
+  // treat the interdisciplinary seat like any other commentor.
+  const dispatch = findNode(root, "dispatch-comment");
+  assert.equal(dispatch.kind, "condition");
+  if (dispatch.kind !== "condition") return;
+  assert.deepEqual(dispatch.if, { ref: "commentor.seat", equals: "interdisciplinary" });
+  const bridge = findAgent(root, "comment-step-bridge");
+  assert.equal(bridge.skill, "interdisciplinary-commentor");
+  assert.equal(bridge.bind?.["roster"], "panel.members", "the seat receives the roster");
+  const disciplinary = findAgent(root, "comment-step");
+  assert.equal(disciplinary.skill, "commentor");
+  assert.equal(disciplinary.bind?.["roster"], undefined, "disciplinary seats stay roster-blind");
+  for (const node of [bridge, disciplinary]) {
+    assert.deepEqual(node.output, { key: "round.comments[commentor.id]", schema: "comment" });
+  }
+
+  // The interdisciplinary skill mirrors the commentor contract: same verdict
+  // artifact, roster delivered as task data, interface literature review.
+  const skill = bundle.skills["interdisciplinary-commentor"]!;
+  assert.equal(skill.meta.kind, "role");
+  assert.equal(skill.meta.output, "comment");
+  assert.ok(skill.meta.payload.includes("roster"));
+  assert.ok(skill.meta.techniques.includes("literature-review"));
 });
 
 test("panel confirmation is an optional, shrink-only human gate", () => {
@@ -384,11 +458,15 @@ test("skills split into the expected roles and 6 techniques, with clean prompt b
     [
       "brain",
       "chair",
-      // The code annotator ships with the code-annotation pass (0.11.0+);
-      // earlier published bundles carry the nine original roles.
+      // The code annotator ships with the code-annotation pass (0.11.0+) and
+      // the interdisciplinary seat's commenting role with the woven panel
+      // (0.12.0+); earlier published bundles carry the original roles.
       ...(bundle.skills["code-annotator"] ? ["code-annotator"] : []),
       "commentor",
       "integrator",
+      ...(bundle.skills["interdisciplinary-commentor"]
+        ? ["interdisciplinary-commentor"]
+        : []),
       "judge",
       "placer",
       "pool-builder",
@@ -529,7 +607,18 @@ test("no type-aware skill hardcodes a type name, so a JSON rename needs no promp
   // through {{type}}, {{shape}}, {{outline}}, and {{typeGuidance}} (plus the
   // processor's rendered {{typeOptions}}). A literal type name in one of these
   // bodies would silently rot the prompt the moment the catalog is edited.
-  for (const name of ["processor", "brain", "redeveloper", "commentor", "judge", "chair", "integrator"]) {
+  for (const name of [
+    "processor",
+    "brain",
+    "redeveloper",
+    "commentor",
+    ...(bundle.skills["interdisciplinary-commentor"]
+      ? ["interdisciplinary-commentor"]
+      : []),
+    "judge",
+    "chair",
+    "integrator",
+  ]) {
     const skill = bundle.skills[name]!;
     for (const typeName of Object.keys(bundle.catalogs.inputTypes.types)) {
       assert.ok(

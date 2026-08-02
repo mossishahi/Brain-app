@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -285,6 +285,20 @@ test("run and resume accept content-dir and append JSONL events", () => {
     const events = lines.map((line) => JSON.parse(line) as { type: string });
     assert.ok(events.some((event) => event.type === "run:suspended"));
     assert.ok(events.some((event) => event.type === "run:completed"));
+
+    // The finished run leaves readable copies of the reviewed deliverables
+    // beside the checkpoint: one file per member's final output plus the
+    // chair's proposal, and the CLI names each written file.
+    const finalDir = join(root, runId, "final");
+    const finalFiles = readdirSync(finalDir).sort();
+    assert.ok(finalFiles.includes("proposal.json"), "final/proposal.json is written");
+    const memberFiles = finalFiles.filter((name) => /^member-\d+\.json$/.test(name));
+    assert.ok(memberFiles.length >= 2, "one final file per panel member");
+    const memberFinal = JSON.parse(
+      readFileSync(join(finalDir, memberFiles[0]!), "utf8"),
+    ) as { output?: unknown; cot?: unknown };
+    assert.ok(memberFinal.output !== undefined && Array.isArray(memberFinal.cot));
+    assert.ok(resumed.stdout.includes("Final output:"), "the CLI reports the final copies");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

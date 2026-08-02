@@ -308,6 +308,7 @@ class FakeBrainstormExecutor implements AgentExecutor {
         };
         break;
       case "commentor":
+      case "interdisciplinary-commentor":
         output = {
           verdict: "Pass",
           step: bindings.currentStep,
@@ -519,10 +520,16 @@ test("Pass path executes member -> step -> round order and keeps C-O-T from chai
       // defer to children sitting within the remaining capacity, so Physics
       // surfaces through the photon-counting topic, Machine Learning seats
       // as an umbrella (its topic is outside the window), and Biology
-      // surfaces through network inference — in queue order.
+      // surfaces through network inference — in queue order. The weave then
+      // appends the interdisciplinary seat, a full member that develops too.
       ["member-1", "Physics", "Quantum Optics"],
       ["member-2", "Computer Science", "Machine Learning"],
       ["member-3", "Biology", "Systems Biology"],
+      [
+        "member-4",
+        "Interdisciplinary Research",
+        "the interdisciplinary space between Quantum Optics, Machine Learning and Systems Biology",
+      ],
     ],
   );
   assert.deepEqual(executor.judgeOrder, [
@@ -535,7 +542,22 @@ test("Pass path executes member -> step -> round order and keeps C-O-T from chai
     "member-3:1:1",
     "member-3:2:1",
     "member-3:3:1",
+    "member-4:1:1",
+    "member-4:2:1",
+    "member-4:3:1",
   ]);
+  // The interdisciplinary seat comments through its own roster-aware skill;
+  // disciplinary seats never receive the roster.
+  const bridgeComments = executor.tasks("interdisciplinary-commentor");
+  assert.ok(bridgeComments.length > 0, "the interdisciplinary seat commented");
+  for (const task of bridgeComments) {
+    assert.equal(task.agentId, "member-4");
+    assert.ok(Array.isArray(task.bindings.roster), "the seat receives the roster");
+  }
+  for (const task of executor.tasks("commentor")) {
+    assert.notEqual(task.agentId, "member-4", "the seat never uses the disciplinary skill");
+    assert.equal(task.bindings.roster, undefined);
+  }
 
   const chair = executor.tasks("chair")[0]!;
   const chairIdeas = object(chair.bindings.ideas, "chair ideas");
@@ -558,8 +580,8 @@ test("Pass path executes member -> step -> round order and keeps C-O-T from chai
   }
   const bridge = object(chair.bindings.bridge, "chair bridge report");
   assert.ok(
-    Array.isArray(bridge.noveltyAudit) && bridge.noveltyAudit.length === 3,
-    "the chair receives one audit entry per member",
+    Array.isArray(bridge.noveltyAudit) && bridge.noveltyAudit.length === 4,
+    "the chair receives one audit entry per member, the woven seat included",
   );
 
   for (const task of executor.seen) {
@@ -846,6 +868,30 @@ test("Build redevelops minimally: change-set computed, ledger carried, no immedi
   // Step targets are narrowed to the walk position in the delivered schema.
   const stepSchema = (roundTwoSchema.properties as JsonObject).step as JsonObject;
   assert.equal(stepSchema.maximum, 2, "comment step targets are capped at the reviewed step");
+
+  // Every redevelopment appends a new version of the member's idea under the
+  // member's own artifact path, so the LAST entry is the reviewed output the
+  // integrator, the chair, the dashboard, and the session's final copies read.
+  const artifacts = await app.artifacts.list();
+  const versions = artifacts.filter(
+    (ref) => ref.metadata?.schema === "brainIdea" && ref.metadata.path === "ideas.member-1",
+  );
+  assert.equal(versions.length, 2, "first pass plus one revision under ideas.member-1");
+  const finalStored = await app.artifacts.get(versions[versions.length - 1]!.id);
+  const finalIdea = JSON.parse(finalStored!.data) as {
+    cot: readonly string[];
+    novelty?: string;
+  };
+  assert.deepEqual(finalIdea.cot, [
+    "COT:member-1:1",
+    "REVISED:member-1:2",
+    "COT:member-1:3",
+  ]);
+  assert.equal(finalIdea.novelty, "Revised novelty for member-1");
+  const untouched = artifacts.filter(
+    (ref) => ref.metadata?.schema === "brainIdea" && ref.metadata.path === "ideas.member-2",
+  );
+  assert.equal(untouched.length, 1, "an unrevised member keeps its single first-pass version");
 });
 
 test("a verdict targeting a step beyond the review position fails the run with a named error", async () => {
@@ -941,6 +987,165 @@ test("invalid agent artifacts fail before downstream state updates", async () =>
   assert.equal(result.status, "failed");
   assert.equal(result.status === "failed" && result.error.name, "ArtifactValidationError");
   assert.match(result.status === "failed" ? result.error.message : "", /processorOutput/);
+});
+
+test("explicitly requested outputs are pinned per task, answered by every member, and reach the chair", async () => {
+  const asks = [
+    { title: "Benchmarking protocol", ask: "Propose a benchmarking protocol for the mechanism." },
+    { title: "Risk register", ask: "List the main failure risks of the mechanism with mitigations." },
+  ];
+  // A well-behaved panel: the processor records the submitter's explicit
+  // asks, and every member (first pass and revision alike) echoes one
+  // response section per ask, in order, titles verbatim.
+  class AnsweringExecutor extends FakeBrainstormExecutor {
+    override async execute(task: AgentTask): Promise<AgentResult> {
+      const result = await super.execute(task);
+      const input = object(task.input, "task input");
+      if (result.status !== "ok") return result;
+      if (input.role === "processor") {
+        const output = object(result.output as JsonValue, "processor output");
+        return { ...result, output: { ...output, requestedOutputs: asks } };
+      }
+      if (input.role === "brain" || input.role === "redeveloper") {
+        const artifact = object(result.output as JsonValue, "member artifact");
+        const bindings = object(input.bindings, "task bindings");
+        const boundInput = object(bindings.input, "bound input");
+        const boundAsks = boundInput.requestedOutputs as readonly { title: string }[];
+        const requested = boundAsks.map((entry) => ({
+          title: entry.title,
+          response: [`Direct response to "${entry.title}" from ${String(task.agentId)}.`],
+        }));
+        return {
+          ...result,
+          output: {
+            ...artifact,
+            output: { ...object(artifact.output, "envelope"), requested },
+          },
+        };
+      }
+      return result;
+    }
+  }
+
+  const executor = new AnsweringExecutor();
+  const result = await runtime(executor).run({
+    runId: "requested-outputs",
+    submission: { prompt: "Investigate the mechanism and also give me a benchmarking protocol and a risk register", attachments: [] },
+    params: { panelSize: 2 },
+  });
+  assert.equal(
+    result.status,
+    "completed",
+    result.status === "failed" ? `${result.error.name}: ${result.error.message}` : undefined,
+  );
+
+  // Every member task's delivered schema pins the section list: required,
+  // count fixed, titles enum-narrowed in the recorded order.
+  for (const task of executor.tasks("brain")) {
+    const format = task.task.modelRequest?.responseFormat;
+    if (format?.type !== "jsonSchema") throw new Error("brain has no jsonSchema format");
+    const envelope = object(
+      object(format.schema.properties, "brain properties").output,
+      "brain output property",
+    );
+    assert.ok(
+      Array.isArray(envelope.required) && (envelope.required as JsonValue[]).includes("requested"),
+      "the requested sections are required in the delivered schema",
+    );
+    const requestedProperty = object(
+      object(envelope.properties, "envelope properties").requested,
+      "requested property",
+    );
+    assert.equal(requestedProperty.minItems, asks.length);
+    assert.equal(requestedProperty.maxItems, asks.length);
+    const titleProperty = object(
+      object(object(requestedProperty.items, "requested items").properties, "item properties").title,
+      "title property",
+    );
+    assert.deepEqual(
+      titleProperty.enum,
+      asks.map((entry) => entry.title),
+      "section titles are pinned in the recorded order",
+    );
+  }
+
+  // The sections ride each member's output into the integrator and the chair.
+  const chairIdeas = object(executor.tasks("chair")[0]!.bindings.ideas, "chair ideas");
+  const auditIdeas = object(executor.tasks("integrator")[0]!.bindings.ideas, "integrator ideas");
+  for (const ideas of [chairIdeas, auditIdeas]) {
+    for (const [memberId, idea] of Object.entries(ideas)) {
+      const envelope = object(object(idea, "projected idea").output, "projected envelope");
+      const sections = envelope.requested as readonly JsonValue[];
+      assert.ok(Array.isArray(sections), `${memberId} carries requested sections downstream`);
+      assert.deepEqual(
+        sections.map((section) => object(section, "section").title),
+        asks.map((entry) => entry.title),
+      );
+    }
+  }
+});
+
+test("a member that skips a requested output fails the run with a named error", async () => {
+  const withAsks = new (class extends FakeBrainstormExecutor {
+    override async execute(task: AgentTask): Promise<AgentResult> {
+      const result = await super.execute(task);
+      const input = object(task.input, "task input");
+      if (input.role !== "processor" || result.status !== "ok") return result;
+      const output = object(result.output as JsonValue, "processor output");
+      return {
+        ...result,
+        output: {
+          ...output,
+          requestedOutputs: [
+            { title: "Benchmarking protocol", ask: "Propose a benchmarking protocol for the mechanism." },
+          ],
+        },
+      };
+    }
+  })();
+  // The base executor's members never emit requested sections, so the first
+  // member write must fail the REQUESTED_SECTION_MISMATCH cross-check.
+  const result = await runtime(withAsks).run({
+    submission: "Requested output skipped",
+    params: { panelSize: 2 },
+  });
+  assert.equal(result.status, "failed");
+  assert.match(
+    result.status === "failed" ? result.error.message : "",
+    /must answer exactly the 1 requested output/,
+  );
+});
+
+test("requested sections without a recorded ask fail the run with a named error", async () => {
+  const volunteers = new (class extends FakeBrainstormExecutor {
+    override async execute(task: AgentTask): Promise<AgentResult> {
+      const result = await super.execute(task);
+      const input = object(task.input, "task input");
+      if (input.role !== "brain" || result.status !== "ok") return result;
+      const artifact = object(result.output as JsonValue, "member artifact");
+      return {
+        ...result,
+        output: {
+          ...artifact,
+          output: {
+            ...object(artifact.output, "envelope"),
+            requested: [
+              { title: "Volunteered extra", response: ["An unrequested section nobody asked for."] },
+            ],
+          },
+        },
+      };
+    }
+  })();
+  const result = await runtime(volunteers).run({
+    submission: "Unrequested sections",
+    params: { panelSize: 2 },
+  });
+  assert.equal(result.status, "failed");
+  assert.match(
+    result.status === "failed" ? result.error.message : "",
+    /recorded no requested outputs/,
+  );
 });
 
 test("a classification outside the input-type catalog fails the run with a named error", async () => {

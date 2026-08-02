@@ -103,6 +103,146 @@ function memberIdea(stage: FirstPassStage) {
   return member.idea;
 }
 
+test("review view surfaces each member's final version; the first pass stays the original", () => {
+  const workspace = mkdtempSync(join(tmpdir(), "stage-mapper-test-"));
+  try {
+    const sessionDir = join(workspace, "session");
+    const jobDir = join(workspace, "job");
+    mkdirSync(join(sessionDir, "artifacts"), { recursive: true });
+    mkdirSync(jobDir, { recursive: true });
+
+    const paperBody = (method: string) => ({
+      abstract: [paragraph, paragraph, paragraph],
+      introduction: [paragraph, paragraph, paragraph],
+      method: [method, paragraph, paragraph],
+      discussion: [paragraph, paragraph, paragraph],
+      conclusion: [paragraph],
+    });
+    const firstIdea = {
+      output: { type: "research idea", paper: paperBody("The original mechanism.") },
+      cot: ["Step one.", "Step two.", "Step three."],
+      novelty: "Original novelty claim.",
+      literature: [{ title: "Closest work", year: 2024 }],
+    };
+    const revisedEnvelope = {
+      type: "research idea",
+      paper: paperBody("The repaired mechanism."),
+    };
+    const revisedIdea = {
+      output: revisedEnvelope,
+      cot: ["Step one.", "REVISED step two.", "Step three."],
+      novelty: "Revised novelty claim.",
+      literature: firstIdea.literature,
+    };
+    // The journal record of the revision: the agent result of the
+    // redevelop-idea execute step at member[0], step index 1, round 0.
+    const revisionEntry = {
+      key:
+        "brainstorm-root/review-members/member[0]/review-steps/cotStep[1]/" +
+        "review-round/iter[0]/review-round-body/maybe-redevelop/then/" +
+        "redevelop-idea/redevelop-idea-execute::result",
+      kind: "agent",
+      value: {
+        taskId: "t-revision",
+        status: "ok",
+        output: {
+          output: revisedEnvelope,
+          steps: revisedIdea.cot,
+          novelty: "Revised novelty claim.",
+        },
+      },
+    };
+    writeFileSync(
+      join(sessionDir, "checkpoint.json"),
+      JSON.stringify({
+        runId: "job-1",
+        workflowId: "brainstorm",
+        status: "completed",
+        input: {},
+        journal: [revisionEntry],
+        pendingGates: [],
+        seq: 1,
+        updatedAt: Date.now(),
+      }),
+    );
+    writeFileSync(
+      join(sessionDir, "artifacts", "index.json"),
+      JSON.stringify({
+        refs: [
+          { id: "a-panel", metadata: { schema: "panel", path: "panel" } },
+          { id: "a-idea", metadata: { schema: "brainIdea", path: "ideas.member-1" } },
+          // The runtime re-persists the idea after the redevelopment; the
+          // first-pass view must stay pinned to the FIRST entry regardless.
+          { id: "a-idea-rev", metadata: { schema: "brainIdea", path: "ideas.member-1" } },
+        ],
+      }),
+    );
+    writeFileSync(
+      join(sessionDir, "artifacts", "a-panel"),
+      JSON.stringify({
+        members: [
+          { id: "member-1", department: "Physics", umbrella: "Quantum Optics", subfields: [] },
+          { id: "member-2", department: "Biology", umbrella: "Systems Biology", subfields: [] },
+        ],
+      }),
+    );
+    writeFileSync(join(sessionDir, "artifacts", "a-idea"), JSON.stringify(firstIdea));
+    writeFileSync(join(sessionDir, "artifacts", "a-idea-rev"), JSON.stringify(revisedIdea));
+
+    const record: JobRecord = {
+      jobId: "job-1",
+      topic: "topic",
+      status: "completed",
+      runner: "local",
+      createdAt: 1,
+      updatedAt: 2,
+    };
+    const detail = buildJobDetail({
+      record,
+      status: "completed",
+      sessionDir,
+      jobDir,
+      settings,
+    });
+
+    const firstPassStage = detail.stages.find((candidate) => candidate.id === "first-pass");
+    assert.ok(firstPassStage && firstPassStage.id === "first-pass");
+    const firstPassIdea = firstPassStage.members.find(
+      (member) => member.memberId === "member-1",
+    )?.idea;
+    assert.ok(firstPassIdea?.paper);
+    assert.ok(
+      firstPassIdea.paper.method.startsWith("The original mechanism."),
+      "the first-pass card keeps the original version",
+    );
+    assert.equal(firstPassIdea.cot[1], "Step two.");
+
+    const reviewStage = detail.stages.find((candidate) => candidate.id === "review-members");
+    assert.ok(reviewStage && reviewStage.id === "review-members");
+    const reviewed = reviewStage.members.find((member) => member.memberId === "member-1");
+    assert.ok(reviewed, "member-1 has a review view");
+    assert.equal(reviewed.revisionCount, 1);
+    assert.ok(reviewed.finalIdea?.paper);
+    assert.ok(
+      reviewed.finalIdea.paper.method.startsWith("The repaired mechanism."),
+      "the review view carries the revised envelope as the final version",
+    );
+    assert.equal(reviewed.finalIdea.cot[1], "REVISED step two.");
+    assert.equal(reviewed.finalIdea.novelty, "Revised novelty claim.");
+    assert.equal(
+      reviewed.finalIdea.literature?.length,
+      1,
+      "the first pass's literature record rides into the final version",
+    );
+
+    const untouched = reviewStage.members.find((member) => member.memberId === "member-2");
+    assert.equal(untouched?.revisionCount, 0);
+    assert.equal(untouched?.finalIdea, undefined, "no first pass, nothing to finalize");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("every submission type's first-pass output maps to its own view shape", () => {
   const develop = memberIdea(
     firstPass({

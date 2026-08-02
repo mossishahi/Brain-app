@@ -53,6 +53,27 @@ const noEvidence: JsonObject = {
   shows: "",
 };
 
+/**
+ * The requested-output section list a member's envelope must carry: one
+ * response per entry of the structured input's `requestedOutputs`, in order,
+ * titles echoed verbatim — the same contract the runtime enforces. Returns
+ * undefined when the run recorded no requested outputs.
+ */
+function requestedSections(input: JsonValue | undefined, label: string): JsonValue[] | undefined {
+  const requested = asObject(input).requestedOutputs;
+  if (!Array.isArray(requested) || requested.length === 0) return undefined;
+  return requested.flatMap((entry) => {
+    const ask = asObject(entry as JsonValue);
+    if (typeof ask.title !== "string") return [];
+    return [
+      {
+        title: ask.title,
+        response: [`${label} offline deterministic response answering the requested output.`],
+      },
+    ];
+  });
+}
+
 export interface OfflineExecutorOptions {
   /** Chain-of-thought steps the offline processor requests. Default 3. */
   readonly cotSteps?: number;
@@ -120,6 +141,15 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
           ),
           assumptions: [],
           cotSteps: this.cotSteps,
+          // One deterministic explicit ask, so every offline run exercises
+          // the requested-output contract end to end (members must echo one
+          // section per entry; the runtime enforces it on write).
+          requestedOutputs: [
+            {
+              title: "Submitter takeaway",
+              ask: "State, in direct address to the submitter, the single most decision-relevant takeaway of this treatment.",
+            },
+          ],
           files,
         };
         break;
@@ -372,9 +402,13 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
           },
         };
         break;
-      case "brain":
+      case "brain": {
+        const requested = requestedSections(bindings.input as JsonValue, agentId);
         output = {
-          output: this.developedOutput(agentId),
+          output: {
+            ...this.developedOutput(agentId),
+            ...(requested ? { requested } : {}),
+          },
           cot: Array.from({ length: this.cotSteps }, (_, i) => `${agentId} chain step ${i + 1} reasoning paragraph.`),
           novelty: `${agentId} novelty paragraph naming the two closest works and the precise gap.`,
           literature: [
@@ -395,12 +429,27 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
           ],
         };
         break;
+      }
       case "commentor": {
         const currentStep = typeof bindings.currentStep === "number" ? bindings.currentStep : 1;
         output = {
           verdict: "Pass",
           step: currentStep,
           reason: `${agentId} finds no demonstrable flaw standing in the reviewed steps.`,
+          suggestion: "",
+          evidence: noEvidence,
+        };
+        break;
+      }
+      case "interdisciplinary-commentor": {
+        // The panel's interdisciplinary seat comments through its own skill;
+        // offline it passes like every other commentor, with a seam-flavored
+        // reason so the two comment paths stay distinguishable in fixtures.
+        const currentStep = typeof bindings.currentStep === "number" ? bindings.currentStep : 1;
+        output = {
+          verdict: "Pass",
+          step: currentStep,
+          reason: `${agentId} finds every cross-field crossing of the reviewed steps carried by its own support.`,
           suggestion: "",
           evidence: noEvidence,
         };
@@ -428,8 +477,12 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
         // the minimal-edit contract the runtime diffs against.
         const currentStep = typeof bindings.currentStep === "number" ? bindings.currentStep : 1;
         const previous = Array.isArray(bindings.chain) ? bindings.chain : [];
+        const requested = requestedSections(bindings.input as JsonValue, `${agentId} revised`);
         output = {
-          output: this.developedOutput(`${agentId} revised`),
+          output: {
+            ...this.developedOutput(`${agentId} revised`),
+            ...(requested ? { requested } : {}),
+          },
           steps: Array.from({ length: this.cotSteps }, (_, i) => {
             const carried = previous[i];
             return i + 1 === currentStep || typeof carried !== "string"

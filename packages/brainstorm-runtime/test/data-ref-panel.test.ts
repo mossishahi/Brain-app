@@ -18,6 +18,7 @@ import {
   resolveBindValue,
   resolveDataReference,
   selectPanel,
+  weavePanel,
   writeDataReference,
 } from "../src/index.js";
 
@@ -353,6 +354,45 @@ test("panel.select removes exhausted parents recursively when their last child i
     // E defers to V (look-ahead), V defers to its imminent topic.
     { id: "member-3", department: "E", umbrella: "V", subfields: ["x"] },
   ]);
+});
+
+test("panel.weave appends one interdisciplinary full member derived from the seated fields", () => {
+  const seated = {
+    members: [
+      { id: "member-1", department: "Physics", umbrella: "Quantum Optics", subfields: ["photon counting"] },
+      { id: "member-2", department: "Computer Science", umbrella: "Machine Learning", subfields: ["representation learning"] },
+      { id: "member-3", department: "Biology", umbrella: "Systems Biology", subfields: ["network inference"] },
+    ],
+  };
+  const woven = weavePanel(seated, 13);
+  assert.equal(woven.members.length, 4);
+  assert.deepEqual(woven.members.slice(0, 3), seated.members);
+  assert.deepEqual(woven.members[3], {
+    id: "member-4",
+    department: "Interdisciplinary Research",
+    umbrella:
+      "the interdisciplinary space between Quantum Optics, Machine Learning and Systems Biology",
+    subfields: [
+      "the pairwise interfaces of Quantum Optics, Machine Learning and Systems Biology",
+      "methods and results that transfer between these fields",
+    ],
+    seat: "interdisciplinary",
+  });
+
+  // Idempotent: weaving an already-woven panel changes nothing.
+  assert.deepEqual(weavePanel(woven, 13), woven);
+
+  // A one-field panel has no between-space; the weave is skipped.
+  const oneField = {
+    members: [
+      { id: "member-1", department: "Physics", umbrella: "Quantum Optics", subfields: ["photon counting"] },
+      { id: "member-2", department: "Physics", umbrella: "Quantum Optics", subfields: ["squeezed light"] },
+    ],
+  };
+  assert.deepEqual(weavePanel(oneField, 13), oneField);
+
+  // At capacity the panel rides through unchanged rather than overflowing.
+  assert.deepEqual(weavePanel(seated, 3), seated);
 });
 
 test("artifact schemas become structural JSON Schema descriptions", () => {

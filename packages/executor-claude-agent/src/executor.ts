@@ -18,6 +18,7 @@ import {
   systemPromptBoundary,
   systemPromptSegments,
   textContent,
+  toolCallDetail,
   type AgentExecutionContext,
   type AgentProgress,
   type AgentExecutor,
@@ -28,6 +29,7 @@ import {
   type ModelMessage,
   type SystemPrompt,
   type TokenUsage,
+  type ToolCallDetail,
 } from "@brainstorm-agentic/core";
 import {
   isCreditLimitMessage,
@@ -534,8 +536,11 @@ interface SdkProgressState {
   readonly heartbeatMs: number;
   /** tool_use_id -> last reported elapsedMs (throttles SDK tool_progress). */
   readonly lastToolProgress: Map<string, number>;
-  /** tool_use_id -> start bookkeeping for tool_end durations. */
-  readonly pendingTools: Map<string, { name: string; startedAt: number }>;
+  /** tool_use_id -> start bookkeeping for tool_end durations and detail. */
+  readonly pendingTools: Map<
+    string,
+    { name: string; startedAt: number; detail?: ToolCallDetail }
+  >;
   /** What the current streamed turn is doing (reasoning / writing output). */
   phase?: { label: string; startedAt: number };
   /** Timestamp of the last progress event of any kind we emitted. */
@@ -624,16 +629,26 @@ function reportSdkMessage(
     for (const candidate of content) {
       const block = record(candidate);
       if (block.type !== "tool_use" || typeof block.name !== "string") continue;
+      // The call's operational detail (path read, query searched, command
+      // run) rides the event for the dashboard's capability icons; the
+      // structured-output and stepwise chain tools are excluded inside
+      // toolCallDetail so artifact and reasoning content never leaks here.
+      const detail = toolCallDetail(
+        block.name,
+        isJsonValue(block.input) ? block.input : undefined,
+      );
       if (typeof block.id === "string") {
         state.pendingTools.set(block.id, {
           name: block.name,
           startedAt: Date.now(),
+          ...(detail ? { detail } : {}),
         });
       }
       emit(state, context, {
         kind: "tool_start",
         toolName: block.name,
         message: toolMessage(block.name, block.input),
+        ...(detail ? { data: { detail: { ...detail } } } : {}),
       });
     }
     return;
@@ -664,6 +679,7 @@ function reportSdkMessage(
           (remaining > 0
             ? ` · ${remaining} tool${remaining === 1 ? "" : "s"} still running`
             : ""),
+        ...(pending.detail ? { data: { detail: { ...pending.detail } } } : {}),
       });
     }
     return;

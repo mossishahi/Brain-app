@@ -22,6 +22,7 @@ export * from "./model/provider.js";
 export * from "./agent/contracts.js";
 export * from "./agent/skill.js";
 export * from "./agent/tool.js";
+export * from "./agent/tool-detail.js";
 
 // Capability broker
 export * from "./capability/index.js";

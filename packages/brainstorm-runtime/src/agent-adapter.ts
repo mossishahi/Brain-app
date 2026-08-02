@@ -160,6 +160,63 @@ export type ContentValidationResult =
   | { readonly success: true; readonly value: JsonValue }
   | { readonly success: false; readonly issues: readonly string[] };
 
+function asRecord(value: unknown): JsonObject | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as JsonObject)
+    : undefined;
+}
+
+/**
+ * Checks a candidate artifact against the requested-output pin the task
+ * compiler wrote into the delivered JSON schema: when the run recorded asks,
+ * `output.requested` must carry exactly the pinned titles in order; when the
+ * schema removed the property, the artifact must not carry it. Returns the
+ * feedback issue, or undefined when the contract holds (or does not apply).
+ */
+function requestedSectionIssue(
+  value: unknown,
+  schemaProperties: JsonObject | undefined,
+): string | undefined {
+  const envelopeSchema = asRecord(schemaProperties?.output);
+  if (!envelopeSchema) return undefined;
+  const envelopeProperties = asRecord(envelopeSchema.properties);
+  if (!envelopeProperties) return undefined;
+  const envelope = asRecord(asRecord(value)?.output);
+  const sections = envelope?.requested;
+
+  const requestedSchema = asRecord(envelopeProperties.requested);
+  if (!requestedSchema) {
+    return sections === undefined
+      ? undefined
+      : "output.requested: this run recorded no requested outputs; omit the field entirely";
+  }
+  const required = Array.isArray(envelopeSchema.required) ? envelopeSchema.required : [];
+  if (!required.includes("requested")) return undefined;
+
+  const expectedTitles = (() => {
+    const items = asRecord(requestedSchema.items);
+    const titleSchema = asRecord(asRecord(items?.properties)?.title);
+    return Array.isArray(titleSchema?.enum)
+      ? titleSchema.enum.filter((entry): entry is string => typeof entry === "string")
+      : [];
+  })();
+  if (expectedTitles.length === 0) return undefined;
+
+  const titles = (Array.isArray(sections) ? sections : []).map(
+    (entry) => asRecord(entry)?.title,
+  );
+  if (
+    titles.length !== expectedTitles.length ||
+    titles.some((title, index) => title !== expectedTitles[index])
+  ) {
+    return (
+      `output.requested: must carry exactly ${expectedTitles.length} section(s), one per ` +
+      `requested output, in order, with these titles copied verbatim: ${expectedTitles.join(" | ")}`
+    );
+  }
+  return undefined;
+}
+
 /**
  * OutputValidator compatible with ToolLoopAgentExecutor. It resolves the
  * JSON Schema title back to the authoritative content Zod schema.
@@ -213,6 +270,15 @@ export class ContentArtifactOutputValidator {
           `verdict: must be one of ${allowedVerdicts.join(", ")} for this round`,
         ],
       };
+    }
+    // The task schema pins the run's requested-output sections (required +
+    // entry count + ordered titles) when the submission explicitly asked for
+    // deliverables, and removes the property when it did not. Enforcing that
+    // pin here turns a wrong section list into retryable feedback on every
+    // executor path instead of a failed run at write time.
+    const requestedIssue = requestedSectionIssue(value, properties);
+    if (requestedIssue !== undefined) {
+      return { success: false, issues: [requestedIssue] };
     }
     const parsed = artifact.safeParse(value) as
       | { readonly success: true; readonly data: unknown }

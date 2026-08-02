@@ -11,6 +11,7 @@ export {
   serializeError,
   textBlock,
   textContent,
+  toolCallDetail,
   toolUseBlocks,
   userMessage,
 } from "@brainstorm-agentic/core";

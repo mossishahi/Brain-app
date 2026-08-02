@@ -1906,6 +1906,80 @@ button.server-file-name {
   white-space: nowrap;
 }
 
+/* ---------------------------------------- per-activity capability icons */
+
+/* Rightmost cell of an activity row; icons fill right-to-left. */
+.activity-caps {
+  display: inline-flex;
+  flex-direction: row-reverse;
+  align-items: center;
+  gap: 6px;
+  justify-self: end;
+}
+
+.cap-badge {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-dim);
+  cursor: default;
+  outline: none;
+}
+
+.cap-badge:hover,
+.cap-badge:focus-visible {
+  color: var(--accent);
+}
+
+/* The hover detail window: position-fixed so the scrolling activity list
+   cannot clip it; a DOM child of the badge, so hovering into it (to scroll
+   a long script) keeps it open. */
+.cap-pop {
+  position: fixed;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 240px;
+  max-width: min(560px, calc(100vw - 24px));
+  max-height: 340px;
+  overflow: auto;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.45;
+  cursor: auto;
+}
+
+.cap-pop-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 11px;
+}
+
+.cap-pop-tool {
+  font-family: var(--mono);
+  font-weight: 600;
+}
+
+.cap-pop-code {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.cap-pop-text {
+  font-family: var(--mono);
+  font-size: 11px;
+  word-break: break-all;
+}
+
 .activity-stale {
   display: flex;
   align-items: center;
@@ -2415,6 +2489,28 @@ button.server-file-name {
 
 .file-partition {
   margin-top: 12px;
+}
+
+/* Collapsible file lists open inside one bounded, scrollable subpanel so a
+   large repository never stretches the stage card. */
+.file-scroll {
+  margin-top: 6px;
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0 8px;
+}
+
+.file-scroll .file-table thead th {
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+  z-index: 1;
+}
+
+.file-scroll .ignored-list {
+  margin: 6px 0;
 }
 
 .file-table .file-path,

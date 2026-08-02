@@ -23,7 +23,7 @@ import type {
 import type { DotState } from "../../format";
 import { Clamp, Dot, EvidenceBlock } from "../common";
 
-type TabId = "primary" | "chain" | "novelty" | "papers";
+type TabId = "primary" | "requested" | "chain" | "novelty" | "papers";
 
 /** The primary tab label for each output shape. */
 const PRIMARY_TAB: Record<OutputShape, string> = {
@@ -503,16 +503,26 @@ function memberStatus(status: FirstPassMemberView["status"]): { text: string; do
   }
 }
 
-function IdeaTabs({ idea }: { idea: BrainIdeaView }) {
+/** Shared idea renderer: the shape tab plus Requested/Chain/Novelty/Papers.
+ * Also used by the review stage to show each member's final version. */
+export function IdeaTabs({ idea }: { idea: BrainIdeaView }) {
   const [tab, setTab] = useState<TabId>("primary");
   const literature = idea.literature ?? [];
+  const requested = idea.requested ?? [];
   const hasPapers = literature.length > 0;
   const hasNovelty = idea.novelty !== undefined;
+  const hasRequested = requested.length > 0;
   const active: TabId =
-    (tab === "papers" && !hasPapers) || (tab === "novelty" && !hasNovelty) ? "primary" : tab;
+    (tab === "papers" && !hasPapers) ||
+    (tab === "novelty" && !hasNovelty) ||
+    (tab === "requested" && !hasRequested)
+      ? "primary"
+      : tab;
 
   const tabs: readonly { id: TabId; label: string }[] = [
     { id: "primary", label: PRIMARY_TAB[idea.shape] },
+    // The member's direct responses to the submitter's explicit asks.
+    ...(hasRequested ? [{ id: "requested" as const, label: "Requested" }] : []),
     { id: "chain", label: "Chain" },
     ...(hasNovelty ? [{ id: "novelty" as const, label: "Novelty" }] : []),
     ...(hasPapers ? [{ id: "papers" as const, label: "Papers" }] : []),
@@ -536,6 +546,16 @@ function IdeaTabs({ idea }: { idea: BrainIdeaView }) {
       </div>
       <div className="idea-tab-content">
         {active === "primary" && <PrimaryBody idea={idea} />}
+        {active === "requested" && (
+          <div>
+            {requested.map((section) => (
+              <div key={section.title} className="paper-section">
+                <p className="section-label">{section.title}</p>
+                <Clamp text={section.response} />
+              </div>
+            ))}
+          </div>
+        )}
         {active === "chain" && (
           <ol className="chain-list">
             {idea.cot.map((step, i) => (

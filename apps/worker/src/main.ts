@@ -236,6 +236,71 @@ async function writeExpertiseTrees(
   return written;
 }
 
+/**
+ * Writes the run's reviewed deliverables as readable copies under
+ * `<session>/<runId>/final/`:
+ *
+ * - `final/<memberId>.json` — the member's LAST recorded idea (the runtime
+ *   re-persists the idea after every redevelopment, so the newest artifact
+ *   under `ideas.<memberId>` is the version the review left standing: the
+ *   final output once the member's walk completed, the latest one otherwise);
+ * - `final/proposal.json` — the chair's synthesis, when the run reached it.
+ *
+ * These are readable copies for the submitter; the artifact store and the
+ * checkpoint journal remain the authoritative records.
+ */
+async function writeFinalOutputs(
+  artifacts: ArtifactStore,
+  sessionRoot: string,
+  runId: string,
+): Promise<readonly string[]> {
+  const refs = await artifacts.list();
+  // Last ref per member idea path wins: first pass, then every revision, in
+  // index (chronological) order.
+  const latestByMember = new Map<string, string>();
+  let proposalId: string | undefined;
+  for (const ref of refs) {
+    const path = ref.metadata?.path;
+    if (ref.metadata?.schema === "brainIdea" && typeof path === "string" && path.startsWith("ideas.")) {
+      latestByMember.set(path.slice("ideas.".length), ref.id);
+    }
+    if (ref.metadata?.schema === "finalProposal") proposalId = ref.id;
+  }
+  if (latestByMember.size === 0 && proposalId === undefined) return [];
+
+  const directory = join(sessionRoot, runId, "final");
+  mkdirSync(directory, { recursive: true });
+  const writeAtomic = (name: string, body: string): string => {
+    const path = join(directory, name);
+    const tmp = `${path}.tmp-${process.pid}`;
+    writeFileSync(tmp, body, "utf8");
+    renameSync(tmp, path);
+    return path;
+  };
+  const pretty = (raw: string): string => {
+    try {
+      return `${JSON.stringify(JSON.parse(raw), null, 2)}\n`;
+    } catch {
+      return raw; // a payload that does not parse is still worth copying verbatim
+    }
+  };
+
+  const written: string[] = [];
+  for (const [memberId, id] of latestByMember) {
+    const stored = await artifacts.get(id);
+    if (!stored) continue;
+    // Member ids are runtime-minted (`member-N`, `member-user-N`) and safe as
+    // file names; anything unexpected is skipped rather than sanitized.
+    if (!/^[A-Za-z0-9_-]+$/.test(memberId)) continue;
+    written.push(writeAtomic(`${memberId}.json`, pretty(stored.data)));
+  }
+  if (proposalId !== undefined) {
+    const stored = await artifacts.get(proposalId);
+    if (stored) written.push(writeAtomic("proposal.json", pretty(stored.data)));
+  }
+  return written;
+}
+
 function logEvent(event: RunEvent): void {
   switch (event.type) {
     case "run:started":
@@ -447,8 +512,10 @@ async function main(): Promise<void> {
         },
       });
       const trees = await writeExpertiseTrees(artifacts, sessionRoot, runId);
+      const finals = await writeFinalOutputs(artifacts, sessionRoot, runId);
       reportResult(result, sessionRoot);
       for (const tree of trees) console.log(`Expertise tree: ${tree}`);
+      for (const file of finals) console.log(`Final output: ${file}`);
       cleanupContentCache(lazy, result);
     } finally {
       await lazy?.close();
@@ -510,8 +577,10 @@ async function main(): Promise<void> {
         ...(Object.keys(responses).length > 0 ? { responses } : {}),
       });
       const trees = await writeExpertiseTrees(artifacts, sessionRoot, runId);
+      const finals = await writeFinalOutputs(artifacts, sessionRoot, runId);
       reportResult(result, sessionRoot);
       for (const tree of trees) console.log(`Expertise tree: ${tree}`);
+      for (const file of finals) console.log(`Final output: ${file}`);
       cleanupContentCache(lazy, result);
     } finally {
       await lazy?.close();

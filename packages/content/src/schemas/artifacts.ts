@@ -111,11 +111,15 @@ export const CODE_FILE_LABELS: readonly FileLabel[] = ["code", "implementation"]
  * The code annotator's one-line account of a code file: what the file
  * contains plus how it bears on the input topic. Exactly one line, long
  * enough to carry an actual description, and never a placeholder probe.
+ * There is deliberately no style-level length cap — "one line" is the whole
+ * formatting contract; the generous ceiling below only stops runaway
+ * generation from bloating the file map that every later task's payload
+ * carries.
  */
 const codeSummaryValue = z
   .string()
   .min(10, "codeSummary must be a real one-line description (at least 10 characters)")
-  .max(400, "codeSummary must stay one line (at most 400 characters)")
+  .max(2000, "codeSummary is runaway output; keep it to one descriptive line")
   .refine((value) => !/[\r\n]/.test(value), {
     message: "codeSummary must be exactly one line",
   })
@@ -154,6 +158,26 @@ export const annotatedFileSchema = z
 
 export type AnnotatedFile = z.infer<typeof annotatedFileSchema>;
 
+/**
+ * One output the submitter EXPLICITLY asked the panel to deliver, beyond the
+ * standard deliverable the submission's type already produces (e.g. "also
+ * give me pseudocode for the algorithm", "provide a comparison table of A
+ * and B"). Detected by the processor from explicit phrasing only — never
+ * inferred from topic or tone. Every panel member's developed output must
+ * answer every recorded entry with a dedicated `requested` section; the
+ * runtime enforces that per task and on write.
+ */
+export const requestedOutputSchema = z
+  .object({
+    /** Short section label for the deliverable; unique across entries. */
+    title: answered(4, "requested-output title"),
+    /** Precisely what the submitter asked to receive, restated faithfully. */
+    ask: answered(12, "requested-output ask"),
+  })
+  .strict();
+
+export type RequestedOutput = z.infer<typeof requestedOutputSchema>;
+
 export const processorOutputSchema = z
   .object({
     /**
@@ -185,13 +209,33 @@ export const processorOutputSchema = z
     /** How many reasoning steps a panel member should produce when developing this input. */
     cotSteps: z.number().int().min(3).max(9),
     /**
+     * The outputs the submitter EXPLICITLY asked for beyond the type's
+     * standard deliverable; empty when the submission names none (the common
+     * case). Optional so pre-feature artifacts stay valid. Every member's
+     * developed output must answer each entry, in this order.
+     */
+    requestedOutputs: z.array(requestedOutputSchema).max(4).optional(),
+    /**
      * One annotated entry per file of the attachment inventory (empty when
      * the submission has no attachments). Optional so pre-attachment
      * artifacts stay valid.
      */
     files: z.array(annotatedFileSchema).max(400).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((output, ctx) => {
+    const seen = new Set<string>();
+    (output.requestedOutputs ?? []).forEach((entry, index) => {
+      if (seen.has(entry.title)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["requestedOutputs", index, "title"],
+          message: `duplicate requested-output title "${entry.title}"`,
+        });
+      }
+      seen.add(entry.title);
+    });
+  });
 
 export type ProcessorOutput = z.infer<typeof processorOutputSchema>;
 
@@ -713,6 +757,11 @@ export type ExpertsTree = z.infer<typeof expertsTreeSchema>;
  * A seated member. Subfields are plain names here, not the tree's counted
  * areas: pool statistics decided who sits, and carry no meaning for a seat
  * that renders them into its own role instructions.
+ *
+ * `seat` marks the panel's one interdisciplinary member — the seat the
+ * deterministic panel.weave activity appends after selection, whose
+ * expertise is the space BETWEEN the seated fields. Disciplinary members
+ * carry no marker; the workflow dispatches its commenting skill on it.
  */
 export const panelMemberSchema = z
   .object({
@@ -720,6 +769,7 @@ export const panelMemberSchema = z
     department: nonEmpty,
     umbrella: nonEmpty,
     subfields: z.array(nonEmpty),
+    seat: z.literal("interdisciplinary").optional(),
   })
   .strict();
 
@@ -1074,6 +1124,35 @@ export const explanationBodySchema = z
 export type ExplanationBody = z.infer<typeof explanationBodySchema>;
 
 /**
+ * One member's direct response to an explicitly requested output: the run's
+ * section `title` echoed verbatim plus the answer itself. Uniform across all
+ * eight shapes — the sections sit on the envelope next to the shape body, so
+ * every projection that carries a member's `output` (integrator, chair,
+ * dashboard) carries the responses automatically. Presence is run data:
+ * exactly when the processor recorded `requestedOutputs`, one section per
+ * ask in the recorded order — enforced per task (schema narrowing) and on
+ * write (writeValidatedOutput), since the static schema cannot know the run.
+ */
+export const requestedSectionSchema = z
+  .object({
+    /** The requested output's title, copied verbatim from the run's list. */
+    title: nonEmpty,
+    /** The answer: 1-6 entries, each exactly one paragraph. */
+    response: z
+      .array(
+        paragraphs(1).refine(
+          (value) => !PLACEHOLDER_VALUE.test(value.trim()),
+          { message: "response is a placeholder, not an answer to the requested output" },
+        ),
+      )
+      .min(1)
+      .max(6),
+  })
+  .strict();
+
+export type RequestedSection = z.infer<typeof requestedSectionSchema>;
+
+/**
  * The full developed-output envelope: `type` carries the submission's catalog
  * label (data — any key of the loaded catalog/input-types.json), and exactly
  * one SHAPE-keyed body is populated. The body key is the shape id, not the
@@ -1098,6 +1177,12 @@ export const developedOutputSchema = z
     interpretation: interpretationBodySchema.optional(),
     survey: surveyBodySchema.optional(),
     explanation: explanationBodySchema.optional(),
+    /**
+     * The member's responses to the submitter's explicitly requested
+     * outputs — present exactly when the run recorded any (run data,
+     * cross-checked by the runtime; see requestedSectionSchema).
+     */
+    requested: z.array(requestedSectionSchema).min(1).max(4).optional(),
   })
   .strict()
   .superRefine((value, ctx) => {
@@ -1114,6 +1199,17 @@ export const developedOutputSchema = z
             : `exactly one shape body must be populated, got ${populated.join(", ")}`,
       });
     }
+    const seen = new Set<string>();
+    (value.requested ?? []).forEach((section, index) => {
+      if (seen.has(section.title)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["requested", index, "title"],
+          message: `duplicate requested-output section "${section.title}"`,
+        });
+      }
+      seen.add(section.title);
+    });
   });
 
 export type DevelopedOutput = z.infer<typeof developedOutputSchema>;

@@ -91,6 +91,10 @@ export type AgentResult = AgentResultSuccess | AgentResultFailure;
 /**
  * Safe operational progress only. Executors must never report chain-of-thought,
  * credentials, full prompts, or unredacted tool outputs through this channel.
+ * Tool INPUTS that describe the operation (the path read, the query searched,
+ * the URL fetched, the script/command the agent chose to run) are deliberately
+ * allowed as `data.detail` (see toolCallDetail); content-transport tools
+ * (stepwise chain, structured output) are excluded there.
  */
 export type AgentProgressKind =
   | "status"

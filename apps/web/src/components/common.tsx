@@ -2,6 +2,7 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import type {
+  ActivityDetailView,
   EvidenceView,
   PanelMemberView,
   StageActivityEntry,
@@ -59,6 +60,134 @@ function formatQuiet(ms: number): string {
   return `${minutes}m ${seconds % 60}s`;
 }
 
+/* ------------------------------------------- per-activity capability icons */
+
+/** 16px stroke glyphs, one per capability (globe when a fetch carries a URL). */
+function CapabilityGlyph({
+  capability,
+  detailKind,
+}: {
+  capability: NonNullable<StageActivityEntry["capability"]>;
+  detailKind?: ActivityDetailView["kind"];
+}) {
+  const common = {
+    viewBox: "0 0 16 16",
+    width: 14,
+    height: 14,
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 1.3,
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+    "aria-hidden": true,
+  };
+  switch (capability) {
+    case "attachment-access":
+      return (
+        <svg {...common}>
+          <path d="M4 1.5h5.2L12.5 5v9a.8.8 0 0 1-.8.8H4a.8.8 0 0 1-.8-.8V2.3a.8.8 0 0 1 .8-.8Z" />
+          <path d="M9 1.5V5h3.5" />
+        </svg>
+      );
+    case "code-execution":
+      return (
+        <svg {...common}>
+          <rect x="1.8" y="2.8" width="12.4" height="10.4" rx="1" />
+          <path d="M4.5 6.2 6.8 8l-2.3 1.8M8.2 10.2h3.2" />
+        </svg>
+      );
+    case "web-search":
+      return detailKind === "url" ? (
+        <svg {...common}>
+          <circle cx="8" cy="8" r="6.2" />
+          <path d="M1.8 8h12.4M8 1.8c-4.4 3.6-4.4 8.8 0 12.4M8 1.8c4.4 3.6 4.4 8.8 0 12.4" />
+        </svg>
+      ) : (
+        <svg {...common}>
+          <circle cx="6.8" cy="6.8" r="4.2" />
+          <path d="m10 10 4 4" />
+        </svg>
+      );
+    case "taxonomy-access":
+      return (
+        <svg {...common}>
+          <path d="M8 2.2v3.6M8 5.8 3.5 9.2M8 5.8l4.5 3.4" />
+          <circle cx="8" cy="2.6" r="1.3" />
+          <circle cx="3.5" cy="11" r="1.6" />
+          <circle cx="12.5" cy="11" r="1.6" />
+        </svg>
+      );
+  }
+}
+
+const DETAIL_LABEL: Record<ActivityDetailView["kind"], string> = {
+  code: "executed script",
+  query: "search query",
+  url: "fetched source",
+  path: "accessed file",
+  text: "call target",
+};
+
+/** Max popover box: keep the flip decision in sync with the CSS ceiling. */
+const POP_MAX_HEIGHT = 340;
+
+/**
+ * One capability icon with its hover detail. The popover is position:fixed
+ * (the activity list scrolls, so an anchored child would be clipped) and is
+ * a DOM child of the wrapper, so moving the pointer into it — to scroll a
+ * long script — keeps it open.
+ */
+function CapabilityBadge({ entry }: { entry: StageActivityEntry }) {
+  const [pop, setPop] = useState<CSSProperties | null>(null);
+  if (!entry.capability) return null;
+  const open = (target: HTMLElement) => {
+    const rect = target.getBoundingClientRect();
+    const openUp = rect.bottom + POP_MAX_HEIGHT + 16 > window.innerHeight;
+    setPop({
+      right: Math.max(8, window.innerWidth - rect.right - 4),
+      ...(openUp
+        ? { bottom: window.innerHeight - rect.top - 2 }
+        : { top: rect.bottom - 2 }),
+    });
+  };
+  return (
+    <span
+      className="cap-badge"
+      onMouseEnter={(event) => open(event.currentTarget)}
+      onMouseLeave={() => setPop(null)}
+      onFocus={(event) => open(event.currentTarget)}
+      onBlur={() => setPop(null)}
+      tabIndex={0}
+      aria-label={
+        entry.detail
+          ? `${entry.capability}: ${DETAIL_LABEL[entry.detail.kind]}`
+          : entry.capability
+      }
+    >
+      <CapabilityGlyph
+        capability={entry.capability}
+        detailKind={entry.detail?.kind}
+      />
+      {pop && (
+        <span className="cap-pop" style={pop} role="tooltip">
+          <span className="cap-pop-head">
+            <span className="cap-pop-tool">{entry.toolName ?? entry.capability}</span>
+            <span className="dim">
+              {entry.detail ? DETAIL_LABEL[entry.detail.kind] : "no call detail recorded"}
+            </span>
+          </span>
+          {entry.detail &&
+            (entry.detail.kind === "code" ? (
+              <pre className="cap-pop-code">{entry.detail.value}</pre>
+            ) : (
+              <span className="cap-pop-text">{entry.detail.value}</span>
+            ))}
+        </span>
+      )}
+    </span>
+  );
+}
+
 export function ActivityFeed({
   entries,
   active,
@@ -97,6 +226,11 @@ export function ActivityFeed({
             {entry.elapsedMs !== undefined && (
               <span className="activity-meta">
                 {(entry.elapsedMs / 1000).toFixed(0)}s
+              </span>
+            )}
+            {entry.capability && (
+              <span className="activity-caps">
+                <CapabilityBadge entry={entry} />
               </span>
             )}
           </li>

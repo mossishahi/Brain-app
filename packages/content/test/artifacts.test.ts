@@ -60,6 +60,39 @@ test("processor output: accepts a well-formed object; type is data checked at ru
   assert.equal(processorOutputSchema.safeParse({ ...good, type: "" }).success, false);
   assert.equal(processorOutputSchema.safeParse({ ...good, cotSteps: 2 }).success, false);
   assert.equal(processorOutputSchema.safeParse({ ...good, cotSteps: 5.5 }).success, false);
+
+  // Explicitly requested outputs: optional (pre-feature artifacts), bounded,
+  // unique titles, and never placeholder probes.
+  const ask = {
+    title: "Benchmarking protocol",
+    ask: "Propose a benchmarking protocol for the differentiable construction.",
+  };
+  assert.ok(processorOutputSchema.safeParse({ ...good, requestedOutputs: [] }).success);
+  assert.ok(processorOutputSchema.safeParse({ ...good, requestedOutputs: [ask] }).success);
+  assert.equal(
+    processorOutputSchema.safeParse({ ...good, requestedOutputs: [ask, ask] }).success,
+    false,
+    "duplicate requested-output titles are rejected",
+  );
+  assert.equal(
+    processorOutputSchema.safeParse({
+      ...good,
+      requestedOutputs: [{ title: "test", ask: "test-question" }],
+    }).success,
+    false,
+    "placeholder requested outputs are rejected",
+  );
+  assert.equal(
+    processorOutputSchema.safeParse({
+      ...good,
+      requestedOutputs: Array.from({ length: 5 }, (_, i) => ({
+        title: `Deliverable ${i + 1}`,
+        ask: `Provide the deliverable number ${i + 1} in full.`,
+      })),
+    }).success,
+    false,
+    "at most four requested outputs",
+  );
 });
 
 test("annotated file map: labels are closed, NA notes may be empty, partitions are pure", () => {
@@ -360,6 +393,47 @@ test("brain idea: paragraph counts and chain length limits are enforced", () => 
     }).success,
     false,
     "exactly one shape body may be populated",
+  );
+
+  // Requested-output sections ride the envelope, uniform across shapes:
+  // unique verbatim titles, 1-6 paragraph responses, no placeholder probes.
+  // Presence-iff-asked is run data, enforced by the runtime, not here.
+  const askSection = {
+    title: "Benchmarking protocol",
+    response: [para(1), para(1)],
+  };
+  const withSections = {
+    output: { ...validDevelopedOutput, requested: [askSection] },
+    cot: [para(1), para(1), para(1)],
+    novelty: para(1),
+  };
+  assert.ok(brainIdeaSchema.safeParse(withSections).success);
+  assert.equal(
+    brainIdeaSchema.safeParse({
+      ...withSections,
+      output: { ...validDevelopedOutput, requested: [] },
+    }).success,
+    false,
+    "an empty requested list is meaningless; the key must be omitted instead",
+  );
+  assert.equal(
+    brainIdeaSchema.safeParse({
+      ...withSections,
+      output: { ...validDevelopedOutput, requested: [askSection, askSection] },
+    }).success,
+    false,
+    "duplicate requested-section titles are rejected",
+  );
+  assert.equal(
+    brainIdeaSchema.safeParse({
+      ...withSections,
+      output: {
+        ...validDevelopedOutput,
+        requested: [{ title: "Benchmarking protocol", response: ["placeholder"] }],
+      },
+    }).success,
+    false,
+    "placeholder responses are rejected",
   );
 });
 

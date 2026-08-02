@@ -557,17 +557,36 @@ function mapResponseContent(value: unknown): readonly ContentBlock[] {
   return content;
 }
 
-/** Names of the server tools the response ran, in order (observability). */
-function serverToolUses(value: unknown): readonly string[] {
+/**
+ * The server tools the response ran, in order, with their JSON-safe call
+ * inputs where present. Names feed the usage ledger (`serverToolUses`);
+ * inputs feed per-call operational detail (`serverToolUseDetails`) — the
+ * query searched, the URL fetched, the script the model chose to execute.
+ */
+interface ServerToolUseEntry {
+  readonly name: string;
+  readonly input?: JsonObject;
+}
+
+function serverToolUses(value: unknown): readonly ServerToolUseEntry[] {
   if (!Array.isArray(value)) return [];
-  const names: string[] = [];
+  const entries: ServerToolUseEntry[] = [];
   for (const item of value) {
     const block = asWireRecord(item);
     if (block.type === "server_tool_use" && typeof block.name === "string") {
-      names.push(block.name);
+      const input = block.input;
+      entries.push({
+        name: block.name,
+        ...(typeof input === "object" &&
+        input !== null &&
+        !Array.isArray(input) &&
+        isJsonValue(input)
+          ? { input: input as JsonObject }
+          : {}),
+      });
     }
   }
-  return names;
+  return entries;
 }
 
 function numberOrZero(value: unknown): number {
@@ -892,7 +911,15 @@ export class AnthropicMessagesProvider implements ModelProvider {
         usage,
         metadata: {
           ...responseMetadata(raw),
-          ...(uses.length > 0 ? { serverToolUses: [...uses] } : {}),
+          ...(uses.length > 0
+            ? {
+                serverToolUses: uses.map((use) => use.name),
+                serverToolUseDetails: uses.map((use) => ({
+                  name: use.name,
+                  ...(use.input !== undefined ? { input: use.input } : {}),
+                })),
+              }
+            : {}),
         },
       };
     } catch (error) {

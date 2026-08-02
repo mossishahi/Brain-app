@@ -54,7 +54,7 @@ import {
 import { BrainstormRuntimeError } from "./errors.js";
 import { applyGateDecision, autoApproveDecision, type HumanGateMode } from "./gates.js";
 import { artifactSchemaToJsonSchema } from "./json-schema.js";
-import { selectPanel } from "./panel.js";
+import { selectPanel, weavePanel } from "./panel.js";
 import { compileSkillPrompt, type PayloadEntry } from "./prompts.js";
 import {
   ExecutorOwnedRouteResolver,
@@ -284,6 +284,37 @@ async function writeValidatedOutput(
         "OUTPUT_SHAPE_MISMATCH",
       );
     }
+    // The submitter's explicitly requested outputs are run data: EVERY
+    // member answers each recorded ask with one `requested` section, in the
+    // recorded order, titles echoed verbatim — and no section list at all
+    // when the run recorded none. The task schema is narrowed the same way;
+    // this is the authoritative re-check on write.
+    const asks = requestedOutputsOf(
+      resolveDataReference("input", scope, state, { required: false }),
+    );
+    const sections = developed.requested;
+    if (asks.length === 0) {
+      if (sections !== undefined) {
+        throw new BrainstormRuntimeError(
+          `node "${nodeId}" returned requested-output sections, but this run recorded no requested outputs`,
+          "REQUESTED_SECTION_MISMATCH",
+        );
+      }
+    } else {
+      const titles = (Array.isArray(sections) ? sections : []).map((entry) =>
+        isJsonRecord(entry) ? entry.title : undefined,
+      );
+      const expected = asks.map((entry) => entry.title);
+      if (
+        titles.length !== expected.length ||
+        titles.some((title, index) => title !== expected[index])
+      ) {
+        throw new BrainstormRuntimeError(
+          `node "${nodeId}" must answer exactly the ${expected.length} requested output(s) of this run, in order: ${expected.join(" | ")}`,
+          "REQUESTED_SECTION_MISMATCH",
+        );
+      }
+    }
   }
   if (schemaName === "brainIdea") {
     const idea = asObject(parsed, "brain idea");
@@ -383,12 +414,47 @@ async function writeValidatedOutput(
   let next = write.state;
   if (schemaName === "redevelopment") {
     next = applyRedevelopment(next, scope, parsed, nodeId);
+    // Persist the member's UPDATED idea as its own artifact version under the
+    // member's idea path (the same path the first pass wrote). The artifact
+    // history then reads first pass -> revision 1 -> revision 2 -> …, so the
+    // LAST entry under `ideas.<memberId>` is always the member's current —
+    // and, once its review walk completes, final — reviewed output, ready
+    // for the dashboard and the session's readable final-output copies.
+    const memberId = resolveDataReference("member.id", scope, next, { required: true });
+    const revised = resolveDataReference("ideas[member.id]", scope, next, { required: true });
+    next = await persistArtifact(
+      next,
+      `ideas.${String(memberId)}`,
+      "brainIdea",
+      nodeId,
+      validateArtifact("brainIdea", nodeId, revised!),
+      context,
+    );
   }
   return persistArtifact(next, write.path, schemaName, nodeId, stored, context);
 }
 
 function isJsonRecord(value: JsonValue | undefined): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The run's explicitly requested outputs, read from the structured input
+ * (the processor's `requestedOutputs`). Empty for runs whose submission
+ * asked for nothing beyond the standard deliverable and for artifacts from
+ * bundles that predate the field — both mean "no extra sections".
+ */
+function requestedOutputsOf(
+  value: JsonValue | undefined,
+): readonly { readonly title: string; readonly ask: string }[] {
+  if (!isJsonRecord(value) || !Array.isArray(value.requestedOutputs)) return [];
+  return value.requestedOutputs.flatMap((entry) => {
+    if (!isJsonRecord(entry)) return [];
+    const { title, ask } = entry;
+    return typeof title === "string" && title.length > 0 && typeof ask === "string"
+      ? [{ title, ask }]
+      : [];
+  });
 }
 
 /** FNV-1a 32-bit hash of a seed string (stable across processes and runs). */
@@ -735,6 +801,20 @@ function builtinActivities(): Readonly<Record<string, DeterministicActivityHandl
         panelSize,
       ) as unknown as JsonValue;
     },
+    "panel.weave": (input) => {
+      const panel = validateArtifact("panel", "panel.weave", input.panel!);
+      const maxSeats = input.maxSeats;
+      if (typeof maxSeats !== "number") {
+        throw new BrainstormRuntimeError(
+          "panel.weave requires a numeric maxSeats",
+          "INVALID_ACTIVITY_INPUT",
+        );
+      }
+      return weavePanel(
+        panel as unknown as Parameters<typeof weavePanel>[0],
+        maxSeats,
+      ) as unknown as JsonValue;
+    },
   };
 }
 
@@ -943,6 +1023,56 @@ class ContentCompiler {
             return shape !== undefined && !required.includes(shape)
               ? { ...envelope, required: [...required, shape] }
               : envelope;
+          }) ?? taskJsonSchema;
+      }
+      // The submitter's explicitly requested outputs are run data the static
+      // envelope leaves optional. When the run recorded any, the section
+      // list becomes required with the entry count pinned and the titles
+      // enum-narrowed in the recorded order, so a schema-constrained model
+      // cannot skip, reorder, or invent a section; when the run recorded
+      // none, the property is removed entirely so it cannot be emitted at
+      // all. Presence and order are re-checked on write either way.
+      if (node.output.schema === "brainIdea" || node.output.schema === "redevelopment") {
+        const asks = requestedOutputsOf(bindings.input);
+        taskJsonSchema =
+          patchSchemaProperty(taskJsonSchema, ["output"], (output) => {
+            const properties = isJsonRecord(output.properties) ? output.properties : {};
+            const required = (Array.isArray(output.required) ? output.required : []).filter(
+              (entry): entry is string => typeof entry === "string",
+            );
+            if (asks.length === 0) {
+              const { requested: _requested, ...rest } = properties as Record<string, JsonValue>;
+              return {
+                ...output,
+                properties: rest,
+                required: required.filter((entry) => entry !== "requested"),
+              };
+            }
+            const requestedProperty = isJsonRecord(properties.requested)
+              ? properties.requested
+              : {};
+            const items = isJsonRecord(requestedProperty.items) ? requestedProperty.items : {};
+            const itemProperties = isJsonRecord(items.properties) ? items.properties : {};
+            const titleProperty = isJsonRecord(itemProperties.title) ? itemProperties.title : {};
+            return {
+              ...output,
+              properties: {
+                ...properties,
+                requested: {
+                  ...requestedProperty,
+                  minItems: asks.length,
+                  maxItems: asks.length,
+                  items: {
+                    ...items,
+                    properties: {
+                      ...itemProperties,
+                      title: { ...titleProperty, enum: asks.map((ask) => ask.title) },
+                    },
+                  },
+                },
+              },
+              required: required.includes("requested") ? required : [...required, "requested"],
+            };
           }) ?? taskJsonSchema;
       }
       if (

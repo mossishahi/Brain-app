@@ -268,6 +268,14 @@ so the body is a *progress matrix* plus a *round inspector*:
     "authority" dim), evidence when present.
   - when the round ended in redevelopment: a bar "Re-developed from step i — steps 1..i−1 frozen"
     and the count of replaced steps.
+- Final output: each member's section ends in a fold carrying the member's output as the review
+  leaves it — the first pass with every redevelopment applied, rendered with the same tabs as a
+  first-pass card. Chip-marked "final version" (`--ok`) once every step of the member's walk has
+  passed or force-passed, "in progress" until then, with a meta line "revised ×k during review" /
+  "unchanged from the first pass". The first-pass panel keeps showing the original version — the
+  history is never rewritten. The same final versions are saved as readable copies under the
+  session's `final/` directory (one JSON per member, plus the proposal), which is what the CLI
+  names when a run finishes.
 - Empty state (stage pending): collapsed row like every other stage.
 
 **7. Proposal** — the synthesis. Body, in order: title (h2), framing paragraph, then a three-column

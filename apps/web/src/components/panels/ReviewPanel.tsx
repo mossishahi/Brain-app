@@ -16,6 +16,7 @@ import type {
 } from "@brainstorm-agentic/protocol";
 import { prefersReducedMotion } from "../../format";
 import { EvidenceBlock, VerdictChip } from "../common";
+import { IdeaTabs } from "./FirstPassPanel";
 
 function redevCount(step: ReviewStepView): number {
   return step.rounds.filter((r) => r.revision !== undefined).length;
@@ -56,6 +57,20 @@ function stepKey(memberId: string, stepIndex: number): string {
 
 function roundKey(memberId: string, stepIndex: number, round: number): string {
   return `${memberId}:${stepIndex}:${round}`;
+}
+
+function finalKey(memberId: string): string {
+  return `${memberId}:final`;
+}
+
+/** Every step of the member's walk has passed (or force-passed at the cap). */
+function walkComplete(member: ReviewMemberView): boolean {
+  return (
+    member.steps.length > 0 &&
+    member.steps.every(
+      (step) => step.outcome === "passed" || step.outcome === "force-passed",
+    )
+  );
 }
 
 function StepOutcomeChip({ step }: { step: ReviewStepView }) {
@@ -374,6 +389,46 @@ export function ReviewBody({ stage }: { stage: ReviewStage }) {
                   </details>
                 );
               })}
+              {member.finalIdea && (() => {
+                // The member's output as the review leaves it: the FINAL
+                // version once every step passed; the current version under
+                // review until then. Also saved as a readable copy under the
+                // session's final/ directory.
+                const finalized = walkComplete(member);
+                const key = finalKey(member.memberId);
+                const open = folds.get(key) ?? finalized;
+                const revisions = member.revisionCount ?? 0;
+                return (
+                  <details className="review-fold review-final" open={open}>
+                    <summary
+                      className="review-fold-head"
+                      onClick={(event) => {
+                        event.preventDefault();
+                        setFold(key, !open);
+                      }}
+                    >
+                      <span className="review-fold-name">
+                        <strong>{finalized ? "Final output" : "Output under review"}</strong>
+                      </span>
+                      {finalized ? (
+                        <span className="step-chip step-chip-ok">final version</span>
+                      ) : (
+                        <span className="step-chip step-chip-active">in progress</span>
+                      )}
+                      <span className="review-step-meta">
+                        {revisions > 0
+                          ? `revised ×${revisions} during review`
+                          : "unchanged from the first pass"}
+                      </span>
+                    </summary>
+                    {open && (
+                      <div className="review-fold-body">
+                        <IdeaTabs idea={member.finalIdea} />
+                      </div>
+                    )}
+                  </details>
+                );
+              })()}
             </div>
           ))}
         </div>

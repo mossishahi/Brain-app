@@ -345,3 +345,54 @@ export function selectPanel(experts: ExpertsTree, panelSize: number): Panel {
 
   return { members };
 }
+
+/** Department name of the appended interdisciplinary seat. */
+export const INTERDISCIPLINARY_DEPARTMENT = "Interdisciplinary Research";
+
+/** "A", "A and B", "A, B and C" — an English list for prompt-rendered seat strings. */
+function englishList(entries: readonly string[]): string {
+  if (entries.length <= 1) return entries[0] ?? "";
+  if (entries.length === 2) return `${entries[0]} and ${entries[1]}`;
+  return `${entries.slice(0, -1).join(", ")} and ${entries[entries.length - 1]}`;
+}
+
+/**
+ * Deterministic seat weave, run by the orchestrator after panel selection —
+ * no model call: appends ONE interdisciplinary member whose expertise is the
+ * space BETWEEN the seated fields, so the panel carries a seat for exactly
+ * the areas no disciplinary member owns. The member is a full panel member —
+ * it develops, is reviewed, and redevelops like every other seat; only its
+ * commenting skill differs (dispatched on the `seat` marker).
+ *
+ * The seat strings are derived from the seated members' umbrella terms
+ * (unique, in seat order) so the existing role skills render its identity
+ * naturally. The weave is skipped — the panel returned unchanged — when the
+ * panel spans fewer than two distinct umbrellas (a one-field panel has no
+ * between-space) or when adding a seat would exceed maxSeats.
+ */
+export function weavePanel(panel: Panel, maxSeats: number): Panel {
+  positiveInteger(maxSeats, "maxSeats");
+  const fields: string[] = [];
+  for (const member of panel.members) {
+    if (member.seat === "interdisciplinary") return panel; // already woven
+    if (!fields.includes(member.umbrella)) fields.push(member.umbrella);
+  }
+  if (fields.length < 2) return panel;
+  if (panel.members.length + 1 > maxSeats) return panel;
+  const listed = englishList(fields);
+  return {
+    members: [
+      ...panel.members,
+      {
+        id: `member-${panel.members.length + 1}`,
+        department: INTERDISCIPLINARY_DEPARTMENT,
+        umbrella: `the interdisciplinary space between ${listed}`,
+        subfields: [
+          `the pairwise interfaces of ${listed}`,
+          "methods and results that transfer between these fields",
+        ],
+        seat: "interdisciplinary",
+      },
+    ],
+  };
+}

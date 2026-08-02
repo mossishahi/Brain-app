@@ -33,7 +33,12 @@ function FileTable({ files }: { files: readonly AnnotatedFileView[] }) {
             <td>
               <span className="tag">{file.label}</span>
             </td>
-            <td>{file.note || "—"}</td>
+            <td>
+              {file.note || "—"}
+              {file.codeSummary && (
+                <div className="dim small">{file.codeSummary}</div>
+              )}
+            </td>
           </tr>
         ))}
       </tbody>
@@ -41,8 +46,14 @@ function FileTable({ files }: { files: readonly AnnotatedFileView[] }) {
   );
 }
 
+/** Lists longer than this open collapsed; short maps stay visible at a glance. */
+const COLLAPSE_FILES_ABOVE = 12;
+
 /** The orchestrator's file partition: what later calls see vs what was dropped. */
 function FilePartition({ files }: { files: FilePartitionView }) {
+  const [showFiles, setShowFiles] = useState(
+    files.useful.length <= COLLAPSE_FILES_ABOVE,
+  );
   const [showIgnored, setShowIgnored] = useState(false);
   return (
     <div className="file-partition">
@@ -50,7 +61,20 @@ function FilePartition({ files }: { files: FilePartitionView }) {
         Files sent to the panel ({files.useful.length})
       </p>
       {files.useful.length > 0 ? (
-        <FileTable files={files.useful} />
+        <>
+          <button
+            type="button"
+            className="more-btn"
+            onClick={() => setShowFiles((v) => !v)}
+          >
+            {showFiles ? "hide" : "show"} the file map ({files.useful.length})
+          </button>
+          {showFiles && (
+            <div className="file-scroll">
+              <FileTable files={files.useful} />
+            </div>
+          )}
+        </>
       ) : (
         <p className="dim small">no useful files — every file was labeled NA</p>
       )}
@@ -65,14 +89,16 @@ function FilePartition({ files }: { files: FilePartitionView }) {
             , labeled NA — removed from all later model calls)
           </button>
           {showIgnored && (
-            <ul className="ignored-list">
-              {files.ignored.map((file) => (
-                <li key={file.path} title={file.path}>
-                  <span className="file-path">{shortPath(file.path)}</span>
-                  {file.note && <span className="dim small"> — {file.note}</span>}
-                </li>
-              ))}
-            </ul>
+            <div className="file-scroll">
+              <ul className="ignored-list">
+                {files.ignored.map((file) => (
+                  <li key={file.path} title={file.path}>
+                    <span className="file-path">{shortPath(file.path)}</span>
+                    {file.note && <span className="dim small"> — {file.note}</span>}
+                  </li>
+                ))}
+              </ul>
+            </div>
           )}
         </>
       )}
@@ -97,6 +123,23 @@ export function ProcessInputBody({
       <h3 className="artifact-title">{output.title}</h3>
       <blockquote className="question">{output.question}</blockquote>
       <Clamp text={output.context} />
+      {output.requestedOutputs && output.requestedOutputs.length > 0 && (
+        <>
+          {/* Explicit deliverables the submitter asked for: every panel
+              member's output must answer each one with a dedicated section. */}
+          <p className="section-label">
+            Requested outputs ({output.requestedOutputs.length})
+          </p>
+          <ul className="assumptions">
+            {output.requestedOutputs.map((requested) => (
+              <li key={requested.title}>
+                <strong>{requested.title}</strong>
+                <span className="dim"> — {requested.ask}</span>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
       <p className="section-label">Assumptions</p>
       {output.assumptions.length > 0 ? (
         <ul className="assumptions">

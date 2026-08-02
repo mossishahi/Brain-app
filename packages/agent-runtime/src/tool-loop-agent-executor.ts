@@ -24,6 +24,7 @@ import {
   satisfiesRequirements,
   serializeError,
   textBlock,
+  toolCallDetail,
   toolUseBlocks,
 } from "./core-adapter.js";
 import {
@@ -627,16 +628,36 @@ export class ToolLoopAgentExecutor<
       }
       // Server tools ran inside the provider; surface each use as a tool
       // event so provider-native and host tools land in one usage ledger.
-      const serverToolUses = response.metadata?.serverToolUses;
-      if (Array.isArray(serverToolUses)) {
-        for (const name of serverToolUses) {
+      // Providers that expose the call inputs (serverToolUseDetails) let the
+      // event carry the operational detail — the query searched, the URL
+      // fetched, the script executed — for the dashboard's capability icons.
+      const serverToolDetails = response.metadata?.serverToolUseDetails;
+      if (Array.isArray(serverToolDetails) && serverToolDetails.length > 0) {
+        for (const entry of serverToolDetails) {
+          if (typeof entry !== "object" || entry === null || Array.isArray(entry)) continue;
+          const { name, input } = entry as { name?: JsonValue; input?: JsonValue };
           if (typeof name !== "string") continue;
+          const detail = toolCallDetail(name, input);
           context.reportProgress?.({
             kind: "tool_end",
             toolName: name,
             turn,
             message: `${name} executed by the provider`,
+            ...(detail ? { data: { detail: { ...detail } } } : {}),
           });
+        }
+      } else {
+        const serverToolUses = response.metadata?.serverToolUses;
+        if (Array.isArray(serverToolUses)) {
+          for (const name of serverToolUses) {
+            if (typeof name !== "string") continue;
+            context.reportProgress?.({
+              kind: "tool_end",
+              toolName: name,
+              turn,
+              message: `${name} executed by the provider`,
+            });
+          }
         }
       }
 
@@ -979,10 +1000,17 @@ export class ToolLoopAgentExecutor<
 
     const startedAt = Date.now();
     const hint = toolCallHint(call.input);
+    // The structured counterpart of the message hint: the one input that
+    // tells a reader what this call targeted, attached so the dashboard can
+    // render per-activity capability detail. Content-bearing tools
+    // (submit_step and kin) are excluded inside toolCallDetail.
+    const detail = toolCallDetail(call.name, call.input);
+    const detailData = detail ? { data: { detail: { ...detail } } } : {};
     context.reportProgress?.({
       kind: "tool_start",
       toolName: call.name,
       message: `Running ${call.name}${hint ? ` — ${hint}` : ""}`,
+      ...detailData,
     });
     try {
       const result = await tool.execute(call.input, {
@@ -996,6 +1024,7 @@ export class ToolLoopAgentExecutor<
         toolName: call.name,
         elapsedMs: Date.now() - startedAt,
         message: `${call.name} completed${hint ? ` — ${hint}` : ""}`,
+        ...detailData,
       });
       return toolResultBlock(call, result);
     } catch (error) {
@@ -1010,6 +1039,7 @@ export class ToolLoopAgentExecutor<
         toolName: call.name,
         elapsedMs: Date.now() - startedAt,
         message: `${call.name} failed`,
+        ...detailData,
       });
       return failureToolResult(call, errorMessage(error));
     }

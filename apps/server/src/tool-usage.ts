@@ -1,10 +1,12 @@
 /**
  * Capability/tool usage aggregation over one job's event log.
  *
- * Two event families feed it, both content-free by contract:
+ * Two event families feed it:
  * - agent:progress "tool_end" events — one per completed tool call, covering
  *   host tools and provider-native server tools alike (executors emit both
- *   through the same channel);
+ *   through the same channel); these may carry the call's operational detail
+ *   (path/query/url/script) in data.detail, which this aggregate ignores —
+ *   the per-activity dashboard rows render it instead;
  * - agent:progress "status" events carrying a `capabilityPlan` data payload —
  *   one per agent task, recording how the broker resolved each normalized
  *   operation (provider / host / unavailable).

@@ -40,6 +40,24 @@ export type StageActivityKind =
   | "retry"
   | "validation";
 
+/** The capability a logged tool call resolved through (drives the row icon). */
+export type ActivityCapability =
+  | "attachment-access"
+  | "code-execution"
+  | "web-search"
+  | "taxonomy-access";
+
+/**
+ * The operational detail of one logged tool call: the file path read, the
+ * query searched, the URL fetched, or the script/command the agent ran.
+ * Tool inputs only, by contract — never prompts, chain-of-thought, or tool
+ * outputs.
+ */
+export interface ActivityDetailView {
+  readonly kind: "code" | "query" | "url" | "path" | "text";
+  readonly value: string;
+}
+
 export interface StageActivityEntry {
   readonly id: string;
   readonly at: number;
@@ -48,6 +66,10 @@ export interface StageActivityEntry {
   readonly toolName?: string;
   readonly turn?: number;
   readonly elapsedMs?: number;
+  /** Present on tool events whose tool maps to a semantic capability. */
+  readonly capability?: ActivityCapability;
+  /** Present when the executor attached the call's operational detail. */
+  readonly detail?: ActivityDetailView;
 }
 
 export interface StageBase {
@@ -62,6 +84,12 @@ export interface StageBase {
 
 /* --------------------------------------------------- per-stage artifact views */
 
+/** One output the submitter explicitly asked the panel to deliver. */
+export interface RequestedOutputView {
+  readonly title: string;
+  readonly ask: string;
+}
+
 export interface ProcessorOutputView {
   readonly type: string;
   readonly title: string;
@@ -70,6 +98,8 @@ export interface ProcessorOutputView {
   readonly attachments: readonly { readonly name: string; readonly note: string }[];
   readonly assumptions: readonly string[];
   readonly cotSteps: number;
+  /** Explicitly requested deliverables; absent when the submission names none. */
+  readonly requestedOutputs?: readonly RequestedOutputView[];
 }
 
 /** One attached file with the processor's relation label ("NA" = useless). */
@@ -305,12 +335,20 @@ export interface ExplainOutputView {
   readonly connections: readonly string[];
 }
 
+/** A member's direct response to one explicitly requested output. */
+export interface RequestedSectionView {
+  readonly title: string;
+  /** The response paragraphs, joined with blank lines for display. */
+  readonly response: string;
+}
+
 /**
  * One member's finished first-pass output. `type` is the submission's catalog
  * label (free-form — the catalog is bundle data); `shape` is the closed
  * structural id, and exactly the matching body field is present. `novelty`
  * exists only for shapes positioned against a literature map (paper,
- * resolution, survey).
+ * resolution, survey). `requested` exists only when the submission
+ * explicitly asked for deliverables — one response section per ask.
  */
 export interface BrainIdeaView {
   readonly type: string;
@@ -323,6 +361,7 @@ export interface BrainIdeaView {
   readonly interpretation?: InterpretOutputView;
   readonly survey?: SurveyOutputView;
   readonly explanation?: ExplainOutputView;
+  readonly requested?: readonly RequestedSectionView[];
   readonly cot: readonly string[];
   readonly novelty?: string;
   readonly literature?: readonly PaperView[];
@@ -394,6 +433,16 @@ export interface ReviewMemberView {
   readonly department?: string;
   readonly umbrella?: string;
   readonly steps: readonly ReviewStepView[];
+  /**
+   * The member's output as the review leaves it: the first pass with every
+   * redevelopment applied. Once every step has passed (or force-passed) this
+   * IS the member's final version — the record the integrator, the chair,
+   * and the session's `final/` copies work from; while the walk is still
+   * running it is the current version under review.
+   */
+  readonly finalIdea?: BrainIdeaView;
+  /** How many redevelopments the review applied to this member's chain. */
+  readonly revisionCount?: number;
 }
 
 export interface ReviewCursorView {
