@@ -517,6 +517,8 @@ export interface ConfirmPanelStage extends StageBase {
   readonly gate: {
     readonly state: GateState;
     readonly removedMemberIds?: readonly string[];
+    /** Ids of the custom seats the user added at confirmation. */
+    readonly addedMemberIds?: readonly string[];
     readonly decidedAt?: number;
   };
 }
@@ -591,6 +593,14 @@ export interface JobSummary {
   readonly createdAt: number;
   readonly updatedAt: number;
   readonly slurmJobId?: string;
+  /**
+   * The immutable content bundle this job pinned at launch (from its
+   * content-pin.json) — the exact skill/workflow version the run used.
+   */
+  readonly contentBundle?: {
+    readonly id: string;
+    readonly version: string;
+  };
   /** Present once the job has been moved to the view-only trash. */
   readonly trashedAt?: number;
   /** Compact progress for the landing-page job card. */
@@ -619,6 +629,18 @@ export interface PendingGateView {
   readonly prompt?: string;
   /** Panel shown for the confirm-panel gate. */
   readonly members?: readonly PanelMemberView[];
+  /**
+   * The server-side countdown to automatic approval: an unattended gate
+   * approves itself as seated when `deadlineAt` passes. Any click inside the
+   * confirmation card (or its pause control) holds it permanently via
+   * POST /api/jobs/:id/gate-hold — `held` then flips true and the deadline
+   * stops mattering.
+   */
+  readonly autoApprove?: {
+    readonly deadlineAt: number;
+    readonly totalMs: number;
+    readonly held: boolean;
+  };
 }
 
 export interface JobDetail extends JobSummary {
@@ -677,10 +699,20 @@ export interface ServerSettings {
   readonly llm: LlmSettings;
   /** "manual": jobs pause at the panel gate for dashboard confirmation. */
   readonly panelConfirmation: "manual" | "auto";
+  /**
+   * DEPLOYMENT-OWNED, read-only for users. The registry endpoint is baked
+   * into the app (DEFAULT_CONTENT_REGISTRY_URL in the server's settings
+   * module; developers override with --content-registry-url or
+   * BRAIN_CONTENT_REGISTRY_URL at launch). PUT /api/settings ignores this
+   * field entirely; it is returned so the UI can display what is in effect.
+   * `version` is absent in normal operation — every new run resolves the
+   * latest published bundle automatically; a developer may pin one by
+   * editing settings.json on the server.
+   */
   readonly contentRegistry: {
     readonly url: string;
     readonly bundle: string;
-    /** Omit to resolve latest once per new run. */
+    /** Developer pin; omit (normal) to resolve latest once per new run. */
     readonly version?: string;
     /**
      * "auto" (default): new runs silently take the latest published version.
@@ -696,6 +728,15 @@ export interface ServerSettings {
     readonly safetyBufferSeconds: number;
     readonly openRouterModel: string;
     readonly openRouterKeyConfigured?: boolean;
+  };
+  /**
+   * Recovery of interrupted jobs (SLURM timeouts, node failures, power
+   * cuts): the scheduler resubmits an orphaned job from its last checkpoint.
+   * Defaults to enabled; auto-resume pauses after repeated attempts without
+   * checkpoint progress and waits for a manual resume instead.
+   */
+  readonly interruptedRecovery?: {
+    readonly autoResume: boolean;
   };
   /**
    * Host tools the user has explicitly enabled/disabled.
@@ -784,7 +825,11 @@ export interface ServerSettingsUpdate {
   readonly slurmTemplate: string;
   readonly runner: RunnerKind;
   readonly panelConfirmation: "manual" | "auto";
-  readonly contentRegistry: {
+  /**
+   * Deployment-owned: accepted for wire compatibility but IGNORED by the
+   * server — the registry endpoint is not a user setting.
+   */
+  readonly contentRegistry?: {
     readonly url: string;
     readonly bundle: string;
     readonly version?: string;
@@ -797,6 +842,10 @@ export interface ServerSettingsUpdate {
     readonly openRouterModel: string;
     readonly openRouterApiKey?: string;
     readonly clearOpenRouterApiKey?: boolean;
+  };
+  /** Absent = keep the current interrupted-recovery policy. */
+  readonly interruptedRecovery?: {
+    readonly autoResume: boolean;
   };
   readonly llm: {
     readonly provider: "anthropic" | "claude-agent" | "offline";
@@ -905,11 +954,36 @@ export interface SubmitJobResponse {
   readonly jobId: string;
 }
 
+/**
+ * A user-defined panel seat added at confirmation: the department, the field
+ * (rendered as the member's umbrella term), and 1-3 research focuses.
+ */
+export interface CustomSeatRequest {
+  readonly department: string;
+  /** The seat's field — carried as the panel member's umbrella term. */
+  readonly umbrella: string;
+  /** Research focuses; at least 1, at most 3. */
+  readonly subfields: readonly string[];
+}
+
+/** Ceilings for gate-time panel edits (mirrors the panel/experts bounds). */
+export const PANEL_EDIT_LIMITS = {
+  minMembers: 2,
+  maxMembers: 12,
+  minSubfields: 1,
+  maxSubfields: 3,
+} as const;
+
 export interface GateAnswerRequest {
   readonly gateKey: string;
   readonly action: "approve" | "shrink";
   /** For shrink: member ids to KEEP, in their existing order. */
   readonly members?: readonly string[];
+  /**
+   * Custom seats to ADD alongside the kept ones (valid with either action).
+   * The confirmed panel — kept + added — must stay within PANEL_EDIT_LIMITS.
+   */
+  readonly addedMembers?: readonly CustomSeatRequest[];
 }
 
 export interface CancelJobResponse {
@@ -919,6 +993,15 @@ export interface CancelJobResponse {
 
 /** Response of POST /api/jobs/:jobId/resume (credit-blocked jobs only). */
 export interface ResumeJobResponse {
+  readonly jobId: string;
+  readonly status: JobStatus;
+}
+
+/**
+ * Response of POST /api/jobs/:jobId/resume-interrupted: resubmits an
+ * orphaned (interrupted) job so it continues from its last checkpoint.
+ */
+export interface ResumeInterruptedJobResponse {
   readonly jobId: string;
   readonly status: JobStatus;
 }
@@ -933,12 +1016,86 @@ export interface ContentRegistryStatus {
   readonly url?: string;
   readonly skills?: number;
   readonly workflows?: number;
+  /** The bundle this deployment serves runs from (e.g. "brainstorm"). */
+  readonly bundle?: string;
+  /** Version of the registry server process itself (from its /health). */
+  readonly serverVersion?: string;
   /** Newest published bundle version the registry index lists. */
   readonly latest?: string;
   /** Release notes of `latest` (the publisher's tag annotation). */
   readonly latestNotes?: string;
   /** The explicit version pin from settings, when one is set. */
   readonly pinnedVersion?: string;
+  /** The bundle version a NEW run starts with right now (pin ?? latest). */
+  readonly effectiveVersion?: string;
+}
+
+/* --------------------------------------------------------------- readiness */
+
+/**
+ * Environment readiness checks the server runs so a submission never starts
+ * into a broken deployment (HPC hosts especially: missing sbatch, offline
+ * compute nodes, unverified credentials). Each check maps to one status icon
+ * in the webapp next to the Brain Registry indicator.
+ */
+export const READINESS_CHECK_IDS = [
+  "registry",
+  "llm",
+  "internet",
+  "code",
+  "slurm",
+] as const;
+export type ReadinessCheckId = (typeof READINESS_CHECK_IDS)[number];
+
+export type ReadinessCheckState =
+  | "unknown" // never evaluated (fresh workspace, before the first run)
+  | "checking" // currently being evaluated (icon pulses)
+  | "ok" // green
+  | "failed" // red — submissions are held until it clears
+  | "skipped"; // not required under current settings (icon hidden)
+
+export interface ReadinessCheck {
+  readonly id: ReadinessCheckId;
+  readonly label: string;
+  readonly state: ReadinessCheckState;
+  /** Whether current settings make this check required before submissions. */
+  readonly required: boolean;
+  /** One-line outcome: what works, or what failed. */
+  readonly message?: string;
+  /** Technical failure detail (command, exit code, stderr excerpt). */
+  readonly detail?: string;
+  /** LLM-generated fix guidance (or a built-in hint when no LLM is usable). */
+  readonly advice?: string;
+  /** True while the LLM advisor is composing advice for this failure. */
+  readonly advising?: boolean;
+  readonly startedAt?: number;
+  readonly finishedAt?: number;
+}
+
+export interface ReadinessReport {
+  readonly checks: readonly ReadinessCheck[];
+  /** True when every required check is ok; submissions start immediately. */
+  readonly ready: boolean;
+  readonly updatedAt: number;
+}
+
+/** POST /api/readiness/check request body; omit `checks` to re-run all. */
+export interface ReadinessCheckRequest {
+  readonly checks?: readonly ReadinessCheckId[];
+}
+
+/** POST /api/readiness/diagnose request body. */
+export interface ReadinessDiagnoseRequest {
+  readonly check: ReadinessCheckId;
+}
+
+/**
+ * Body of the 409 returned by POST /api/jobs while a required readiness
+ * check is failing: the submission is held client-side until `ready`.
+ */
+export interface SubmissionBlockedResponse {
+  readonly message: string;
+  readonly readiness: ReadinessReport;
 }
 
 export interface HealthResponse {
@@ -953,10 +1110,14 @@ export interface HealthResponse {
   };
 }
 
-/** Server-sent events. `jobs` streams on /api/stream; `job` on /api/jobs/:id/stream. */
+/**
+ * Server-sent events. `jobs` and `readiness` stream on /api/stream; `job` on
+ * /api/jobs/:id/stream.
+ */
 export type ServerEvent =
   | { readonly type: "jobs"; readonly jobs: readonly JobSummary[] }
   | { readonly type: "job"; readonly job: JobDetail }
+  | { readonly type: "readiness"; readonly readiness: ReadinessReport }
   | { readonly type: "error"; readonly message: string };
 
 /**
@@ -991,15 +1152,20 @@ export interface ToolUsageReport {
  *   GET  /api/attachments/browse              -> BrowseServerFilesResponse
  *   GET  /api/attachments/search              -> SearchServerFilesResponse
  *   POST /api/attachments/validate            -> ValidateAttachmentsResponse
- *   POST /api/jobs                            -> SubmitJobResponse   (body: SubmitJobRequest with validated server paths/URLs)
+ *   POST /api/jobs                            -> SubmitJobResponse   (body: SubmitJobRequest; 409 SubmissionBlockedResponse while a required readiness check fails)
+ *   GET  /api/readiness                       -> ReadinessReport
+ *   POST /api/readiness/check                 -> ReadinessReport     (body: ReadinessCheckRequest; re-runs checks asynchronously)
+ *   POST /api/readiness/diagnose              -> ReadinessReport     (body: ReadinessDiagnoseRequest; asks the LLM advisor about a failed check)
  *   GET  /api/jobs/trash                      -> JobSummary[]       (view-only trash, newest first)
  *   GET  /api/jobs/:jobId                     -> JobDetail
  *   POST /api/jobs/:jobId/cancel              -> CancelJobResponse
  *   POST /api/jobs/:jobId/resume              -> ResumeJobResponse  (credit-blocked jobs only; 409 otherwise)
+ *   POST /api/jobs/:jobId/resume-interrupted  -> ResumeInterruptedJobResponse (orphaned jobs only; 409 otherwise)
  *   POST /api/jobs/:jobId/trash               -> TrashJobResponse   (409 while the job is still live)
  *   POST /api/jobs/:jobId/gate                -> JobDetail           (body: GateAnswerRequest; submits a resume job)
+ *   POST /api/jobs/:jobId/gate-hold           -> JobDetail           (permanently pauses the gate's auto-approve countdown)
  *   GET  /api/jobs/:jobId/tool-usage          -> ToolUsageReport     (aggregated from the job's event log)
- *   GET  /api/stream                          -> SSE of ServerEvent{type:"jobs"}
+ *   GET  /api/stream                          -> SSE of ServerEvent{type:"jobs"|"readiness"}
  *   GET  /api/jobs/:jobId/stream              -> SSE of ServerEvent{type:"job"}
  * Static: everything else serves the webapp build (SPA fallback to index.html).
  */

@@ -7,7 +7,12 @@ import { InMemoryToolRegistry } from "@brainstorm-agentic/core";
 
 import { ATTACHMENT_MANIFESTS, attachmentTools, ATTACHMENT_TOOL_NAMES } from "./attachment-tools.js";
 import { WEB_SEARCH_MANIFESTS } from "./web-search.js";
-import { CODE_EXECUTION_MANIFESTS } from "./code-execution.js";
+import {
+  CODE_EXECUTION_MANIFESTS,
+  CODE_EXECUTION_TOOL_NAMES,
+  codeExecutionTools,
+  type CodeRuntimeEnvironment,
+} from "./code-execution.js";
 import { TAXONOMY_MANIFESTS, TAXONOMY_TOOL_NAMES, taxonomyTools } from "./taxonomy-tools.js";
 import type { TaxonomyAccess } from "@brainstorm-agentic/core";
 
@@ -36,6 +41,8 @@ export interface HostToolRegistryConfig {
   readonly attachmentRoots?: readonly string[];
   /** Shared-taxonomy access. Required for taxonomy tools to be functional. */
   readonly taxonomy?: TaxonomyAccess;
+  /** Prepared code scratch workspace. Required for the code_execute tool. */
+  readonly codeEnvironment?: CodeRuntimeEnvironment;
   /** User-enabled tool IDs. Only these are registered on the runtime registry. */
   readonly enabledToolIds: ReadonlySet<string>;
 }
@@ -43,7 +50,7 @@ export interface HostToolRegistryConfig {
 /**
  * Creates a tool registry containing only the enabled, executable host tools.
  * Tools that are listed in manifests but have no runtime implementation
- * (web-search, code-execution) are silently skipped.
+ * (web-search) are silently skipped.
  */
 export function createHostToolRegistry(
   config: HostToolRegistryConfig,
@@ -72,7 +79,17 @@ export function createHostToolRegistry(
     }
   }
 
-  // Future: register web-search and code-execution tools here when backends exist
+  // Host code execution: only register over a prepared scratch workspace
+  if (config.codeEnvironment) {
+    for (const tool of codeExecutionTools(config.codeEnvironment)) {
+      if (config.enabledToolIds.has(tool.definition.name)) {
+        registry.register(tool);
+        registeredNames.push(tool.definition.name);
+      }
+    }
+  }
+
+  // Future: register web-search tools here when a backend exists
 
   return { registry, registeredToolNames: registeredNames };
 }
@@ -84,6 +101,7 @@ export function createHostToolRegistry(
 export function executableHostToolIds(config: {
   attachmentRoots?: readonly string[];
   taxonomy?: TaxonomyAccess;
+  codeEnvironment?: CodeRuntimeEnvironment;
 }): ReadonlySet<string> {
   const ids = new Set<string>();
   if (config.attachmentRoots && config.attachmentRoots.length > 0) {
@@ -93,6 +111,11 @@ export function executableHostToolIds(config: {
   }
   if (config.taxonomy) {
     for (const name of TAXONOMY_TOOL_NAMES) {
+      ids.add(name);
+    }
+  }
+  if (config.codeEnvironment) {
+    for (const name of CODE_EXECUTION_TOOL_NAMES) {
       ids.add(name);
     }
   }
@@ -106,6 +129,7 @@ export function executableHostToolIds(config: {
 export function availableHostToolManifests(config: {
   attachmentRoots?: readonly string[];
   taxonomy?: TaxonomyAccess;
+  codeEnvironment?: CodeRuntimeEnvironment;
 }): readonly HostToolManifest[] {
   const available: HostToolManifest[] = [];
   if (config.attachmentRoots && config.attachmentRoots.length > 0) {
@@ -114,8 +138,9 @@ export function availableHostToolManifests(config: {
   if (config.taxonomy) {
     available.push(...TAXONOMY_MANIFESTS);
   }
-  // Web search and code execution manifests are always listed (for settings UI)
-  // but marked as non-executable until backends are implemented
+  // Web search and code execution manifests are always listed (for the
+  // settings UI); code execution is executable only when a prepared
+  // workspace backs it (see executableHostToolIds).
   available.push(...WEB_SEARCH_MANIFESTS);
   available.push(...CODE_EXECUTION_MANIFESTS);
   return available;

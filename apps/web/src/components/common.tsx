@@ -119,15 +119,99 @@ export function VerdictChip({ verdict }: { verdict: Verdict }) {
   return <span className={`verdict ${cls}`}>{verdict}</span>;
 }
 
-function maybeLink(locator: string) {
-  if (/^https?:\/\//i.test(locator)) {
+/*
+ * Reference locators arrive as free prose that often carries several URLs
+ * plus commentary ("https://… (see also X, JMLR 2006, 'Title', https://…)").
+ * Rendering that string as ONE link breaks the href and wraps mid-URL, so it
+ * is split into segments: each URL becomes its own working link, with the
+ * text before it carried as that link's description.
+ */
+type LocatorItem =
+  | { readonly kind: "link"; readonly url: string; readonly label?: string }
+  | { readonly kind: "note"; readonly text: string };
+
+const LOCATOR_URL = /https?:\/\/[^\s<>"']+/g;
+
+function count(text: string, char: string): number {
+  let n = 0;
+  for (const c of text) if (c === char) n += 1;
+  return n;
+}
+
+/** Strips sentence punctuation and unbalanced closers the prose glued onto a URL. */
+function trimUrl(raw: string): string {
+  let url = raw;
+  for (;;) {
+    const last = url[url.length - 1];
+    if (last !== undefined && /[.,;:!?]/.test(last)) {
+      url = url.slice(0, -1);
+      continue;
+    }
+    if (last === ")" && count(url, "(") < count(url, ")")) {
+      url = url.slice(0, -1);
+      continue;
+    }
+    if (last === "]" && count(url, "[") < count(url, "]")) {
+      url = url.slice(0, -1);
+      continue;
+    }
+    return url;
+  }
+}
+
+/** Drops the connective punctuation left over once the URLs are cut out. */
+function cleanNote(text: string): string {
+  return text
+    .replace(/^[\s([,;:.\u2013\u2014-]+/, "")
+    .replace(/[\s)\],;:\u2013\u2014-]+$/, "")
+    .trim();
+}
+
+export function splitLocator(locator: string): readonly LocatorItem[] {
+  const items: LocatorItem[] = [];
+  let cursor = 0;
+  for (const match of locator.matchAll(LOCATOR_URL)) {
+    const label = cleanNote(locator.slice(cursor, match.index));
+    items.push({ kind: "link", url: trimUrl(match[0]), ...(label ? { label } : {}) });
+    cursor = match.index + match[0].length;
+  }
+  const trailing = cleanNote(locator.slice(cursor));
+  if (trailing) items.push({ kind: "note", text: trailing });
+  return items;
+}
+
+function LocatorBlock({ locator }: { locator: string }) {
+  const items = splitLocator(locator);
+  if (items.length === 0) return null;
+  const only = items.length === 1 ? items[0]! : undefined;
+  if (only?.kind === "note") {
+    return <span className="evidence-locator">{only.text}</span>;
+  }
+  if (only?.kind === "link" && only.label === undefined) {
     return (
-      <a className="evidence-locator" href={locator} target="_blank" rel="noreferrer">
-        {locator}
+      <a className="evidence-locator" href={only.url} target="_blank" rel="noreferrer">
+        {only.url}
       </a>
     );
   }
-  return <span className="evidence-locator">{locator}</span>;
+  return (
+    <ul className="locator-list">
+      {items.map((item, index) =>
+        item.kind === "link" ? (
+          <li key={index}>
+            {item.label !== undefined && <span className="locator-note">{item.label}</span>}
+            <a className="evidence-locator" href={item.url} target="_blank" rel="noreferrer">
+              {item.url}
+            </a>
+          </li>
+        ) : (
+          <li key={index}>
+            <span className="locator-note">{item.text}</span>
+          </li>
+        ),
+      )}
+    </ul>
+  );
 }
 
 /** Script evidence as a code block, math as a block, reference as a citation. */
@@ -157,7 +241,7 @@ export function EvidenceBlock({ evidence }: { evidence: EvidenceView }) {
         <div>
           <span className="detail-label">reference</span>
           <div>{evidence.citation}</div>
-          {maybeLink(evidence.locator)}
+          <LocatorBlock locator={evidence.locator} />
           <div className="evidence-shows">shows: {evidence.shows}</div>
         </div>
       );

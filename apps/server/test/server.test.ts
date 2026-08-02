@@ -14,7 +14,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
@@ -22,6 +22,7 @@ import {
   SLURM_COMMAND_TAG,
   type JobDetail,
   type JobSummary,
+  type ReadinessReport,
   type ServerSettings,
   type ServerSettingsUpdate,
 } from "@brainstorm-agentic/protocol";
@@ -193,6 +194,75 @@ test("settings roundtrip and template validation", async () => {
   }
 });
 
+test("the registry endpoint is deployment-owned: PUT ignores it and health reports versions", async () => {
+  const workspace = tempRoot();
+  const server = await startTestBrainServer({ workspace, port: 0 });
+  try {
+    const initial = (
+      await requestJson<ServerSettings>(server, "/api/settings")
+    ).value;
+    const deploymentUrl = initial.contentRegistry.url;
+    assert.ok(deploymentUrl.length > 0);
+
+    // A user submitting a different registry URL/bundle/pin changes nothing:
+    // the field is deployment configuration, not a setting.
+    const tampered = await requestJson<ServerSettings>(server, "/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({
+        ...initial,
+        llm: { provider: "offline" },
+        contentRegistry: {
+          url: "https://attacker.example/mcp",
+          bundle: "not-brainstorm",
+          version: "9.9.9",
+        },
+      }),
+    });
+    assert.equal(tampered.status, 200);
+    assert.equal(tampered.value.contentRegistry.url, deploymentUrl);
+    assert.equal(tampered.value.contentRegistry.bundle, "brainstorm");
+    assert.equal(tampered.value.contentRegistry.version, undefined);
+    const stored = JSON.parse(
+      readFileSync(join(workspace, "settings.json"), "utf8"),
+    ) as { contentRegistry: { url: string; bundle: string } };
+    assert.equal(stored.contentRegistry.url, deploymentUrl);
+    assert.equal(stored.contentRegistry.bundle, "brainstorm");
+
+    // An update that omits contentRegistry entirely (the webapp's shape) works.
+    const omitted = await requestJson<ServerSettings>(server, "/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({
+        ...tampered.value,
+        contentRegistry: undefined,
+      }),
+    });
+    assert.equal(omitted.status, 200);
+    assert.equal(omitted.value.contentRegistry.url, deploymentUrl);
+
+    // Health names the bundle and the version a new run starts with (no pin
+    // exists, so the effective version IS the latest published one).
+    const health = (
+      await requestJson<{
+        version: string;
+        contentRegistry: {
+          bundle?: string;
+          effectiveVersion?: string;
+          latest?: string;
+          pinnedVersion?: string;
+        };
+      }>(server, "/api/health")
+    ).value;
+    assert.match(health.version, /^\d+\.\d+\.\d+$/);
+    assert.equal(health.contentRegistry.bundle, "brainstorm");
+    assert.equal(health.contentRegistry.latest, latestPublishedVersion());
+    assert.equal(health.contentRegistry.effectiveVersion, latestPublishedVersion());
+    assert.equal(health.contentRegistry.pinnedVersion, undefined);
+  } finally {
+    await server.close();
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("Anthropic jobs are rejected before creation until settings are verified", async () => {
   const workspace = tempRoot();
   const server = await startTestBrainServer({ workspace, port: 0 });
@@ -205,7 +275,13 @@ test("Anthropic jobs are rejected before creation until settings are verified", 
         body: JSON.stringify({ topic: "must not become orphaned" }),
       },
     );
-    assert.equal(response.status, 400);
+    // 400 comes from the submit guard; 409 from the readiness gate once the
+    // startup LLM check has recorded the missing credentials. Both carry the
+    // same actionable message and neither creates a job.
+    assert.ok(
+      response.status === 400 || response.status === 409,
+      `expected 400 or 409, got ${response.status}`,
+    );
     assert.match(response.value.message, /Configure and verify/);
     const jobs = (
       await requestJson<readonly JobSummary[]>(server, "/api/jobs")
@@ -569,6 +645,10 @@ test("fake sbatch submission records id and cancellation calls scancel", async (
       PATH: `${bin}:${process.env.PATH ?? ""}`,
       SCANCEL_RECORD: cancelRecord,
     },
+    // The stub sbatch cannot run the probe job; pin the check green so the
+    // submission gate never interferes with what this test exercises.
+    readinessProbes: { slurm: async () => ({ message: "stubbed" }) },
+    readinessAdvisor: null,
   });
   try {
     await putSettings(server, { llm: { provider: "offline" } });
@@ -624,6 +704,11 @@ test("local offline job completes with every dashboard artifact", async () => {
     assert.equal(storedPin.bundle, "brainstorm");
     assert.equal(storedPin.version, latestPublishedVersion());
     assert.match(storedPin.manifestSha256, /^[a-f0-9]{64}$/);
+    // The exact skills version this run executed travels on the job itself.
+    assert.deepEqual(detail.contentBundle, {
+      id: "brainstorm",
+      version: latestPublishedVersion(),
+    });
     appendFileSync(
       join(workspace, "workspace", "jobs", jobId, "events.jsonl"),
       `${JSON.stringify({
@@ -797,7 +882,7 @@ test("attachments are ingested at submission and partitioned into useful and ign
   }
 });
 
-test("server file picker browses allowlisted roots, validates immediately, and snapshots at launch", async () => {
+test("server file picker starts at its roots, reaches any readable path, and snapshots at launch", async () => {
   const workspace = tempRoot();
   const remoteRoot = join(workspace, "remote-data");
   const prototype = join(remoteRoot, "prototype");
@@ -812,8 +897,14 @@ test("server file picker browses allowlisted roots, validates immediately, and s
   mkdirSync(travel, { recursive: true });
   writeFileSync(join(travel, "itinerary.pdf"), "%PDF-itinerary\n");
   symlinkSync("/etc", join(remoteRoot, "escape-outside-root"));
+  // A dataset OUTSIDE the configured root — the common HPC layout where
+  // inputs live on scratch/project mounts, not under the browse root.
+  const outsideData = join(workspace, "outside-data");
+  mkdirSync(outsideData, { recursive: true });
+  writeFileSync(join(outsideData, "measurements.txt"), "42, 43, 44\n");
   const canonicalRoot = realpathSync(remoteRoot);
   const canonicalPrototype = realpathSync(prototype);
+  const canonicalOutside = realpathSync(outsideData);
   const server = await startTestBrainServer({
     workspace,
     port: 0,
@@ -856,12 +947,12 @@ test("server file picker browses allowlisted roots, validates immediately, and s
           entry.selectable,
       ),
     );
-    assert.equal(
+    assert.ok(
       top.value.entries.some(
-        (entry) => entry.name === "escape-outside-root",
+        (entry) =>
+          entry.name === "escape-outside-root" && entry.kind === "folder",
       ),
-      false,
-      "symlinks escaping an allowed root are not exposed",
+      "symlinks leading outside the root stay visible (HPC scratch links)",
     );
     assert.equal(
       top.value.entries.some(
@@ -870,6 +961,28 @@ test("server file picker browses allowlisted roots, validates immediately, and s
       ),
       false,
       "hidden and junk entries are not shown in the picker",
+    );
+
+    // Roots are starting points, not walls: browsing the parent of the
+    // configured root works, and the root itself is one of its entries.
+    const above = await requestJson<{
+      currentPath: string;
+      entries: { name: string; kind: string }[];
+    }>(
+      server,
+      `/api/attachments/browse?kind=folder&root=${encodeURIComponent(rootId)}&path=${encodeURIComponent(resolve(canonicalRoot, ".."))}`,
+    );
+    assert.equal(above.status, 200);
+    assert.ok(
+      above.value.entries.some(
+        (entry) => entry.name === "remote-data" && entry.kind === "folder",
+      ),
+    );
+    assert.ok(
+      above.value.entries.some(
+        (entry) => entry.name === "outside-data" && entry.kind === "folder",
+      ),
+      "sibling folders outside the configured root are browsable",
     );
 
     const folderSearch = await requestJson<{
@@ -972,23 +1085,36 @@ test("server file picker browses allowlisted roots, validates immediately, and s
     assert.equal(wrongType.value.attachments[0]!.valid, false);
     assert.match(wrongType.value.attachments[0]!.reason ?? "", /PDF/i);
 
-    const outside = await requestJson<{
+    // Paths outside every configured root validate like any other readable
+    // path: the roots are bookmarks, the OS permissions are the boundary.
+    const outsideFolder = await requestJson<{
+      attachments: { valid: boolean; files?: number; reason?: string }[];
+    }>(server, "/api/attachments/validate", {
+      method: "POST",
+      body: JSON.stringify({ kind: "folder", paths: [canonicalOutside] }),
+    });
+    assert.equal(outsideFolder.status, 200);
+    assert.equal(outsideFolder.value.attachments[0]!.valid, true);
+    assert.equal(outsideFolder.value.attachments[0]!.files, 1);
+
+    // Nonexistent paths still fail cleanly.
+    const missing = await requestJson<{
       attachments: { valid: boolean; reason?: string }[];
     }>(server, "/api/attachments/validate", {
       method: "POST",
-      body: JSON.stringify({ kind: "file", paths: ["/etc/passwd"] }),
+      body: JSON.stringify({
+        kind: "file",
+        paths: [join(workspace, "never-created.txt")],
+      }),
     });
-    assert.equal(outside.status, 200);
-    assert.equal(outside.value.attachments[0]!.valid, false);
-    assert.match(
-      outside.value.attachments[0]!.reason ?? "",
-      /outside the configured attachment roots/,
-    );
+    assert.equal(missing.status, 200);
+    assert.equal(missing.value.attachments[0]!.valid, false);
+    assert.match(missing.value.attachments[0]!.reason ?? "", /does not exist/);
 
     const jobId = await submit(
       server,
       "Analyze this server-resident prototype",
-      [canonicalPrototype],
+      [canonicalPrototype, canonicalOutside],
     );
     const jobDir = join(workspace, "workspace", "jobs", jobId);
     const manifest = JSON.parse(
@@ -999,10 +1125,16 @@ test("server file picker browses allowlisted roots, validates immediately, and s
         files: { path: string }[];
       }[];
     };
-    assert.equal(manifest.attachments[0]!.origin, canonicalPrototype);
+    assert.deepEqual(
+      manifest.attachments.map((attachment) => attachment.origin).sort(),
+      [canonicalOutside, canonicalPrototype].sort(),
+      "out-of-root folders launch alongside in-root ones",
+    );
     assert.ok(
-      manifest.attachments[0]!.files.every((file) =>
-        file.path.startsWith(join(jobDir, "attachments")),
+      manifest.attachments.every((attachment) =>
+        attachment.files.every((file) =>
+          file.path.startsWith(join(jobDir, "attachments")),
+        ),
       ),
       "launch snapshots server files into the immutable job store",
     );
@@ -1100,6 +1232,57 @@ test("manual gate can shrink, complete, and reload after restart", async () => {
     assert.ok(suspended.pendingGate?.members);
     const original = suspended.pendingGate.members;
     const keep = original.slice(0, 2).map((member) => member.id);
+
+    // The poller arms the 30s auto-approve countdown; holding it (any click
+    // in the confirmation card does this) freezes the gate open, which also
+    // keeps the rest of this test deterministic.
+    await (async () => {
+      const deadline = Date.now() + 10_000;
+      for (;;) {
+        const detail = await requestJson<JobDetail>(server, `/api/jobs/${jobId}`);
+        if (detail.value.pendingGate?.autoApprove) return;
+        if (Date.now() > deadline) {
+          throw new Error("the auto-approve countdown never armed");
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    })();
+    const heldDetail = await requestJson<JobDetail>(
+      server,
+      `/api/jobs/${jobId}/gate-hold`,
+      { method: "POST" },
+    );
+    assert.equal(heldDetail.status, 200);
+    assert.equal(heldDetail.value.pendingGate?.autoApprove?.held, true);
+
+    // Malformed custom seats never reach the runtime: four subfields is out
+    // of the 1-3 range.
+    const badSeat = await requestJson<{ message: string }>(
+      server,
+      `/api/jobs/${jobId}/gate`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          gateKey: suspended.pendingGate.gateKey,
+          action: "approve",
+          addedMembers: [
+            { department: "X", umbrella: "Y", subfields: ["a", "b", "c", "d"] },
+          ],
+        }),
+      },
+    );
+    assert.equal(badSeat.status, 400);
+    assert.match(badSeat.value.message, /1 to 3/);
+
+    // Shrink to two seats AND add one user-defined custom seat.
+    const customSeat = {
+      department: "Synthetic Biology",
+      umbrella: "Biofoundry Automation",
+      subfields: [
+        "Automated strain engineering",
+        "Design-build-test-learn loops",
+      ],
+    };
     const answered = await requestJson<JobDetail>(
       server,
       `/api/jobs/${jobId}/gate`,
@@ -1109,6 +1292,7 @@ test("manual gate can shrink, complete, and reload after restart", async () => {
           gateKey: suspended.pendingGate.gateKey,
           action: "shrink",
           members: keep,
+          addedMembers: [customSeat],
         }),
       },
     );
@@ -1129,6 +1313,34 @@ test("manual gate can shrink, complete, and reload after restart", async () => {
       confirm.id === "confirm-panel" ? confirm.gate.removedMemberIds : [],
       original.slice(2).map((member) => member.id),
     );
+    assert.deepEqual(
+      confirm.id === "confirm-panel" ? confirm.gate.addedMemberIds : [],
+      ["member-user-1"],
+    );
+
+    // The custom seat ran the whole pipeline like any selected member.
+    const firstPass = completed.stages[4]!;
+    assert.equal(firstPass.id, "first-pass");
+    if (firstPass.id === "first-pass") {
+      assert.equal(firstPass.members.length, keep.length + 1);
+      const custom = firstPass.members.find(
+        (member) => member.memberId === "member-user-1",
+      );
+      assert.ok(custom, "the custom seat joins the first pass");
+      assert.equal(custom.department, customSeat.department);
+      assert.equal(custom.umbrella, customSeat.umbrella);
+      assert.deepEqual(custom.subfields, customSeat.subfields);
+      assert.equal(custom.status, "completed");
+      assert.ok(custom.idea, "the custom seat produced a first-pass idea");
+    }
+    const reviewStage = completed.stages[5]!;
+    assert.equal(reviewStage.id, "review-members");
+    if (reviewStage.id === "review-members") {
+      assert.ok(
+        reviewStage.members.some((member) => member.memberId === "member-user-1"),
+        "the custom seat is reviewed like any other",
+      );
+    }
 
     await server.close();
     server = await startTestBrainServer({ workspace, port: 0 });
@@ -1650,4 +1862,447 @@ test("POST /api/jobs/:id/resume rejects unknown and non-blocked jobs", async () 
     await server.close();
     rmSync(workspace, { recursive: true, force: true });
   }
+});
+
+test("readiness reports required checks, gates submissions while red, and re-runs on demand", async () => {
+  const workspace = tempRoot();
+  let llmProbeCalls = 0;
+  const server = await startTestBrainServer({
+    workspace,
+    port: 0,
+    readinessProbes: {
+      llm: async () => {
+        llmProbeCalls += 1;
+        throw new Error(
+          "Configure and verify the Anthropic API key and model in Settings",
+        );
+      },
+      internet: async () => ({ message: "stub online" }),
+      code: async () => ({ message: "stub scripts run" }),
+      slurm: async () => ({ message: "stub sbatch works" }),
+    },
+    readinessAdvisor: null,
+  });
+  try {
+    // The startup evaluation lands asynchronously: wait for the failed LLM check.
+    let report!: ReadinessReport;
+    await (async () => {
+      const deadline = Date.now() + 10_000;
+      for (;;) {
+        report = (
+          await requestJson<ReadinessReport>(server, "/api/readiness")
+        ).value;
+        const llm = report.checks.find((check) => check.id === "llm");
+        if (llm?.state === "failed") return;
+        if (Date.now() > deadline) throw new Error("llm check never failed");
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    })();
+    assert.equal(report.ready, false);
+    assert.equal(report.checks.length, 5);
+    const byId = new Map(report.checks.map((check) => [check.id, check]));
+    assert.equal(byId.get("registry")?.state, "ok");
+    // Default settings: anthropic provider + slurm runner => all five required.
+    assert.ok(report.checks.every((check) => check.required));
+    assert.match(byId.get("llm")?.message ?? "", /Configure and verify/);
+    // A failed check always carries fix advice (built-in hint without an LLM).
+    assert.ok((byId.get("llm")?.advice ?? "").length > 0);
+
+    // The gate: a red required check holds submissions with a 409 + report.
+    const blocked = await requestJson<{
+      message: string;
+      readiness: ReadinessReport;
+    }>(server, "/api/jobs", {
+      method: "POST",
+      body: JSON.stringify({ topic: "must wait for green icons" }),
+    });
+    assert.equal(blocked.status, 409);
+    assert.match(blocked.value.message, /Environment is not ready/);
+    assert.match(blocked.value.message, /Configure and verify/);
+    assert.equal(blocked.value.readiness.ready, false);
+    assert.equal(
+      (await requestJson<readonly JobSummary[]>(server, "/api/jobs")).value.length,
+      0,
+    );
+
+    // Switching to the offline provider re-evaluates: the LLM and internet
+    // checks stop being required and the environment turns ready.
+    await putSettings(server, { llm: { provider: "offline" } });
+    await (async () => {
+      const deadline = Date.now() + 10_000;
+      for (;;) {
+        report = (
+          await requestJson<ReadinessReport>(server, "/api/readiness")
+        ).value;
+        if (report.ready) return;
+        if (Date.now() > deadline) {
+          throw new Error(
+            `environment never turned ready: ${JSON.stringify(report.checks)}`,
+          );
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    })();
+    const after = new Map(report.checks.map((check) => [check.id, check]));
+    assert.equal(after.get("llm")?.state, "skipped");
+    assert.equal(after.get("internet")?.state, "skipped");
+    assert.equal(after.get("slurm")?.state, "ok");
+    assert.equal(after.get("code")?.state, "ok");
+
+    // The gate is open now: submission proceeds past readiness and fails only
+    // inside the submitter (no sbatch binary in this environment) — a 400,
+    // never the 409 readiness hold.
+    const past = await requestJson<{ message: string }>(server, "/api/jobs", {
+      method: "POST",
+      body: JSON.stringify({ topic: "gate is open" }),
+    });
+    assert.notEqual(past.status, 409);
+
+    // Targeted re-run hits exactly the requested probe. The LLM probe is not
+    // required under the offline provider, so it must NOT run again.
+    const callsBefore = llmProbeCalls;
+    const recheck = await requestJson<ReadinessReport>(
+      server,
+      "/api/readiness/check",
+      { method: "POST", body: JSON.stringify({ checks: ["llm"] }) },
+    );
+    assert.equal(recheck.status, 200);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(llmProbeCalls, callsBefore);
+  } finally {
+    await server.close();
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("interrupted jobs resume manually from their last checkpoint", async () => {
+  const workspace = tempRoot();
+  const marker = join(workspace, "interrupted-resume-marker.txt");
+  const fakeCli = join(workspace, "fake-cli.mjs");
+  writeFileSync(
+    fakeCli,
+    `import fs from "node:fs"; import path from "node:path";
+const args = process.argv.slice(2);
+const value = (name) => args[args.indexOf(name) + 1];
+fs.appendFileSync(${JSON.stringify(marker)}, args[0] + "\\n");
+const checkpointPath = path.join(value("--session-root"), value("--run-id"), "checkpoint.json");
+const checkpoint = JSON.parse(fs.readFileSync(checkpointPath, "utf8"));
+checkpoint.status = "completed"; checkpoint.output = { resumed: true };
+checkpoint.seq += 1; checkpoint.updatedAt = Date.now();
+fs.writeFileSync(checkpointPath, JSON.stringify(checkpoint, null, 2));
+`,
+  );
+  const now = Date.now();
+  const manager = new JobManager({ workspace, workerPath: fakeCli, now: () => now });
+  const settings = await manager.settings.put({
+    ...manager.settings.get(),
+    runner: "local",
+    llm: { provider: "offline" },
+    creditRecovery: {
+      autoResume: true,
+      safetyBufferSeconds: 60,
+      openRouterModel: "openrouter/free",
+    },
+  });
+  const jobId = "interrupted-job";
+  const jobDir = join(workspace, "workspace", "jobs", jobId);
+  const sessionDir = join(workspace, "workspace", "sessions", jobId);
+  mkdirSync(jobDir, { recursive: true });
+  mkdirSync(sessionDir, { recursive: true });
+  writeFileSync(
+    join(jobDir, "job.json"),
+    JSON.stringify({
+      jobId,
+      topic: "interrupted by a SLURM timeout",
+      status: "running",
+      runner: "local",
+      pid: 999_999_999, // long dead
+      createdAt: now - 60_000,
+      updatedAt: now - 30_000,
+      submissionCount: 1,
+      executionSettings: settings,
+    }),
+  );
+  writeFileSync(
+    join(sessionDir, "checkpoint.json"),
+    JSON.stringify({
+      runId: jobId,
+      workflowId: "brainstorm",
+      status: "running", // crashed mid-run: journal intact, process gone
+      input: {},
+      journal: [],
+      pendingGates: [],
+      seq: 5,
+      updatedAt: now - 30_000,
+    }),
+  );
+  manager.reload();
+  assert.equal((await manager.detail(jobId)).status, "orphaned");
+
+  assert.equal(await manager.resumeInterrupted(jobId), "queued");
+  await waitUntil(() => existsSync(marker), 5_000);
+  assert.equal(readFileSync(marker, "utf8"), "resume\n");
+  const record = JSON.parse(
+    readFileSync(join(jobDir, "job.json"), "utf8"),
+  ) as {
+    submissionCount: number;
+    interruptedResume?: { count: number; checkpointSeq?: number };
+  };
+  assert.equal(record.submissionCount, 2);
+  assert.equal(record.interruptedResume?.count, 1);
+  assert.equal(record.interruptedResume?.checkpointSeq, 5);
+  assert.ok(
+    existsSync(join(jobDir, "submit-interrupted-resume-1.sh")),
+    "the resubmission script is kept beside the job",
+  );
+  await waitUntil(() => {
+    try {
+      return (
+        (JSON.parse(
+          readFileSync(join(sessionDir, "checkpoint.json"), "utf8"),
+        ) as { status: string }).status === "completed"
+      );
+    } catch {
+      return false;
+    }
+  }, 5_000);
+  assert.equal((await manager.detail(jobId)).status, "completed");
+  // A finished job is no longer interrupted.
+  await assert.rejects(manager.resumeInterrupted(jobId), /not interrupted/);
+  rmSync(workspace, { recursive: true, force: true });
+});
+
+test("interrupted auto-resume scans resubmit orphans and pause after stalled attempts", async () => {
+  const workspace = tempRoot();
+  const marker = join(workspace, "auto-resume-marker.txt");
+  const fakeCli = join(workspace, "fake-cli.mjs");
+  // This worker dies without touching the checkpoint: no progress is ever made.
+  writeFileSync(
+    fakeCli,
+    `import fs from "node:fs";
+fs.appendFileSync(${JSON.stringify(marker)}, process.argv.slice(2)[0] + "\\n");
+`,
+  );
+  let clock = Date.now();
+  const manager = new JobManager({ workspace, workerPath: fakeCli, now: () => clock });
+  const settings = await manager.settings.put({
+    ...manager.settings.get(),
+    runner: "local",
+    llm: { provider: "offline" },
+    creditRecovery: {
+      autoResume: true,
+      safetyBufferSeconds: 60,
+      openRouterModel: "openrouter/free",
+    },
+  });
+  const jobId = "stalled-job";
+  const jobDir = join(workspace, "workspace", "jobs", jobId);
+  const sessionDir = join(workspace, "workspace", "sessions", jobId);
+  mkdirSync(jobDir, { recursive: true });
+  mkdirSync(sessionDir, { recursive: true });
+  writeFileSync(
+    join(jobDir, "job.json"),
+    JSON.stringify({
+      jobId,
+      topic: "keeps dying before any checkpoint progress",
+      status: "running",
+      runner: "local",
+      pid: 999_999_999,
+      createdAt: clock - 60_000,
+      updatedAt: clock - 30_000,
+      submissionCount: 1,
+      executionSettings: settings,
+    }),
+  );
+  writeFileSync(
+    join(sessionDir, "checkpoint.json"),
+    JSON.stringify({
+      runId: jobId,
+      workflowId: "brainstorm",
+      status: "running",
+      input: {},
+      journal: [],
+      pendingGates: [],
+      seq: 5,
+      updatedAt: clock - 30_000,
+    }),
+  );
+  manager.reload();
+
+  const markerLines = (): number =>
+    existsSync(marker)
+      ? readFileSync(marker, "utf8").split("\n").filter(Boolean).length
+      : 0;
+
+  // The spawned script may briefly still be alive when a scan runs (the scan
+  // then correctly sees a live process and skips); keep scanning until the
+  // resubmission lands.
+  const scanUntilMarker = async (target: number): Promise<void> => {
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      await manager.resumeInterruptedJobs();
+      if (markerLines() >= target) return;
+      if (Date.now() > deadline) {
+        throw new Error(`resubmission ${target} never happened`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  };
+
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    await scanUntilMarker(attempt);
+    clock += 61_000; // past the resubmission quiet window
+  }
+
+  // Further scans pause instead of resubmitting: three attempts, no progress.
+  await (async () => {
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      await manager.resumeInterruptedJobs();
+      const record = JSON.parse(
+        readFileSync(join(jobDir, "job.json"), "utf8"),
+      ) as { warnings?: string[] };
+      if (record.warnings?.some((warning) => warning.includes("resume paused"))) {
+        return;
+      }
+      if (Date.now() > deadline) throw new Error("the pause warning never appeared");
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  })();
+  assert.equal(markerLines(), 3);
+
+  // An explicit manual resume overrides the guard and resets the counter.
+  assert.equal(await manager.resumeInterrupted(jobId), "queued");
+  await waitUntil(() => markerLines() === 4, 5_000);
+  const reset = JSON.parse(readFileSync(join(jobDir, "job.json"), "utf8")) as {
+    interruptedResume?: { count: number };
+  };
+  assert.equal(reset.interruptedResume?.count, 1);
+  rmSync(workspace, { recursive: true, force: true });
+});
+
+test("unattended gates auto-approve after the countdown unless held", async () => {
+  const workspace = tempRoot();
+  const marker = join(workspace, "gate-auto-marker.txt");
+  const fakeCli = join(workspace, "fake-cli.mjs");
+  writeFileSync(
+    fakeCli,
+    `import fs from "node:fs"; import path from "node:path";
+const args = process.argv.slice(2);
+const value = (name) => args[args.indexOf(name) + 1];
+fs.appendFileSync(${JSON.stringify(marker)}, args.join(" ") + "\\n");
+const checkpointPath = path.join(value("--session-root"), value("--run-id"), "checkpoint.json");
+const checkpoint = JSON.parse(fs.readFileSync(checkpointPath, "utf8"));
+checkpoint.status = "completed"; checkpoint.output = { resumed: true };
+checkpoint.pendingGates = []; checkpoint.seq += 1; checkpoint.updatedAt = Date.now();
+fs.writeFileSync(checkpointPath, JSON.stringify(checkpoint, null, 2));
+`,
+  );
+  let clock = Date.now();
+  const manager = new JobManager({
+    workspace,
+    workerPath: fakeCli,
+    now: () => clock,
+  });
+  const settings = await manager.settings.put({
+    ...manager.settings.get(),
+    runner: "local",
+    panelConfirmation: "manual",
+    llm: { provider: "offline" },
+  });
+  const fabricate = (jobId: string) => {
+    const jobDir = join(workspace, "workspace", "jobs", jobId);
+    const sessionDir = join(workspace, "workspace", "sessions", jobId);
+    mkdirSync(jobDir, { recursive: true });
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(
+      join(jobDir, "job.json"),
+      JSON.stringify({
+        jobId,
+        topic: "suspended on the panel gate",
+        status: "running",
+        runner: "local",
+        pid: 999_999_999,
+        createdAt: clock - 60_000,
+        updatedAt: clock - 30_000,
+        submissionCount: 1,
+        executionSettings: settings,
+      }),
+    );
+    writeFileSync(
+      join(sessionDir, "checkpoint.json"),
+      JSON.stringify({
+        runId: jobId,
+        workflowId: "brainstorm",
+        status: "suspended",
+        input: {},
+        journal: [],
+        pendingGates: [
+          {
+            gateKey: "confirm-panel",
+            journalKey:
+              "brainstorm-root/confirm-panel/confirm-panel-wait::response",
+            path: "brainstorm-root/confirm-panel/confirm-panel-wait",
+            prompt: "Review the seated panel.",
+            metadata: { title: "Confirm the panel" },
+          },
+        ],
+        seq: 5,
+        updatedAt: clock - 30_000,
+      }),
+    );
+    return { jobDir, sessionDir };
+  };
+  const auto = fabricate("gate-auto");
+  const held = fabricate("gate-held");
+  manager.reload();
+
+  // The first scan only ARMS the countdown (30s from first observation).
+  await manager.autoApproveDueGates();
+  const armed = await manager.detail("gate-auto");
+  assert.equal(armed.status, "suspended");
+  assert.equal(armed.pendingGate?.autoApprove?.held, false);
+  assert.equal(armed.pendingGate?.autoApprove?.totalMs, 30_000);
+  assert.equal(armed.pendingGate?.autoApprove?.deadlineAt, clock + 30_000);
+
+  // A user interaction holds one gate permanently.
+  const afterHold = await manager.holdGateAutoApprove("gate-held");
+  assert.equal(afterHold.pendingGate?.autoApprove?.held, true);
+
+  // Past the deadline: the unattended gate approves as seated, the held one
+  // stays suspended forever.
+  clock += 31_000;
+  await manager.autoApproveDueGates();
+  await waitUntil(() => {
+    try {
+      return (
+        (JSON.parse(
+          readFileSync(join(auto.sessionDir, "checkpoint.json"), "utf8"),
+        ) as { status: string }).status === "completed"
+      );
+    } catch {
+      return false;
+    }
+  }, 5_000);
+  assert.match(
+    readFileSync(marker, "utf8"),
+    /resume .*--gate confirm-panel=approve/,
+    "the auto-approval resumes with a plain approve answer",
+  );
+  assert.equal((await manager.detail("gate-auto")).status, "completed");
+  assert.equal(
+    (await manager.detail("gate-auto")).pendingGate,
+    undefined,
+  );
+
+  clock += 31_000;
+  await manager.autoApproveDueGates();
+  const stillHeld = await manager.detail("gate-held");
+  assert.equal(stillHeld.status, "suspended");
+  assert.equal(stillHeld.pendingGate?.autoApprove?.held, true);
+  assert.ok(
+    !readFileSync(marker, "utf8").includes("gate-held"),
+    "a held gate never auto-approves",
+  );
+  rmSync(workspace, { recursive: true, force: true });
 });

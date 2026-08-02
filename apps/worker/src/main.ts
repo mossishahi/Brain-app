@@ -3,7 +3,7 @@
  * Brainstorm worker process (also exposed through a compatibility CLI alias).
  *
  *   brainstorm-agentic run --topic "..." [--attachments-manifest path] [--offline] [--auto-approve] [--run-id id]
- *   brainstorm-agentic resume --run-id id [--offline] [--gate key=action[:memberId,...]]
+ *   brainstorm-agentic resume --run-id id [--offline] [--gate key=action[:memberId,...]] [--gate-json '{"gateKey":...,"action":...,"addedMembers":[...]}']
  *   brainstorm-agentic list
  *
  * Sessions live under BRAINSTORM_AGENTIC_SESSION_ROOT
@@ -32,6 +32,11 @@ import type {
   RunResult,
   TaxonomyAccess,
 } from "@brainstorm-agentic/core";
+
+import {
+  prepareCodeWorkspace,
+  type CodeRuntimeEnvironment,
+} from "@brainstorm-agentic/host-tools";
 
 import { defaultSessionRoot, loadDotEnv } from "./env.js";
 import { FsArtifactStore, FsCheckpointStore } from "./fs-stores.js";
@@ -62,6 +67,38 @@ function taxonomyForRun(
     seed,
     join(sessionRoot, runId, "taxonomy-suggestions"),
   );
+}
+
+/**
+ * Prepares the run's code scratch workspace when the host code-execution
+ * tool is enabled. The workspace is self-sufficient (the probe runs through
+ * this process's own Node binary), so it works on bare hosts without package
+ * managers; python is detected opportunistically. A preparation failure
+ * never fails the run — code execution then resolves provider-natively or
+ * falls back to the capability catalog's honesty rules.
+ */
+async function prepareRunCodeEnvironment(
+  sessionRoot: string,
+  runId: string,
+  offline: boolean,
+): Promise<CodeRuntimeEnvironment | undefined> {
+  if (offline) return undefined;
+  const enabled = new Set(
+    (process.env.BRAINSTORM_AGENTIC_HOST_TOOLS ?? "").split(",").filter(Boolean),
+  );
+  if (!enabled.has("code_execute")) return undefined;
+  try {
+    return await prepareCodeWorkspace(join(sessionRoot, runId, "code-env"), {
+      env: process.env,
+    });
+  } catch (error) {
+    console.error(
+      `[code] scratch workspace unavailable: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return undefined;
+  }
 }
 
 /**
@@ -297,6 +334,33 @@ function parseGateFlag(raw: string): { gateKey: string; response: JsonValue } {
   return { gateKey, response: { action, members } };
 }
 
+/**
+ * Parses --gate-json, the rich gate answer used when the compact --gate
+ * syntax cannot carry the response (user-added custom seats). The value is
+ * one JSON object: { gateKey, action, members?, addedMembers? }.
+ */
+function parseGateJsonFlag(raw: string): { gateKey: string; response: JsonValue } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(
+      `--gate-json must be valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("--gate-json must be a JSON object");
+  }
+  const { gateKey, ...response } = parsed as { gateKey?: unknown } & Record<string, unknown>;
+  if (typeof gateKey !== "string" || gateKey.length === 0) {
+    throw new Error("--gate-json needs a non-empty gateKey");
+  }
+  if (typeof (response as { action?: unknown }).action !== "string") {
+    throw new Error("--gate-json needs an action string");
+  }
+  return { gateKey, response: response as JsonValue };
+}
+
 async function main(): Promise<void> {
   loadDotEnv(process.cwd());
   const args = parseArgs(process.argv.slice(2));
@@ -341,18 +405,27 @@ async function main(): Promise<void> {
     );
     const runId = stringFlag(args, "run-id") ?? newRunId();
     mkdirSync(join(sessionRoot, runId), { recursive: true });
+    // An interrupted job resubmitted before its first checkpoint arrives as a
+    // fresh `run` with the content pin already on disk: reuse that pin (same
+    // version, verified cache) instead of refusing the resubmission.
+    const pinExists = existsSync(join(contentDir!, "content-pin.json"));
     const lazy = contentRegistryUrl
       ? await openLazyRegistryContent({
           registryUrl: contentRegistryUrl,
           contentDir: contentDir!,
-          resume: false,
-          ...(contentRegistryVersion
+          resume: pinExists,
+          ...(!pinExists && contentRegistryVersion
             ? { version: contentRegistryVersion }
             : {}),
         })
       : undefined;
     const artifacts = new FsArtifactStore(sessionRoot, runId);
     const taxonomy = taxonomyForRun(lazy, contentDir!, sessionRoot, runId);
+    const codeEnvironment = await prepareRunCodeEnvironment(
+      sessionRoot,
+      runId,
+      offline,
+    );
     const runtime = buildRuntime({
       providerConfig: providerConfigFromEnv(process.env, offline),
       checkpoints: new FsCheckpointStore(sessionRoot),
@@ -360,6 +433,7 @@ async function main(): Promise<void> {
       autoApproveGates: autoApprove,
       ...(manifest ? { attachmentRoots: [manifest.baseDir] } : {}),
       ...(taxonomy ? { taxonomy } : {}),
+      ...(codeEnvironment ? { codeEnvironment } : {}),
       bundle: lazy?.bundle ?? loadContent(contentDir!),
       ...(lazy ? { skillResolver: lazy.skillResolver } : {}),
       ...(onEvent !== undefined ? { onEvent } : {}),
@@ -395,6 +469,11 @@ async function main(): Promise<void> {
       const { gateKey, response } = parseGateFlag(gateFlag);
       responses[gateKey] = response;
     }
+    const gateJsonFlag = stringFlag(args, "gate-json");
+    if (gateJsonFlag) {
+      const { gateKey, response } = parseGateJsonFlag(gateJsonFlag);
+      responses[gateKey] = response;
+    }
     const lazy = contentRegistryUrl
       ? await openLazyRegistryContent({
           registryUrl: contentRegistryUrl,
@@ -410,12 +489,18 @@ async function main(): Promise<void> {
     const resumeAutoApprove = autoApprove && Object.keys(responses).length === 0;
     const artifacts = new FsArtifactStore(sessionRoot, runId);
     const taxonomy = taxonomyForRun(lazy, contentDir!, sessionRoot, runId);
+    const codeEnvironment = await prepareRunCodeEnvironment(
+      sessionRoot,
+      runId,
+      offline,
+    );
     const runtime = buildRuntime({
       providerConfig: providerConfigFromEnv(process.env, offline),
       checkpoints: new FsCheckpointStore(sessionRoot),
       artifacts,
       autoApproveGates: resumeAutoApprove,
       ...(taxonomy ? { taxonomy } : {}),
+      ...(codeEnvironment ? { codeEnvironment } : {}),
       bundle: lazy?.bundle ?? loadContent(contentDir!),
       ...(lazy ? { skillResolver: lazy.skillResolver } : {}),
       ...(onEvent !== undefined ? { onEvent } : {}),
@@ -439,7 +524,7 @@ async function main(): Promise<void> {
     '  brain-worker run --topic "..." --content-dir <cache-dir> [--content-registry-url <mcp-url>] [--offline] [--auto-approve] [--events-file <path>] [--verbose]',
   );
   console.log(
-    "  brain-worker resume --run-id <id> --content-dir <cache-dir> [--content-registry-url <mcp-url>] [--gate key=action[:memberId,...]] [--events-file <path>]",
+    "  brain-worker resume --run-id <id> --content-dir <cache-dir> [--content-registry-url <mcp-url>] [--gate key=action[:memberId,...]] [--gate-json <json>] [--events-file <path>]",
   );
   console.log("  brainstorm-agentic list");
 }

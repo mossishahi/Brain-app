@@ -1,27 +1,44 @@
 /** View 1 — prompt entry plus live job cards. */
-import { useEffect, useState } from "react";
-import type { HealthResponse, JobSummary } from "@brainstorm-agentic/protocol";
+import { useCallback, useEffect, useState } from "react";
+import type {
+  HealthResponse,
+  JobSummary,
+  ReadinessCheckId,
+  ReadinessReport,
+  ServerSettings,
+} from "@brainstorm-agentic/protocol";
 import {
   cacheJobs,
   cachedJobs,
   cancelJob,
+  diagnoseReadiness,
   errorMessage,
   getHealth,
   getJobs,
+  getReadiness,
+  getSettings,
   jobsStreamUrl,
   prefetchJobDetail,
+  recheckReadiness,
+  resumeInterruptedJob,
   submitJob,
   trashJob,
   useServerEvents,
 } from "../api";
 import { jobDot, jobStatusLine } from "../format";
 import { Dot } from "./common";
-import { TrashIcon, XIcon } from "./Icons";
+import { ResumeIcon, TrashIcon, XIcon } from "./Icons";
+import {
+  ProviderOnboarding,
+  onboardingDismissed,
+  onboardingNeeded,
+} from "./ProviderOnboarding";
 import { SubmissionBox } from "./SubmissionBox";
 
 function JobCard({ job }: { readonly job: JobSummary }) {
   const [confirming, setConfirming] = useState<"cancel" | "trash" | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [resuming, setResuming] = useState(false);
   const cancellable =
     job.status === "queued" ||
     job.status === "running" ||
@@ -33,6 +50,9 @@ function JobCard({ job }: { readonly job: JobSummary }) {
     job.status === "failed" ||
     job.status === "cancelled" ||
     job.status === "orphaned";
+  // An interrupted job (SLURM timeout, node failure, power cut) resumes from
+  // its last checkpoint with one click.
+  const resumable = job.status === "orphaned";
 
   const perform = async (
     action: () => Promise<unknown>,
@@ -45,6 +65,18 @@ function JobCard({ job }: { readonly job: JobSummary }) {
       setActionError(failure);
     } finally {
       setConfirming(null);
+    }
+  };
+
+  const resume = async (): Promise<void> => {
+    setResuming(true);
+    setActionError(null);
+    try {
+      await resumeInterruptedJob(job.jobId);
+    } catch (error) {
+      setActionError(errorMessage(error));
+    } finally {
+      setResuming(false);
     }
   };
 
@@ -97,10 +129,22 @@ function JobCard({ job }: { readonly job: JobSummary }) {
           </button>
         </div>
       ) : (
-        (cancellable || trashable) && (
+        (cancellable || trashable || resumable) && (
           <div className="cancel-zone">
             {actionError && (
               <span className="error-text">{actionError}</span>
+            )}
+            {resumable && (
+              <button
+                type="button"
+                className="ghost-btn resume-btn"
+                aria-label={`resume interrupted job from its last checkpoint: ${job.topic}`}
+                data-tooltip="resume from checkpoint"
+                disabled={resuming}
+                onClick={() => void resume()}
+              >
+                <ResumeIcon size={16} />
+              </button>
             )}
             {trashable && (
               <button
@@ -135,13 +179,34 @@ function JobCard({ job }: { readonly job: JobSummary }) {
   );
 }
 
+/** Last bundle version this browser has acknowledged as "seen". */
+const BUNDLE_ACK_KEY = "brain-acked-bundle-version";
+
+function ackedBundleVersion(): string | null {
+  try {
+    return localStorage.getItem(BUNDLE_ACK_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function ackBundleVersion(version: string): void {
+  try {
+    localStorage.setItem(BUNDLE_ACK_KEY, version);
+  } catch {
+    // Storage unavailable; the notice simply reappears next visit.
+  }
+}
+
 /**
- * Pull-based update notices: a newer published bundle while runs are pinned
- * behind it, and a newer app release tag. Purely informational — nothing is
- * applied automatically.
+ * Pull-based update notices: a newly published skills bundle (new runs pick
+ * it up automatically — the notice only informs), a newer bundle while a
+ * deployment pin holds runs behind it, and a newer app release tag. Nothing
+ * here changes behavior; skill updates need no user action at all.
  */
 function UpdateNotices() {
   const [health, setHealth] = useState<HealthResponse | null>(null);
+  const [ackedVersion, setAckedVersion] = useState<string | null>(ackedBundleVersion);
 
   useEffect(() => {
     let live = true;
@@ -160,19 +225,53 @@ function UpdateNotices() {
     };
   }, []);
 
+  // First visit establishes the baseline silently: "updated" only means
+  // "newer than what this browser saw before", never "newer than nothing".
+  useEffect(() => {
+    const latest = health?.contentRegistry.latest;
+    if (latest && ackedVersion === null) {
+      ackBundleVersion(latest);
+      setAckedVersion(latest);
+    }
+  }, [health, ackedVersion]);
+
   if (!health) return null;
   const registry = health.contentRegistry;
   const bundleBehind =
     registry.latest !== undefined &&
     registry.pinnedVersion !== undefined &&
     registry.latest !== registry.pinnedVersion;
-  if (!bundleBehind && !health.appUpdate) return null;
+  const skillsUpdated =
+    registry.latest !== undefined &&
+    registry.pinnedVersion === undefined &&
+    ackedVersion !== null &&
+    registry.latest !== ackedVersion;
+  if (!bundleBehind && !skillsUpdated && !health.appUpdate) return null;
   return (
     <div className="update-notices">
+      {skillsUpdated && (
+        <div className="banner banner-actionable">
+          <span>
+            Brain skills updated: <strong>{registry.bundle ?? "brainstorm"} v{registry.latest}</strong>
+            {registry.latestNotes ? <> — {registry.latestNotes}</> : null}. New
+            pipelines use it automatically; nothing to do.
+          </span>
+          <button
+            type="button"
+            className="btn btn-small"
+            onClick={() => {
+              ackBundleVersion(registry.latest!);
+              setAckedVersion(registry.latest!);
+            }}
+          >
+            Got it
+          </button>
+        </div>
+      )}
       {bundleBehind && (
         <div className="banner">
           Bundle <strong>{registry.latest}</strong> is published — runs are
-          pinned to {registry.pinnedVersion}.
+          pinned to {registry.pinnedVersion} by the deployment.
           {registry.latestNotes ? <> {registry.latestNotes}</> : null}
         </div>
       )}
@@ -199,6 +298,9 @@ export function Landing({
   const [submitError, setSubmitError] = useState<string | null>(
     null,
   );
+  const [readiness, setReadiness] = useState<ReadinessReport | null>(null);
+  const [settings, setSettings] = useState<ServerSettings | null>(null);
+  const [onboardingHidden, setOnboardingHidden] = useState(onboardingDismissed);
 
   useEffect(() => {
     let live = true;
@@ -209,8 +311,24 @@ export function Landing({
       .catch(() => {
         if (live) setJobs((previous) => previous ?? []);
       });
+    getReadiness()
+      .then((report) => {
+        if (live) setReadiness((previous) => previous ?? report);
+      })
+      .catch(() => undefined);
+    getSettings()
+      .then((current) => {
+        if (live) setSettings(current);
+      })
+      .catch(() => undefined);
+    const onSettingsUpdated = (event: Event): void => {
+      const detail = (event as CustomEvent<ServerSettings>).detail;
+      if (detail) setSettings(detail);
+    };
+    window.addEventListener("brain-settings-updated", onSettingsUpdated);
     return () => {
       live = false;
+      window.removeEventListener("brain-settings-updated", onSettingsUpdated);
     };
   }, []);
 
@@ -219,7 +337,22 @@ export function Landing({
       setJobs(event.jobs);
       cacheJobs(event.jobs);
     }
+    if (event.type === "readiness") {
+      setReadiness(event.readiness);
+    }
   });
+
+  const recheck = useCallback((checks?: readonly ReadinessCheckId[]) => {
+    recheckReadiness(checks)
+      .then(setReadiness)
+      .catch(() => undefined);
+  }, []);
+
+  const diagnose = useCallback((check: ReadinessCheckId) => {
+    diagnoseReadiness(check)
+      .then(setReadiness)
+      .catch(() => undefined);
+  }, []);
 
   const submit = async (
     topic: string,
@@ -230,7 +363,11 @@ export function Landing({
       await submitJob(topic, attachmentPaths);
       setJobs(await getJobs());
     } catch (error) {
-      setSubmitError(errorMessage(error));
+      // A readiness 409 is handled by the submission box's waiting card,
+      // not as an error banner.
+      if (!(error instanceof Error && errorMessage(error).startsWith("Environment is not ready"))) {
+        setSubmitError(errorMessage(error));
+      }
       throw error;
     }
   };
@@ -241,6 +378,9 @@ export function Landing({
       )
     : [];
 
+  const showOnboarding =
+    !onboardingHidden && settings !== null && onboardingNeeded(settings);
+
   return (
     <main className="landing">
       <div className="landing-column">
@@ -248,6 +388,9 @@ export function Landing({
         <SubmissionBox
           onSubmit={submit}
           onOpenSettings={onOpenSettings}
+          readiness={readiness}
+          onRecheckReadiness={recheck}
+          onDiagnoseReadiness={diagnose}
         />
         {submitError && (
           <p className="error-text submit-error">{submitError}</p>
@@ -263,6 +406,19 @@ export function Landing({
           </ul>
         )}
       </div>
+      {showOnboarding && (
+        <ProviderOnboarding
+          settings={settings}
+          onSaved={(updated) => {
+            setSettings(updated);
+            window.dispatchEvent(
+              new CustomEvent("brain-settings-updated", { detail: updated }),
+            );
+            recheck();
+          }}
+          onDismiss={() => setOnboardingHidden(true)}
+        />
+      )}
     </main>
   );
 }

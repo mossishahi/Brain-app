@@ -59,32 +59,44 @@ function UsageMatrix({
 export function ToolUsagePanel({
   jobId,
   updatedAt,
+  active,
 }: {
   jobId: string;
   updatedAt: number;
+  /** True while the job is running: keeps the report polling during long tasks. */
+  active: boolean;
 }) {
   const [report, setReport] = useState<ToolUsageReport | null>(null);
   const [error, setError] = useState<string | null>(null);
   const lastFetch = useRef(0);
 
   useEffect(() => {
-    if (Date.now() - lastFetch.current < REFRESH_MIN_MS && report !== null) return;
-    lastFetch.current = Date.now();
     let live = true;
-    getToolUsage(jobId)
-      .then((usage) => {
-        if (!live) return;
-        setReport(usage);
-        setError(null);
-      })
-      .catch((e: unknown) => {
-        if (live) setError(errorMessage(e));
-      });
+    const fetchNow = (force: boolean) => {
+      if (!force && Date.now() - lastFetch.current < REFRESH_MIN_MS) return;
+      lastFetch.current = Date.now();
+      getToolUsage(jobId)
+        .then((usage) => {
+          if (!live) return;
+          setReport(usage);
+          setError(null);
+        })
+        .catch((e: unknown) => {
+          if (live) setError(errorMessage(e));
+        });
+    };
+    fetchNow(report === null);
+    // updatedAt only advances on status transitions and checkpoint saves; a
+    // minutes-long agent task streams tool events without moving either, so
+    // while the job runs the panel polls on its own clock instead of waiting
+    // for a snapshot bump that may never come.
+    const timer = active ? setInterval(() => fetchNow(false), REFRESH_MIN_MS) : undefined;
     return () => {
       live = false;
+      if (timer !== undefined) clearInterval(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- refetch keyed on job progress
-  }, [jobId, updatedAt]);
+  }, [jobId, updatedAt, active]);
 
   if (error) return <p className="dim small">tool usage unavailable: {error}</p>;
   if (!report) return null;

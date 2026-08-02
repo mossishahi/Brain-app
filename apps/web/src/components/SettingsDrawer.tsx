@@ -19,14 +19,16 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
 
   const [runner, setRunner] = useState<RunnerKind>("slurm");
   const [template, setTemplate] = useState("");
-  const [registryUrl, setRegistryUrl] = useState("");
-  const [registryBundle, setRegistryBundle] = useState("brainstorm");
-  const [registryVersion, setRegistryVersion] = useState("");
-  const [updatePolicy, setUpdatePolicy] = useState<"auto" | "notify">("auto");
   const [updateCheck, setUpdateCheck] = useState<"off" | "notify">("notify");
-  const [latestPublished, setLatestPublished] = useState<
-    { version: string; notes?: string } | null
-  >(null);
+  /** Deployment-owned registry facts, shown read-only (never editable). */
+  const [registryInfo, setRegistryInfo] = useState<{
+    url?: string;
+    bundle?: string;
+    serverVersion?: string;
+    effectiveVersion?: string;
+    pinnedVersion?: string;
+    latestNotes?: string;
+  } | null>(null);
   const [provider, setProvider] = useState<Provider>("anthropic");
   const [model, setModel] = useState("");
   const [apiKey, setApiKey] = useState("");
@@ -44,6 +46,7 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
   const [connectionMessage, setConnectionMessage] = useState<string | null>(null);
   const [confirmation, setConfirmation] = useState<"manual" | "auto">("manual");
   const [autoResume, setAutoResume] = useState(true);
+  const [resumeInterrupted, setResumeInterrupted] = useState(true);
   const [safetyBufferSeconds, setSafetyBufferSeconds] = useState("60");
   const [openRouterModel, setOpenRouterModel] = useState("openrouter/free");
   const [openRouterApiKey, setOpenRouterApiKey] = useState("");
@@ -62,9 +65,6 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
         setLoaded(s);
         setRunner(s.runner);
         setTemplate(s.slurmTemplate);
-        setRegistryUrl(s.contentRegistry.url);
-        setRegistryBundle(s.contentRegistry.bundle);
-        setRegistryVersion(s.contentRegistry.version ?? "");
         setProvider(s.llm.provider);
         setModel(s.llm.model ?? "");
         setBaseUrl(s.llm.baseUrl ?? "");
@@ -79,9 +79,9 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
         setAgentFallbackModel(s.llm.agentSdk?.fallbackModel ?? "");
         setConfirmation(s.panelConfirmation);
         setAutoResume(s.creditRecovery.autoResume);
+        setResumeInterrupted(s.interruptedRecovery?.autoResume ?? true);
         setSafetyBufferSeconds(String(s.creditRecovery.safetyBufferSeconds));
         setOpenRouterModel(s.creditRecovery.openRouterModel);
-        setUpdatePolicy(s.contentRegistry.updatePolicy ?? "auto");
         setUpdateCheck(s.updateCheck ?? "notify");
         if (s.hostTools?.enabledToolIds) {
           setEnabledHostTools([...s.hostTools.enabledToolIds]);
@@ -92,14 +92,25 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
       });
     getHealth()
       .then((health) => {
-        if (live && health.contentRegistry.latest) {
-          setLatestPublished({
-            version: health.contentRegistry.latest,
-            ...(health.contentRegistry.latestNotes
-              ? { notes: health.contentRegistry.latestNotes }
-              : {}),
-          });
-        }
+        if (!live) return;
+        setRegistryInfo({
+          ...(health.contentRegistry.url ? { url: health.contentRegistry.url } : {}),
+          ...(health.contentRegistry.bundle
+            ? { bundle: health.contentRegistry.bundle }
+            : {}),
+          ...(health.contentRegistry.serverVersion
+            ? { serverVersion: health.contentRegistry.serverVersion }
+            : {}),
+          ...(health.contentRegistry.effectiveVersion
+            ? { effectiveVersion: health.contentRegistry.effectiveVersion }
+            : {}),
+          ...(health.contentRegistry.pinnedVersion
+            ? { pinnedVersion: health.contentRegistry.pinnedVersion }
+            : {}),
+          ...(health.contentRegistry.latestNotes
+            ? { latestNotes: health.contentRegistry.latestNotes }
+            : {}),
+        });
       })
       .catch(() => undefined);
     return () => {
@@ -171,23 +182,11 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
       if (openRouterModel.trim() === "") {
         throw new Error("OpenRouter model must not be empty.");
       }
-      if (registryUrl.trim() === "") {
-        throw new Error("Brain Registry URL must not be empty.");
-      }
-      if (registryBundle.trim() === "") {
-        throw new Error("Brain Registry bundle must not be empty.");
-      }
+      // contentRegistry is deployment-owned and deliberately not sent: the
+      // server ignores it on PUT anyway.
       const update: ServerSettingsUpdate = {
         slurmTemplate: template,
         runner,
-        contentRegistry: {
-          url: registryUrl.trim(),
-          bundle: registryBundle.trim(),
-          ...(registryVersion.trim()
-            ? { version: registryVersion.trim() }
-            : {}),
-          updatePolicy,
-        },
         updateCheck,
         llm: {
           provider,
@@ -243,6 +242,9 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
           ...(openRouterApiKey.trim()
             ? { openRouterApiKey: openRouterApiKey.trim() }
             : {}),
+        },
+        interruptedRecovery: {
+          autoResume: resumeInterrupted,
         },
         hostTools: {
           enabledToolIds: enabledHostTools,
@@ -334,79 +336,61 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
 
             <section className="drawer-section">
               <h3>Brain Registry</h3>
+              <div className="registry-info">
+                <div className="registry-info-row">
+                  <span className="registry-info-label">Endpoint</span>
+                  <span className="registry-info-value">
+                    {registryInfo?.url ?? loaded.contentRegistry.url}
+                  </span>
+                </div>
+                <div className="registry-info-row">
+                  <span className="registry-info-label">Skills bundle</span>
+                  <span className="registry-info-value">
+                    {registryInfo?.bundle ?? loaded.contentRegistry.bundle}
+                    {registryInfo?.effectiveVersion
+                      ? ` v${registryInfo.effectiveVersion}`
+                      : ""}
+                    {registryInfo?.pinnedVersion
+                      ? " (pinned by the deployment)"
+                      : registryInfo?.effectiveVersion
+                        ? " (latest)"
+                        : ""}
+                  </span>
+                </div>
+                {registryInfo?.serverVersion && (
+                  <div className="registry-info-row">
+                    <span className="registry-info-label">Registry server</span>
+                    <span className="registry-info-value">
+                      v{registryInfo.serverVersion}
+                    </span>
+                  </div>
+                )}
+                {registryInfo?.latestNotes && (
+                  <div className="registry-info-row">
+                    <span className="registry-info-label">Release notes</span>
+                    <span className="registry-info-value">
+                      {registryInfo.latestNotes}
+                    </span>
+                  </div>
+                )}
+              </div>
+              <span className="field-note">
+                Configured by the deployment — nothing to set up here. Every
+                new pipeline automatically fetches the latest published skills
+                and records the exact version it used.
+              </span>
               <div className="field">
-                <label className="field-label" htmlFor="settings-registry-url">
-                  MCP endpoint
+                <label className="field-label" htmlFor="settings-update-check">
+                  App update check
                 </label>
-                <input
-                  id="settings-registry-url"
-                  type="url"
-                  value={registryUrl}
-                  onChange={(e) => setRegistryUrl(e.target.value)}
-                  placeholder="https://167.172.170.154/mcp"
-                />
-                <span className="field-note">
-                  The worker pins a version and fetches each skill only when its stage is reached.
-                </span>
-              </div>
-              <div className="field-grid-two">
-                <div className="field">
-                  <label className="field-label" htmlFor="settings-registry-bundle">
-                    Bundle
-                  </label>
-                  <input
-                    id="settings-registry-bundle"
-                    type="text"
-                    value={registryBundle}
-                    onChange={(e) => setRegistryBundle(e.target.value)}
-                  />
-                </div>
-                <div className="field">
-                  <label className="field-label" htmlFor="settings-registry-version">
-                    Version override
-                  </label>
-                  <input
-                    id="settings-registry-version"
-                    type="text"
-                    value={registryVersion}
-                    onChange={(e) => setRegistryVersion(e.target.value)}
-                    placeholder="latest"
-                  />
-                </div>
-              </div>
-              {latestPublished && (
-                <span className="field-note">
-                  Latest published: <strong>{latestPublished.version}</strong>
-                  {latestPublished.notes ? <> — {latestPublished.notes}</> : null}
-                </span>
-              )}
-              <div className="field-grid-two">
-                <div className="field">
-                  <label className="field-label" htmlFor="settings-update-policy">
-                    New bundle versions
-                  </label>
-                  <select
-                    id="settings-update-policy"
-                    value={updatePolicy}
-                    onChange={(e) => setUpdatePolicy(e.target.value as "auto" | "notify")}
-                  >
-                    <option value="auto">use latest for new runs</option>
-                    <option value="notify">notify in the dashboard</option>
-                  </select>
-                </div>
-                <div className="field">
-                  <label className="field-label" htmlFor="settings-update-check">
-                    App update check
-                  </label>
-                  <select
-                    id="settings-update-check"
-                    value={updateCheck}
-                    onChange={(e) => setUpdateCheck(e.target.value as "off" | "notify")}
-                  >
-                    <option value="notify">notify when a release tag appears</option>
-                    <option value="off">off</option>
-                  </select>
-                </div>
+                <select
+                  id="settings-update-check"
+                  value={updateCheck}
+                  onChange={(e) => setUpdateCheck(e.target.value as "off" | "notify")}
+                >
+                  <option value="notify">notify when a release tag appears</option>
+                  <option value="off">off</option>
+                </select>
               </div>
             </section>
 
@@ -719,10 +703,29 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                       setEnabledHostTools((prev) => prev.filter((id) => id !== "code_execute"));
                     }
                   }}
-                  disabled
                 />
-                Code execution (not yet implemented)
+                Code execution (host scratch workspace; providers with native
+                execution keep using it)
               </label>
+            </section>
+
+            <section className="drawer-section">
+              <h3>Interrupted jobs</h3>
+              <label className="radio-row">
+                <input
+                  type="checkbox"
+                  checked={resumeInterrupted}
+                  onChange={(e) => setResumeInterrupted(e.target.checked)}
+                />
+                Resume interrupted jobs automatically from their last
+                checkpoint
+              </label>
+              <span className="field-note">
+                Covers SLURM timeouts, node failures, and power cuts: the
+                scheduler resubmits the run and it continues from where it
+                stopped. Auto-resume pauses after repeated attempts without
+                progress; the job card then offers a manual resume.
+              </span>
             </section>
 
             <section className="drawer-section">

@@ -49,8 +49,10 @@ import {
   ATTACHMENT_MANIFESTS,
   TAXONOMY_MANIFESTS,
   TAXONOMY_TOOL_NAMES,
+  codeExecutionTools,
   createHostToolRegistry,
   taxonomyTools,
+  type CodeRuntimeEnvironment,
 } from "@brainstorm-agentic/host-tools";
 import { OfflineBrainstormExecutor } from "./offline-executor.js";
 
@@ -95,6 +97,13 @@ export interface RuntimeWiringOptions {
    * taxonomy-access capability tools.
    */
   readonly taxonomy?: TaxonomyAccess;
+  /**
+   * Prepared code scratch workspace; the host code_execute tool registers
+   * over it. Providers with native code execution keep preferring it (the
+   * broker resolves provider-first) — the host tool is the fallback for
+   * providers without one.
+   */
+  readonly codeEnvironment?: CodeRuntimeEnvironment;
   readonly bundle: ContentBundle;
   readonly skillResolver?: SkillResolver;
   readonly onEvent?: RunEventListener;
@@ -115,6 +124,7 @@ export function buildAgentExecutor(
   attachmentRoots: readonly string[] = [],
   inputTypes?: LoadedInputTypes,
   taxonomy?: TaxonomyAccess,
+  codeEnvironment?: CodeRuntimeEnvironment,
 ): AgentExecutor {
   if (config.provider === "offline") {
     return new OfflineBrainstormExecutor({ ...(inputTypes ? { inputTypes } : {}) });
@@ -172,6 +182,9 @@ export function buildAgentExecutor(
   }
   if (taxonomy) {
     for (const tool of taxonomyTools(taxonomy)) registry.register(tool);
+  }
+  if (codeEnvironment) {
+    for (const tool of codeExecutionTools(codeEnvironment)) registry.register(tool);
   }
   return new ToolLoopAgentExecutor({
     provider,
@@ -371,6 +384,7 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
           attachmentRoots,
           options.bundle.catalogs.inputTypes,
           options.taxonomy,
+          options.codeEnvironment,
         ),
         options.providerConfig.creditRecovery,
       ),

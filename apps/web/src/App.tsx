@@ -70,7 +70,9 @@ export function App() {
     >
       <AmbientBackdrop theme={theme} />
       <div className="app-foreground">
-        <div className="top-controls">
+        {/* A real header bar (in flow, sticky) so the controls never overlay
+            page text, however narrow the viewport gets. */}
+        <header className="app-header">
           <button
             type="button"
             className="ghost-btn"
@@ -87,7 +89,7 @@ export function App() {
           >
             <GearIcon />
           </button>
-        </div>
+        </header>
         <div
           className="route-view"
           key={route.view === "job" ? `job:${route.jobId}` : route.view}

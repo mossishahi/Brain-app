@@ -21,6 +21,8 @@ import {
 } from "@brainstorm-agentic/credit-recovery";
 import {
   ATTACHMENT_LIMITS,
+  PANEL_EDIT_LIMITS,
+  type CustomSeatRequest,
   type GateAnswerRequest,
   type JobDetail,
   type JobStatus,
@@ -57,6 +59,12 @@ export interface JobManagerOptions {
     apiKey: string,
     model: string,
   ) => Promise<void>;
+  /**
+   * How long an unattended panel-confirmation gate waits before approving
+   * itself as seated. Any interaction with the confirmation card holds the
+   * countdown permanently. Default 30 seconds.
+   */
+  readonly panelAutoApproveMs?: number;
 }
 
 interface CommandResult {
@@ -116,6 +124,7 @@ export class JobManager {
   private readonly env: NodeJS.ProcessEnv;
   private readonly now: () => number;
   private readonly onChange: () => void;
+  private readonly panelAutoApproveMs: number;
   private readonly autoResuming = new Set<string>();
   private readonly summaryCache = new Map<
     string,
@@ -144,6 +153,7 @@ export class JobManager {
     this.env = options.env ?? process.env;
     this.now = options.now ?? (() => Date.now());
     this.onChange = options.onChange ?? (() => undefined);
+    this.panelAutoApproveMs = options.panelAutoApproveMs ?? 30_000;
     mkdirSync(this.jobsDir, { recursive: true });
     mkdirSync(this.sessionsDir, { recursive: true });
     this.reload();
@@ -215,6 +225,9 @@ export class JobManager {
               gateKey: gate.gateKey,
               action: gate.action,
               ...(gate.members ? { members: gate.members } : {}),
+              ...(gate.addedMembers && gate.addedMembers.length > 0
+                ? { addedMembers: gate.addedMembers }
+                : {}),
             },
           }
         : {}),
@@ -482,7 +495,11 @@ export class JobManager {
       }
       return checkpoint;
     }
-    if (checkpoint === "running" && record.autoResumePending) {
+    if (
+      checkpoint === "running" &&
+      (record.autoResumePending || record.status === "queued")
+    ) {
+      // A resubmitted run (credit or interrupted resume) reached its worker.
       delete record.autoResumePending;
       record.status = "running";
       record.updatedAt = this.now();
@@ -777,6 +794,179 @@ export class JobManager {
     this.write(record);
   }
 
+  /** How many interrupted auto-resumes may run without checkpoint progress. */
+  private static readonly MAX_STALLED_INTERRUPTED_RESUMES = 3;
+  /** Minimum quiet time after a resubmission before another scan may act. */
+  private static readonly INTERRUPTED_RESUBMIT_QUIET_MS = 60_000;
+
+  /**
+   * User-initiated resume of an interrupted (orphaned) job: the workspace
+   * carries checkpoints/artifacts but no live process — a SLURM timeout, a
+   * node failure, or a power cut took the worker down. Resubmits the same
+   * deterministic command so the run continues from its last checkpoint (or
+   * restarts cleanly when it died before the first checkpoint). Always
+   * resets the stalled-attempts counter: an explicit click outranks the
+   * auto-resume guard.
+   */
+  async resumeInterrupted(jobId: string): Promise<JobStatus> {
+    const record = this.record(jobId);
+    if (record.trashedAt !== undefined) {
+      throw new JobConflictError(`job "${jobId}" is in the trash`);
+    }
+    if (this.autoResuming.has(jobId)) {
+      throw new JobConflictError(
+        `job "${jobId}" already has a resume submission in progress`,
+      );
+    }
+    const status = await this.reconcile(record);
+    if (status !== "orphaned") {
+      throw new JobConflictError(
+        `job "${jobId}" is not interrupted (status "${status}")`,
+      );
+    }
+    this.autoResuming.add(jobId);
+    try {
+      await this.submitInterruptedResume(record, { resetAttempts: true });
+    } finally {
+      this.autoResuming.delete(jobId);
+    }
+    return record.status;
+  }
+
+  /**
+   * Called by the server poller and once at startup: resubmits every
+   * interrupted job from its last checkpoint (the workspace is shared
+   * storage, so a relaunch on any node of the cluster recovers the same
+   * jobs). A job that keeps dying without writing new checkpoints pauses
+   * after MAX_STALLED_INTERRUPTED_RESUMES and waits for a manual resume.
+   */
+  async resumeInterruptedJobs(): Promise<void> {
+    const recovery = this.settings.get().interruptedRecovery;
+    if (recovery !== undefined && recovery.autoResume === false) return;
+    for (const record of this.jobs.values()) {
+      if (record.trashedAt !== undefined) continue;
+      if (
+        record.status !== "running" &&
+        record.status !== "queued" &&
+        record.status !== "orphaned"
+      ) {
+        continue;
+      }
+      if (this.autoResuming.has(record.jobId)) continue;
+      const status = await this.reconcile(record);
+      if (status !== "orphaned") continue;
+      if (
+        record.interruptedResume &&
+        this.now() - record.interruptedResume.submittedAt <
+          JobManager.INTERRUPTED_RESUBMIT_QUIET_MS
+      ) {
+        continue; // a fresh resubmission needs time to reach the scheduler
+      }
+      const checkpoint = this.checkpoint(record.jobId);
+      const previous = record.interruptedResume;
+      const progressed =
+        previous?.checkpointSeq !== undefined &&
+        checkpoint !== undefined &&
+        checkpoint.seq > previous.checkpointSeq;
+      if (
+        previous !== undefined &&
+        !progressed &&
+        previous.count >= JobManager.MAX_STALLED_INTERRUPTED_RESUMES
+      ) {
+        const notice =
+          "Automatic interrupted-job resume paused: " +
+          `${previous.count} resubmissions made no checkpoint progress. ` +
+          "Resume manually from the dashboard once the cause is fixed.";
+        if (!record.warnings?.includes(notice)) {
+          this.warning(record, notice);
+          record.updatedAt = this.now();
+          this.write(record);
+        }
+        continue;
+      }
+      this.autoResuming.add(record.jobId);
+      try {
+        await this.submitInterruptedResume(record, { resetAttempts: progressed });
+      } catch (error) {
+        this.warning(
+          record,
+          `Automatic interrupted-job resume failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        record.updatedAt = this.now();
+        this.write(record);
+      } finally {
+        this.autoResuming.delete(record.jobId);
+      }
+    }
+  }
+
+  /**
+   * Submits the resume of an interrupted job. With a checkpoint on disk the
+   * worker resumes it (journal replay recovers the exact position — this
+   * covers SLURM timeouts and power cuts mid-run); a job that died before
+   * its first checkpoint is re-run from the start, reusing its content pin.
+   */
+  private async submitInterruptedResume(
+    record: JobRecord,
+    options: { readonly resetAttempts: boolean },
+  ): Promise<void> {
+    const settings = record.executionSettings ?? this.settings.get();
+    const checkpoint = this.checkpoint(record.jobId);
+    const command = this.command(
+      record,
+      checkpoint !== undefined ? "resume" : "run",
+      settings,
+    );
+    const number = (record.submissionCount ?? 1) + 1;
+    const script = this.writeScript(
+      record,
+      `submit-interrupted-resume-${number - 1}.sh`,
+      command,
+      settings.slurmTemplate,
+    );
+    await this.submitScript(record, script, settings);
+    record.status = "queued";
+    record.submissionCount = number;
+    record.interruptedResume = {
+      submittedAt: this.now(),
+      count: options.resetAttempts ? 1 : (record.interruptedResume?.count ?? 0) + 1,
+      ...(checkpoint !== undefined ? { checkpointSeq: checkpoint.seq } : {}),
+    };
+    record.updatedAt = this.now();
+    this.write(record);
+  }
+
+  /** Validates the shape of gate-time custom seats (runtime re-validates). */
+  private static validateAddedSeats(
+    added: readonly CustomSeatRequest[],
+  ): void {
+    for (const seat of added) {
+      if (
+        typeof seat.department !== "string" ||
+        seat.department.trim().length === 0 ||
+        typeof seat.umbrella !== "string" ||
+        seat.umbrella.trim().length === 0
+      ) {
+        throw new Error("an added seat needs a non-empty department and field");
+      }
+      if (
+        !Array.isArray(seat.subfields) ||
+        seat.subfields.length < PANEL_EDIT_LIMITS.minSubfields ||
+        seat.subfields.length > PANEL_EDIT_LIMITS.maxSubfields ||
+        seat.subfields.some(
+          (entry) => typeof entry !== "string" || entry.trim().length === 0,
+        )
+      ) {
+        throw new Error(
+          `an added seat needs ${PANEL_EDIT_LIMITS.minSubfields} to ` +
+            `${PANEL_EDIT_LIMITS.maxSubfields} non-empty subfields`,
+        );
+      }
+    }
+  }
+
   async answerGate(jobId: string, answer: GateAnswerRequest): Promise<JobDetail> {
     const record = this.record(jobId);
     const detail = await this.detail(jobId);
@@ -787,9 +977,27 @@ export class JobManager {
       throw new Error(`job "${jobId}" has no pending gate "${answer.gateKey}"`);
     }
     const panelIds = detail.pendingGate.members?.map((member) => member.id) ?? [];
+    const added = answer.addedMembers ?? [];
+    JobManager.validateAddedSeats(added);
+    // Seat-count bounds are enforceable only when the panel is known (it
+    // always is in real flows; the runtime re-validates authoritatively).
+    const keptCount =
+      answer.action === "shrink" ? (answer.members?.length ?? 0) : panelIds.length;
+    if (answer.action === "shrink" || panelIds.length > 0) {
+      if (keptCount + added.length < PANEL_EDIT_LIMITS.minMembers) {
+        throw new Error(
+          `the confirmed panel needs at least ${PANEL_EDIT_LIMITS.minMembers} seats (kept + added)`,
+        );
+      }
+      if (keptCount + added.length > PANEL_EDIT_LIMITS.maxMembers) {
+        throw new Error(
+          `the confirmed panel may seat at most ${PANEL_EDIT_LIMITS.maxMembers} members`,
+        );
+      }
+    }
     if (answer.action === "shrink") {
-      if (!answer.members || answer.members.length < 2) {
-        throw new Error("shrink must keep at least two members");
+      if (!answer.members || answer.members.length === 0) {
+        throw new Error("shrink needs the member ids to keep");
       }
       if (new Set(answer.members).size !== answer.members.length) {
         throw new Error("shrink members must be unique");
@@ -824,8 +1032,100 @@ export class JobManager {
     await this.submitScript(record, script, settings);
     record.status = "running";
     record.submissionCount = number;
+    delete record.gateAutoApprove;
     record.updatedAt = this.now();
     this.write(record);
+    return this.detail(jobId);
+  }
+
+  /**
+   * Called by the server poller: starts the auto-approve countdown when a
+   * suspended gate is first observed, and approves the panel as seated when
+   * the deadline passes without any user interaction. A held countdown
+   * (heldAt set) never fires — "the whole timeout idea stops".
+   */
+  async autoApproveDueGates(): Promise<void> {
+    for (const record of this.jobs.values()) {
+      if (record.trashedAt !== undefined) continue;
+      if (
+        record.status !== "suspended" &&
+        record.status !== "running" &&
+        record.status !== "queued"
+      ) {
+        continue;
+      }
+      const checkpoint = this.checkpoint(record.jobId);
+      const gate =
+        checkpoint?.status === "suspended" ? checkpoint.pendingGates[0] : undefined;
+      if (!gate) {
+        if (record.gateAutoApprove !== undefined) {
+          delete record.gateAutoApprove;
+          record.updatedAt = this.now();
+          this.write(record);
+        }
+        continue;
+      }
+      const marker = record.gateAutoApprove;
+      if (!marker || marker.gateKey !== gate.gateKey) {
+        record.gateAutoApprove = {
+          gateKey: gate.gateKey,
+          deadlineAt: this.now() + this.panelAutoApproveMs,
+          totalMs: this.panelAutoApproveMs,
+        };
+        record.updatedAt = this.now();
+        this.write(record);
+        continue;
+      }
+      if (marker.heldAt !== undefined) continue;
+      if (this.now() < marker.deadlineAt) continue;
+      if (this.autoResuming.has(record.jobId)) continue;
+      this.autoResuming.add(record.jobId);
+      try {
+        await this.answerGate(record.jobId, {
+          gateKey: gate.gateKey,
+          action: "approve",
+        });
+      } catch (error) {
+        this.warning(
+          record,
+          `Automatic panel approval failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        record.updatedAt = this.now();
+        this.write(record);
+      } finally {
+        this.autoResuming.delete(record.jobId);
+      }
+    }
+  }
+
+  /**
+   * Permanently pauses a pending gate's auto-approve countdown: the user
+   * clicked into the confirmation card (or its pause control), so the run
+   * waits for an explicit decision from here on.
+   */
+  async holdGateAutoApprove(jobId: string): Promise<JobDetail> {
+    const record = this.record(jobId);
+    if (record.trashedAt !== undefined) {
+      throw new JobConflictError(`job "${jobId}" is in the trash`);
+    }
+    const checkpoint = this.checkpoint(jobId);
+    const gate =
+      checkpoint?.status === "suspended" ? checkpoint.pendingGates[0] : undefined;
+    if (!gate) {
+      throw new JobConflictError(`job "${jobId}" is not waiting on a gate`);
+    }
+    if (record.gateAutoApprove?.heldAt === undefined) {
+      record.gateAutoApprove = {
+        gateKey: gate.gateKey,
+        deadlineAt: record.gateAutoApprove?.deadlineAt ?? this.now(),
+        totalMs: record.gateAutoApprove?.totalMs ?? this.panelAutoApproveMs,
+        heldAt: this.now(),
+      };
+      record.updatedAt = this.now();
+      this.write(record);
+    }
     return this.detail(jobId);
   }
 }

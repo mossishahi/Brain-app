@@ -23,6 +23,30 @@ export interface JobRecord {
     readonly retryAt?: number;
     readonly submittedAt: number;
   };
+  /**
+   * Bookkeeping of interrupted-job (orphaned) resubmissions: when the last
+   * one was submitted, how many were submitted without checkpoint progress,
+   * and the checkpoint seq observed at that submission (progress marker).
+   * Auto-resume pauses after repeated attempts without progress; a manual
+   * resume always resets the counter.
+   */
+  interruptedResume?: {
+    readonly submittedAt: number;
+    readonly count: number;
+    readonly checkpointSeq?: number;
+  };
+  /**
+   * The pending human gate's auto-approve countdown: initialized when the
+   * server first observes the suspended checkpoint, approved as seated when
+   * `deadlineAt` passes, permanently paused once `heldAt` is set (a user
+   * interacted with the confirmation card). Cleared when the gate resolves.
+   */
+  gateAutoApprove?: {
+    readonly gateKey: string;
+    readonly deadlineAt: number;
+    readonly totalMs: number;
+    readonly heldAt?: number;
+  };
   /** Immutable remote content snapshot used by this job. */
   contentBundle?: {
     readonly id: string;
@@ -40,4 +64,6 @@ export interface ContentRegistryRuntimeStatus {
   url?: string;
   skills?: number;
   workflows?: number;
+  /** Version of the registry server process, from its /health payload. */
+  serverVersion?: string;
 }

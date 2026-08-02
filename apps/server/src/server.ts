@@ -15,17 +15,26 @@ import { homedir } from "node:os";
 import { delimiter, extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import type {
-  AttachmentSelectionKind,
-  GateAnswerRequest,
-  HealthResponse,
-  ModelOptionsResponse,
-  ServerEvent,
-  SubmitJobRequest,
+import {
+  READINESS_CHECK_IDS,
+  type AttachmentSelectionKind,
+  type GateAnswerRequest,
+  type HealthResponse,
+  type ModelOptionsResponse,
+  type ReadinessCheckId,
+  type ServerEvent,
+  type SubmitJobRequest,
 } from "@brainstorm-agentic/protocol";
 
+import { createReadinessAdvisor } from "./advisor.js";
 import { JobConflictError, JobManager } from "./job-manager.js";
 import type { ContentRegistryRuntimeStatus } from "./model.js";
+import {
+  ReadinessService,
+  defaultReadinessProbes,
+  type ReadinessAdvisor,
+  type ReadinessProbes,
+} from "./readiness.js";
 import { aggregateToolUsage } from "./tool-usage.js";
 import { checkAppUpdate } from "./self-update.js";
 import { RouteCatalog, loadModelCatalog } from "./route-catalog.js";
@@ -33,9 +42,11 @@ import {
   ServerFileBrowser,
   ServerFileError,
 } from "./server-files.js";
-import type {
-  AnthropicConnectionValidator,
-  ClaudeAgentConnectionValidator,
+import {
+  validateAnthropicConnection,
+  validateClaudeAgentConnection,
+  type AnthropicConnectionValidator,
+  type ClaudeAgentConnectionValidator,
 } from "./settings.js";
 
 const VERSION = "0.1.0";
@@ -43,6 +54,8 @@ const SNAPSHOT_THROTTLE_MS = 500;
 const HEARTBEAT_MS = 15_000;
 const POLL_MS = 2_000;
 const REGISTRY_HEARTBEAT_MS = 15_000;
+/** Interrupted-job scans hit squeue/sacct, so they poll far less often. */
+const INTERRUPTED_SCAN_MS = 30_000;
 const ATTACHMENT_KINDS = new Set<AttachmentSelectionKind>([
   "file",
   "folder",
@@ -74,6 +87,15 @@ async function probeContentRegistry(
       headers: { accept: "application/json" },
     });
     status.running = response.ok;
+    if (response.ok) {
+      // Registry health announces its own process version; older registries
+      // without it simply leave the field unset.
+      const payload = (await response.json().catch(() => undefined)) as
+        | { server?: { version?: unknown } }
+        | undefined;
+      const version = payload?.server?.version;
+      if (typeof version === "string") status.serverVersion = version;
+    }
   } catch {
     status.running = false;
   }
@@ -101,6 +123,14 @@ export interface StartBrainServerOptions {
   ) => Promise<void>;
   /** Check git release tags for a newer app version (real deployments only). */
   readonly selfUpdateCheck?: boolean;
+  /** Per-check probe overrides (test seam / special deployments). */
+  readonly readinessProbes?: Partial<ReadinessProbes>;
+  /** LLM fix-advice provider; null disables it (built-in hints only). */
+  readonly readinessAdvisor?: ReadinessAdvisor | null;
+  /** Ceiling for the SLURM probe job (submission + queue wait). */
+  readonly slurmProbeTimeoutMs?: number;
+  /** Unattended panel gates approve themselves after this. Default 30s. */
+  readonly panelAutoApproveMs?: number;
 }
 
 export interface RunningBrainServer {
@@ -110,6 +140,7 @@ export interface RunningBrainServer {
   readonly workspace: string;
   readonly manager: JobManager;
   readonly contentRegistry: ContentRegistryRuntimeStatus;
+  readonly readiness: ReadinessService;
   readonly httpServer: HttpServer;
   close(): Promise<void>;
 }
@@ -238,7 +269,12 @@ function serveStatic(
 class SseConnection {
   private lastSnapshotAt = 0;
   private timer: NodeJS.Timeout | undefined;
-  private pending: (() => Promise<ServerEvent>) | undefined;
+  /**
+   * One pending snapshot producer per event type: a jobs snapshot and a
+   * readiness snapshot may both be queued; a newer snapshot of the same type
+   * replaces the older one (only the latest state matters).
+   */
+  private readonly pending = new Map<string, () => Promise<ServerEvent>>();
   private closed = false;
   private sending = false;
   readonly heartbeat: NodeJS.Timeout;
@@ -252,9 +288,9 @@ class SseConnection {
     }, HEARTBEAT_MS);
   }
 
-  schedule(producer: () => Promise<ServerEvent>): void {
+  schedule(kind: string, producer: () => Promise<ServerEvent>): void {
     if (this.closed) return;
-    this.pending = producer;
+    this.pending.set(kind, producer);
     const delay = Math.max(
       0,
       SNAPSHOT_THROTTLE_MS - (Date.now() - this.lastSnapshotAt),
@@ -268,28 +304,38 @@ class SseConnection {
   }
 
   private async flush(): Promise<void> {
-    const producer = this.pending;
-    this.pending = undefined;
-    if (!producer || this.closed) return;
+    if (this.closed || this.pending.size === 0) return;
+    const producers = [...this.pending.values()];
+    this.pending.clear();
     this.sending = true;
     try {
-      const event = await producer();
-      if (!this.closed) {
-        this.res.write(`data: ${JSON.stringify(event)}\n\n`);
-        this.lastSnapshotAt = Date.now();
-      }
-    } catch (error) {
-      if (!this.closed) {
-        const event: ServerEvent = {
-          type: "error",
-          message: error instanceof Error ? error.message : String(error),
-        };
-        this.res.write(`data: ${JSON.stringify(event)}\n\n`);
-        this.lastSnapshotAt = Date.now();
+      for (const producer of producers) {
+        if (this.closed) return;
+        try {
+          const event = await producer();
+          if (!this.closed) {
+            this.res.write(`data: ${JSON.stringify(event)}\n\n`);
+            this.lastSnapshotAt = Date.now();
+          }
+        } catch (error) {
+          if (!this.closed) {
+            const event: ServerEvent = {
+              type: "error",
+              message: error instanceof Error ? error.message : String(error),
+            };
+            this.res.write(`data: ${JSON.stringify(event)}\n\n`);
+            this.lastSnapshotAt = Date.now();
+          }
+        }
       }
     } finally {
       this.sending = false;
-      if (this.pending) this.schedule(this.pending);
+      if (this.pending.size > 0 && this.timer === undefined && !this.closed) {
+        this.timer = setTimeout(() => {
+          this.timer = undefined;
+          void this.flush();
+        }, SNAPSHOT_THROTTLE_MS);
+      }
     }
   }
 
@@ -401,16 +447,25 @@ export async function startBrainServer(
   const detailStreams = new Map<string, Set<SseConnection>>();
   const routeCatalog = new RouteCatalog();
   let manager!: JobManager;
+  let readiness!: ReadinessService;
   const broadcastJobs = (): void => {
     for (const stream of jobStreams) {
-      stream.schedule(async () => ({ type: "jobs", jobs: await manager.list() }));
+      stream.schedule("jobs", async () => ({ type: "jobs", jobs: await manager.list() }));
     }
   };
   const broadcastDetails = (): void => {
     for (const [jobId, streams] of detailStreams) {
       for (const stream of streams) {
-        stream.schedule(async () => ({ type: "job", job: await manager.detail(jobId) }));
+        stream.schedule("job", async () => ({ type: "job", job: await manager.detail(jobId) }));
       }
+    }
+  };
+  const broadcastReadiness = (): void => {
+    for (const stream of jobStreams) {
+      stream.schedule("readiness", async () => ({
+        type: "readiness",
+        readiness: readiness.report(),
+      }));
     }
   };
   const broadcast = (): void => {
@@ -432,15 +487,54 @@ export async function startBrainServer(
     ...(options.validateOpenRouter
       ? { validateOpenRouter: options.validateOpenRouter }
       : {}),
+    ...(options.panelAutoApproveMs !== undefined
+      ? { panelAutoApproveMs: options.panelAutoApproveMs }
+      : {}),
     onChange: broadcast,
   });
+  readiness = new ReadinessService({
+    workspace: options.workspace,
+    settings: manager.settings,
+    contentRegistry,
+    probes: defaultReadinessProbes({
+      validateAnthropic: options.validateAnthropic ?? validateAnthropicConnection,
+      validateClaudeAgent:
+        options.validateClaudeAgent ?? validateClaudeAgentConnection,
+      ...(options.slurmProbeTimeoutMs !== undefined
+        ? { slurmProbeTimeoutMs: options.slurmProbeTimeoutMs }
+        : {}),
+    }),
+    ...(options.readinessProbes ? { probeOverrides: options.readinessProbes } : {}),
+    ...(options.readinessAdvisor !== null
+      ? {
+          advisor:
+            options.readinessAdvisor ??
+            createReadinessAdvisor({
+              settings: manager.settings,
+              ...(options.env ? { env: options.env } : {}),
+            }),
+        }
+      : {}),
+    ...(options.env ? { env: options.env } : {}),
+    onChange: broadcastReadiness,
+  });
+  // Starting points for the file picker, not a boundary: any server-readable
+  // path can be attached. Defaults cover home, the launch workspace, and the
+  // storage mounts HPC sites conventionally export as env vars ($SCRATCH,
+  // $WORK, $PROJECT) — the browser dedupes and drops unreadable entries.
+  const hpcStorageRoots = ["SCRATCH", "WORK", "PROJECT"]
+    .map((name) => options.env?.[name] ?? process.env[name])
+    .filter(
+      (value): value is string =>
+        typeof value === "string" && value.trim().length > 0,
+    );
   const configuredAttachmentRoots =
     options.attachmentRoots ??
     (options.env?.BRAIN_ATTACHMENT_ROOTS ?? process.env.BRAIN_ATTACHMENT_ROOTS)
       ?.split(delimiter)
       .map((entry) => entry.trim())
       .filter((entry) => entry.length > 0) ??
-    [homedir()];
+    [homedir(), options.workspace, process.cwd(), ...hpcStorageRoots];
   const fileBrowser = new ServerFileBrowser({
     roots: configuredAttachmentRoots,
   });
@@ -460,6 +554,9 @@ export async function startBrainServer(
         const { latest, latestNotes } = await registryLatest(
           settings.contentRegistry.bundle,
         );
+        // The version a new run starts with right now: the developer pin
+        // when one exists, else the latest the registry publishes.
+        const effectiveVersion = settings.contentRegistry.version ?? latest;
         const health: HealthResponse = {
           ok: true,
           version: VERSION,
@@ -471,11 +568,16 @@ export async function startBrainServer(
             ...(contentRegistry.workflows !== undefined
               ? { workflows: contentRegistry.workflows }
               : {}),
+            bundle: settings.contentRegistry.bundle,
+            ...(contentRegistry.serverVersion
+              ? { serverVersion: contentRegistry.serverVersion }
+              : {}),
             ...(latest ? { latest } : {}),
             ...(latestNotes ? { latestNotes } : {}),
             ...(settings.contentRegistry.version
               ? { pinnedVersion: settings.contentRegistry.version }
               : {}),
+            ...(effectiveVersion ? { effectiveVersion } : {}),
           },
           ...(appUpdate && settings.updateCheck !== "off" ? { appUpdate } : {}),
         };
@@ -557,6 +659,9 @@ export async function startBrainServer(
         try {
           const settings = await manager.settings.put(await readJson(req));
           broadcast();
+          // Provider/runner changes flip which checks matter; re-verify.
+          readiness.refresh();
+          broadcastReadiness();
           sendJson(res, 200, settings);
         } catch (error) {
           throw new HttpError(
@@ -564,6 +669,44 @@ export async function startBrainServer(
             error instanceof Error ? error.message : String(error),
           );
         }
+        return;
+      }
+      if (req.method === "GET" && path === "/api/readiness") {
+        sendJson(res, 200, readiness.report());
+        return;
+      }
+      if (req.method === "POST" && path === "/api/readiness/check") {
+        const body = requestObject(await readJson(req));
+        let checks: ReadinessCheckId[] | undefined;
+        if (body.checks !== undefined) {
+          if (
+            !Array.isArray(body.checks) ||
+            !body.checks.every(
+              (id): id is ReadinessCheckId =>
+                typeof id === "string" &&
+                (READINESS_CHECK_IDS as readonly string[]).includes(id),
+            )
+          ) {
+            throw new HttpError(400, "checks must be an array of readiness check ids");
+          }
+          checks = body.checks;
+        }
+        readiness.refresh(checks);
+        broadcastReadiness();
+        sendJson(res, 200, readiness.report());
+        return;
+      }
+      if (req.method === "POST" && path === "/api/readiness/diagnose") {
+        const body = requestObject(await readJson(req));
+        if (
+          typeof body.check !== "string" ||
+          !(READINESS_CHECK_IDS as readonly string[]).includes(body.check)
+        ) {
+          throw new HttpError(400, "check must be a readiness check id");
+        }
+        await readiness.advise(body.check as ReadinessCheckId, { force: true });
+        broadcastReadiness();
+        sendJson(res, 200, readiness.report());
         return;
       }
       if (req.method === "GET" && path === "/api/model-options") {
@@ -608,6 +751,27 @@ export async function startBrainServer(
         if (typeof body.topic !== "string" || body.topic.trim().length === 0) {
           throw new HttpError(400, "topic must be a non-empty string");
         }
+        // The submission gate: while a required environment check is RED the
+        // pipeline must not start. The webapp holds the prompt and shows the
+        // waiting card; checks still running do not block (their failures
+        // surface as ordinary job errors, exactly as before readiness existed).
+        {
+          const report = readiness.report();
+          const failing = report.checks.filter(
+            (check) => check.required && check.state === "failed",
+          );
+          if (failing.length > 0) {
+            sendJson(res, 409, {
+              message:
+                "Environment is not ready: " +
+                failing
+                  .map((check) => `${check.label} — ${check.message ?? "check failed"}`)
+                  .join("; "),
+              readiness: report,
+            });
+            return;
+          }
+        }
         if (
           body.attachments !== undefined &&
           (!Array.isArray(body.attachments) ||
@@ -644,7 +808,11 @@ export async function startBrainServer(
         connection = new SseConnection(res, () => jobStreams.delete(connection));
         jobStreams.add(connection);
         res.once("close", () => connection.close());
-        connection.schedule(async () => ({ type: "jobs", jobs: await manager.list() }));
+        connection.schedule("jobs", async () => ({ type: "jobs", jobs: await manager.list() }));
+        connection.schedule("readiness", async () => ({
+          type: "readiness",
+          readiness: readiness.report(),
+        }));
         return;
       }
 
@@ -666,7 +834,7 @@ export async function startBrainServer(
         });
         streams.add(connection);
         res.once("close", () => connection.close());
-        connection.schedule(async () => ({ type: "job", job: await manager.detail(jobId) }));
+        connection.schedule("job", async () => ({ type: "job", job: await manager.detail(jobId) }));
         return;
       }
 
@@ -684,6 +852,23 @@ export async function startBrainServer(
         const jobId = decodeURIComponent(resumeMatch[1]!);
         try {
           const status = await manager.resumeCreditBlocked(jobId);
+          broadcast();
+          sendJson(res, 200, { jobId, status });
+        } catch (error) {
+          if (error instanceof JobConflictError) {
+            throw new HttpError(409, error.message);
+          }
+          throw error; // "was not found" maps to 404 in the outer handler
+        }
+        return;
+      }
+
+      const resumeInterruptedMatch =
+        /^\/api\/jobs\/([^/]+)\/resume-interrupted$/.exec(path);
+      if (req.method === "POST" && resumeInterruptedMatch) {
+        const jobId = decodeURIComponent(resumeInterruptedMatch[1]!);
+        try {
+          const status = await manager.resumeInterrupted(jobId);
           broadcast();
           sendJson(res, 200, { jobId, status });
         } catch (error) {
@@ -716,6 +901,22 @@ export async function startBrainServer(
         return;
       }
 
+      const gateHoldMatch = /^\/api\/jobs\/([^/]+)\/gate-hold$/.exec(path);
+      if (req.method === "POST" && gateHoldMatch) {
+        const jobId = decodeURIComponent(gateHoldMatch[1]!);
+        try {
+          const detail = await manager.holdGateAutoApprove(jobId);
+          broadcast();
+          sendJson(res, 200, detail);
+        } catch (error) {
+          if (error instanceof JobConflictError) {
+            throw new HttpError(409, error.message);
+          }
+          throw error; // "was not found" maps to 404 in the outer handler
+        }
+        return;
+      }
+
       const gateMatch = /^\/api\/jobs\/([^/]+)\/gate$/.exec(path);
       if (req.method === "POST" && gateMatch) {
         const body = requestObject(await readJson(req));
@@ -724,7 +925,13 @@ export async function startBrainServer(
           (body.action !== "approve" && body.action !== "shrink") ||
           (body.members !== undefined &&
             (!Array.isArray(body.members) ||
-              !body.members.every((member) => typeof member === "string")))
+              !body.members.every((member) => typeof member === "string"))) ||
+          (body.addedMembers !== undefined &&
+            (!Array.isArray(body.addedMembers) ||
+              !body.addedMembers.every(
+                (seat) =>
+                  typeof seat === "object" && seat !== null && !Array.isArray(seat),
+              )))
         ) {
           throw new HttpError(400, "invalid gate answer");
         }
@@ -801,13 +1008,24 @@ export async function startBrainServer(
     watcher(manager.sessionsDir, broadcast),
   ].filter((entry): entry is FSWatcher => entry !== undefined);
   const poll = setInterval(() => {
-    void manager.resumeDueCreditBlocks().finally(broadcast);
+    void manager
+      .resumeDueCreditBlocks()
+      .then(() => manager.autoApproveDueGates())
+      .finally(broadcast);
   }, POLL_MS);
+  const interruptedPoll = setInterval(() => {
+    void manager.resumeInterruptedJobs().finally(broadcast);
+  }, INTERRUPTED_SCAN_MS);
   const registryPoll = setInterval(() => {
     void probeContentRegistry(contentRegistryUrl, contentRegistry);
   }, REGISTRY_HEARTBEAT_MS);
   await manager.resumeDueCreditBlocks();
   await probeContentRegistry(contentRegistryUrl, contentRegistry);
+  // Startup recovery + verification run in the background: interrupted jobs
+  // found on the shared workspace resume from their checkpoints, and every
+  // required environment check re-verifies for the status icons.
+  void manager.resumeInterruptedJobs().finally(broadcast);
+  readiness.refresh();
 
   return {
     port,
@@ -816,11 +1034,14 @@ export async function startBrainServer(
     workspace: options.workspace,
     manager,
     contentRegistry,
+    readiness,
     httpServer,
     close: async () => {
       clearInterval(poll);
+      clearInterval(interruptedPoll);
       clearInterval(registryPoll);
       if (appUpdateTimer) clearInterval(appUpdateTimer);
+      readiness.close();
       watchers.forEach((entry) => entry.close());
       for (const stream of [...jobStreams]) stream.close();
       for (const streams of detailStreams.values()) {

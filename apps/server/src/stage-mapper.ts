@@ -120,6 +120,27 @@ function readCheckpoint(sessionDir: string): WorkflowCheckpoint | undefined {
   }
 }
 
+/**
+ * The immutable content bundle the job pinned at launch. The pin outlives
+ * the fetched content cache (which is deleted on terminal states), so this
+ * stays the run's provenance record forever.
+ */
+function readContentBundle(
+  jobDir: string,
+): { readonly id: string; readonly version: string } | undefined {
+  try {
+    const pin = readJsonFile<{ bundle?: unknown; version?: unknown }>(
+      join(jobDir, "content", "content-pin.json"),
+    );
+    if (typeof pin?.bundle === "string" && typeof pin.version === "string") {
+      return { id: pin.bundle, version: pin.version };
+    }
+  } catch {
+    // A malformed pin never hides the rest of the job.
+  }
+  return undefined;
+}
+
 function readEvents(jobDir: string): RunEvent[] {
   const path = join(jobDir, "events.jsonl");
   if (!existsSync(path)) return [];
@@ -1044,9 +1065,39 @@ function proposal(value: unknown): ProposalView | undefined {
   };
 }
 
+/**
+ * Custom seats from the gate response, mirrored to the exact ids the runtime
+ * assigns (`member-user-N`, in submission order) so the dashboard's panel
+ * matches the one the run actually executed.
+ */
+function addedPanelMembers(raw: unknown): PanelMemberView[] {
+  if (!Array.isArray(raw)) return [];
+  const members: PanelMemberView[] = [];
+  raw.forEach((entry, index) => {
+    const seat = object(entry);
+    if (
+      typeof seat?.department !== "string" ||
+      typeof seat.umbrella !== "string" ||
+      !Array.isArray(seat.subfields)
+    ) {
+      return;
+    }
+    members.push({
+      id: `member-user-${index + 1}`,
+      department: seat.department,
+      umbrella: seat.umbrella,
+      subfields: seat.subfields.filter(
+        (subfield): subfield is string => typeof subfield === "string",
+      ),
+    });
+  });
+  return members;
+}
+
 function gateDecision(entries: readonly JournalEntry[]): {
   action?: string;
   members?: string[];
+  added: PanelMemberView[];
   automatic: boolean;
 } {
   const auto = entries.find((entry) =>
@@ -1059,9 +1110,12 @@ function gateDecision(entries: readonly JournalEntry[]): {
       entry.key.endsWith("::response"),
   );
   const raw = manual?.value ?? auto?.value;
-  if (typeof raw === "string") return { action: raw, automatic: auto !== undefined };
+  if (typeof raw === "string") {
+    return { action: raw, added: [], automatic: auto !== undefined };
+  }
   const value = object(raw);
   return {
+    added: addedPanelMembers(value?.addedMembers),
     action: typeof value?.action === "string" ? value.action : undefined,
     members: Array.isArray(value?.members)
       ? value.members.filter((entry): entry is string => typeof entry === "string")
@@ -1491,22 +1545,27 @@ export function buildJobDetail(input: MapperInput): JobDetail {
   }
   const gate = gateDecision(entries);
   const retained = new Set(gate.members ?? selectedPanel.map((member) => member.id));
-  const finalPanel =
+  const keptPanel =
     gate.action === "shrink"
       ? selectedPanel.filter((member) => retained.has(member.id))
       : selectedPanel;
+  // The panel the run executed: kept seats plus the custom seats the user
+  // added at confirmation (they exist only once the gate was answered).
+  const finalPanel =
+    gate.action !== undefined ? [...keptPanel, ...gate.added] : keptPanel;
   const removedMemberIds =
     gate.action === "shrink"
       ? selectedPanel.filter((member) => !retained.has(member.id)).map((member) => member.id)
       : [];
+  const addedMemberIds = gate.added.map((member) => member.id);
 
   const ideas = new Map<string, BrainIdeaView>();
-  for (const member of selectedPanel) {
+  for (const member of finalPanel) {
     const value =
       brainIdea(artifact(artifacts, "brainIdea", `ideas.${member.id}`)) ??
       brainIdea(journalAgent(entries, (key) =>
         key.includes("/first-pass/") &&
-        key.includes(`/member[${selectedPanel.indexOf(member)}]/`) &&
+        key.includes(`/member[${finalPanel.indexOf(member)}]/`) &&
         /\/develop-idea(?:\/develop-idea-execute)?::result$/.test(key)
       ));
     if (value) ideas.set(member.id, value);
@@ -1621,6 +1680,7 @@ export function buildJobDetail(input: MapperInput): JobDetail {
         ? {
             state: "shrunk",
             removedMemberIds,
+            ...(addedMemberIds.length > 0 ? { addedMemberIds } : {}),
             ...(gateResolvedAt !== undefined
               ? { decidedAt: gateResolvedAt }
               : checkpoint ? { decidedAt: checkpoint.updatedAt } : {}),
@@ -1628,6 +1688,7 @@ export function buildJobDetail(input: MapperInput): JobDetail {
         : gate.action === "approve"
           ? {
               state: "approved",
+              ...(addedMemberIds.length > 0 ? { addedMemberIds } : {}),
               ...(gateResolvedAt !== undefined
                 ? { decidedAt: gateResolvedAt }
                 : checkpoint ? { decidedAt: checkpoint.updatedAt } : {}),
@@ -1960,6 +2021,26 @@ export function buildJobDetail(input: MapperInput): JobDetail {
       stage.status === "suspended" ||
       stage.status === "credit_blocked",
   )?.id;
+  const contentBundle = readContentBundle(input.jobDir);
+  // The pending gate view, enriched with the record's auto-approve countdown
+  // so the dashboard can render the progress bar (and its held state).
+  const pendingGateBase = pendingGate(checkpoint, selectedPanel);
+  const autoApprove = input.record.gateAutoApprove;
+  const pendingGateView: PendingGateView | undefined = pendingGateBase
+    ? {
+        ...pendingGateBase,
+        ...(autoApprove !== undefined &&
+        autoApprove.gateKey === pendingGateBase.gateKey
+          ? {
+              autoApprove: {
+                deadlineAt: autoApprove.deadlineAt,
+                totalMs: autoApprove.totalMs,
+                held: autoApprove.heldAt !== undefined,
+              },
+            }
+          : {}),
+      }
+    : undefined;
   return {
     jobId: input.record.jobId,
     topic: input.record.topic,
@@ -1968,6 +2049,7 @@ export function buildJobDetail(input: MapperInput): JobDetail {
     createdAt: input.record.createdAt,
     updatedAt: Math.max(input.record.updatedAt, checkpoint?.updatedAt ?? 0),
     ...(input.record.slurmJobId ? { slurmJobId: input.record.slurmJobId } : {}),
+    ...(contentBundle ? { contentBundle } : {}),
     ...(input.record.trashedAt !== undefined
       ? { trashedAt: input.record.trashedAt }
       : {}),
@@ -1992,9 +2074,7 @@ export function buildJobDetail(input: MapperInput): JobDetail {
         }
       : {}),
     stages,
-    ...(pendingGate(checkpoint, selectedPanel)
-      ? { pendingGate: pendingGate(checkpoint, selectedPanel) }
-      : {}),
+    ...(pendingGateView ? { pendingGate: pendingGateView } : {}),
   };
 }
 

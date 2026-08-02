@@ -14,6 +14,9 @@ import type {
   JobSummary,
   ModelOptionsResponse,
   ModelsByRouteUpdate,
+  ReadinessCheckId,
+  ReadinessReport,
+  ResumeInterruptedJobResponse,
   ResumeJobResponse,
   ServerEvent,
   ServerAttachmentRootsResponse,
@@ -29,11 +32,24 @@ import type {
 
 export class ApiError extends Error {
   readonly status: number;
-  constructor(message: string, status: number) {
+  /** Parsed JSON body of the error response, when there was one. */
+  readonly payload?: unknown;
+  constructor(message: string, status: number, payload?: unknown) {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    this.payload = payload;
   }
+}
+
+/** The readiness report of a 409 "environment not ready" submit response. */
+export function blockedReadiness(error: unknown): ReadinessReport | undefined {
+  if (!(error instanceof ApiError) || error.status !== 409) return undefined;
+  const payload = error.payload;
+  if (typeof payload !== "object" || payload === null) return undefined;
+  const readiness = (payload as { readiness?: unknown }).readiness;
+  if (typeof readiness !== "object" || readiness === null) return undefined;
+  return readiness as ReadinessReport;
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -45,17 +61,18 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
   if (!res.ok) {
     let message = `request failed (${res.status})`;
+    let payload: unknown;
     try {
-      const body: unknown = await res.json();
-      if (body && typeof body === "object") {
-        const rec = body as Record<string, unknown>;
+      payload = await res.json();
+      if (payload && typeof payload === "object") {
+        const rec = payload as Record<string, unknown>;
         if (typeof rec.error === "string") message = rec.error;
         else if (typeof rec.message === "string") message = rec.message;
       }
     } catch {
       // non-JSON error body; keep the generic message
     }
-    throw new ApiError(message, res.status);
+    throw new ApiError(message, res.status, payload);
   }
   return (await res.json()) as T;
 }
@@ -174,6 +191,32 @@ export const cancelJob = (jobId: string): Promise<CancelJobResponse> =>
 export const resumeJob = (jobId: string): Promise<ResumeJobResponse> =>
   request(`/jobs/${encodeURIComponent(jobId)}/resume`, { method: "POST" });
 
+/** Resubmits an interrupted (orphaned) job from its last checkpoint. */
+export const resumeInterruptedJob = (
+  jobId: string,
+): Promise<ResumeInterruptedJobResponse> =>
+  request(`/jobs/${encodeURIComponent(jobId)}/resume-interrupted`, {
+    method: "POST",
+  });
+
+export const getReadiness = (): Promise<ReadinessReport> =>
+  request("/readiness");
+
+/** Re-runs environment checks (all, or the listed ones). */
+export const recheckReadiness = (
+  checks?: readonly ReadinessCheckId[],
+): Promise<ReadinessReport> =>
+  request(
+    "/readiness/check",
+    jsonInit("POST", checks !== undefined ? { checks } : {}),
+  );
+
+/** Asks the LLM advisor to (re)diagnose a failed check. */
+export const diagnoseReadiness = (
+  check: ReadinessCheckId,
+): Promise<ReadinessReport> =>
+  request("/readiness/diagnose", jsonInit("POST", { check }));
+
 export const getToolUsage = (jobId: string): Promise<ToolUsageReport> =>
   request(`/jobs/${encodeURIComponent(jobId)}/tool-usage`);
 
@@ -185,6 +228,10 @@ export const getTrashedJobs = (): Promise<readonly JobSummary[]> =>
 
 export const answerGate = (jobId: string, body: GateAnswerRequest): Promise<JobDetail> =>
   request(`/jobs/${encodeURIComponent(jobId)}/gate`, jsonInit("POST", body));
+
+/** Permanently pauses the pending gate's auto-approve countdown. */
+export const holdGateAutoApprove = (jobId: string): Promise<JobDetail> =>
+  request(`/jobs/${encodeURIComponent(jobId)}/gate-hold`, { method: "POST" });
 
 export const jobsStreamUrl = `${API_BASE}/stream`;
 export const jobStreamUrl = (jobId: string): string =>

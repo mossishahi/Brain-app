@@ -6,7 +6,9 @@ import { tmpdir } from "node:os";
 
 import {
   attachmentTools,
+  codeExecutionTools,
   insideRoots,
+  prepareCodeWorkspace,
   ATTACHMENT_MANIFESTS,
   ALL_HOST_TOOL_MANIFESTS,
   createHostToolRegistry,
@@ -127,5 +129,110 @@ describe("availableHostToolManifests", () => {
     assert.ok(ids.includes("attachment_list"));
     assert.ok(ids.includes("web_search"));
     assert.ok(ids.includes("code_execute"));
+  });
+});
+
+describe("code execution", () => {
+  it("prepares a workspace and runs a JavaScript script", async () => {
+    const root = mkdtempSync(join(tmpdir(), "host-tools-code-"));
+    const environment = await prepareCodeWorkspace(root);
+    assert.ok(environment.node.version.startsWith("v"));
+
+    const tools = codeExecutionTools(environment);
+    assert.equal(tools.length, 1);
+    assert.equal(tools[0]!.definition.name, "code_execute");
+    const result = await tools[0]!.execute(
+      { language: "javascript", code: "console.log(6 * 7)" },
+      { runId: "r1" },
+    );
+    const output = result.output as { exitCode: number; stdout: string };
+    assert.equal(result.isError, undefined);
+    assert.equal(output.exitCode, 0);
+    assert.match(output.stdout, /42/);
+  });
+
+  it("reports a non-zero exit as a readable result, not an error", async () => {
+    const root = mkdtempSync(join(tmpdir(), "host-tools-code-"));
+    const environment = await prepareCodeWorkspace(root);
+    const tools = codeExecutionTools(environment);
+    const result = await tools[0]!.execute(
+      {
+        language: "javascript",
+        code: 'console.error("assertion failed"); process.exit(3)',
+      },
+      { runId: "r1" },
+    );
+    const output = result.output as { exitCode: number; stderr: string };
+    assert.equal(result.isError, undefined);
+    assert.equal(output.exitCode, 3);
+    assert.match(output.stderr, /assertion failed/);
+  });
+
+  it("refuses python honestly when no interpreter exists", async () => {
+    const root = mkdtempSync(join(tmpdir(), "host-tools-code-"));
+    const environment = await prepareCodeWorkspace(root, {
+      pythonCandidates: ["definitely-not-a-python-binary"],
+    });
+    assert.equal(environment.python, undefined);
+    const tools = codeExecutionTools(environment);
+    const result = await tools[0]!.execute(
+      { language: "python", code: "print('hi')" },
+      { runId: "r1" },
+    );
+    assert.equal(result.isError, true);
+    assert.match(String(result.output), /python interpreter/);
+  });
+
+  it("kills scripts at the timeout", async () => {
+    const root = mkdtempSync(join(tmpdir(), "host-tools-code-"));
+    const environment = await prepareCodeWorkspace(root);
+    const tools = codeExecutionTools(environment);
+    const result = await tools[0]!.execute(
+      {
+        language: "javascript",
+        code: "setInterval(() => {}, 1000); console.log('spinning')",
+        timeout_ms: 1000,
+      },
+      { runId: "r1" },
+    );
+    const output = result.output as { timedOut: boolean };
+    assert.equal(result.isError, true);
+    assert.equal(output.timedOut, true);
+  });
+
+  it("never leaks credentials into the script environment", async () => {
+    const root = mkdtempSync(join(tmpdir(), "host-tools-code-"));
+    const environment = await prepareCodeWorkspace(root);
+    const tools = codeExecutionTools(environment, {
+      ...process.env,
+      ANTHROPIC_API_KEY: "super-secret",
+      PATH: process.env.PATH,
+    });
+    const result = await tools[0]!.execute(
+      {
+        language: "javascript",
+        code: "console.log(JSON.stringify(process.env))",
+      },
+      { runId: "r1" },
+    );
+    const output = result.output as { stdout: string };
+    assert.ok(!output.stdout.includes("super-secret"));
+  });
+
+  it("registers code_execute only over a prepared workspace", async () => {
+    const root = mkdtempSync(join(tmpdir(), "host-tools-code-"));
+    const environment = await prepareCodeWorkspace(root);
+    const withEnvironment = createHostToolRegistry({
+      codeEnvironment: environment,
+      enabledToolIds: new Set(["code_execute"]),
+    });
+    assert.deepEqual(withEnvironment.registeredToolNames, ["code_execute"]);
+    const withoutEnvironment = createHostToolRegistry({
+      enabledToolIds: new Set(["code_execute"]),
+    });
+    assert.equal(withoutEnvironment.registeredToolNames.length, 0);
+    assert.ok(
+      executableHostToolIds({ codeEnvironment: environment }).has("code_execute"),
+    );
   });
 });

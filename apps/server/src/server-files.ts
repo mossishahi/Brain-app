@@ -1,9 +1,14 @@
 /**
- * Read-only, allowlisted browser over the orchestration server's filesystem.
+ * Read-only browser over the orchestration server's filesystem.
  *
- * This is deliberately metadata-only: the webapp can list names and validate
- * a selection, but cannot download file contents. Content is snapshotted by
- * JobManager at launch and exposed only to scoped model tools.
+ * The configured roots are STARTING POINTS (quick-access bookmarks), not a
+ * security boundary: research inputs routinely live outside the workspace or
+ * home directory (HPC scratch/project mounts, symlinked storage), so any
+ * absolute path the server process can read may be browsed, validated, and
+ * attached. The operating-system permissions of the server user are the
+ * boundary. This stays deliberately metadata-only: the webapp can list names
+ * and validate a selection, but cannot download file contents. Content is
+ * snapshotted by JobManager at launch and exposed only to scoped model tools.
  */
 import {
   accessSync,
@@ -17,14 +22,7 @@ import {
   type Dirent,
 } from "node:fs";
 import { homedir } from "node:os";
-import {
-  basename,
-  extname,
-  isAbsolute,
-  join,
-  relative,
-  resolve,
-} from "node:path";
+import { basename, extname, join, resolve } from "node:path";
 
 import yauzl, { type Entry } from "yauzl";
 import {
@@ -88,11 +86,6 @@ export class ServerFileError extends Error {
     super(message);
     this.name = "ServerFileError";
   }
-}
-
-function inside(root: string, candidate: string): boolean {
-  const rel = relative(root, candidate);
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
 function readable(path: string, directory: boolean): boolean {
@@ -323,24 +316,20 @@ export class ServerFileBrowser {
     this.roots = roots;
   }
 
-  /** Resolve and confine a path to one of the configured roots. */
+  /**
+   * Resolve a selected path to its canonical form. Any existing path is
+   * accepted — the roots are bookmarks, not a boundary — and readability,
+   * type, and size checks happen during validation and ingestion.
+   */
   resolveSelectedPath(path: string): string {
-    let real: string;
     try {
-      real = realpathSync(resolve(path));
+      return realpathSync(resolve(path));
     } catch {
       throw new ServerFileError(400, `path "${path}" does not exist`);
     }
-    if (![...this.rootPaths.values()].some((root) => inside(root, real))) {
-      throw new ServerFileError(
-        403,
-        `path "${path}" is outside the configured attachment roots`,
-      );
-    }
-    return real;
   }
 
-  /** Canonicalize job-submission references and enforce the root boundary. */
+  /** Canonicalize job-submission references (URLs pass through untouched). */
   canonicalizeReferences(paths: readonly string[]): string[] {
     return paths.map((path) =>
       /^https?:\/\//i.test(path) ? path : this.resolveSelectedPath(path),
@@ -362,9 +351,6 @@ export class ServerFileBrowser {
     } catch {
       throw new ServerFileError(400, `folder "${candidate}" does not exist`);
     }
-    if (!inside(root, current)) {
-      throw new ServerFileError(403, "cannot browse outside the selected root");
-    }
     if (!statSync(current).isDirectory() || !readable(current, true)) {
       throw new ServerFileError(400, `"${current}" is not a readable folder`);
     }
@@ -385,8 +371,10 @@ export class ServerFileBrowser {
       let path: string;
       let stat;
       try {
+        // Symlinks are followed wherever they lead: on HPC hosts the useful
+        // storage ($HOME/scratch -> /scratch/user) usually lives outside the
+        // starting root.
         path = realpathSync(unresolved);
-        if (!inside(root, path)) continue;
         stat = statSync(path);
       } catch {
         continue;
@@ -417,13 +405,12 @@ export class ServerFileBrowser {
             ? -1
             : 1),
     );
+    const parent = resolve(current, "..");
     return {
       roots: this.roots,
       rootId: id,
       currentPath: current,
-      ...(current !== root
-        ? { parentPath: resolve(current, "..") }
-        : {}),
+      ...(parent !== current ? { parentPath: parent } : {}),
       entries,
     };
   }
@@ -456,9 +443,6 @@ export class ServerFileBrowser {
       basePath = realpathSync(candidate);
     } catch {
       throw new ServerFileError(400, `folder "${candidate}" does not exist`);
-    }
-    if (!inside(root, basePath)) {
-      throw new ServerFileError(403, "cannot search outside the selected root");
     }
     if (!statSync(basePath).isDirectory() || !readable(basePath, true)) {
       throw new ServerFileError(400, `"${basePath}" is not a readable folder`);
@@ -502,7 +486,6 @@ export class ServerFileBrowser {
         let stat;
         try {
           path = realpathSync(join(current.path, child.name));
-          if (!inside(root, path)) continue;
           stat = statSync(path);
         } catch {
           continue;

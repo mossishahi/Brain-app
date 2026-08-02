@@ -13,6 +13,7 @@
   --warn: #d99a2b;
   --bad: #d5484d;
   --radius: 8px;
+  --app-header-h: 56px;
   --font:
     -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
@@ -238,7 +239,7 @@ textarea,
 .band-col,
 .gate-card,
 .judge-card,
-.round-block,
+.review-fold,
 .code-block {
   transition:
     color 120ms ease,
@@ -432,13 +433,24 @@ textarea,
   background: color-mix(in srgb, var(--text) 7%, transparent);
 }
 
-.top-controls {
-  position: fixed;
-  top: 16px;
-  right: 16px;
-  display: flex;
-  gap: 8px;
+/*
+ * The app header: a real bar in the layout flow (sticky, translucent) holding
+ * the theme and settings controls. Content starts below it, so the controls
+ * can never overlay page text at any viewport width.
+ */
+.app-header {
+  position: sticky;
+  top: 0;
   z-index: 40;
+  height: var(--app-header-h);
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 0 16px;
+  background: color-mix(in srgb, var(--bg) 78%, transparent);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
 }
 
 input[type="checkbox"],
@@ -558,7 +570,27 @@ input[type="radio"] {
 .evidence-locator {
   font-family: var(--mono);
   font-size: 12px;
-  word-break: break-all;
+  /* Long URLs wrap at safe points instead of being sliced mid-token. */
+  overflow-wrap: anywhere;
+}
+
+/* A locator with several sources renders as one bullet per link/note. */
+.locator-list {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.locator-list li::marker {
+  color: var(--text-dim);
+}
+
+.locator-note {
+  display: block;
+  color: var(--text-dim);
+  font-size: 12px;
 }
 
 .verdict {
@@ -603,17 +635,18 @@ input[type="radio"] {
 /* ----------------------------------------------------------------- landing */
 
 .landing {
-  min-height: 100vh;
+  min-height: calc(100vh - var(--app-header-h));
   display: flex;
   padding: 0 16px;
 }
 
 /*
  * The column top is pinned (instead of centered) so a growing prompt box
- * extends downward only and its first line never moves.
+ * extends downward only and its first line never moves. The app header above
+ * is part of the flow, so its height comes off the original offset.
  */
 .landing-column {
-  margin: clamp(96px, 26vh, 280px) auto auto;
+  margin: clamp(40px, calc(26vh - var(--app-header-h)), 224px) auto auto;
   width: 100%;
   max-width: 820px;
   padding: 0 0 96px;
@@ -1300,7 +1333,7 @@ button.server-file-name {
 
 @media (max-width: 720px) {
   .landing-column {
-    margin-top: 72px;
+    margin-top: 24px;
     padding: 0 0 72px;
   }
 
@@ -1537,14 +1570,13 @@ button.server-file-name {
 .dash {
   max-width: 1120px;
   margin: 0 auto;
-  padding: 24px 24px 96px;
+  padding: 12px 24px 96px;
 }
 
 .dash-header {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin-right: 88px; /* clear the fixed top-right controls */
   min-height: 32px;
 }
 
@@ -2489,39 +2521,66 @@ button.server-file-name {
   margin-top: 10px;
 }
 
-.round-inspector {
+/*
+ * The reviewed steps as always-present sub-panels below the matrix: one
+ * member group per seat, one collapsible fold per reviewed step, the rounds
+ * nested inside as their own folds.
+ */
+.review-steps {
   border-top: 1px solid var(--border);
   margin-top: 16px;
-  padding-top: 12px;
+  padding-top: 4px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 4px;
 }
 
-.inspector-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+.review-member {
+  margin-top: 10px;
 }
 
-.inspector-title {
-  font-weight: 600;
+.review-member-head {
   font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 2px;
 }
 
-.round-block {
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
+.review-member-sub {
+  color: var(--text-dim);
+  font-weight: 400;
+  font-size: 12px;
 }
 
-.round-head {
+.review-step > .review-fold-head {
+  flex-wrap: wrap;
+}
+
+.review-step-meta {
   font-size: 12px;
   color: var(--text-dim);
+}
+
+.step-chip {
+  font-size: 11px;
+  line-height: 18px;
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid;
+}
+
+.step-chip-active {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.step-chip-ok {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+
+.step-chip-warn {
+  color: var(--warn);
+  border-color: var(--warn);
 }
 
 .comment-chip-row {
@@ -2726,7 +2785,7 @@ button.server-file-name {
 .seat-card,
 .member-card,
 .cell,
-.round-block,
+.review-step,
 .band-col {
   border-color: var(--border-1);
 }
@@ -2735,11 +2794,11 @@ button.server-file-name {
 .cell-redev,
 .comment-chip,
 .judge-card,
+.review-round,
 .member-card .paper-table th,
 .member-card .paper-table td,
 .member-card .issue-item,
 .member-card .code-block,
-.round-block .code-block,
 .seat-card .tag,
 .tree-col .tag {
   border-color: var(--border-2);
@@ -2748,6 +2807,8 @@ button.server-file-name {
 /* Level 3 — evidence blocks nested one level deeper still. */
 .comment-chip .code-block,
 .judge-card .code-block,
+.review-round .review-fold,
+.review-round .code-block,
 .member-card .issue-item .code-block {
   border-color: var(--border-3);
 }
@@ -2949,7 +3010,667 @@ button.server-file-name {
   font-size: 13px;
 }
 
-.inspector-subtitle {
+/* Step folds hold the rounds; give them a little extra breathing room. */
+.review-step {
+  margin: 8px 0;
+}
+
+.review-step > .review-fold-head {
+  padding: 10px 12px;
+}
+
+/* ------------------------------------------------------------------------- *
+ * Environment status icons (LLM / code / internet / SLURM) + readiness UI
+ * ------------------------------------------------------------------------- */
+
+.env-status {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.env-icon {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  padding: 0;
+  transition: color 140ms ease, transform 140ms ease, background 140ms ease;
+}
+
+.env-icon:hover,
+.env-icon:focus-visible,
+.env-icon.env-icon-open {
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+  transform: scale(1.06);
+  outline: none;
+}
+
+.env-icon.state-ok {
+  color: var(--ok);
+}
+
+.env-icon.state-failed {
+  color: var(--bad);
+}
+
+.env-icon.state-unknown {
   color: var(--text-dim);
+}
+
+.env-icon.state-checking {
+  color: var(--warn);
+  animation: soft-pulse 1.6s ease-in-out infinite;
+}
+
+/* Same hover tooltip pattern as the registry indicator. */
+.env-icon::after {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  z-index: 30;
+  transform: translateX(-50%) translateY(2px);
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--text) 12%, transparent);
+  color: var(--text);
+  content: attr(data-tooltip);
+  font-size: 11px;
   font-weight: 400;
+  line-height: 1.3;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease, transform 120ms ease;
+  white-space: nowrap;
+  max-width: 340px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.env-icon:hover::after,
+.env-icon:focus-visible::after {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+.env-popover {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 10px);
+  z-index: 40;
+  width: 340px;
+  max-width: 84vw;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: 0 16px 48px color-mix(in srgb, var(--text) 14%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  text-align: left;
+  animation: env-rise 140ms ease;
+}
+
+@keyframes env-rise {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.env-popover-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.env-state-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.env-state-dot.state-ok {
+  background: var(--ok);
+}
+
+.env-state-dot.state-failed {
+  background: var(--bad);
+}
+
+.env-state-dot.state-checking {
+  background: var(--warn);
+  animation: soft-pulse 1.6s ease-in-out infinite;
+}
+
+.env-state-dot.state-unknown {
+  background: var(--text-dim);
+}
+
+.env-popover-title {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.env-popover-state {
+  margin-left: auto;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.env-popover-message {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.env-popover-detail {
+  margin: 0;
+  max-height: 140px;
+  overflow: auto;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--text) 4%, transparent);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.env-popover-advice {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border-left: 2px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  border-radius: 0 6px 6px 0;
+}
+
+.env-popover-advice p {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.env-popover-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* Waiting card: a held submission until every required check is green. */
+
+.waiting-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  animation: env-rise 160ms ease;
+}
+
+.waiting-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.waiting-title {
+  font-weight: 600;
+  font-size: 14px;
+  margin-right: auto;
+}
+
+.waiting-lead {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.waiting-checks {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.waiting-check {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  align-items: baseline;
+  column-gap: 8px;
+  font-size: 13px;
+}
+
+.waiting-check .dot {
+  align-self: center;
+}
+
+.waiting-check-label {
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.waiting-check-message {
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.waiting-check-advice {
+  grid-column: 3;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: normal;
+}
+
+.waiting-failed .waiting-check-message {
+  color: var(--bad);
+}
+
+/* Resume icon on job cards. */
+
+.resume-btn {
+  position: relative;
+  color: var(--ok);
+}
+
+.resume-btn::after {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 6px);
+  z-index: 30;
+  transform: translateX(-50%);
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  content: attr(data-tooltip);
+  font-size: 11px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+  white-space: nowrap;
+}
+
+.resume-btn:hover::after,
+.resume-btn:focus-visible::after {
+  opacity: 1;
+}
+
+/* Provider onboarding overlay: smooth, light, one decision. */
+
+.onboard-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--bg) 55%, transparent);
+  backdrop-filter: blur(7px);
+  -webkit-backdrop-filter: blur(7px);
+  animation: onboard-fade 180ms ease;
+}
+
+@keyframes onboard-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.onboard-card {
+  width: min(460px, 92vw);
+  max-height: 88vh;
+  overflow: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 28px;
+  box-shadow: 0 24px 80px color-mix(in srgb, var(--text) 16%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  animation: onboard-rise 220ms ease;
+}
+
+@keyframes onboard-rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.99);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.onboard-title {
+  margin: 0;
+  font-size: 19px;
+  font-weight: 650;
+}
+
+.onboard-lead {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 13.5px;
+  line-height: 1.55;
+}
+
+.onboard-section-label {
+  margin: 4px 0 -6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.onboard-providers {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.onboard-provider {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 140ms ease, background 140ms ease;
+}
+
+.onboard-provider.selected {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+
+.onboard-provider-name {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.onboard-provider-hint {
+  color: var(--text-dim);
+  font-size: 11.5px;
+}
+
+.onboard-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+
+.onboard-field input {
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13.5px;
+}
+
+.onboard-field input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.onboard-note {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.onboard-note code {
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.onboard-note a {
+  color: var(--accent);
+}
+
+.onboard-error {
+  margin: 0;
+}
+
+.onboard-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.onboard-actions .btn-ghost {
+  margin-left: auto;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+}
+
+/* Deployment-owned registry info in the settings drawer + version chips. */
+
+.registry-info {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--text) 3%, transparent);
+  font-size: 13px;
+}
+
+.registry-info-row {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.registry-info-label {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.registry-info-value {
+  word-break: break-all;
+}
+
+.dash-bundle {
+  flex: none;
+  color: var(--text-dim);
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 10px;
+  white-space: nowrap;
+}
+
+.banner-actionable {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.banner-actionable > span {
+  flex: 1;
+}
+
+/* Panel-confirmation auto-approve countdown + custom seat builder. */
+
+.gate-countdown {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  column-gap: 8px;
+  row-gap: 4px;
+}
+
+.gate-countdown-track {
+  grid-column: 1 / -1;
+  height: 3px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--warn) 18%, transparent);
+  overflow: hidden;
+}
+
+.gate-countdown-fill {
+  height: 100%;
+  background: var(--warn);
+  border-radius: 999px;
+  transition: width 200ms linear;
+}
+
+.gate-countdown-text {
+  font-size: 11.5px;
+  color: var(--warn);
+}
+
+.gate-countdown-pause {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--warn);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--warn);
+  cursor: pointer;
+  padding: 0;
+}
+
+.gate-countdown-pause:hover {
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+}
+
+.gate-held {
+  margin: 0;
+}
+
+.seat-ghost {
+  border-style: dashed;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.seat-custom {
+  border-color: var(--accent);
+}
+
+.ghost-input {
+  width: 100%;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 12.5px;
+}
+
+.ghost-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.ghost-field {
+  font-weight: 600;
+}
+
+.ghost-subfields {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ghost-subfield-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.ghost-subfield-remove {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 0;
+}
+
+.ghost-subfield-remove:hover {
+  color: var(--bad);
+}
+
+/* The rectangle with a + at its middle: adds one subfield input (max 3). */
+.ghost-add-subfield {
+  width: 100%;
+  min-height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.ghost-add-subfield:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.ghost-hint {
+  font-size: 11px;
+  color: var(--text-dim);
 }

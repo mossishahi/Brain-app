@@ -46,25 +46,28 @@ has one.
 
 ## Launch
 
-Against the shared Brain Registry:
+Cloning and installing is all a user needs — the shared Brain Registry endpoint is baked into
+the app, and every new run automatically fetches the latest published skills:
 
 ```bash
-npm run launch -- --content-registry-url https://167.172.170.154/mcp
+npm install && npm run build
+npm run launch
 ```
-
-For local development, start Brain Registry separately and pass its URL:
-
-```bash
-# in the Brain repository
-node dist/src/main.js --host 127.0.0.1 --port 51011
-
-# in this repository
-npm run launch -- --content-registry-url http://127.0.0.1:51011
-```
-
-Alternatively, `--content-registry-main /absolute/path/to/brain/dist/src/main.js` tells the host
-to spawn that explicitly supplied local executable. There is intentionally no implicit sibling
-directory lookup: the two repositories are independently deployable.
 
 The host defaults to `127.0.0.1:8787` and `~/.brainstorm-agentic`. Use
 `--attachment-roots`, `--workspace`, `--ip`, and `--port` to override deployment settings.
+
+### Developer-only registry overrides
+
+The registry endpoint is deliberately NOT a user setting (the webapp shows it read-only and the
+settings API ignores attempts to change it). Developers change deployments by editing
+`DEFAULT_CONTENT_REGISTRY_URL` in `apps/server/src/settings.ts`, or override one launch:
+
+```bash
+# point at another registry
+npm run launch -- --content-registry-url http://127.0.0.1:51011
+# or spawn a local registry process (no implicit sibling lookup)
+npm run launch -- --content-registry-main /absolute/path/to/brain/dist/src/main.js
+```
+
+`BRAIN_CONTENT_REGISTRY_URL` / `BRAIN_CONTENT_REGISTRY_MAIN` work as environment equivalents.

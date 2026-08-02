@@ -111,7 +111,7 @@ export function jobStatusLine(job: JobSummary): string {
     case "cancelled":
       return "cancelled";
     case "orphaned":
-      return "orphaned";
+      return "interrupted · resumable from checkpoint";
     case "running": {
       const active = job.progress?.activeStage;
       if (active === "review-members") {

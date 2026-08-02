@@ -99,3 +99,57 @@ export function SendIcon({ size = 16 }: IconProps) {
     </svg>
   );
 }
+
+/** Model connection: a four-point spark. */
+export function SparkIcon({ size = 16 }: IconProps) {
+  return (
+    <svg {...frame(size)}>
+      <path d="M12 3v4M12 17v4M3 12h4M17 12h4" />
+      <path d="M12 8.5 13.6 10.4 15.5 12 13.6 13.6 12 15.5 10.4 13.6 8.5 12 10.4 10.4Z" />
+    </svg>
+  );
+}
+
+/** Code workspace: a terminal prompt. */
+export function TerminalIcon({ size = 16 }: IconProps) {
+  return (
+    <svg {...frame(size)}>
+      <rect x="3" y="4.5" width="18" height="15" rx="2" />
+      <path d="m7 9.5 3 2.5-3 2.5" />
+      <path d="M12.5 15H17" />
+    </svg>
+  );
+}
+
+/** Internet access: a globe. */
+export function GlobeIcon({ size = 16 }: IconProps) {
+  return (
+    <svg {...frame(size)}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M3 12h18" />
+      <path d="M12 3a13.5 13.5 0 0 1 0 18a13.5 13.5 0 0 1 0-18Z" />
+    </svg>
+  );
+}
+
+/** SLURM scheduler: stacked queue layers. */
+export function QueueIcon({ size = 16 }: IconProps) {
+  return (
+    <svg {...frame(size)}>
+      <path d="m12 3 9 4.5-9 4.5-9-4.5Z" />
+      <path d="m3 12.5 9 4.5 9-4.5" />
+      <path d="m3 17 9 4.5 9-4.5" />
+    </svg>
+  );
+}
+
+/** Resume an interrupted job: circular arrow into a play head. */
+export function ResumeIcon({ size = 16 }: IconProps) {
+  return (
+    <svg {...frame(size)}>
+      <path d="M21 12a9 9 0 1 1-3.1-6.8" />
+      <path d="M21 4v5h-5" />
+      <path d="m10.5 9.5 4 2.5-4 2.5Z" />
+    </svg>
+  );
+}

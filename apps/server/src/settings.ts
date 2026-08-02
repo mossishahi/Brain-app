@@ -18,6 +18,14 @@ import {
 import { atomicWriteFile, atomicWriteJson, readJsonFile } from "./files.js";
 
 const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5";
+/**
+ * THE deployment constant for the shared Brain Registry (MCP + static HTTP).
+ * Users never configure this: cloning and installing the app is enough — the
+ * webapp shows it read-only and PUT /api/settings ignores attempts to change
+ * it. Developers change deployments here, or override one launch with
+ * `--content-registry-url` / `BRAIN_CONTENT_REGISTRY_URL` (and
+ * `--content-registry-main` to spawn a local registry process instead).
+ */
 export const DEFAULT_CONTENT_REGISTRY_URL =
   "https://167.172.170.154/mcp";
 const CONNECTION_TIMEOUT_MS = 15_000;
@@ -75,12 +83,8 @@ export interface SettingsStoreOptions {
     apiKey: string,
     model: string,
   ) => Promise<void>;
+  /** The deployment's registry endpoint (launch-time CLI/env override). */
   readonly defaultContentRegistryUrl?: string;
-  readonly validateContentRegistry?: (
-    url: string,
-    bundle: string,
-    version?: string,
-  ) => Promise<void>;
 }
 
 export const DEFAULT_SLURM_TEMPLATE = `#!/usr/bin/env bash
@@ -109,6 +113,9 @@ export function defaultServerSettings(
       safetyBufferSeconds: 60,
       openRouterModel: "openrouter/free",
       openRouterKeyConfigured: false,
+    },
+    interruptedRecovery: {
+      autoResume: true,
     },
     llm: {
       provider: "anthropic",
@@ -147,6 +154,7 @@ function validateCommonSettings(value: unknown): {
   readonly panelConfirmation: "manual" | "auto";
   readonly llm: Record<string, unknown>;
   readonly creditRecovery: Record<string, unknown>;
+  readonly interruptedRecovery?: Record<string, unknown>;
   readonly contentRegistry: Record<string, unknown>;
   readonly hostTools?: Record<string, unknown>;
   readonly updateCheck?: "off" | "notify";
@@ -194,6 +202,10 @@ function validateCommonSettings(value: unknown): {
     input.hostTools !== undefined
       ? object(input.hostTools, "hostTools")
       : undefined;
+  const interruptedRecovery =
+    input.interruptedRecovery !== undefined
+      ? object(input.interruptedRecovery, "interruptedRecovery")
+      : undefined;
   const updateCheck = input.updateCheck;
   if (
     updateCheck !== undefined &&
@@ -208,10 +220,21 @@ function validateCommonSettings(value: unknown): {
     panelConfirmation: input.panelConfirmation,
     llm,
     creditRecovery,
+    ...(interruptedRecovery !== undefined ? { interruptedRecovery } : {}),
     contentRegistry,
     hostTools,
     ...(updateCheck !== undefined ? { updateCheck } : {}),
   };
+}
+
+function validateInterruptedRecovery(
+  value: Record<string, unknown> | undefined,
+): { autoResume: boolean } {
+  if (value === undefined) return { autoResume: true };
+  if (typeof value.autoResume !== "boolean") {
+    throw new Error("interruptedRecovery.autoResume must be a boolean");
+  }
+  return { autoResume: value.autoResume };
 }
 
 function validateContentRegistry(
@@ -398,6 +421,7 @@ function validateStoredSettings(value: unknown): StoredServerSettings {
   const modelsByRoute = validateModelsByRoute(common.llm.modelsByRoute);
   const agentSdk = validateClaudeAgentSettings(common.llm.agentSdk);
   const creditRecovery = validateCreditRecovery(common.creditRecovery);
+  const interruptedRecovery = validateInterruptedRecovery(common.interruptedRecovery);
   const contentRegistry = validateContentRegistry(common.contentRegistry);
   const hostTools = validateHostTools(common.hostTools);
   return {
@@ -406,6 +430,7 @@ function validateStoredSettings(value: unknown): StoredServerSettings {
     panelConfirmation: common.panelConfirmation,
     contentRegistry,
     creditRecovery,
+    interruptedRecovery,
     llm: {
       provider,
       ...(model !== undefined ? { model } : {}),
@@ -419,7 +444,12 @@ function validateStoredSettings(value: unknown): StoredServerSettings {
 }
 
 interface ValidatedUpdate {
-  readonly settings: StoredServerSettings;
+  /**
+   * Everything the user may change. `contentRegistry` is deliberately
+   * absent: the registry endpoint is deployment-owned, so put() carries the
+   * stored value forward regardless of what an update submits.
+   */
+  readonly settings: Omit<StoredServerSettings, "contentRegistry">;
   readonly submittedApiKey?: string;
   readonly submittedSetupToken?: string;
   readonly clearApiKey: boolean;
@@ -483,7 +513,11 @@ function validateSettingsUpdate(value: unknown): ValidatedUpdate {
   const modelsByRoute = validateModelsByRoute(common.llm.modelsByRoute);
   const agentSdk = validateClaudeAgentSettings(common.llm.agentSdk);
   const creditRecovery = validateCreditRecovery(common.creditRecovery);
-  const contentRegistry = validateContentRegistry(common.contentRegistry);
+  // Absent in an update = keep the currently stored policy (merged in put()).
+  const interruptedRecovery =
+    common.interruptedRecovery !== undefined
+      ? validateInterruptedRecovery(common.interruptedRecovery)
+      : undefined;
   const submittedOpenRouterApiKey = optionalNonEmptyString(
     common.creditRecovery.openRouterApiKey,
     "creditRecovery.openRouterApiKey",
@@ -503,8 +537,8 @@ function validateSettingsUpdate(value: unknown): ValidatedUpdate {
       runner: common.runner,
       panelConfirmation: common.panelConfirmation,
       ...(common.updateCheck !== undefined ? { updateCheck: common.updateCheck } : {}),
-      contentRegistry,
       creditRecovery,
+      ...(interruptedRecovery !== undefined ? { interruptedRecovery } : {}),
       llm: {
         provider,
         ...(model !== undefined ? { model } : {}),
@@ -630,16 +664,18 @@ export async function validateContentRegistryConnection(
 export class SettingsStore {
   readonly path: string;
   readonly credentialsPath: string;
+  /**
+   * The registry endpoint this deployment runs against: the launch-time URL
+   * (CLI/env override, or the built-in DEFAULT_CONTENT_REGISTRY_URL). It is
+   * the single source of truth — stored files carrying an older URL are
+   * overridden on read, and updates never change it.
+   */
+  private readonly deploymentRegistryUrl: string;
   private readonly connectionValidator: AnthropicConnectionValidator;
   private readonly claudeAgentValidator: ClaudeAgentConnectionValidator;
   private readonly openRouterValidator: (
     apiKey: string,
     model: string,
-  ) => Promise<void>;
-  private readonly contentRegistryValidator: (
-    url: string,
-    bundle: string,
-    version?: string,
   ) => Promise<void>;
 
   constructor(
@@ -648,14 +684,14 @@ export class SettingsStore {
   ) {
     this.path = join(workspace, "settings.json");
     this.credentialsPath = join(workspace, "credentials.json");
+    this.deploymentRegistryUrl =
+      options.defaultContentRegistryUrl ?? DEFAULT_CONTENT_REGISTRY_URL;
     this.connectionValidator =
       options.validateAnthropic ?? validateAnthropicConnection;
     this.claudeAgentValidator =
       options.validateClaudeAgent ?? validateClaudeAgentConnection;
     this.openRouterValidator =
       options.validateOpenRouter ?? validateOpenRouterConnection;
-    this.contentRegistryValidator =
-      options.validateContentRegistry ?? validateContentRegistryConnection;
     mkdirSync(join(workspace, "workspace", "jobs"), { recursive: true });
     mkdirSync(join(workspace, "workspace", "sessions"), { recursive: true });
     const stored = readJsonFile<unknown>(this.path);
@@ -664,12 +700,11 @@ export class SettingsStore {
       typeof stored === "object" &&
       stored !== null &&
       !Array.isArray(stored) &&
-      !("contentRegistry" in stored) &&
-      options.defaultContentRegistryUrl
+      !("contentRegistry" in stored)
         ? {
             ...stored,
             contentRegistry: {
-              url: options.defaultContentRegistryUrl,
+              url: this.deploymentRegistryUrl,
               bundle: "brainstorm",
             },
           }
@@ -678,7 +713,7 @@ export class SettingsStore {
       this.path,
       stored === undefined
         ? validateStoredSettings(
-            defaultServerSettings(options.defaultContentRegistryUrl),
+            defaultServerSettings(this.deploymentRegistryUrl),
           )
         : validateStoredSettings(storedWithRegistry),
     );
@@ -688,6 +723,12 @@ export class SettingsStore {
     const settings = validateStoredSettings(readJsonFile<unknown>(this.path));
     return {
       ...settings,
+      // The deployment's registry endpoint always wins over anything stored
+      // (e.g. a workspace created under an older deployment).
+      contentRegistry: {
+        ...settings.contentRegistry,
+        url: this.deploymentRegistryUrl,
+      },
       llm: {
         ...settings.llm,
         apiKeyConfigured: this.getAnthropicApiKey() !== undefined,
@@ -868,24 +909,22 @@ export class SettingsStore {
         update.settings.creditRecovery.openRouterModel,
       );
     }
-    if (
-      update.settings.contentRegistry.url !==
-        currentSettings.contentRegistry.url ||
-      update.settings.contentRegistry.bundle !==
-        currentSettings.contentRegistry.bundle ||
-      update.settings.contentRegistry.version !==
-        currentSettings.contentRegistry.version
-    ) {
-      await this.contentRegistryValidator(
-        update.settings.contentRegistry.url,
-        update.settings.contentRegistry.bundle,
-        update.settings.contentRegistry.version,
-      );
-    }
 
     // Persist only after every validation (including the real provider call)
-    // succeeded. Secrets are never written to settings.json.
-    atomicWriteJson(this.path, update.settings);
+    // succeeded. Secrets are never written to settings.json. An update that
+    // omitted interruptedRecovery keeps the currently stored policy, and the
+    // deployment-owned contentRegistry is always carried forward unchanged —
+    // whatever an update submitted for it is ignored.
+    const storedRegistry = validateStoredSettings(
+      readJsonFile<unknown>(this.path),
+    ).contentRegistry;
+    atomicWriteJson(this.path, {
+      ...update.settings,
+      contentRegistry: { ...storedRegistry, url: this.deploymentRegistryUrl },
+      interruptedRecovery:
+        update.settings.interruptedRecovery ??
+        currentSettings.interruptedRecovery ?? { autoResume: true },
+    });
     const previousCredentials =
       readJsonFile<StoredCredentials>(this.credentialsPath) ?? {};
     const nextCredentials: {

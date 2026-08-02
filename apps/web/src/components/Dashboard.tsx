@@ -17,7 +17,9 @@ import {
   cancelJob,
   errorMessage,
   getJob,
+  holdGateAutoApprove,
   jobStreamUrl,
+  resumeInterruptedJob,
   resumeJob,
   useServerEvents,
 } from "../api";
@@ -263,6 +265,12 @@ export function Dashboard({ jobId }: { jobId: string }) {
     [jobId],
   );
 
+  const onGateHold = useCallback(() => {
+    holdGateAutoApprove(jobId)
+      .then(setJob)
+      .catch(() => undefined);
+  }, [jobId]);
+
   const cancelCreditWait = useCallback(async () => {
     setCancellingResume(true);
     try {
@@ -279,6 +287,19 @@ export function Dashboard({ jobId }: { jobId: string }) {
     setResumeError(null);
     try {
       await resumeJob(jobId);
+      setJob(await getJob(jobId));
+    } catch (error) {
+      setResumeError(errorMessage(error));
+    } finally {
+      setResumingNow(false);
+    }
+  }, [jobId]);
+
+  const resumeInterrupted = useCallback(async () => {
+    setResumingNow(true);
+    setResumeError(null);
+    try {
+      await resumeInterruptedJob(jobId);
       setJob(await getJob(jobId));
     } catch (error) {
       setResumeError(errorMessage(error));
@@ -335,6 +356,7 @@ export function Dashboard({ jobId }: { jobId: string }) {
               pendingGate={job.pendingGate}
               fallbackMembers={selectStage?.panel}
               onAnswer={onGateAnswer}
+              onHold={onGateHold}
             />
           );
         }
@@ -374,6 +396,14 @@ export function Dashboard({ jobId }: { jobId: string }) {
         <h1 className="dash-title" title={job.topic}>
           {job.topic}
         </h1>
+        {job.contentBundle && (
+          <span
+            className="dash-bundle"
+            title={`This run pinned ${job.contentBundle.id}@${job.contentBundle.version} — the exact skill/workflow version it executed`}
+          >
+            skills v{job.contentBundle.version}
+          </span>
+        )}
         <span className="dash-status">
           <Dot state={jobDot(job.status)} />
           {job.status}
@@ -446,7 +476,22 @@ export function Dashboard({ jobId }: { jobId: string }) {
         </div>
       )}
       {job.status === "orphaned" && (
-        <div className="banner">state reconstructed from workspace files</div>
+        <div className="banner credit-banner">
+          <span>
+            <strong>Interrupted.</strong> The process is gone (job timeout,
+            node failure, or shutdown) but its checkpoints are intact — the
+            run can continue from the exact point it stopped.
+            {resumeError && <> Resume failed: {resumeError}.</>}
+          </span>
+          <button
+            type="button"
+            className="btn"
+            disabled={resumingNow}
+            onClick={() => void resumeInterrupted()}
+          >
+            {resumingNow ? "Resuming…" : "Resume from checkpoint"}
+          </button>
+        </div>
       )}
       {job.status === "failed" && job.error && !anyStageFailed && (
         <div className="banner banner-bad">{job.error}</div>
@@ -490,14 +535,26 @@ export function Dashboard({ jobId }: { jobId: string }) {
             </StageFrame>
           );
         })}
-        <ToolUsageSection jobId={jobId} updatedAt={job.updatedAt} />
+        <ToolUsageSection
+          jobId={jobId}
+          updatedAt={job.updatedAt}
+          active={job.status === "running"}
+        />
       </div>
     </div>
   );
 }
 
 /** Collapsible capability & tool usage section below the pipeline stages. */
-function ToolUsageSection({ jobId, updatedAt }: { jobId: string; updatedAt: number }) {
+function ToolUsageSection({
+  jobId,
+  updatedAt,
+  active,
+}: {
+  jobId: string;
+  updatedAt: number;
+  active: boolean;
+}) {
   const [expanded, setExpanded] = useState(false);
   return (
     <section className="stage">
@@ -521,7 +578,7 @@ function ToolUsageSection({ jobId, updatedAt }: { jobId: string; updatedAt: numb
         <span className="stage-title">Capability & tool usage</span>
       </header>
       <div id="stage-body-tool-usage">
-        {expanded && <ToolUsagePanel jobId={jobId} updatedAt={updatedAt} />}
+        {expanded && <ToolUsagePanel jobId={jobId} updatedAt={updatedAt} active={active} />}
       </div>
     </section>
   );

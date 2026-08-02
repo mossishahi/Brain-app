@@ -38,10 +38,50 @@ An empty page. Nothing else competes with the chat box.
   longer than the cap anchors the
   VIEW to the first line while the caret stays after the last word — the start of the prompt is
   always the thing on screen. Enter submits, Shift+Enter newlines. The footer strip (attach dial,
-  model chip, send button) sits snug under the last text line with a tiny 4px gap. Nothing else —
-  no logo, no title, no marketing copy.
+  model chip, brain + environment status icons, send button) sits snug under the last text line
+  with a tiny 4px gap. Nothing else — no logo, no title, no marketing copy.
 - On submit: POST /api/jobs, clear the textarea immediately (the prompt stays free for the next
   idea), and a job card appears under the chat box.
+
+### Environment status icons (next to the brain icon)
+
+Beside the Brain Registry brain glyph, up to four small check icons stream live from
+`GET /api/readiness` + the `readiness` SSE event: **LLM** (spark — the configured provider
+answers), **code** (terminal — the host scratch workspace runs scripts), **internet** (globe —
+outbound HTTPS works), and **SLURM** (queue layers — a probe job submitted through the user's own
+template ran to completion). Colors: green ok, red failed, amber pulse while checking, dim never
+run. An icon whose check is not required under current settings is NOT rendered at all — no SLURM
+icon with the local runner, no LLM/internet icons with the offline provider. Clicking an icon
+opens a popover with the outcome, the technical detail (command, stderr), the fix advice — written
+by the configured LLM (thinking mode; max effort on the Agent SDK) when one is connected,
+otherwise a built-in hint — plus "Re-run check" and "Ask AI for help" actions.
+
+### Provider onboarding overlay
+
+When the server has no verified LLM credential for the selected provider, opening the webapp pops
+a smooth, light overlay (blurred backdrop, one centered card). It asks two things:
+
+- **Where do jobs run** — "This machine" (local processes) or "SLURM cluster" (`sbatch`),
+  initialized from the current settings. The deployment default is SLURM, so a laptop user must be
+  able to flip this here: otherwise the SLURM readiness icon sits red with no obvious way out. A
+  note under the cards explains what changes (the readiness strip gains/loses the SLURM probe; the
+  batch template stays editable in Settings). The choice is saved on every path out — Connect and
+  offline mode alike.
+- **Model provider** — choose Claude setup token or Anthropic API key, paste the secret, and a
+  short note underneath explains where to get one (`claude setup-token` in a signed-in terminal;
+  console.anthropic.com → API Keys). Saving verifies through the normal settings endpoint.
+
+"Use offline mode" and a session-scoped "Later" are the ways out.
+
+### Submission gating (waiting until all icons are green)
+
+Submitting while any required check is not green does not start the pipeline: the prompt is HELD
+and a waiting card appears under the composer — "Preparing the environment… your run starts
+automatically when every check below is green" — listing each required check with its live state,
+message, and advice for red ones, plus "Run checks again" and "Cancel". The held submission fires
+automatically the moment the readiness report turns ready. The server enforces the same rule
+(POST /api/jobs answers 409 with the readiness report while a required check is failed), so the
+gate holds even for API callers.
 
 ### Job cards (under the chat box)
 
@@ -146,11 +186,26 @@ rewritten.
   whose action follows the checkboxes — the selection is the decision, so it can never be
   silently discarded: with every seat checked it reads **Approve panel** (action `approve`);
   with seats unchecked it reads **Continue with N of M seats** (action `shrink`, retained ids
-  from the checked set); with fewer than two seats checked it is disabled with a hint (a panel
+  from the checked set); with fewer than two total seats it is disabled with a hint (a panel
   needs ≥2 members). It calls POST /api/jobs/:id/gate; the card then shows "resuming…" until the
   stream updates.
+- *Auto-approve countdown:* an unattended gate never idles the run. The SERVER counts down 30
+  seconds from first observing the suspension (restart-safe, works with the browser closed) and
+  then approves the panel as seated. While pending, the card's top shows a thin `--warn`
+  progress bar filling toward the deadline ("auto-approves in Ns — click anywhere to pause")
+  with a small pause button. ANY click inside the card — a checkbox, the pause control, the
+  builder — permanently holds the countdown (POST /api/jobs/:id/gate-hold); the bar is replaced
+  by "auto-approve paused — take your time".
+- *Custom seats:* next to the suggested seat cards sits one dashed ghost card — empty
+  placeholders for **Department** and **Field**, plus a dashed rectangle with a + at its middle
+  that adds subfield inputs (at least 1, at most 3). "Add seat" materializes it as an
+  accent-bordered custom card (removable) and the primary button gains "+ N custom". The answer
+  carries them as `addedMembers`; the runtime assigns ids (`member-user-N`), appends them to the
+  panel (kept + added must stay within 2–12 seats), and they flow through first pass, review,
+  audit, and synthesis like any selected seat.
 - *Decided:* one quiet line — "Approved as seated" / "Shrunk to 4 members (removed: …)" /
-  "Approved automatically (settings)". With timestamp.
+  "Approved automatically (settings)", plus "· added N custom seats" when the user added any.
+  With timestamp.
 - *Not reached:* collapsed.
 
 **5. First pass** — parallel thinking. Body: a member grid (2 columns desktop, 1 mobile). Each
@@ -230,8 +285,11 @@ directory path.
 
 A failed stage shows the error string in a `--bad` bordered box inside its panel; downstream
 stages stay pending. A cancelled job freezes every panel as-is with a "cancelled" banner under
-the header. An orphaned job (files present, scheduler unknown) shows a dim banner: "state
-reconstructed from workspace files".
+the header. An interrupted job (files present, process gone — SLURM timeout, node failure, power
+cut) shows an "Interrupted" banner with a **Resume from checkpoint** button; its landing-page
+card shows a resume glyph next to the X, and its status line reads "interrupted · resumable from
+checkpoint". The scheduler also resubmits interrupted jobs automatically (Settings → Interrupted
+jobs, default on) and pauses after three resubmissions without checkpoint progress.
 
 A credit-blocked job keeps its interrupted stage selected with a warning badge and live countdown:
 "Credit blocked · resumes in 1h 12m at 17:30". The dashboard offers `Cancel auto-resume`, followed

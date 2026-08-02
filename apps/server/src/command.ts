@@ -1,5 +1,6 @@
 import {
   SLURM_COMMAND_TAG,
+  type CustomSeatRequest,
   type ServerSettings,
 } from "@brainstorm-agentic/protocol";
 
@@ -24,6 +25,8 @@ export interface OrchestrationCommandOptions {
     readonly gateKey: string;
     readonly action: "approve" | "shrink";
     readonly members?: readonly string[];
+    /** Custom seats added at confirmation; forces the JSON gate transport. */
+    readonly addedMembers?: readonly CustomSeatRequest[];
   };
 }
 
@@ -91,14 +94,30 @@ export function buildOrchestrationCommand(
   if (options.settings.llm.provider === "offline") args.push("--offline");
   if (options.settings.panelConfirmation === "auto") args.push("--auto-approve");
   if (options.gate) {
-    const suffix =
-      options.gate.action === "shrink"
-        ? `:${(options.gate.members ?? []).join(",")}`
-        : "";
-    args.push(
-      "--gate",
-      shellQuote(`${options.gate.gateKey}=${options.gate.action}${suffix}`),
-    );
+    if (options.gate.addedMembers && options.gate.addedMembers.length > 0) {
+      // Custom seats do not fit the compact key=action[:ids] syntax; the
+      // JSON transport carries the full response.
+      args.push(
+        "--gate-json",
+        shellQuote(
+          JSON.stringify({
+            gateKey: options.gate.gateKey,
+            action: options.gate.action,
+            ...(options.gate.members ? { members: options.gate.members } : {}),
+            addedMembers: options.gate.addedMembers,
+          }),
+        ),
+      );
+    } else {
+      const suffix =
+        options.gate.action === "shrink"
+          ? `:${(options.gate.members ?? []).join(",")}`
+          : "";
+      args.push(
+        "--gate",
+        shellQuote(`${options.gate.gateKey}=${options.gate.action}${suffix}`),
+      );
+    }
   }
 
   const command = [...modelEnvironment(options.settings), ...args].join(" ");

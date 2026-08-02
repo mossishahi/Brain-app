@@ -25,10 +25,13 @@ import {
   ATTACHMENT_LIMITS,
   type AttachmentSelectionKind,
   type ModelOptionsResponse,
+  type ReadinessCheckId,
+  type ReadinessReport,
   type ServerSettings,
   type ValidatedAttachment,
 } from "@brainstorm-agentic/protocol";
 import {
+  blockedReadiness,
   errorMessage,
   getHealth,
   getModelOptions,
@@ -36,6 +39,7 @@ import {
   putModelsByRoute,
   validateAttachments,
 } from "../api";
+import { EnvironmentStatus } from "./EnvironmentStatus";
 import { SendIcon } from "./Icons";
 
 // Ant Design's directory tree is substantial; load it only when the user
@@ -274,14 +278,25 @@ function AttachmentSpeedDial({
 export function SubmissionBox({
   onSubmit,
   onOpenSettings,
+  readiness,
+  onRecheckReadiness,
+  onDiagnoseReadiness,
 }: {
   readonly onSubmit: (
     topic: string,
     attachmentPaths: readonly string[],
   ) => Promise<void>;
   readonly onOpenSettings: () => void;
+  readonly readiness: ReadinessReport | null;
+  readonly onRecheckReadiness: (checks?: readonly ReadinessCheckId[]) => void;
+  readonly onDiagnoseReadiness: (check: ReadinessCheckId) => void;
 }) {
   const [value, setValue] = useState("");
+  /** A submission held until every required environment check is green. */
+  const [heldSubmission, setHeldSubmission] = useState<{
+    readonly topic: string;
+    readonly attachmentPaths: readonly string[];
+  } | null>(null);
   const [attachments, setAttachments] = useState<
     readonly ValidatedAttachment[]
   >([]);
@@ -307,6 +322,8 @@ export function SubmissionBox({
   const [registryConnected, setRegistryConnected] = useState(false);
   const [registryTarget, setRegistryTarget] = useState("Brain Registry");
   const [registryPage, setRegistryPage] = useState<string | undefined>();
+  /** "brainstorm v0.11.0 (latest) · registry v0.1.0 · app v0.1.0" */
+  const [registryVersionLine, setRegistryVersionLine] = useState<string | undefined>();
   const ref = useRef<HTMLTextAreaElement>(null);
   const pastedRef = useRef(false);
 
@@ -386,11 +403,24 @@ export function SubmissionBox({
         setRegistryConnected(health.contentRegistry.running);
         setRegistryTarget(registryHost(endpoint));
         setRegistryPage(registryPageUrl(endpoint));
+        // Exactly what runs where: the skills bundle version new runs use,
+        // the registry server's own version, and this app's version.
+        const registry = health.contentRegistry;
+        const parts = [
+          registry.effectiveVersion
+            ? `${registry.bundle ?? "brainstorm"} v${registry.effectiveVersion}` +
+              (registry.pinnedVersion ? " (pinned)" : " (latest)")
+            : undefined,
+          registry.serverVersion ? `registry v${registry.serverVersion}` : undefined,
+          `app v${health.version}`,
+        ].filter((part): part is string => Boolean(part));
+        setRegistryVersionLine(parts.join(" · "));
       } catch {
         if (!live) return;
         setRegistryConnected(false);
         setRegistryTarget(registryHost(settings?.contentRegistry.url));
         setRegistryPage(registryPageUrl(settings?.contentRegistry.url));
+        setRegistryVersionLine(undefined);
       }
     };
     void refresh();
@@ -480,11 +510,39 @@ export function SubmissionBox({
     return checked;
   };
 
+  /** Fires the held/checked submission; clears the composer on success. */
+  const launch = async (
+    topic: string,
+    attachmentPaths: readonly string[],
+  ): Promise<void> => {
+    setSubmitting(true);
+    setSubmitPhase("Starting pipeline…");
+    try {
+      await onSubmit(topic, attachmentPaths);
+      setValue("");
+      setAttachments([]);
+      setUrlDraft("");
+      setUrlOpen(false);
+      setHeldSubmission(null);
+    } catch (error) {
+      // A 409 with a readiness payload means the environment turned red
+      // between our check and the server's: hold and wait it out.
+      if (blockedReadiness(error) !== undefined) {
+        setHeldSubmission({ topic, attachmentPaths });
+      }
+      // Any other server error is owned by the parent; retain selections.
+    } finally {
+      setSubmitting(false);
+      setSubmitPhase("");
+    }
+  };
+
   const send = async (): Promise<void> => {
     const topic = value.trim();
     if (
       !topic ||
       submitting ||
+      heldSubmission !== null ||
       attachments.some((item) => !item.valid)
     ) {
       return;
@@ -498,15 +556,17 @@ export function SubmissionBox({
           ? await revalidateAll()
           : attachments;
       if (!checked) return;
-      setSubmitPhase("Starting pipeline…");
-      await onSubmit(
-        topic,
-        checked.map((attachment) => attachment.path),
-      );
-      setValue("");
-      setAttachments([]);
-      setUrlDraft("");
-      setUrlOpen(false);
+      const attachmentPaths = checked.map((attachment) => attachment.path);
+      // The environment gate: while any required check is not green, hold
+      // the submission and show the waiting card; it fires automatically
+      // the moment the report turns ready.
+      if (readiness !== null && !readiness.ready) {
+        setHeldSubmission({ topic, attachmentPaths });
+        onRecheckReadiness();
+        return;
+      }
+      await launch(topic, attachmentPaths);
+      return;
     } catch {
       // The parent owns the server error; retain selections for retry.
     } finally {
@@ -514,6 +574,14 @@ export function SubmissionBox({
       setSubmitPhase("");
     }
   };
+
+  // Auto-fire the held submission once every required check is green.
+  useEffect(() => {
+    if (heldSubmission === null || submitting) return;
+    if (readiness === null || !readiness.ready) return;
+    void launch(heldSubmission.topic, heldSubmission.attachmentPaths);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [readiness?.ready, heldSubmission, submitting]);
 
   const onKeyDown = (
     event: KeyboardEvent<HTMLTextAreaElement>,
@@ -572,7 +640,7 @@ export function SubmissionBox({
           placeholder="What do you want to think through?"
           aria-label="What do you want to think through?"
           value={value}
-          disabled={submitting}
+          disabled={submitting || heldSubmission !== null}
           onChange={(event) => setValue(event.target.value)}
           onKeyDown={onKeyDown}
           onPaste={() => {
@@ -855,12 +923,14 @@ export function SubmissionBox({
                 rel="noreferrer"
                 data-tooltip={
                   registryConnected
-                    ? `connected to ${registryTarget}`
+                    ? `connected to ${registryTarget}` +
+                      (registryVersionLine ? ` — ${registryVersionLine}` : "")
                     : `could not connect to ${registryTarget}`
                 }
                 aria-label={
                   registryConnected
-                    ? `Connected to Brain Registry at ${registryTarget}`
+                    ? `Connected to Brain Registry at ${registryTarget}` +
+                      (registryVersionLine ? ` (${registryVersionLine})` : "")
                     : `Could not connect to Brain Registry at ${registryTarget}`
                 }
                 onClick={(event) => {
@@ -869,6 +939,12 @@ export function SubmissionBox({
               >
                 <LuBrain aria-hidden />
               </a>
+              <EnvironmentStatus
+                readiness={readiness}
+                onRecheck={onRecheckReadiness}
+                onDiagnose={onDiagnoseReadiness}
+                onOpenSettings={onOpenSettings}
+              />
               <button
                 type="button"
                 className="send-btn"
@@ -876,6 +952,7 @@ export function SubmissionBox({
                 disabled={
                   value.trim().length === 0 ||
                   submitting ||
+                  heldSubmission !== null ||
                   attachments.some((item) => !item.valid)
                 }
                 onClick={() => void send()}
@@ -886,6 +963,63 @@ export function SubmissionBox({
           </div>
       </div>
       </div>
+
+      {heldSubmission && (
+        <div className="waiting-card" role="status" aria-live="polite">
+          <div className="waiting-head">
+            <span className="dot dot-warn pulse" aria-hidden />
+            <span className="waiting-title">Preparing the environment</span>
+            <button
+              type="button"
+              className="btn btn-small"
+              onClick={() => onRecheckReadiness()}
+            >
+              Run checks again
+            </button>
+            <button
+              type="button"
+              className="btn btn-small"
+              onClick={() => setHeldSubmission(null)}
+            >
+              Cancel
+            </button>
+          </div>
+          <p className="waiting-lead">
+            Your run starts automatically when every check below is green.
+          </p>
+          <ul className="waiting-checks">
+            {(readiness?.checks ?? [])
+              .filter((check) => check.required && check.state !== "skipped")
+              .map((check) => (
+                <li
+                  key={check.id}
+                  className={`waiting-check waiting-${check.state}`}
+                >
+                  <span
+                    className={`dot ${
+                      check.state === "ok"
+                        ? "dot-ok"
+                        : check.state === "failed"
+                          ? "dot-bad"
+                          : check.state === "checking"
+                            ? "dot-warn pulse"
+                            : "dot-dim"
+                    }`}
+                    aria-hidden
+                  />
+                  <span className="waiting-check-label">{check.label}</span>
+                  <span className="waiting-check-message">
+                    {check.message ??
+                      (check.state === "unknown" ? "not checked yet" : "")}
+                  </span>
+                  {check.state === "failed" && check.advice && (
+                    <span className="waiting-check-advice">{check.advice}</span>
+                  )}
+                </li>
+              ))}
+          </ul>
+        </div>
+      )}
 
       {pickerKind && (
         <Suspense fallback={null}>
