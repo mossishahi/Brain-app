@@ -18,6 +18,7 @@ import {
 } from "@brainstorm-agentic/core";
 
 import type {
+  HostToolManifest,
   TaxonomyAccess,
   TaxonomyNodePosition,
   TaxonomyResolveResult,
@@ -226,6 +227,50 @@ class FakeBrainstormExecutor implements AgentExecutor {
               note: "",
             },
           ],
+        };
+        break;
+      case "classifier":
+        // The split classification stage (workflow 0.14.0+): the primary
+        // reading mirrors the processor fixture's type so the merged input
+        // stays the one every other fixture is built around.
+        output = {
+          primary: {
+            type: "research idea",
+            reason: "The fixture submission sketches a mechanism to be developed into a full contribution.",
+          },
+          alternative: {
+            type: "unverified claim",
+            reason: "A reader could take the held-out-graph question as a single checkable claim instead.",
+          },
+          cotSteps: 3,
+          requestedOutputs: [],
+          embeddingInput: {
+            title: "Distributional message passing over graphs",
+            abstract:
+              "This work studies message passing over graphs in which node states are full distributions rather than point estimates. " +
+              "It develops the propagation mechanism, examines its behavior on held-out graphs, and relates it to established graph representation learning. " +
+              "A successful outcome is a mechanism whose predictions transfer across graph structures.",
+            facets: [
+              {
+                name: "graph representation learning",
+                statement:
+                  "Graph representation learning studies how to encode nodes and graphs into vector spaces that preserve structural relationships for prediction tasks.",
+                relevance: 0.9,
+              },
+              {
+                name: "message passing neural networks",
+                statement:
+                  "Message passing neural networks compute node representations by iteratively aggregating information from neighboring nodes along the graph structure.",
+                relevance: 0.8,
+              },
+              {
+                name: "probabilistic modeling",
+                statement:
+                  "Probabilistic modeling represents quantities as distributions rather than point estimates, propagating uncertainty through the computation.",
+                relevance: 0.6,
+              },
+            ],
+          },
         };
         break;
       case "code-annotator": {
@@ -475,6 +520,44 @@ function roleCapabilities(role: string): readonly string[] {
   return capabilities;
 }
 
+/**
+ * The taxonomy read tools of a correctly configured deployment, as the
+ * capability broker sees them. Without these the placer's REQUIRED
+ * taxonomy-access capability resolves unavailable and the run fails loud
+ * (REQUIRED_CAPABILITY_UNAVAILABLE) — exactly the toolless-placer guard.
+ */
+const TEST_HOST_TOOLS: readonly HostToolManifest[] = [
+  {
+    toolId: "taxonomy_tree",
+    displayName: "Taxonomy Tree",
+    operations: ["taxonomy.tree"],
+    risk: "low",
+    defaultEnabled: true,
+    definition: {
+      name: "taxonomy_tree",
+      description: "Fetch the shared taxonomy outline.",
+      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    },
+  },
+  {
+    toolId: "taxonomy_resolve",
+    displayName: "Taxonomy Resolve",
+    operations: ["taxonomy.resolve"],
+    risk: "low",
+    defaultEnabled: true,
+    definition: {
+      name: "taxonomy_resolve",
+      description: "Resolve one name against the shared taxonomy.",
+      inputSchema: {
+        type: "object",
+        properties: { query: { type: "string" } },
+        required: ["query"],
+        additionalProperties: false,
+      },
+    },
+  },
+];
+
 function runtime(
   executor: AgentExecutor,
   humanGateMode: "manual" | "autoApproveSkippable" = "autoApproveSkippable",
@@ -490,6 +573,8 @@ function runtime(
       writing: { modelId: "configured-writer", providerId: "fake" },
       balanced: { modelId: "configured-balanced", providerId: "fake" },
     }),
+    hostTools: TEST_HOST_TOOLS,
+    enabledHostToolIds: new Set(TEST_HOST_TOOLS.map((manifest) => manifest.toolId)),
     ...(stores ?? {}),
   });
 }
@@ -606,12 +691,33 @@ test("Pass path executes member -> step -> round order and keeps C-O-T from chai
     if (format?.type !== "jsonSchema") throw new Error(`${role} has no jsonSchema format`);
     return format.schema;
   };
-  const processorType = object(
-    object(deliveredSchema("processor").properties, "processor properties").type,
-    "processor type property",
+  const processorProperties = object(
+    deliveredSchema("processor").properties,
+    "processor properties",
   );
-  assert.ok(Array.isArray(processorType.enum), "processor type is enum-narrowed");
-  assert.ok((processorType.enum as JsonValue[]).includes("research idea"));
+  if (executor.tasks("classifier").length > 0) {
+    // Split-classification bundles (0.14.0+): the processor cannot emit the
+    // classification fields at all — they are stripped from its task schema
+    // — and the CLASSIFIER's two offered readings are enum-pinned instead.
+    assert.equal(processorProperties.type, undefined, "processor schema drops `type`");
+    assert.equal(processorProperties.cotSteps, undefined, "processor schema drops `cotSteps`");
+    const classifierProperties = object(
+      deliveredSchema("classifier").properties,
+      "classifier properties",
+    );
+    for (const option of ["primary", "alternative"] as const) {
+      const optionType = object(
+        object(object(classifierProperties[option], option).properties, `${option} properties`).type,
+        `${option} type property`,
+      );
+      assert.ok(Array.isArray(optionType.enum), `classifier ${option}.type is enum-narrowed`);
+      assert.ok((optionType.enum as JsonValue[]).includes("research idea"));
+    }
+  } else {
+    const processorType = object(processorProperties.type, "processor type property");
+    assert.ok(Array.isArray(processorType.enum), "processor type is enum-narrowed");
+    assert.ok((processorType.enum as JsonValue[]).includes("research idea"));
+  }
   const memberEnvelope = object(
     object(deliveredSchema("brain").properties, "brain properties").output,
     "brain output property",
@@ -663,6 +769,17 @@ test("Pass path executes member -> step -> round order and keeps C-O-T from chai
         unmatched.map((member) => member.term),
         ["chip morphology"],
         "placer receives exactly the unmatched pool members",
+      );
+    } else if (task.role === "classifier") {
+      // The classifier runs BEFORE partitioning by design: the raw relation
+      // map — NA labels included — is evidence of what the submitter brought.
+      assert.deepEqual(
+        task.bindings.files,
+        [
+          usefulEntry,
+          { path: "attachments/1-repo/package-lock.json", label: "NA", note: "" },
+        ],
+        "the classifier receives the processor's full relation map",
       );
     } else if (task.role === "code-annotator") {
       assert.deepEqual(
@@ -949,14 +1066,31 @@ test("a model cannot issue Build twice consecutively even if it ignores the prom
 test("manual panel gate suspends and checkpoint resume does not repeat prior agents", async () => {
   const executor = new FakeBrainstormExecutor();
   const app = runtime(executor, "manual");
-  const first = await app.run({
+  let state = await app.run({
     runId: "manual-resume",
     submission: "Checkpoint test",
     params: { panelSize: 2 },
   });
-  assert.equal(first.status, "suspended");
-  if (first.status !== "suspended") throw new Error("unreachable");
-  assert.equal(first.pendingGates[0]?.gateKey, "confirm-panel");
+  assert.equal(state.status, "suspended");
+  if (state.status !== "suspended") throw new Error("unreachable");
+
+  // Split-classification bundles (0.14.0+) pause at the classification gate
+  // first; approving it across a FRESH runtime instance is itself part of
+  // the replay proof.
+  if (state.pendingGates[0]?.gateKey === "confirm-classification") {
+    const processorTasks = executor.tasks("processor").length;
+    const intermediate = runtime(executor, "manual", {
+      checkpoints: app.checkpoints,
+      artifacts: app.artifacts,
+    });
+    state = await intermediate.resume("manual-resume", {
+      responses: { "confirm-classification": { action: "approve" } },
+    });
+    assert.equal(state.status, "suspended");
+    if (state.status !== "suspended") throw new Error("unreachable");
+    assert.equal(executor.tasks("processor").length, processorTasks);
+  }
+  assert.equal(state.pendingGates[0]?.gateKey, "confirm-panel");
   assert.equal(executor.tasks("processor").length, 1);
   assert.equal(executor.tasks("pool-builder").length, 1);
 
@@ -994,16 +1128,18 @@ test("explicitly requested outputs are pinned per task, answered by every member
     { title: "Benchmarking protocol", ask: "Propose a benchmarking protocol for the mechanism." },
     { title: "Risk register", ask: "List the main failure risks of the mechanism with mitigations." },
   ];
-  // A well-behaved panel: the processor records the submitter's explicit
-  // asks, and every member (first pass and revision alike) echoes one
-  // response section per ask, in order, titles verbatim.
+  // A well-behaved panel: the run records the submitter's explicit asks
+  // (the processor on pre-split bundles, the classifier on 0.14.0+ — the
+  // merge writes its list into the input), and every member (first pass
+  // and revision alike) echoes one response section per ask, in order,
+  // titles verbatim.
   class AnsweringExecutor extends FakeBrainstormExecutor {
     override async execute(task: AgentTask): Promise<AgentResult> {
       const result = await super.execute(task);
       const input = object(task.input, "task input");
       if (result.status !== "ok") return result;
-      if (input.role === "processor") {
-        const output = object(result.output as JsonValue, "processor output");
+      if (input.role === "processor" || input.role === "classifier") {
+        const output = object(result.output as JsonValue, `${String(input.role)} output`);
         return { ...result, output: { ...output, requestedOutputs: asks } };
       }
       if (input.role === "brain" || input.role === "redeveloper") {
@@ -1090,8 +1226,13 @@ test("a member that skips a requested output fails the run with a named error", 
     override async execute(task: AgentTask): Promise<AgentResult> {
       const result = await super.execute(task);
       const input = object(task.input, "task input");
-      if (input.role !== "processor" || result.status !== "ok") return result;
-      const output = object(result.output as JsonValue, "processor output");
+      if (
+        (input.role !== "processor" && input.role !== "classifier") ||
+        result.status !== "ok"
+      ) {
+        return result;
+      }
+      const output = object(result.output as JsonValue, `${String(input.role)} output`);
       return {
         ...result,
         output: {

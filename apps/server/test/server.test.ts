@@ -1258,8 +1258,23 @@ test("manual gate can shrink, complete, and reload after restart", async () => {
         },
       );
       assert.equal(approvedClassification.status, 200);
-      suspended = await waitFor(server, jobId, "suspended");
-      assert.equal(suspended.pendingGate?.gateKey, "confirm-panel");
+      // The job reports "suspended" from its checkpoint until the resumed
+      // worker actually reaches the panel gate, so wait for the NEXT gate,
+      // never merely the next suspended status.
+      const deadline = Date.now() + 120_000;
+      for (;;) {
+        suspended = (await requestJson<JobDetail>(server, `/api/jobs/${jobId}`)).value;
+        if (
+          suspended.status === "suspended" &&
+          suspended.pendingGate?.gateKey === "confirm-panel"
+        ) {
+          break;
+        }
+        if (Date.now() > deadline) {
+          throw new Error("the panel gate never arrived after approving the classification");
+        }
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
     }
     const contentDir = join(
       workspace,
