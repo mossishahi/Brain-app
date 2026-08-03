@@ -141,6 +141,10 @@ export function buildAgentExecutor(
       ...(attachmentRoots.length > 0
         ? { attachmentRoots: [...attachmentRoots] }
         : {}),
+      // The Agent SDK has no built-in taxonomy tool, so the shared-taxonomy
+      // read tools reach the placer only when we hand the executor the same
+      // TaxonomyAccess the deterministic activities use.
+      ...(taxonomy ? { taxonomy } : {}),
       outputValidator: new ContentArtifactOutputValidator(),
       maxValidationAttempts: 3,
       ...(model ? { model } : {}),
@@ -364,6 +368,17 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
         .filter((m) => m.defaultEnabled)
         .map((m) => m.toolId),
   );
+  // The taxonomy read tools are a deployment resource the decompose stage
+  // (pool -> match -> place) requires, not a user preference: whenever a
+  // shared taxonomy is wired, enable them so the capability broker resolves
+  // taxonomy-access; when NO taxonomy is wired, remove them so the broker's
+  // verdict stays truthful (an "available" capability with no backing
+  // implementation is exactly the silent degradation the required-capability
+  // guard exists to catch — the placer then fails loud instead).
+  for (const manifest of TAXONOMY_MANIFESTS) {
+    if (options.taxonomy) enabledHostToolIds.add(manifest.toolId);
+    else enabledHostToolIds.delete(manifest.toolId);
+  }
 
   // Provider-native operation offers for the capability broker: web search,
   // web fetch, and code execution run natively on both provider paths (as

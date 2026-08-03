@@ -124,7 +124,15 @@ export function defaultServerSettings(
       apiKeyConfigured: false,
     },
     hostTools: {
-      enabledToolIds: ["attachment_list", "attachment_read"],
+      // Low-risk reads enabled by default (mirrors the manifests'
+      // defaultEnabled). The taxonomy tools power the decompose stage's
+      // placer; without them taxonomy-access resolves as unavailable.
+      enabledToolIds: [
+        "attachment_list",
+        "attachment_read",
+        "taxonomy_tree",
+        "taxonomy_resolve",
+      ],
     },
     slurmTemplate: DEFAULT_SLURM_TEMPLATE,
   };

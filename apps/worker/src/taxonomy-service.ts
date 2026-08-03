@@ -17,12 +17,14 @@ import { randomUUID } from "node:crypto";
 
 import type {
   TaxonomyAccess,
+  TaxonomyEmbeddings,
   TaxonomyNodePosition,
   TaxonomyResolveResult,
   TaxonomySuggestionEntry,
   TaxonomySuggestionReceipt,
   TaxonomyTreeExport,
 } from "@brainstorm-agentic/core";
+import { EMBEDDER_MANIFEST, nodeEmbedding, roundVector } from "@brainstorm-agentic/core";
 import type { ContentRegistryClient } from "@brainstorm-agentic/registry-client";
 
 // ---------------------------------------------------------------------------
@@ -30,6 +32,8 @@ import type { ContentRegistryClient } from "@brainstorm-agentic/registry-client"
 // ---------------------------------------------------------------------------
 
 export class RegistryTaxonomyService implements TaxonomyAccess {
+  private embeddingsCache: TaxonomyEmbeddings | undefined;
+
   constructor(private readonly client: ContentRegistryClient) {}
 
   async resolve(query: string, optionLimit?: number): Promise<TaxonomyResolveResult> {
@@ -43,6 +47,28 @@ export class RegistryTaxonomyService implements TaxonomyAccess {
     return (await this.client.callTool("taxonomy_tree", {
       ...(root !== undefined ? { root } : {}),
     })) as TaxonomyTreeExport;
+  }
+
+  /**
+   * The server-computed node-embedding index, cached per revision for the
+   * process lifetime. An older registry without the tool answers with an
+   * error — reported as `undefined`, which leaves the semantic matching
+   * lane off and the run on the pre-embedding behavior.
+   */
+  async embeddings(): Promise<TaxonomyEmbeddings | undefined> {
+    try {
+      const answer = (await this.client.callTool("taxonomy_embeddings", {
+        ...(this.embeddingsCache !== undefined
+          ? { knownRevision: this.embeddingsCache.revision }
+          : {}),
+      })) as TaxonomyEmbeddings | { revision: number; unchanged: true };
+      if ("unchanged" in answer && answer.unchanged) return this.embeddingsCache;
+      if (!Array.isArray((answer as TaxonomyEmbeddings).nodes)) return undefined;
+      this.embeddingsCache = answer as TaxonomyEmbeddings;
+      return this.embeddingsCache;
+    } catch {
+      return undefined;
+    }
   }
 
   async suggest(
@@ -110,6 +136,7 @@ export class LocalTaxonomyService implements TaxonomyAccess {
   private readonly children = new Map<string, SeedNode[]>();
   private readonly words = new Map<string, SeedNode[]>();
   private readonly domains: SeedNode[] = [];
+  private embeddingsCache: TaxonomyEmbeddings | undefined;
 
   constructor(
     seedPath: string,
@@ -233,6 +260,47 @@ export class LocalTaxonomyService implements TaxonomyAccess {
       for (const domain of this.domains) walk(domain, 0);
     }
     return { revision: this.revision, nodeCount: count, outline: lines.join("\n") };
+  }
+
+  /**
+   * Locally computed node-embedding index over the bundle seed, mirroring
+   * exactly what the registry serves (same embedder, same node template) —
+   * offline runs exercise the full semantic lane deterministically.
+   */
+  async embeddings(): Promise<TaxonomyEmbeddings | undefined> {
+    if (this.embeddingsCache) return this.embeddingsCache;
+    const nodes = [...this.byId.values()];
+    const ancestorNames = (node: SeedNode): string[] => {
+      const chain: string[] = [];
+      let cursor = node.parent ? this.byId.get(node.parent) : undefined;
+      const seen = new Set<string>();
+      while (cursor && !seen.has(cursor.id)) {
+        seen.add(cursor.id);
+        chain.unshift(cursor.name);
+        cursor = cursor.parent ? this.byId.get(cursor.parent) : undefined;
+      }
+      return chain;
+    };
+    this.embeddingsCache = {
+      revision: this.revision,
+      embedder: EMBEDDER_MANIFEST,
+      nodes: nodes.map((node) => ({
+        id: node.id,
+        name: node.name,
+        level: node.level,
+        ...(node.parent ? { parent: node.parent } : {}),
+      })),
+      vectors: nodes.map((node) =>
+        roundVector(
+          nodeEmbedding({
+            name: node.name,
+            aliases: node.aliases ?? [],
+            ancestors: ancestorNames(node),
+          }),
+        ),
+      ),
+    };
+    return this.embeddingsCache;
   }
 
   async suggest(

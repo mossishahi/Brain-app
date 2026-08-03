@@ -206,6 +206,70 @@ test("aborting the signal cancels the run; resume continues past the recorded pr
   assert.equal(fastRuns, 1, "fast activity must be replayed from the journal, not re-executed");
 });
 
+test("a failed run resumes from its journal and re-executes only the failed activity", async () => {
+  const checkpoints = new InMemoryCheckpointStore();
+  let stableRuns = 0;
+  let flakyRuns = 0;
+  let flakyMode: "crash" | "ok" = "crash";
+  const functions = new WorkflowFunctions()
+    .registerActivity("stable", () => {
+      stableRuns += 1;
+      return "stable-done";
+    })
+    .registerActivity("flaky", () => {
+      flakyRuns += 1;
+      if (flakyMode === "crash") {
+        throw new Error("Claude Code process exited with code 1");
+      }
+      return "flaky-done";
+    })
+    .registerSelector("summary", (scope) => ({
+      stable: scope.get("stable") as string,
+      flaky: scope.get("flaky") as string,
+    }));
+  const definition = workflow(
+    "retryable",
+    sequence(
+      [
+        activity("stable", { id: "first", resultKey: "stable" }),
+        activity("flaky", { id: "second", resultKey: "flaky" }),
+        terminal("success", { id: "done", outputFrom: "summary" }),
+      ],
+      { id: "main" },
+    ),
+  );
+
+  const runner = new WorkflowRunner({ functions, checkpoints });
+  const first = await runner.run(definition, { runId: "run-failed" });
+  assert.equal(first.status, "failed");
+  assert.equal(stableRuns, 1);
+  assert.equal(flakyRuns, 1);
+  const failed = await checkpoints.load("run-failed");
+  assert.equal(failed?.status, "failed");
+  // The failure was never journaled; the completed prefix was.
+  assert.ok(failed!.journal.some((entry) => entry.key.includes("first")));
+  assert.ok(!failed!.journal.some((entry) => entry.key.includes("second")));
+
+  // Resuming the failed run replays the journaled prefix and re-executes
+  // exactly the failed task — one transient crash costs one retry, never
+  // the run's completed work.
+  flakyMode = "ok";
+  const resumed = await runner.resume(definition, "run-failed");
+  assert.equal(resumed.status, "completed");
+  assert.deepEqual(resumed.status === "completed" && resumed.output, {
+    stable: "stable-done",
+    flaky: "flaky-done",
+  });
+  assert.equal(stableRuns, 1, "the succeeded activity must replay from the journal");
+  assert.equal(flakyRuns, 2, "the failed activity re-executes");
+
+  // A completed run stays final.
+  await assert.rejects(
+    () => runner.resume(definition, "run-failed"),
+    /already finished with status "completed"/,
+  );
+});
+
 test("a pre-aborted signal cancels before any node executes", async () => {
   let runs = 0;
   const functions = new WorkflowFunctions().registerActivity("never", () => {

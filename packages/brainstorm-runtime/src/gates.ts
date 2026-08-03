@@ -19,12 +19,28 @@ export interface HumanGateDecision {
    * re-validates the whole panel after the edit.
    */
   readonly addedMembers?: readonly JsonValue[];
+  /**
+   * For a classification-revising action: the submission type to proceed
+   * with — either offered option or any other type of the loaded catalog
+   * (membership is validated; the type drives the run's shape/outline
+   * bindings, so an unknown label is refused).
+   */
+  readonly type?: JsonValue;
+  /**
+   * For a classification-revising action: the full replacement list of
+   * requested outputs ({title, ask} each, at most 4, unique titles). An
+   * empty list clears them.
+   */
+  readonly requestedOutputs?: readonly JsonValue[];
 }
 
 /** Gate-time panel bounds (mirrors the protocol's PANEL_EDIT_LIMITS). */
 const MAX_PANEL_MEMBERS = 12;
 const MIN_SEAT_SUBFIELDS = 1;
 const MAX_SEAT_SUBFIELDS = 3;
+
+/** Gate-time classification bounds (mirrors the taskClassification schema). */
+const MAX_REQUESTED_OUTPUTS = 4;
 
 /**
  * Validates one user-added seat and returns the panel member it becomes.
@@ -172,6 +188,98 @@ export function applyGateDecision(
   } else if (decision.members !== undefined) {
     throw new BrainstormRuntimeError(
       `human gate action "${decision.action}" does not permit edits`,
+      "INVALID_GATE_DECISION",
+    );
+  }
+
+  if (action.editRule === "classification") {
+    if (!action.edits) {
+      throw new BrainstormRuntimeError(
+        `human gate "${node.id}" classification action has no edit target`,
+        "INVALID_GATE",
+      );
+    }
+    const hasType = decision.type !== undefined;
+    const hasRequested = decision.requestedOutputs !== undefined;
+    // A revise carrying neither field is a plain approval of the merged
+    // primary decision; edits apply only to the fields actually sent.
+    if (hasType || hasRequested) {
+      const current = object(
+        resolveDataReference(action.edits, scope, next, { required: true }),
+        "classification edit target",
+      );
+      const edited: Record<string, JsonValue> = { ...current };
+      if (hasType) {
+        const type = decision.type;
+        const knownTypes = resolveDataReference("catalog.inputTypes.types", scope, next, {
+          required: true,
+        });
+        if (
+          typeof type !== "string" ||
+          type.trim().length === 0 ||
+          typeof knownTypes !== "object" ||
+          knownTypes === null ||
+          Array.isArray(knownTypes) ||
+          !Object.prototype.hasOwnProperty.call(knownTypes, type)
+        ) {
+          throw new BrainstormRuntimeError(
+            `human gate "${node.id}" cannot set type "${String(type)}": not a type of the loaded input-type catalog`,
+            "INVALID_GATE_DECISION",
+          );
+        }
+        edited.type = type;
+      }
+      if (hasRequested) {
+        if (
+          !Array.isArray(decision.requestedOutputs) ||
+          decision.requestedOutputs.length > MAX_REQUESTED_OUTPUTS
+        ) {
+          throw new BrainstormRuntimeError(
+            `human gate "${node.id}" accepts at most ${MAX_REQUESTED_OUTPUTS} requested outputs`,
+            "INVALID_GATE_DECISION",
+          );
+        }
+        const titles = new Set<string>();
+        const entries = decision.requestedOutputs.map((raw) => {
+          const entry = object(raw, "requested output");
+          if (
+            typeof entry.title !== "string" ||
+            entry.title.trim().length === 0 ||
+            typeof entry.ask !== "string" ||
+            entry.ask.trim().length === 0
+          ) {
+            throw new BrainstormRuntimeError(
+              "each requested output needs a non-empty title and ask",
+              "INVALID_GATE_DECISION",
+            );
+          }
+          if (titles.has(entry.title)) {
+            throw new BrainstormRuntimeError(
+              `duplicate requested-output title "${entry.title}"`,
+              "INVALID_GATE_DECISION",
+            );
+          }
+          titles.add(entry.title);
+          return { title: entry.title, ask: entry.ask };
+        });
+        if (entries.length > 0) {
+          edited.requestedOutputs = entries;
+        } else {
+          delete edited.requestedOutputs;
+        }
+      }
+      next = writeDataReference(next, action.edits, edited, scope).state;
+      // The edited input must still be a valid structured input — the same
+      // schema every downstream task reads (title/ask floors included).
+      validateArtifact(
+        "processorOutput",
+        node.id,
+        resolveDataReference(action.edits, scope, next, { required: true })!,
+      );
+    }
+  } else if (decision.type !== undefined || decision.requestedOutputs !== undefined) {
+    throw new BrainstormRuntimeError(
+      `human gate action "${decision.action}" does not permit classification edits`,
       "INVALID_GATE_DECISION",
     );
   }

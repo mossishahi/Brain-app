@@ -117,6 +117,8 @@ export interface StartBrainServerOptions {
   readonly validateAnthropic?: AnthropicConnectionValidator;
   /** Test/integration seam; production performs a real Agent SDK request. */
   readonly validateClaudeAgent?: ClaudeAgentConnectionValidator;
+  /** How long one live registry verification stays cached. Default 60s. */
+  readonly registryProbeTtlMs?: number;
   readonly validateOpenRouter?: (
     apiKey: string,
     model: string,
@@ -382,19 +384,28 @@ export async function startBrainServer(
   };
   const contentRegistryUrl = options.contentRegistryUrl;
 
-  // Pull-based update discovery. Content: the registry index is polled with
-  // a short cache so the dashboard can show newer published bundles. App:
-  // release tags are checked at startup and daily when enabled (the real
-  // CLI server enables it; tests do not).
+  // Live registry verification with a short cache: every refresh probes the
+  // registry's /health (reachability + its own server version) AND resolves
+  // the configured bundle from /v1/index.json. "Connected" is strict by
+  // design — the registry must be reachable NOW and serving the bundle's
+  // index NOW, or the status reports not running. There is deliberately no
+  // fallback that keeps showing a stale launch-time connection: an
+  // unverifiable registry surfaces as disconnected, never as an old version.
+  // The verdict lands on the shared mutable status object, so the readiness
+  // gate and the health endpoint always agree.
+  const registryProbeTtlMs = options.registryProbeTtlMs ?? 60_000;
   let registryIndexCache:
     | { at: number; latest?: string; latestNotes?: string }
     | undefined;
   const registryLatest = async (
     bundle: string,
   ): Promise<{ latest?: string; latestNotes?: string }> => {
-    if (registryIndexCache && Date.now() - registryIndexCache.at < 60_000) {
+    if (registryIndexCache && Date.now() - registryIndexCache.at < registryProbeTtlMs) {
       return registryIndexCache;
     }
+    // Reachability first: a dead or non-registry host must flip the shared
+    // status to not running even when the index fetch below cannot run.
+    await probeContentRegistry(contentRegistryUrl, contentRegistry);
     let latest: string | undefined;
     let latestNotes: string | undefined;
     try {
@@ -420,8 +431,12 @@ export async function startBrainServer(
         }
       }
     } catch {
-      // The registry being unreachable never fails the health endpoint.
+      // The registry being unreachable never fails the health endpoint;
+      // it reports a disconnected registry instead.
     }
+    // Reachable but not serving the configured bundle's index is NOT a
+    // connection — nothing current could be resolved to run from.
+    contentRegistry.running = contentRegistry.running && latest !== undefined;
     registryIndexCache = {
       at: Date.now(),
       ...(latest ? { latest } : {}),
@@ -869,6 +884,22 @@ export async function startBrainServer(
         const jobId = decodeURIComponent(resumeInterruptedMatch[1]!);
         try {
           const status = await manager.resumeInterrupted(jobId);
+          broadcast();
+          sendJson(res, 200, { jobId, status });
+        } catch (error) {
+          if (error instanceof JobConflictError) {
+            throw new HttpError(409, error.message);
+          }
+          throw error; // "was not found" maps to 404 in the outer handler
+        }
+        return;
+      }
+
+      const retryMatch = /^\/api\/jobs\/([^/]+)\/retry$/.exec(path);
+      if (req.method === "POST" && retryMatch) {
+        const jobId = decodeURIComponent(retryMatch[1]!);
+        try {
+          const status = await manager.retryFailed(jobId);
           broadcast();
           sendJson(res, 200, { jobId, status });
         } catch (error) {

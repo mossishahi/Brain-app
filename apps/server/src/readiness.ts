@@ -15,7 +15,17 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { join } from "node:path";
 import process from "node:process";
 
-import { prepareCodeWorkspace } from "@brainstorm-agentic/host-tools";
+import {
+  ANTHROPIC_ADAPTER,
+  CLAUDE_AGENT_ADAPTER,
+  resolveCapabilityPlan,
+  type CapabilityDeclaration,
+} from "@brainstorm-agentic/core";
+import {
+  ATTACHMENT_MANIFESTS,
+  TAXONOMY_MANIFESTS,
+  prepareCodeWorkspace,
+} from "@brainstorm-agentic/host-tools";
 import {
   READINESS_CHECK_IDS,
   type ReadinessCheck,
@@ -37,6 +47,7 @@ import type {
 export const READINESS_CHECK_LABELS: Readonly<Record<ReadinessCheckId, string>> = {
   registry: "Brain Registry",
   llm: "Model connection",
+  capabilities: "Agent capabilities",
   internet: "Internet access",
   code: "Code workspace",
   slurm: "SLURM scheduler",
@@ -53,6 +64,10 @@ export function readinessCheckRequired(
       return true;
     case "llm":
     case "internet":
+      return settings.llm.provider !== "offline";
+    case "capabilities":
+      // The offline executor never calls tools; every other backend must be
+      // able to satisfy the core agent capabilities before a run starts.
       return settings.llm.provider !== "offline";
     case "slurm":
       return settings.runner === "slurm";
@@ -233,6 +248,84 @@ export function defaultReadinessProbes(
       return { message: "offline provider — no model connection needed" };
     },
 
+    capabilities: async (context) => {
+      // The toolless-placer guard, deployment-level: run the SAME capability
+      // broker a task's compiler runs, with the SAME inputs the worker wires
+      // (provider-native offers per backend, host-tool manifests, the
+      // settings' enabled set with the taxonomy force-enable), and verify
+      // every core agent capability resolves to a source. A capability that
+      // resolves nowhere here would reach agents as "unavailable" mid-run —
+      // degraded prompts at best, a failed required-capability task at
+      // worst — so it blocks submissions instead.
+      const provider = context.settings.llm.provider;
+      const providerOffers =
+        provider === "anthropic"
+          ? ANTHROPIC_ADAPTER.staticOffers
+          : provider === "claude-agent"
+            ? CLAUDE_AGENT_ADAPTER.staticOffers
+            : [];
+      const hostTools = [...ATTACHMENT_MANIFESTS, ...TAXONOMY_MANIFESTS];
+      const enabledHostToolIds = new Set<string>(
+        context.settings.hostTools?.enabledToolIds ??
+          hostTools.filter((manifest) => manifest.defaultEnabled).map((m) => m.toolId),
+      );
+      // Mirrors the worker's wiring: taxonomy reads are a deployment
+      // resource, force-enabled whenever a taxonomy is wired — and every
+      // real run wires one (the registry's live store, or the bundle seed).
+      for (const manifest of TAXONOMY_MANIFESTS) {
+        enabledHostToolIds.add(manifest.toolId);
+      }
+      const coreCapabilities: CapabilityDeclaration[] = [
+        { capabilityId: "web-search", operations: ["web.search", "web.fetch"], whenUnavailable: "" },
+        { capabilityId: "code-execution", operations: ["code.execute"], whenUnavailable: "" },
+        {
+          capabilityId: "attachment-access",
+          operations: ["attachment.list", "attachment.read"],
+          whenUnavailable: "",
+        },
+        {
+          capabilityId: "taxonomy-access",
+          operations: ["taxonomy.tree", "taxonomy.resolve"],
+          whenUnavailable: "",
+        },
+      ];
+      const plan = resolveCapabilityPlan({
+        requiredCapabilities: coreCapabilities,
+        providerOffers,
+        hostTools,
+        enabledHostToolIds,
+      });
+      const byCapability = new Map<string, Set<string>>();
+      for (const operation of plan.operations) {
+        const sources = byCapability.get(operation.capabilityId) ?? new Set<string>();
+        sources.add(operation.source);
+        byCapability.set(operation.capabilityId, sources);
+      }
+      const unsatisfied = coreCapabilities
+        .map((capability) => capability.capabilityId)
+        .filter((id) => byCapability.get(id)?.has("unavailable") ?? true);
+      const detail = plan.operations
+        .map((operation) => `${operation.capabilityId} / ${operation.operationId} -> ${operation.source}`)
+        .join("\n");
+      if (unsatisfied.length > 0) {
+        throw new ReadinessProbeError(
+          `${unsatisfied.join(", ")} cannot be satisfied on this deployment — agents that ` +
+            "depend on it would run degraded (or fail, where the skill marks it required). " +
+            "Re-enable the backing host tools in Settings, or switch to a backend that " +
+            "provides the capability natively.",
+          detail,
+        );
+      }
+      const summary = coreCapabilities
+        .map((capability) => {
+          const sources = byCapability.get(capability.capabilityId) ?? new Set<string>();
+          const source = sources.has("provider") ? "provider" : "host tools";
+          return `${capability.capabilityId}: ${source}`;
+        })
+        .join(" · ");
+      return { message: summary, detail };
+    },
+
     internet: async (context) => {
       // Any HTTP response (401 included) proves DNS + TLS + outbound routing;
       // only transport failures reject. The model API host doubles as the
@@ -393,10 +486,12 @@ function staticAdvice(id: ReadinessCheckId, settings: ServerSettings): string {
       return "This host cannot reach the public internet over HTTPS. On HPC clusters compute nodes are often offline: launch the server on a node with outbound access, or export https_proxy/HTTPS_PROXY (your cluster's proxy) in the launch script before `brain launch`.";
     case "code":
       return "The scratch workspace could not run a script. Check that the workspace path is on writable storage, that the filesystem is not mounted noexec, and that TMPDIR points somewhere writable.";
+    case "capabilities":
+      return "One or more agent capabilities resolve to no tool on this deployment, so agents depending on them would run degraded (or fail where a skill marks the capability required). Open Settings and re-enable the backing host tools (attachment and taxonomy reads ship enabled by default), or switch to a backend that provides the capability natively. The technical detail lists every operation and where it resolved.";
     case "slurm":
       return "Verify job submission works from this node: `sbatch --version` must succeed and the template's partition/QOS/account must be valid for your user. The probe script and its log are kept under workspace/readiness/ — submit the script manually with sbatch to see the scheduler's own message.";
     case "registry":
-      return "The Brain Registry is unreachable. Check the registry URL in Settings and that this host can reach it (it serves /health over HTTPS).";
+      return "The Brain Registry could not be verified: it is unreachable, or it no longer serves the configured bundle's index. Check the registry URL in Settings and that this host can reach it (it serves /health and /v1/index.json over HTTPS). Runs are held rather than started against an unverified registry.";
   }
 }
 
@@ -420,6 +515,7 @@ interface PersistedCheck extends MutableCheck {
 
 const RUNNABLE_CHECK_IDS: readonly RunnableReadinessCheckId[] = [
   "llm",
+  "capabilities",
   "internet",
   "code",
   "slurm",
@@ -509,6 +605,9 @@ export class ReadinessService {
         };
       }
       if (id === "registry") {
+        // The shared live-verified status: reachable AND serving the
+        // configured bundle's index on the last probe. Never a launch-time
+        // snapshot — see the server's registry verification.
         const running = this.options.contentRegistry.running;
         return {
           id,
@@ -517,7 +616,7 @@ export class ReadinessService {
           state: running ? "ok" : "failed",
           message: running
             ? (this.options.contentRegistry.url ?? "connected")
-            : "Brain Registry is unreachable",
+            : "Brain Registry could not be verified (unreachable, or not serving the configured bundle)",
           ...(running ? {} : { advice: staticAdvice("registry", settings) }),
         };
       }

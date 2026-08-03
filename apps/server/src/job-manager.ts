@@ -21,6 +21,7 @@ import {
 } from "@brainstorm-agentic/credit-recovery";
 import {
   ATTACHMENT_LIMITS,
+  CLASSIFICATION_EDIT_LIMITS,
   PANEL_EDIT_LIMITS,
   type CustomSeatRequest,
   type GateAnswerRequest,
@@ -227,6 +228,10 @@ export class JobManager {
               ...(gate.members ? { members: gate.members } : {}),
               ...(gate.addedMembers && gate.addedMembers.length > 0
                 ? { addedMembers: gate.addedMembers }
+                : {}),
+              ...(gate.type !== undefined ? { type: gate.type } : {}),
+              ...(gate.requestedOutputs !== undefined
+                ? { requestedOutputs: gate.requestedOutputs }
                 : {}),
             },
           }
@@ -769,6 +774,71 @@ export class JobManager {
     return record.status;
   }
 
+  /**
+   * User-initiated retry of a FAILED job from its last checkpoint. A run
+   * fails when one task fails (a provider error, a crashed Claude Code
+   * subprocess, an invalid artifact after every retry) — but the checkpoint
+   * journal keeps every completed effect, and failures are never journaled,
+   * so resuming re-executes exactly the failed task and continues. Refuses
+   * jobs that are not failed, failures with no checkpoint (nothing ran —
+   * submit a new job instead), and claims already in flight.
+   */
+  async retryFailed(jobId: string): Promise<JobStatus> {
+    const record = this.record(jobId);
+    if (record.trashedAt !== undefined) {
+      throw new JobConflictError(`job "${jobId}" is in the trash`);
+    }
+    if (this.autoResuming.has(jobId)) {
+      throw new JobConflictError(
+        `job "${jobId}" already has a resume submission in progress`,
+      );
+    }
+    const status = await this.reconcile(record);
+    if (status !== "failed") {
+      throw new JobConflictError(`job "${jobId}" is not failed (status "${status}")`);
+    }
+    const checkpoint = this.checkpoint(jobId);
+    if (checkpoint?.status !== "failed") {
+      throw new JobConflictError(
+        `job "${jobId}" failed before its first checkpoint; submit it again as a new job`,
+      );
+    }
+    if (record.autoResumePending) {
+      const alive =
+        record.runner === "local"
+          ? this.localAlive(record.pid)
+          : await this.slurmAlive(record.slurmJobId);
+      if (alive || this.now() - record.autoResumePending.submittedAt < 30_000) {
+        throw new JobConflictError(
+          `job "${jobId}" already has a resume submission in progress`,
+        );
+      }
+      delete record.autoResumePending;
+    }
+    this.autoResuming.add(jobId);
+    try {
+      const settings = record.executionSettings ?? this.settings.get();
+      const command = this.command(record, "resume", settings);
+      const number = (record.submissionCount ?? 1) + 1;
+      const script = this.writeScript(
+        record,
+        `submit-retry-${number - 1}.sh`,
+        command,
+        settings.slurmTemplate,
+      );
+      await this.submitScript(record, script, settings);
+      record.status = "queued";
+      delete record.error;
+      record.submissionCount = number;
+      record.autoResumePending = { submittedAt: this.now() };
+      record.updatedAt = this.now();
+      this.write(record);
+    } finally {
+      this.autoResuming.delete(jobId);
+    }
+    return record.status;
+  }
+
   /** Submits the deterministic credit-resume command and persists the claim. */
   private async submitCreditResume(
     record: JobRecord,
@@ -976,6 +1046,55 @@ export class JobManager {
     if (detail.pendingGate.gateKey !== answer.gateKey) {
       throw new Error(`job "${jobId}" has no pending gate "${answer.gateKey}"`);
     }
+    if (answer.action === "revise") {
+      // A revise answers the classification gate: validate against the
+      // offered options (the runtime re-validates authoritatively).
+      const classification = detail.pendingGate.classification;
+      if (!classification) {
+        throw new Error(`gate "${answer.gateKey}" does not accept a classification revision`);
+      }
+      if (answer.members !== undefined || (answer.addedMembers?.length ?? 0) > 0) {
+        throw new Error("revise does not accept panel edits");
+      }
+      if (answer.type !== undefined) {
+        if (typeof answer.type !== "string" || answer.type.trim().length === 0) {
+          throw new Error("revise needs a non-empty type");
+        }
+        if (
+          classification.typeOptions.length > 0 &&
+          !classification.typeOptions.includes(answer.type)
+        ) {
+          throw new Error(`"${answer.type}" is not a type of this run's catalog`);
+        }
+      }
+      if (answer.requestedOutputs !== undefined) {
+        if (answer.requestedOutputs.length > CLASSIFICATION_EDIT_LIMITS.maxRequestedOutputs) {
+          throw new Error(
+            `at most ${CLASSIFICATION_EDIT_LIMITS.maxRequestedOutputs} requested outputs are allowed`,
+          );
+        }
+        const titles = new Set<string>();
+        for (const entry of answer.requestedOutputs) {
+          if (
+            typeof entry.title !== "string" ||
+            entry.title.trim().length < CLASSIFICATION_EDIT_LIMITS.minTitleChars ||
+            typeof entry.ask !== "string" ||
+            entry.ask.trim().length < CLASSIFICATION_EDIT_LIMITS.minAskChars
+          ) {
+            throw new Error(
+              `each requested output needs a title (>= ${CLASSIFICATION_EDIT_LIMITS.minTitleChars} chars) ` +
+                `and an ask (>= ${CLASSIFICATION_EDIT_LIMITS.minAskChars} chars)`,
+            );
+          }
+          if (titles.has(entry.title)) {
+            throw new Error(`duplicate requested-output title "${entry.title}"`);
+          }
+          titles.add(entry.title);
+        }
+      }
+    } else if (answer.type !== undefined || answer.requestedOutputs !== undefined) {
+      throw new Error(`action "${answer.action}" does not accept classification edits`);
+    }
     const panelIds = detail.pendingGate.members?.map((member) => member.id) ?? [];
     const added = answer.addedMembers ?? [];
     JobManager.validateAddedSeats(added);
@@ -1088,7 +1207,7 @@ export class JobManager {
       } catch (error) {
         this.warning(
           record,
-          `Automatic panel approval failed: ${
+          `Automatic gate approval failed: ${
             error instanceof Error ? error.message : String(error)
           }`,
         );

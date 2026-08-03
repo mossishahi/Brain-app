@@ -23,7 +23,8 @@ export interface TaxonomyNodePosition {
   readonly field?: string;
   readonly subfield?: string;
   readonly topic?: string;
-  readonly matchedOn?: "name" | "alias";
+  /** "embedding": an unambiguous semantic auto-match (client-side lane). */
+  readonly matchedOn?: "name" | "alias" | "embedding";
   readonly matchedAlias?: string;
 }
 
@@ -68,6 +69,25 @@ export interface TaxonomySuggestionReceipt {
   readonly queued: number;
 }
 
+/**
+ * The node-embedding index of one taxonomy revision, as served by the
+ * registry (or computed locally over the bundle seed for offline runs):
+ * node metadata parallel to L2-normalized vectors, plus the embedder
+ * manifest a client must verify its own implementation against before
+ * trusting its query vectors (see verifyEmbedder in embedder.ts).
+ */
+export interface TaxonomyEmbeddings {
+  readonly revision: number;
+  readonly embedder: import("./embedder.js").EmbedderManifest;
+  readonly nodes: ReadonlyArray<{
+    readonly id: string;
+    readonly name: string;
+    readonly level: "domain" | "field" | "subfield" | "topic";
+    readonly parent?: string;
+  }>;
+  readonly vectors: ReadonlyArray<readonly number[]>;
+}
+
 export interface TaxonomyAccess {
   resolve(query: string, optionLimit?: number): Promise<TaxonomyResolveResult>;
   tree(root?: string): Promise<TaxonomyTreeExport>;
@@ -75,4 +95,10 @@ export interface TaxonomyAccess {
     entries: readonly TaxonomySuggestionEntry[],
     submittedBy?: string,
   ): Promise<TaxonomySuggestionReceipt>;
+  /**
+   * The node-embedding index of the current revision. Optional: transports
+   * that cannot serve it (older registries) simply leave the semantic lane
+   * off — matching then runs exactly as before the lane existed.
+   */
+  embeddings?(): Promise<TaxonomyEmbeddings | undefined>;
 }

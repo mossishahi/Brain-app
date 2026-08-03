@@ -41,6 +41,7 @@ import {
   type PaperView,
   type ResolveOutputView,
   type SeamView,
+  type SolutionOutputView,
   type SoundnessAspectView,
   type SurveyOutputView,
   type VerifyOutputView,
@@ -263,10 +264,24 @@ const DECOMPOSE_SUBNODES = [
   "bridge-experts",
 ] as const;
 
+/**
+ * The classification split's workflow nodes (workflow >= 0.14.0): they all
+ * surface on the dashboard's Process-input stage — the classifier's agent
+ * activity, the deterministic merge, and the confirmation gate.
+ */
+const PREPROCESS_SUBNODES = [
+  "classify-input",
+  "apply-classification",
+  "confirm-classification",
+] as const;
+
 export function stageForPath(path: string): StageId | undefined {
   const segments = path.split("/");
   const direct = STAGE_IDS.find((id) => segments.includes(id));
   if (direct) return direct;
+  if (PREPROCESS_SUBNODES.some((node) => segments.includes(node))) {
+    return "process-input";
+  }
   return DECOMPOSE_SUBNODES.some((node) => segments.includes(node))
     ? "decompose-experts"
     : undefined;
@@ -448,13 +463,11 @@ function panelMembers(value: unknown): PanelMemberView[] {
 function processor(value: unknown): ProcessorOutputView | undefined {
   const output = object(value);
   if (
-    typeof output?.type !== "string" ||
-    typeof output.title !== "string" ||
+    typeof output?.title !== "string" ||
     typeof output.question !== "string" ||
     typeof output.context !== "string" ||
     !Array.isArray(output.attachments) ||
-    !Array.isArray(output.assumptions) ||
-    typeof output.cotSteps !== "number"
+    !Array.isArray(output.assumptions)
   ) {
     return undefined;
   }
@@ -468,16 +481,55 @@ function processor(value: unknown): ProcessorOutputView | undefined {
     : [];
   // The raw artifact may also carry the annotated file map; the view exposes
   // the clean structured input only (files surface via the partition view).
+  // `type`/`cotSteps` are absent between preprocessing and classification on
+  // split-classification bundles (workflow >= 0.14.0).
   return {
-    type: output.type,
+    ...(typeof output.type === "string" ? { type: output.type } : {}),
     title: output.title,
     question: output.question,
     context: output.context,
     attachments: output.attachments,
     assumptions: output.assumptions,
-    cotSteps: output.cotSteps,
+    ...(typeof output.cotSteps === "number" ? { cotSteps: output.cotSteps } : {}),
     ...(requestedOutputs.length > 0 ? { requestedOutputs } : {}),
   } as ProcessorOutputView;
+}
+
+/** One {title, ask} list, defensively parsed. */
+function requestedOutputViews(value: unknown): { title: string; ask: string }[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((candidate) => {
+    const entry = object(candidate);
+    return typeof entry?.title === "string" && typeof entry.ask === "string"
+      ? [{ title: entry.title, ask: entry.ask }]
+      : [];
+  });
+}
+
+/** The classifier's two offered readings, defensively parsed. */
+function classificationOptions(value: unknown):
+  | {
+      primary: { type: string; reason: string };
+      alternative: { type: string; reason: string };
+      requestedOutputs: { title: string; ask: string }[];
+    }
+  | undefined {
+  const raw = object(value);
+  const primary = object(raw?.primary);
+  const alternative = object(raw?.alternative);
+  if (
+    typeof primary?.type !== "string" ||
+    typeof primary.reason !== "string" ||
+    typeof alternative?.type !== "string" ||
+    typeof alternative.reason !== "string"
+  ) {
+    return undefined;
+  }
+  return {
+    primary: { type: primary.type, reason: primary.reason },
+    alternative: { type: alternative.type, reason: alternative.reason },
+    requestedOutputs: requestedOutputViews(raw?.requestedOutputs),
+  };
 }
 
 function annotatedFiles(value: unknown): AnnotatedFileView[] {
@@ -951,6 +1003,59 @@ function establishedConceptView(body: Record<string, unknown>): ExplainOutputVie
   };
 }
 
+function researchObstacleView(body: Record<string, unknown>): SolutionOutputView | undefined {
+  const problemFraming = textBlock(body.problemFraming);
+  const recommendation = textBlock(body.recommendation);
+  if (problemFraming === undefined || recommendation === undefined) return undefined;
+  const diagnosis = Array.isArray(body.diagnosis)
+    ? body.diagnosis.flatMap((candidate) => {
+        const item = object(candidate);
+        return typeof item?.cause === "string" && typeof item.rationale === "string"
+          ? [{ cause: item.cause, rationale: item.rationale }]
+          : [];
+      })
+    : [];
+  if (diagnosis.length === 0) return undefined;
+  const priorAttempts = Array.isArray(body.priorAttempts)
+    ? body.priorAttempts.flatMap((candidate) => {
+        const item = object(candidate);
+        return typeof item?.attempt === "string" && typeof item.outcome === "string"
+          ? [{ attempt: item.attempt, outcome: item.outcome }]
+          : [];
+      })
+    : [];
+  const candidateSolutions = Array.isArray(body.candidateSolutions)
+    ? body.candidateSolutions.flatMap((candidate) => {
+        const item = object(candidate);
+        const mechanism = item ? textBlock(item.mechanism) : undefined;
+        return item &&
+          typeof item.approach === "string" &&
+          mechanism !== undefined &&
+          typeof item.expectedEffect === "string" &&
+          typeof item.risk === "string"
+          ? [
+              {
+                approach: item.approach,
+                mechanism,
+                expectedEffect: item.expectedEffect,
+                risk: item.risk,
+              },
+            ]
+          : [];
+      })
+    : [];
+  if (candidateSolutions.length === 0) return undefined;
+  return {
+    problemFraming,
+    diagnosis,
+    priorAttempts,
+    candidateSolutions,
+    recommendation,
+    validationPlan: stringList(body.validationPlan),
+    residualRisks: stringList(body.residualRisks),
+  };
+}
+
 function brainIdea(value: unknown): BrainIdeaView | undefined {
   const idea = object(value);
   if (!idea || !Array.isArray(idea.cot)) return undefined;
@@ -977,6 +1082,7 @@ function brainIdea(value: unknown): BrainIdeaView | undefined {
     interpretation?: InterpretOutputView;
     survey?: SurveyOutputView;
     explanation?: ExplainOutputView;
+    solution?: SolutionOutputView;
   } = {};
   switch (shape ?? "paper") {
     case "paper": {
@@ -1025,6 +1131,12 @@ function brainIdea(value: unknown): BrainIdeaView | undefined {
       const explanation = establishedConceptView(body);
       if (!explanation) return undefined;
       shaped.explanation = explanation;
+      break;
+    }
+    case "solution": {
+      const solution = researchObstacleView(body);
+      if (!solution) return undefined;
+      shaped.solution = solution;
       break;
     }
   }
@@ -1192,6 +1304,37 @@ function gateDecision(entries: readonly JournalEntry[]): {
     members: Array.isArray(value?.members)
       ? value.members.filter((entry): entry is string => typeof entry === "string")
       : undefined,
+    automatic: auto !== undefined,
+  };
+}
+
+/** The classification gate's recorded answer (manual or auto-approved). */
+function classificationGateDecision(entries: readonly JournalEntry[]): {
+  action?: string;
+  type?: string;
+  requestedOutputs?: { title: string; ask: string }[];
+  automatic: boolean;
+} {
+  const auto = entries.find((entry) =>
+    entry.key.includes("/confirm-classification/confirm-classification-auto::result"),
+  );
+  const manual = entries.find(
+    (entry) =>
+      entry.kind === "gate" &&
+      entry.key.includes("/confirm-classification") &&
+      entry.key.endsWith("::response"),
+  );
+  const raw = manual?.value ?? auto?.value;
+  if (typeof raw === "string") {
+    return { action: raw, automatic: auto !== undefined };
+  }
+  const value = object(raw);
+  return {
+    action: typeof value?.action === "string" ? value.action : undefined,
+    ...(typeof value?.type === "string" ? { type: value.type } : {}),
+    ...(value?.requestedOutputs !== undefined
+      ? { requestedOutputs: requestedOutputViews(value.requestedOutputs) }
+      : {}),
     automatic: auto !== undefined,
   };
 }
@@ -1580,15 +1723,28 @@ function base(
 function pendingGate(
   checkpoint: WorkflowCheckpoint | undefined,
   panel: readonly PanelMemberView[],
+  classification?: {
+    readonly primary: { type: string; reason: string };
+    readonly alternative: { type: string; reason: string };
+    readonly requestedOutputs: readonly { title: string; ask: string }[];
+  },
 ): PendingGateView | undefined {
   const gate = checkpoint?.pendingGates[0];
   if (!gate) return undefined;
   const metadata = object(gate.metadata);
+  // The catalog's type list ships in the compiled gate metadata, so the
+  // dashboard can offer every option without loading the bundle.
+  const typeOptions = Array.isArray(metadata?.typeOptions)
+    ? metadata.typeOptions.filter((entry): entry is string => typeof entry === "string")
+    : [];
   return {
     gateKey: gate.gateKey,
     ...(typeof metadata?.title === "string" ? { title: metadata.title } : {}),
     ...(gate.prompt ? { prompt: gate.prompt } : {}),
     ...(stageForPath(gate.path) === "confirm-panel" ? { members: panel } : {}),
+    ...(gate.gateKey === "confirm-classification" && classification
+      ? { classification: { ...classification, typeOptions } }
+      : {}),
   };
 }
 
@@ -1599,12 +1755,43 @@ export function buildJobDetail(input: MapperInput): JobDetail {
   const entries = checkpoint?.journal ?? [];
   const stageTimings = timings(events);
 
-  const processorOutput =
-    processor(artifact(artifacts, "processorOutput")) ??
+  // Latest-wins: on split-classification bundles the merge re-writes the
+  // structured input with type/cotSteps/requestedOutputs filled in.
+  let processorOutput =
+    processor(artifactLatest(artifacts, "processorOutput")) ??
     processor(journalAgent(entries, (key) =>
       key.includes("/process-input") &&
       /\/process-input(?:-execute)?::result$/.test(key)
     ));
+  const classificationValue = classificationOptions(
+    artifact(artifacts, "taskClassification") ??
+      journalAgent(entries, (key) =>
+        key.includes("/classify-input") &&
+        /\/classify-input(?:-execute)?::result$/.test(key)
+      ),
+  );
+  const classificationDecision = classificationGateDecision(entries);
+  // The gate's revision is applied to run state only (never re-persisted as
+  // an artifact), so the dashboard mirrors it onto the structured-input view.
+  if (
+    processorOutput &&
+    classificationDecision.action === "revise" &&
+    (classificationDecision.type !== undefined ||
+      classificationDecision.requestedOutputs !== undefined)
+  ) {
+    const { requestedOutputs: existingRequested, ...rest } = processorOutput;
+    const revisedRequested =
+      classificationDecision.requestedOutputs ?? existingRequested;
+    processorOutput = {
+      ...rest,
+      ...(classificationDecision.type !== undefined
+        ? { type: classificationDecision.type }
+        : {}),
+      ...(revisedRequested && revisedRequested.length > 0
+        ? { requestedOutputs: revisedRequested }
+        : {}),
+    };
+  }
   const usefulFilesView = annotatedFiles(
     artifactLatest(artifacts, "usefulFiles") ??
       journalStateField(
@@ -1776,9 +1963,51 @@ export function buildJobDetail(input: MapperInput): JobDetail {
       /\/synthesize-proposal(?:-execute)?::result$/.test(key)
     ));
 
-  const gateResolvedAt = [...events]
-    .reverse()
-    .find((event) => event.type === "gate:resolved")?.at;
+  // Per-gate resolution times (runs may carry both the classification and
+  // the panel gate); events without a key fall back to any resolution.
+  const gateResolvedAtFor = (key: string): number | undefined =>
+    [...events]
+      .reverse()
+      .find(
+        (event) =>
+          event.type === "gate:resolved" &&
+          ((event as { gateKey?: unknown }).gateKey === key ||
+            (event as { gateKey?: unknown }).gateKey === undefined),
+      )?.at;
+  const gateResolvedAt = gateResolvedAtFor("confirm-panel");
+
+  const classificationPending =
+    checkpoint?.status === "suspended" &&
+    checkpoint.pendingGates.some((gate) => gate.gateKey === "confirm-classification");
+  const classificationView: NonNullable<
+    Extract<StageView, { id: "process-input" }>["classification"]
+  > | undefined = classificationValue
+    ? {
+        primary: classificationValue.primary,
+        alternative: classificationValue.alternative,
+        requestedOutputs: classificationValue.requestedOutputs,
+        gate: classificationPending
+          ? { state: "pending" }
+          : classificationDecision.action === undefined
+            ? { state: "not-reached" }
+            : {
+                state: classificationDecision.automatic
+                  ? "auto-approved"
+                  : classificationDecision.action === "revise"
+                    ? "revised"
+                    : "approved",
+                chosenType:
+                  classificationDecision.type ?? classificationValue.primary.type,
+                ...(() => {
+                  const decidedAt =
+                    gateResolvedAtFor("confirm-classification") ??
+                    checkpoint?.updatedAt;
+                  return decidedAt !== undefined ? { decidedAt } : {};
+                })(),
+              },
+      }
+    : undefined;
+
   const confirmGate: ConfirmPanelStage["gate"] = checkpoint?.pendingGates.some(
     (candidate) => stageForPath(candidate.path) === "confirm-panel",
   )
@@ -1811,7 +2040,14 @@ export function buildJobDetail(input: MapperInput): JobDetail {
           : { state: "not-reached" };
 
   const direct = new Map<StageId, boolean>([
-    ["process-input", processorOutput !== undefined],
+    // On split-classification bundles the stage completes only once the
+    // classifier's decision has been merged in (type present) — the
+    // processor artifact alone means the classifier is still to run.
+    [
+      "process-input",
+      processorOutput !== undefined &&
+        (classificationValue === undefined || processorOutput.type !== undefined),
+    ],
     ["decompose-experts", expertsOutput !== undefined],
     ["select-panel", selectedPanel.length > 0],
     ["confirm-panel", confirmGate.state !== "not-reached" && confirmGate.state !== "pending"],
@@ -1826,7 +2062,11 @@ export function buildJobDetail(input: MapperInput): JobDetail {
     ["done", checkpoint?.status === "completed"],
   ]);
   const journalNodesFor = (id: StageId): readonly string[] =>
-    id === "decompose-experts" ? [id, ...DECOMPOSE_SUBNODES] : [id];
+    id === "decompose-experts"
+      ? [id, ...DECOMPOSE_SUBNODES]
+      : id === "process-input"
+        ? [id, ...PREPROCESS_SUBNODES]
+        : [id];
   const journalPresent = new Map<StageId, boolean>(
     STAGE_IDS.map((id) => [
       id,
@@ -2094,6 +2334,7 @@ export function buildJobDetail(input: MapperInput): JobDetail {
       id: "process-input",
       ...(processorOutput ? { output: processorOutput } : {}),
       ...(filePartition ? { files: filePartition } : {}),
+      ...(classificationView ? { classification: classificationView } : {}),
     },
     {
       ...decomposeBase,
@@ -2139,7 +2380,7 @@ export function buildJobDetail(input: MapperInput): JobDetail {
   const contentBundle = readContentBundle(input.jobDir);
   // The pending gate view, enriched with the record's auto-approve countdown
   // so the dashboard can render the progress bar (and its held state).
-  const pendingGateBase = pendingGate(checkpoint, selectedPanel);
+  const pendingGateBase = pendingGate(checkpoint, selectedPanel, classificationValue);
   const autoApprove = input.record.gateAutoApprove;
   const pendingGateView: PendingGateView | undefined = pendingGateBase
     ? {

@@ -91,15 +91,45 @@ export interface RequestedOutputView {
 }
 
 export interface ProcessorOutputView {
-  readonly type: string;
+  /**
+   * The decided submission type. Absent while the run is between
+   * preprocessing and classification (workflow >= 0.14.0 splits them); the
+   * classification merge writes it in.
+   */
+  readonly type?: string;
   readonly title: string;
   readonly question: string;
   readonly context: string;
   readonly attachments: readonly { readonly name: string; readonly note: string }[];
   readonly assumptions: readonly string[];
-  readonly cotSteps: number;
-  /** Explicitly requested deliverables; absent when the submission names none. */
+  /** Chain-step count; absent between preprocessing and classification. */
+  readonly cotSteps?: number;
+  /** Requested deliverables; absent when the submission names none. */
   readonly requestedOutputs?: readonly RequestedOutputView[];
+}
+
+/** One candidate reading of the submission offered by the classifier. */
+export interface ClassificationOptionView {
+  readonly type: string;
+  readonly reason: string;
+}
+
+/**
+ * The classification stage's record on the Process-input card: the two
+ * offered readings, the suggested asks, and how the confirmation gate was
+ * (or will be) resolved.
+ */
+export interface ClassificationStageView {
+  readonly primary: ClassificationOptionView;
+  readonly alternative: ClassificationOptionView;
+  /** The classifier's suggested asks (before any gate edit). */
+  readonly requestedOutputs: readonly RequestedOutputView[];
+  readonly gate: {
+    readonly state: GateState;
+    readonly decidedAt?: number;
+    /** The type the run proceeded with, once decided. */
+    readonly chosenType?: string;
+  };
 }
 
 /** One attached file with the processor's relation label ("NA" = useless). */
@@ -201,6 +231,7 @@ export const OUTPUT_SHAPES = [
   "interpretation",
   "survey",
   "explanation",
+  "solution",
 ] as const;
 export type OutputShape = (typeof OUTPUT_SHAPES)[number];
 
@@ -335,6 +366,34 @@ export interface ExplainOutputView {
   readonly connections: readonly string[];
 }
 
+export interface ObstacleCauseView {
+  readonly cause: string;
+  readonly rationale: string;
+}
+
+export interface PriorAttemptView {
+  readonly attempt: string;
+  readonly outcome: string;
+}
+
+export interface CandidateSolutionView {
+  readonly approach: string;
+  readonly mechanism: string;
+  readonly expectedEffect: string;
+  readonly risk: string;
+}
+
+/** solution — a diagnosis-and-fix for a concrete research obstacle. */
+export interface SolutionOutputView {
+  readonly problemFraming: string;
+  readonly diagnosis: readonly ObstacleCauseView[];
+  readonly priorAttempts: readonly PriorAttemptView[];
+  readonly candidateSolutions: readonly CandidateSolutionView[];
+  readonly recommendation: string;
+  readonly validationPlan: readonly string[];
+  readonly residualRisks: readonly string[];
+}
+
 /** A member's direct response to one explicitly requested output. */
 export interface RequestedSectionView {
   readonly title: string;
@@ -361,6 +420,7 @@ export interface BrainIdeaView {
   readonly interpretation?: InterpretOutputView;
   readonly survey?: SurveyOutputView;
   readonly explanation?: ExplainOutputView;
+  readonly solution?: SolutionOutputView;
   readonly requested?: readonly RequestedSectionView[];
   readonly cot: readonly string[];
   readonly novelty?: string;
@@ -521,6 +581,12 @@ export interface ProcessInputStage extends StageBase {
   readonly output?: ProcessorOutputView;
   /** Present once the file map has been partitioned (jobs with attachments). */
   readonly files?: FilePartitionView;
+  /**
+   * The classification record (workflow >= 0.14.0): the classifier's two
+   * offered readings plus the confirmation gate's state. Absent on runs from
+   * bundles whose processor still classifies inline.
+   */
+  readonly classification?: ClassificationStageView;
 }
 
 /** One sub-step of the split decompose pipeline, in execution order. */
@@ -559,7 +625,13 @@ export interface SelectPanelStage extends StageBase {
   readonly leavesAvailable?: number;
 }
 
-export type GateState = "not-reached" | "pending" | "approved" | "shrunk" | "auto-approved";
+export type GateState =
+  | "not-reached"
+  | "pending"
+  | "approved"
+  | "shrunk"
+  | "revised"
+  | "auto-approved";
 
 export interface ConfirmPanelStage extends StageBase {
   readonly id: "confirm-panel";
@@ -678,6 +750,15 @@ export interface PendingGateView {
   readonly prompt?: string;
   /** Panel shown for the confirm-panel gate. */
   readonly members?: readonly PanelMemberView[];
+  /** Choices shown for the confirm-classification gate. */
+  readonly classification?: {
+    readonly primary: ClassificationOptionView;
+    readonly alternative: ClassificationOptionView;
+    /** The classifier's suggested asks, editable at the gate. */
+    readonly requestedOutputs: readonly RequestedOutputView[];
+    /** Every type of the run's catalog, in disambiguation order. */
+    readonly typeOptions: readonly string[];
+  };
   /**
    * The server-side countdown to automatic approval: an unattended gate
    * approves itself as seated when `deadlineAt` passes. Any click inside the
@@ -1023,16 +1104,39 @@ export const PANEL_EDIT_LIMITS = {
   maxSubfields: 3,
 } as const;
 
+/**
+ * Bounds for gate-time classification edits (mirrors the artifact schema:
+ * at most 4 requested outputs, title >= 4 chars, ask >= 12 chars).
+ */
+export const CLASSIFICATION_EDIT_LIMITS = {
+  maxRequestedOutputs: 4,
+  minTitleChars: 4,
+  minAskChars: 12,
+} as const;
+
 export interface GateAnswerRequest {
   readonly gateKey: string;
-  readonly action: "approve" | "shrink";
+  /**
+   * "approve"/"shrink" answer the panel gate; "revise" answers the
+   * classification gate with a different type and/or edited asks.
+   */
+  readonly action: "approve" | "shrink" | "revise";
   /** For shrink: member ids to KEEP, in their existing order. */
   readonly members?: readonly string[];
   /**
-   * Custom seats to ADD alongside the kept ones (valid with either action).
-   * The confirmed panel — kept + added — must stay within PANEL_EDIT_LIMITS.
+   * Custom seats to ADD alongside the kept ones (valid with either panel
+   * action). The confirmed panel — kept + added — must stay within
+   * PANEL_EDIT_LIMITS.
    */
   readonly addedMembers?: readonly CustomSeatRequest[];
+  /** For revise: the catalog type to proceed with (omit to keep the primary). */
+  readonly type?: string;
+  /**
+   * For revise: the FULL replacement requested-output list (omit to keep the
+   * classifier's list; empty array clears it). Within
+   * CLASSIFICATION_EDIT_LIMITS.
+   */
+  readonly requestedOutputs?: readonly RequestedOutputView[];
 }
 
 export interface CancelJobResponse {
@@ -1061,6 +1165,13 @@ export interface TrashJobResponse {
 }
 
 export interface ContentRegistryStatus {
+  /**
+   * STRICT live connection verdict, re-verified on a short TTL: the registry
+   * answered its /health probe AND currently serves the configured bundle's
+   * index. Deliberately never a stale launch-time snapshot and never a
+   * fallback — a registry that cannot be verified right now reports false,
+   * so the UI shows disconnected rather than an old or unknown version.
+   */
   readonly running: boolean;
   readonly url?: string;
   readonly skills?: number;
@@ -1090,6 +1201,7 @@ export interface ContentRegistryStatus {
 export const READINESS_CHECK_IDS = [
   "registry",
   "llm",
+  "capabilities",
   "internet",
   "code",
   "slurm",

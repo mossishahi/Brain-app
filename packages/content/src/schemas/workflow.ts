@@ -220,8 +220,16 @@ export interface HumanGateNode {
       description: string;
       /** Data reference the action may edit. */
       edits?: string;
-      /** The only supported edit rule: items may be removed, never added. */
-      editRule?: "removeOnly";
+      /**
+       * The edit contract of the action:
+       * - "removeOnly": items of the edited collection may be removed, never
+       *   added (the panel gate; the host may additionally layer explicit
+       *   custom-seat additions on top).
+       * - "classification": the decision may override the edited input's
+       *   `type` (any type of the loaded catalog) and replace its
+       *   `requestedOutputs` (the classification gate).
+       */
+      editRule?: "removeOnly" | "classification";
     }>;
   };
   /** When true, an unattended runtime may auto-approve and continue. */
@@ -312,7 +320,7 @@ export const workflowNodeSchema: z.ZodType<WorkflowNode> = z.lazy(() =>
                     id: identifier,
                     description: z.string().min(1),
                     edits: dataRefSchema.optional(),
-                    editRule: z.literal("removeOnly").optional(),
+                    editRule: z.enum(["removeOnly", "classification"]).optional(),
                   })
                   .strict(),
               )
@@ -513,11 +521,30 @@ export const skillMetaSchema = z
     techniques: z.array(identifier).default([]),
     /** Executable capabilities the host must provide (from the capability catalog). */
     capabilities: z.array(identifier).default([]),
+    /**
+     * The subset of `capabilities` that is LOAD-BEARING for this role: the
+     * task must fail loudly (before the model is called) when one of these
+     * resolves unavailable on the deployment, instead of degrading with the
+     * catalog's whenUnavailable prose. Mark a capability required exactly
+     * when the role's job is impossible without it (the placer without
+     * taxonomy reads); leave enrichment capabilities (a member's web
+     * search) degradable.
+     */
+    requiredCapabilities: z.array(identifier).default([]),
     /** Artifact schema the structured output must satisfy (roles only). */
     output: z.string().min(1).optional(),
   })
   .strict()
   .superRefine((meta, ctx) => {
+    for (const name of meta.requiredCapabilities) {
+      if (!meta.capabilities.includes(name)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["requiredCapabilities"],
+          message: `required capability "${name}" is not among the skill's declared capabilities`,
+        });
+      }
+    }
     if (meta.kind === "role" && meta.output === undefined) {
       ctx.addIssue({ code: "custom", path: ["output"], message: "role skills must declare an output schema" });
     }

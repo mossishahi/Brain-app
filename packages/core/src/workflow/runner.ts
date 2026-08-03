@@ -152,15 +152,20 @@ export class WorkflowRunner {
 
   /**
    * Resumes a run from its persisted checkpoint, optionally answering
-   * pending human gates. Suspended, cancelled, and crashed ("running")
-   * checkpoints are resumable; completed/failed runs are not.
+   * pending human gates. Suspended, cancelled, credit-blocked, crashed
+   * ("running"), and FAILED checkpoints are all resumable: failures are
+   * never journaled, so replaying a failed run re-executes exactly the
+   * task that failed (a transient provider or subprocess error costs one
+   * retry, never the run's completed work). Only completed runs refuse —
+   * their result already stands. A run that failed at a terminal node with
+   * outcome "failure" deterministically reaches the same terminal again.
    */
   async resume(definition: WorkflowDefinition, runId: string, options: ResumeOptions = {}): Promise<RunResult> {
     const checkpoint = await this.checkpoints.load(runId);
     if (!checkpoint) {
       throw new WorkflowConfigError(`no checkpoint found for run "${runId}"`);
     }
-    if (checkpoint.status === "completed" || checkpoint.status === "failed") {
+    if (checkpoint.status === "completed") {
       throw new WorkflowConfigError(`run "${runId}" already finished with status "${checkpoint.status}"`);
     }
     if (checkpoint.workflowId !== definition.id) {

@@ -16,8 +16,9 @@ import { SeatCard } from "../common";
  * The auto-approve countdown: a thin warn-colored bar filling toward the
  * deadline, with a pause control. Any click inside the gate card (captured
  * by the card container) or on the pause button holds it permanently.
+ * Shared with the classification gate card (ProcessInputPanel).
  */
-function AutoApproveBar({
+export function AutoApproveBar({
   deadlineAt,
   totalMs,
   onPause,

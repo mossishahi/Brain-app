@@ -85,10 +85,17 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
   readonly executed: Array<{ role: string; agentId: string }> = [];
   private readonly cotSteps: number;
   private readonly paperType: string;
+  private readonly alternativeType: string;
 
   constructor(options: OfflineExecutorOptions = {}) {
     this.cotSteps = options.cotSteps ?? 3;
     this.paperType = paperTypeOf(options.inputTypes);
+    // The classifier's second option must be a different catalog type; any
+    // deterministic pick works offline (first non-paper type in order).
+    this.alternativeType =
+      Object.keys(options.inputTypes?.types ?? {}).find(
+        (name) => name !== this.paperType,
+      ) ?? "unverified claim";
   }
 
   private developedOutput(label: string): JsonObject {
@@ -151,6 +158,58 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
             },
           ],
           files,
+        };
+        break;
+      }
+      case "classifier": {
+        // Deterministic classification mirroring the offline processor's
+        // paper-shaped reading, with the same single explicit ask so every
+        // offline run exercises the requested-output contract end to end.
+        output = {
+          primary: {
+            type: this.paperType,
+            reason:
+              "Offline deterministic classification: the residual paper-shaped reading of the submission.",
+          },
+          alternative: {
+            type: this.alternativeType,
+            reason:
+              "Offline deterministic runner-up: the strongest other reading a careful reader could take.",
+          },
+          cotSteps: this.cotSteps,
+          requestedOutputs: [
+            {
+              title: "Submitter takeaway",
+              ask: "State, in direct address to the submitter, the single most decision-relevant takeaway of this treatment.",
+            },
+          ],
+          embeddingInput: {
+            title: "Offline deterministic study of graph-based representation learning",
+            abstract:
+              "This work studies how graph-based machine learning methods recover useful low-dimensional structure from high-dimensional observations. " +
+              "It examines the construction of neighborhood graphs, the optimization objectives that align learned representations with the underlying data geometry, and the failure modes that arise when spurious connections contaminate the graph. " +
+              "A successful outcome is a representation whose pairwise distances faithfully reflect the true relationships in the data.",
+            facets: [
+              {
+                name: "graph representation learning",
+                statement:
+                  "Graph representation learning studies how to encode nodes, edges, and whole graphs into vector spaces that preserve structural and semantic relationships for downstream prediction tasks.",
+                relevance: 0.9,
+              },
+              {
+                name: "dimensionality reduction",
+                statement:
+                  "Dimensionality reduction maps high-dimensional data into low-dimensional spaces while preserving the relationships that matter, trading off local neighborhood fidelity against global structure.",
+                relevance: 0.7,
+              },
+              {
+                name: "mathematical optimization",
+                statement:
+                  "Mathematical optimization studies algorithms that minimize or maximize objective functions under constraints, including the convergence behavior of first-order methods on non-convex landscapes.",
+                relevance: 0.5,
+              },
+            ],
+          },
         };
         break;
       }

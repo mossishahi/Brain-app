@@ -23,10 +23,14 @@ export interface OrchestrationCommandOptions {
   readonly settings: ServerSettings;
   readonly gate?: {
     readonly gateKey: string;
-    readonly action: "approve" | "shrink";
+    readonly action: "approve" | "shrink" | "revise";
     readonly members?: readonly string[];
     /** Custom seats added at confirmation; forces the JSON gate transport. */
     readonly addedMembers?: readonly CustomSeatRequest[];
+    /** Classification revision: the type to proceed with (JSON transport). */
+    readonly type?: string;
+    /** Classification revision: the replacement asks (JSON transport). */
+    readonly requestedOutputs?: readonly { title: string; ask: string }[];
   };
 }
 
@@ -94,9 +98,13 @@ export function buildOrchestrationCommand(
   if (options.settings.llm.provider === "offline") args.push("--offline");
   if (options.settings.panelConfirmation === "auto") args.push("--auto-approve");
   if (options.gate) {
-    if (options.gate.addedMembers && options.gate.addedMembers.length > 0) {
-      // Custom seats do not fit the compact key=action[:ids] syntax; the
-      // JSON transport carries the full response.
+    const needsJson =
+      (options.gate.addedMembers && options.gate.addedMembers.length > 0) ||
+      options.gate.type !== undefined ||
+      options.gate.requestedOutputs !== undefined;
+    if (needsJson) {
+      // Custom seats and classification revisions do not fit the compact
+      // key=action[:ids] syntax; the JSON transport carries the full response.
       args.push(
         "--gate-json",
         shellQuote(
@@ -104,7 +112,13 @@ export function buildOrchestrationCommand(
             gateKey: options.gate.gateKey,
             action: options.gate.action,
             ...(options.gate.members ? { members: options.gate.members } : {}),
-            addedMembers: options.gate.addedMembers,
+            ...(options.gate.addedMembers && options.gate.addedMembers.length > 0
+              ? { addedMembers: options.gate.addedMembers }
+              : {}),
+            ...(options.gate.type !== undefined ? { type: options.gate.type } : {}),
+            ...(options.gate.requestedOutputs !== undefined
+              ? { requestedOutputs: options.gate.requestedOutputs }
+              : {}),
           }),
         ),
       );

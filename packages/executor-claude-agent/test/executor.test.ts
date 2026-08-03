@@ -672,6 +672,68 @@ test("returns a normalized error when Agent SDK execution fails", async () => {
   );
 });
 
+test("a crashed Claude Code subprocess is retried in a fresh session before failing", async () => {
+  // The SDK surfaces a nonzero subprocess exit as a thrown error whose
+  // message can carry no reason at all (empty stderr): transient
+  // infrastructure, retried without consuming validation attempts.
+  let calls = 0;
+  const queryFn: ClaudeAgentQueryFn = (input) => ({
+    async *[Symbol.asyncIterator]() {
+      calls += 1;
+      if (calls === 1) {
+        throw new Error("Claude Code process exited with code 1");
+      }
+      yield {
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: JSON.stringify({ answer: "recovered" }),
+        structured_output: { answer: "recovered" },
+        usage: { input_tokens: 3, output_tokens: 2 },
+      };
+      void input;
+    },
+  });
+  const progressKinds: string[] = [];
+  const executor = new ClaudeAgentExecutor({
+    token: "setup-token-secret",
+    queryFn,
+  });
+  const result = await executor.execute(structuredTask, {
+    runId: "run-1",
+    nodePath: "root/brain",
+    reportProgress: (progress) => progressKinds.push(progress.kind),
+  });
+  assert.equal(result.status, "ok");
+  assert.deepEqual(result.status === "ok" && result.output, { answer: "recovered" });
+  assert.equal(calls, 2, "the crashed attempt restarts once");
+  assert.ok(progressKinds.includes("retry"), "the restart is reported as a retry");
+});
+
+test("a subprocess that keeps crashing fails after the bounded retries", async () => {
+  let calls = 0;
+  const executor = new ClaudeAgentExecutor({
+    token: "setup-token-secret",
+    queryFn: () => ({
+      async *[Symbol.asyncIterator]() {
+        calls += 1;
+        throw new Error("Claude Code process terminated by signal SIGKILL");
+        yield undefined; // makes this a generator; never reached
+      },
+    }),
+  });
+  const result = await executor.execute(structuredTask, {
+    runId: "run-1",
+    nodePath: "root/brain",
+  });
+  assert.equal(result.status, "error");
+  assert.match(
+    result.status === "error" ? result.error.message : "",
+    /terminated by signal/,
+  );
+  assert.equal(calls, 3, "one attempt plus two crash retries");
+});
+
 test("pre-aborted execution propagates AbortError", async () => {
   const controller = new AbortController();
   controller.abort("stop");

@@ -115,28 +115,33 @@ test("manual gate suspends; resume across a fresh runtime instance completes fro
       ...testTaxonomy(root),
       bundle: registryBundle,
     });
-    const suspended = await first.run({
+    let result = await first.run({
       runId,
       submission: { prompt: "A topic that pauses at the panel gate", attachments: [] },
     });
-    assert.equal(suspended.status, "suspended");
-    const gateKey =
-      suspended.status === "suspended" ? suspended.pendingGates[0]!.gateKey : "";
-    assert.ok(gateKey.length > 0);
+    assert.equal(result.status, "suspended");
 
-    // Fresh instance simulates a process restart: state must come from disk.
-    const second = buildRuntime({
-      providerConfig: { provider: "offline" },
-      checkpoints: new FsCheckpointStore(root),
-      artifacts: new FsArtifactStore(root, runId),
-      autoApproveGates: false,
-      ...testTaxonomy(root),
-      bundle: registryBundle,
-    });
-    const finished = await second.resume(runId, {
-      responses: { [gateKey]: { action: "approve" } },
-    });
-    assert.equal(finished.status, "completed");
+    // Approve every gate the bundle carries (0.14.0 adds the classification
+    // gate before the panel gate), each time across a FRESH runtime instance
+    // to simulate a process restart: state must come from disk.
+    let resumes = 0;
+    while (result.status === "suspended") {
+      assert.ok((resumes += 1) <= 3, "unexpected number of gates");
+      const gateKey = result.pendingGates[0]!.gateKey;
+      assert.ok(gateKey.length > 0);
+      const next = buildRuntime({
+        providerConfig: { provider: "offline" },
+        checkpoints: new FsCheckpointStore(root),
+        artifacts: new FsArtifactStore(root, runId),
+        autoApproveGates: false,
+        ...testTaxonomy(root),
+        bundle: registryBundle,
+      });
+      result = await next.resume(runId, {
+        responses: { [gateKey]: { action: "approve" } },
+      });
+    }
+    assert.equal(result.status, "completed");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -168,11 +173,22 @@ test("gate shrink action reduces the seated panel before the first pass", async 
       ...testTaxonomy(root),
       bundle: registryBundle,
     });
-    const suspended = await runtime.run({
+    let suspended = await runtime.run({
       runId,
       submission: { prompt: "Shrink the panel to two members", attachments: [] },
     });
     assert.equal(suspended.status, "suspended");
+    // Split-classification bundles (>= 0.14.0) pause at the classification
+    // gate first; approve it to reach the panel gate this test targets.
+    if (
+      suspended.status === "suspended" &&
+      suspended.pendingGates[0]!.gateKey === "confirm-classification"
+    ) {
+      suspended = await runtime.resume(runId, {
+        responses: { "confirm-classification": { action: "approve" } },
+      });
+      assert.equal(suspended.status, "suspended");
+    }
     const gateKey =
       suspended.status === "suspended" ? suspended.pendingGates[0]!.gateKey : "";
     const finished = await runtime.resume(runId, {
@@ -212,10 +228,24 @@ test("an explicit gate answer wins over --auto-approve on resume", () => {
       { encoding: "utf8" },
     );
     assert.equal(started.status, 0, started.stderr);
-    const checkpoint = JSON.parse(
+    let checkpoint = JSON.parse(
       readFileSync(join(root, runId, "checkpoint.json"), "utf8"),
     ) as { status: string; pendingGates: Array<{ gateKey: string }> };
     assert.equal(checkpoint.status, "suspended");
+    // Split-classification bundles pause at the classification gate first;
+    // approve it explicitly to reach the panel gate this test targets.
+    if (checkpoint.pendingGates[0]!.gateKey === "confirm-classification") {
+      const approved = spawnSync(
+        process.execPath,
+        [cli.pathname, "resume", ...common, "--gate", "confirm-classification=approve"],
+        { encoding: "utf8" },
+      );
+      assert.equal(approved.status, 0, approved.stderr);
+      checkpoint = JSON.parse(
+        readFileSync(join(root, runId, "checkpoint.json"), "utf8"),
+      ) as { status: string; pendingGates: Array<{ gateKey: string }> };
+      assert.equal(checkpoint.status, "suspended");
+    }
     const gateKey = checkpoint.pendingGates[0]!.gateKey;
 
     const resumed = spawnSync(
@@ -268,18 +298,32 @@ test("run and resume accept content-dir and append JSONL events", () => {
       { encoding: "utf8" },
     );
     assert.equal(started.status, 0, started.stderr);
-    const checkpoint = JSON.parse(
+    let checkpoint = JSON.parse(
       readFileSync(join(root, runId, "checkpoint.json"), "utf8"),
     ) as { status: string; pendingGates: Array<{ gateKey: string }> };
     assert.equal(checkpoint.status, "suspended");
     const before = readFileSync(eventsFile, "utf8").trim().split("\n").length;
 
-    const resumed = spawnSync(
+    // Approve every gate the bundle carries (one on pre-0.14.0 bundles, the
+    // classification gate first on split-classification bundles).
+    let resumed = spawnSync(
       process.execPath,
       [cli.pathname, "resume", ...common, "--gate", `${checkpoint.pendingGates[0]!.gateKey}=approve`],
       { encoding: "utf8" },
     );
     assert.equal(resumed.status, 0, resumed.stderr);
+    for (let round = 0; round < 2; round += 1) {
+      checkpoint = JSON.parse(
+        readFileSync(join(root, runId, "checkpoint.json"), "utf8"),
+      ) as { status: string; pendingGates: Array<{ gateKey: string }> };
+      if (checkpoint.status !== "suspended") break;
+      resumed = spawnSync(
+        process.execPath,
+        [cli.pathname, "resume", ...common, "--gate", `${checkpoint.pendingGates[0]!.gateKey}=approve`],
+        { encoding: "utf8" },
+      );
+      assert.equal(resumed.status, 0, resumed.stderr);
+    }
     const lines = readFileSync(eventsFile, "utf8").trim().split("\n");
     assert.ok(lines.length > before);
     const events = lines.map((line) => JSON.parse(line) as { type: string });

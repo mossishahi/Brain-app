@@ -132,6 +132,17 @@ export function GlobeIcon({ size = 16 }: IconProps) {
   );
 }
 
+/** Agent capabilities: a power plug — the tools agents plug into. */
+export function PlugIcon({ size = 16 }: IconProps) {
+  return (
+    <svg {...frame(size)}>
+      <path d="M9 3v5M15 3v5" />
+      <path d="M6.5 8h11v3.5a5.5 5.5 0 0 1-5.5 5.5a5.5 5.5 0 0 1-5.5-5.5Z" />
+      <path d="M12 17v4" />
+    </svg>
+  );
+}
+
 /** SLURM scheduler: stacked queue layers. */
 export function QueueIcon({ size = 16 }: IconProps) {
   return (

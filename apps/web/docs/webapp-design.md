@@ -292,12 +292,17 @@ directory path.
 ### Failure & cancellation
 
 A failed stage shows the error string in a `--bad` bordered box inside its panel; downstream
-stages stay pending. A cancelled job freezes every panel as-is with a "cancelled" banner under
-the header. An interrupted job (files present, process gone — SLURM timeout, node failure, power
-cut) shows an "Interrupted" banner with a **Resume from checkpoint** button; its landing-page
-card shows a resume glyph next to the X, and its status line reads "interrupted · resumable from
-checkpoint". The scheduler also resubmits interrupted jobs automatically (Settings → Interrupted
-jobs, default on) and pauses after three resubmissions without checkpoint progress.
+stages stay pending. A failed job additionally shows a "Failed" banner with a **Retry from
+checkpoint** button (`POST /api/jobs/:id/retry`): task failures are never journaled, so the
+retry resubmits the same deterministic resume command, replays the completed work, and re-runs
+only the task that failed. Jobs that failed before their first checkpoint are refused with a
+hint to submit a new job. A cancelled job freezes every panel as-is with a "cancelled" banner
+under the header. An interrupted job (files present, process gone — SLURM timeout, node failure,
+power cut) shows an "Interrupted" banner with a **Resume from checkpoint** button; its
+landing-page card shows a resume glyph next to the X, and its status line reads "interrupted ·
+resumable from checkpoint". The scheduler also resubmits interrupted jobs automatically
+(Settings → Interrupted jobs, default on) and pauses after three resubmissions without
+checkpoint progress.
 
 A credit-blocked job keeps its interrupted stage selected with a warning badge and live countdown:
 "Credit blocked · resumes in 1h 12m at 17:30". The dashboard offers `Cancel auto-resume`, followed

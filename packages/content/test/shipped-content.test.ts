@@ -32,15 +32,20 @@ test("workflow phases appear in the canonical order", () => {
   const bundle = freshBundle();
   const root = bundle.workflows["brainstorm"]!.root as SequenceNode;
   assert.equal(root.kind, "sequence");
-  // The code-annotation pass ships from workflow 0.11.0 and the woven
-  // interdisciplinary seat from 0.12.0; earlier published bundles stay valid
-  // without them, so the expected spine is presence-aware.
+  // The code-annotation pass ships from workflow 0.11.0, the woven
+  // interdisciplinary seat from 0.12.0, and the split classification stage
+  // (classifier + merge + confirmation gate) from 0.14.0; earlier published
+  // bundles stay valid without them, so the expected spine is presence-aware.
   const hasCodeAnnotation = root.steps.some((step) => step.id === "partition-files-code");
   const hasWeave = root.steps.some((step) => step.id === "weave-panel");
+  const hasClassify = root.steps.some((step) => step.id === "classify-input");
   assert.deepEqual(
     root.steps.map((s) => s.id),
     [
       "process-input",
+      ...(hasClassify
+        ? ["classify-input", "apply-classification", "confirm-classification"]
+        : []),
       "partition-files-useful",
       "partition-files-ignored",
       ...(hasCodeAnnotation ? ["partition-files-code", "maybe-annotate-code"] : []),
@@ -60,6 +65,52 @@ test("workflow phases appear in the canonical order", () => {
     ],
   );
   assert.equal(root.steps[root.steps.length - 1]!.kind, "terminal");
+});
+
+test("the classification stage decides the type and gates before any panel cost", () => {
+  const bundle = freshBundle();
+  const root = bundle.workflows["brainstorm"]!.root as SequenceNode;
+  if (!root.steps.some((step) => step.id === "classify-input")) {
+    return; // pre-split published bundle: the processor still classifies inline
+  }
+
+  // The classifier reasons over the structured input and the attachment
+  // relation map only — no capabilities, and the catalog pins its options.
+  const classifier = findAgent(root, "classify-input");
+  assert.equal(classifier.skill, "classifier");
+  assert.deepEqual(classifier.bind?.["input"], { ref: "input", omit: ["files"] });
+  assert.equal(classifier.bind?.["files"], "input.files");
+  assert.equal(classifier.bind?.["typeOptions"], "catalog.inputTypes.types");
+  assert.deepEqual(classifier.output, {
+    key: "classification",
+    schema: "taskClassification",
+  });
+
+  // The deterministic merge REPLACES the structured input, so every later
+  // task reads one merged record.
+  const merge = findActivity(root, "apply-classification");
+  assert.equal(merge.handler, "classification.apply");
+  assert.deepEqual(merge.bind, {
+    input: "input",
+    classification: "classification",
+    maxFiles: "params.maxAttachmentFiles",
+  });
+  assert.deepEqual(merge.output, { key: "input", schema: "processorOutput" });
+
+  // The confirmation gate is skippable (countdown auto-approval) and its
+  // revise action edits the merged input under the classification rule.
+  const gate = findNode(root, "confirm-classification");
+  assert.equal(gate.kind, "humanGate");
+  if (gate.kind !== "humanGate") return;
+  assert.equal(gate.skippable, true);
+  const revise = gate.gate.actions.find((action) => action.id === "revise");
+  assert.ok(revise, "the gate offers a revise action");
+  assert.equal(revise!.editRule, "classification");
+  assert.equal(revise!.edits, "input");
+
+  // The slimmed processor no longer receives the type catalog.
+  const processor = findAgent(root, "process-input");
+  assert.equal(processor.bind?.["typeOptions"], undefined);
 });
 
 test("the code-annotation pass is gated on code files and folds summaries into the shared map", () => {
@@ -214,9 +265,21 @@ test("the decomposer split: pool with provenance, deterministic matching, placer
   assert.deepEqual(bundle.skills["pool-builder"]!.meta.vars.slice().sort(), ["files", "input"]);
 
   // Deterministic matching: one server round-trip per member, no model call.
+  // Bundles with the split classification stage (0.14.0+) additionally bind
+  // the classification, whose facets warm the semantic lane's regions.
   const matcher = findActivity(root, "match-taxonomy");
   assert.equal(matcher.handler, "taxonomy.match");
-  assert.deepEqual(matcher.bind, { pool: "pool", maxMembers: "params.maxPoolMembers" });
+  const hasClassification = root.steps.some((step) => step.id === "classify-input");
+  assert.deepEqual(
+    matcher.bind,
+    hasClassification
+      ? {
+          pool: "pool",
+          classification: "classification",
+          maxMembers: "params.maxPoolMembers",
+        }
+      : { pool: "pool", maxMembers: "params.maxPoolMembers" },
+  );
   assert.deepEqual(matcher.output, { key: "poolMatches", schema: "poolMatches" });
   const matchHandler = bundle.activities.handlers["taxonomy.match"]!;
   assert.equal(matchHandler.deterministic, true);
@@ -458,9 +521,11 @@ test("skills split into the expected roles and 6 techniques, with clean prompt b
     [
       "brain",
       "chair",
-      // The code annotator ships with the code-annotation pass (0.11.0+) and
+      // The code annotator ships with the code-annotation pass (0.11.0+),
       // the interdisciplinary seat's commenting role with the woven panel
-      // (0.12.0+); earlier published bundles carry the original roles.
+      // (0.12.0+), and the classifier with the split classification stage
+      // (0.14.0+); earlier published bundles carry the original roles.
+      ...(bundle.skills["classifier"] ? ["classifier"] : []),
       ...(bundle.skills["code-annotator"] ? ["code-annotator"] : []),
       "commentor",
       "integrator",

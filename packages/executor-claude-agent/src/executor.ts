@@ -28,6 +28,7 @@ import {
   type JsonValue,
   type ModelMessage,
   type SystemPrompt,
+  type TaxonomyAccess,
   type TokenUsage,
   type ToolCallDetail,
 } from "@brainstorm-agentic/core";
@@ -61,6 +62,14 @@ export interface ClaudeAgentExecutorConfig {
   readonly cwd?: string;
   /** Job-owned attachment directories the built-in Read/Glob/Grep may access. */
   readonly attachmentRoots?: readonly string[];
+  /**
+   * Shared-taxonomy access. The Claude Agent SDK has no built-in taxonomy
+   * tool, so when this is set the taxonomy_tree / taxonomy_resolve READ tools
+   * are delivered as in-process MCP tools (like the stepwise chain tool) to
+   * any task whose skill declares the `taxonomy-access` capability — without
+   * it the placer is toolless and cannot satisfy taxonomy-access.
+   */
+  readonly taxonomy?: TaxonomyAccess;
   readonly maxTurns?: number;
   readonly maxBudgetUsd?: number;
   readonly effort?: "low" | "medium" | "high" | "xhigh" | "max";
@@ -146,6 +155,13 @@ const KNOWN_BUILTIN_TOOLS = [
 
 /** Route trait that turns on reasoning-trace capture for a task. */
 const TRACE_TRAIT = "extended-reasoning";
+/**
+ * How many times one task restarts after its Claude Code subprocess dies
+ * (nonzero exit, kill signal, or spawn failure) before the failure is real.
+ * Separate from validation attempts: a crashed session produced no output
+ * to validate.
+ */
+const MAX_CRASH_RETRIES = 2;
 /** In-process MCP server name carrying the stepwise chain tool. */
 const STEPWISE_SERVER = "steps";
 
@@ -270,6 +286,105 @@ function stepwiseServer(
               },
             ],
           };
+        },
+      ),
+    ],
+  });
+}
+
+/** In-process MCP server name carrying the shared-taxonomy read tools. */
+const TAXONOMY_SERVER = "taxonomy";
+
+/** Full Claude Code tool names for the in-process taxonomy MCP server. */
+function taxonomySdkToolNames(): readonly string[] {
+  return [
+    `mcp__${TAXONOMY_SERVER}__taxonomy_tree`,
+    `mcp__${TAXONOMY_SERVER}__taxonomy_resolve`,
+  ];
+}
+
+/** True when the task's skill declared the taxonomy-access capability. */
+function taskUsesTaxonomy(task: AgentTask): boolean {
+  return (
+    Array.isArray(task.allowedCapabilities) &&
+    task.allowedCapabilities.includes("taxonomy-access")
+  );
+}
+
+/**
+ * In-process MCP server exposing the shared-taxonomy READ tools
+ * (taxonomy_tree / taxonomy_resolve) backed by the injected TaxonomyAccess.
+ * The Claude Agent SDK ships no taxonomy built-in, so — exactly like the
+ * stepwise chain tool — these run in this process and call the shared store.
+ * Reads only: recording placement decisions stays a deterministic runtime
+ * step (taxonomy.suggest), never an agent tool.
+ */
+function taxonomyServer(
+  taxonomy: TaxonomyAccess,
+): ReturnType<typeof createSdkMcpServer> {
+  const errorResult = (error: unknown) => ({
+    content: [
+      {
+        type: "text" as const,
+        text: JSON.stringify({
+          ok: false,
+          message: error instanceof Error ? error.message : String(error),
+        }),
+      },
+    ],
+    isError: true as const,
+  });
+  return createSdkMcpServer({
+    name: TAXONOMY_SERVER,
+    version: "1.0.0",
+    tools: [
+      sdkTool(
+        "taxonomy_tree",
+        "Fetch the complete CURRENT shared scientific taxonomy as a names-only " +
+          "indented outline (no indent = domain, one = field, two = subfield, " +
+          "three = topic), stamped with the live revision it was read at. " +
+          "Optionally pass `root` (an exact node name) to fetch one branch. " +
+          "Read it in full before deciding any placement.",
+        { root: z.string().optional() },
+        async (args) => {
+          try {
+            const root =
+              typeof args.root === "string" && args.root.trim() !== ""
+                ? args.root
+                : undefined;
+            return {
+              content: [
+                { type: "text" as const, text: JSON.stringify(await taxonomy.tree(root)) },
+              ],
+            };
+          } catch (error) {
+            return errorResult(error);
+          }
+        },
+      ),
+      sdkTool(
+        "taxonomy_resolve",
+        "Resolve one field name against the shared taxonomy at its latest " +
+          "revision. Returns the exact position when the name (or a curated " +
+          "alias) exists, otherwise NA with candidate node names. Use it to " +
+          "check whether a field you are about to place already exists under " +
+          "another spelling.",
+        {
+          query: z.string().min(1),
+          optionLimit: z.number().int().min(1).max(100).optional(),
+        },
+        async (args) => {
+          try {
+            const result = await taxonomy.resolve(
+              args.query,
+              typeof args.optionLimit === "number" ? args.optionLimit : undefined,
+            );
+            return {
+              content: [{ type: "text" as const, text: JSON.stringify(result) }],
+            };
+          } catch (error) {
+            return errorResult(error);
+          }
         },
       ),
     ],
@@ -963,10 +1078,15 @@ function queryOptions(
   capture: TraceCapture,
 ): UnknownRecord {
   const builtinTools = allowedTools(task);
-  const tools =
-    capture.stepwise !== undefined
-      ? [...builtinTools, stepwiseSdkToolName(capture.stepwise.spec)]
-      : builtinTools;
+  const wantsTaxonomy =
+    config.taxonomy !== undefined && taskUsesTaxonomy(task);
+  const tools = [
+    ...builtinTools,
+    ...(capture.stepwise !== undefined
+      ? [stepwiseSdkToolName(capture.stepwise.spec)]
+      : []),
+    ...(wantsTaxonomy ? taxonomySdkToolNames() : []),
+  ];
   const disallowedTools = KNOWN_BUILTIN_TOOLS.filter(
     (name) => !tools.includes(name),
   );
@@ -998,10 +1118,16 @@ function queryOptions(
     env: sdkEnvironment(config.token, config.env),
     hooks: fileAccessHooks(config),
   };
-  if (capture.stepwise !== undefined) {
-    options.mcpServers = {
-      [STEPWISE_SERVER]: stepwiseServer(capture.stepwise.spec, capture),
-    };
+  const mcpServers: UnknownRecord = {
+    ...(capture.stepwise !== undefined
+      ? { [STEPWISE_SERVER]: stepwiseServer(capture.stepwise.spec, capture) }
+      : {}),
+    ...(wantsTaxonomy
+      ? { [TAXONOMY_SERVER]: taxonomyServer(config.taxonomy!) }
+      : {}),
+  };
+  if (Object.keys(mcpServers).length > 0) {
+    options.mcpServers = mcpServers;
   }
   if ((config.attachmentRoots?.length ?? 0) > 0) {
     options.additionalDirectories = [...config.attachmentRoots!];
@@ -1211,6 +1337,7 @@ export class ClaudeAgentExecutor implements AgentExecutor {
     let rejectedOutput: JsonValue | undefined;
     let usage = emptyUsage();
     let nativeStructuredOutput = true;
+    let crashRetries = 0;
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       const workspace = taskWorkspace(this.config, task, context, attempt);
       // Fresh per-attempt trace state: attempts run in fresh sessions, so
@@ -1385,6 +1512,26 @@ export class ClaudeAgentExecutor implements AgentExecutor {
             kind: "validation",
             message:
               "Native structured output exhausted; retrying with validated raw JSON",
+          });
+          continue;
+        }
+        // A crashed or unspawnable Claude Code subprocess (it can die with an
+        // empty stderr — the SDK's exit error then carries no reason at all)
+        // is transient infrastructure, not a semantic task failure: retry a
+        // bounded number of times in a fresh session and sandbox before
+        // giving up, so one silent process death cannot sink a long run.
+        // Crash retries consume no validation attempts.
+        if (
+          /Claude Code process (?:exited with code \d+|terminated by signal \w+)|Failed to spawn Claude Code process/.test(
+            message,
+          ) &&
+          crashRetries < MAX_CRASH_RETRIES
+        ) {
+          crashRetries += 1;
+          attempt -= 1;
+          progress(context, {
+            kind: "retry",
+            message: `Claude Code process crashed; restarting the task, retry ${crashRetries}/${MAX_CRASH_RETRIES}`,
           });
           continue;
         }

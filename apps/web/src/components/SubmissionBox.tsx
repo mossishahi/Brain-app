@@ -400,21 +400,31 @@ export function SubmissionBox({
         if (!live) return;
         const endpoint =
           health.contentRegistry.url ?? settings?.contentRegistry.url;
-        setRegistryConnected(health.contentRegistry.running);
+        const registry = health.contentRegistry;
+        // Connected is strict: the server verified the registry live AND
+        // resolved the bundle version new runs would use right now. A
+        // reachable-but-unresolvable registry shows as disconnected — never
+        // as a connection to an unknown or old version.
+        const verified =
+          registry.running && registry.effectiveVersion !== undefined;
+        setRegistryConnected(verified);
         setRegistryTarget(registryHost(endpoint));
         setRegistryPage(registryPageUrl(endpoint));
-        // Exactly what runs where: the skills bundle version new runs use,
-        // the registry server's own version, and this app's version.
-        const registry = health.contentRegistry;
-        const parts = [
-          registry.effectiveVersion
-            ? `${registry.bundle ?? "brainstorm"} v${registry.effectiveVersion}` +
-              (registry.pinnedVersion ? " (pinned)" : " (latest)")
-            : undefined,
-          registry.serverVersion ? `registry v${registry.serverVersion}` : undefined,
-          `app v${health.version}`,
-        ].filter((part): part is string => Boolean(part));
-        setRegistryVersionLine(parts.join(" · "));
+        // Exactly what runs where, unambiguously labeled: the SKILLS bundle
+        // version new runs use, the registry server's own software version,
+        // and this app's own software version (the latter two are program
+        // versions, not content versions).
+        const parts = verified
+          ? [
+              `skills ${registry.bundle ?? "brainstorm"} v${registry.effectiveVersion}` +
+                (registry.pinnedVersion ? " (pinned)" : " (latest)"),
+              registry.serverVersion
+                ? `registry server v${registry.serverVersion}`
+                : undefined,
+              `brain app v${health.version}`,
+            ].filter((part): part is string => Boolean(part))
+          : [];
+        setRegistryVersionLine(parts.length > 0 ? parts.join(" · ") : undefined);
       } catch {
         if (!live) return;
         setRegistryConnected(false);
@@ -925,13 +935,13 @@ export function SubmissionBox({
                   registryConnected
                     ? `connected to ${registryTarget}` +
                       (registryVersionLine ? ` — ${registryVersionLine}` : "")
-                    : `could not connect to ${registryTarget}`
+                    : `not connected to ${registryTarget} — the registry could not be verified just now (no stale connection is shown)`
                 }
                 aria-label={
                   registryConnected
                     ? `Connected to Brain Registry at ${registryTarget}` +
                       (registryVersionLine ? ` (${registryVersionLine})` : "")
-                    : `Could not connect to Brain Registry at ${registryTarget}`
+                    : `Not connected to Brain Registry at ${registryTarget}: the registry could not be verified just now`
                 }
                 onClick={(event) => {
                   if (!registryPage) event.preventDefault();

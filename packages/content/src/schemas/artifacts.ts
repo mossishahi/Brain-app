@@ -66,6 +66,7 @@ export const OUTPUT_SHAPES = [
   "interpretation",
   "survey",
   "explanation",
+  "solution",
 ] as const;
 
 export type OutputShape = (typeof OUTPUT_SHAPES)[number];
@@ -184,11 +185,17 @@ export const processorOutputSchema = z
      * Exactly one key of the loaded catalog/input-types.json, copied verbatim.
      * The catalog is data, so this cannot be a static enum — the task compiler
      * narrows it to the loaded catalog's keys per run, and the runtime
-     * cross-checks membership on write (writeValidatedOutput).
+     * cross-checks membership on write (writeValidatedOutput) whenever the
+     * field is present. OPTIONAL since workflow 0.14.0: classification is a
+     * separate stage (the classifier agent), and the deterministic
+     * classification.apply merge writes the decided type into the structured
+     * input. Bundles up to 0.13.0 still emit it from the processor directly.
      */
-    type: nonEmpty.describe(
-      "One category name from the option set in the instructions, copied verbatim.",
-    ),
+    type: nonEmpty
+      .describe(
+        "One category name from the option set in the instructions, copied verbatim.",
+      )
+      .optional(),
     title: answered(4, "title"),
     /** The core scientific question, stated precisely. */
     question: answered(12, "question"),
@@ -206,8 +213,12 @@ export const processorOutputSchema = z
     attachments: z.array(z.object({ name: nonEmpty, note: nonEmpty }).strict()),
     /** Implied-but-unstated assumptions; empty when there are none. */
     assumptions: z.array(nonEmpty),
-    /** How many reasoning steps a panel member should produce when developing this input. */
-    cotSteps: z.number().int().min(3).max(9),
+    /**
+     * How many reasoning steps a panel member should produce when developing
+     * this input. OPTIONAL since workflow 0.14.0 — decided by the classifier
+     * and merged in by classification.apply (see `type`).
+     */
+    cotSteps: z.number().int().min(3).max(9).optional(),
     /**
      * The outputs the submitter EXPLICITLY asked for beyond the type's
      * standard deliverable; empty when the submission names none (the common
@@ -238,6 +249,168 @@ export const processorOutputSchema = z
   });
 
 export type ProcessorOutput = z.infer<typeof processorOutputSchema>;
+
+/**
+ * One candidate reading of the submission: a catalog type plus the reason it
+ * fits. The type is a key of the loaded catalog/input-types.json — data, so
+ * the static schema cannot enumerate it; the task compiler narrows it to the
+ * loaded catalog's keys per run and the runtime re-checks membership on
+ * write.
+ */
+export const classificationOptionSchema = z
+  .object({
+    type: nonEmpty.describe(
+      "One category name from the option set in the instructions, copied verbatim.",
+    ),
+    /** Why this reading fits (or would fit), grounded in the submission's ask. */
+    reason: answered(12, "classification reason"),
+  })
+  .strict();
+
+export type ClassificationOption = z.infer<typeof classificationOptionSchema>;
+
+/** Exactly one line of plain text (no newlines). */
+const singleLine = (schema: z.ZodString | ReturnType<typeof answered>) =>
+  schema.refine((value: string) => !/[\r\n]/.test(value), {
+    message: "must be exactly one line",
+  });
+
+/**
+ * One retrieval facet of the submission: a single scientific concept,
+ * phrased for a text-embedding model. Facet vectors are matched against the
+ * embedded nodes of the shared research taxonomy (and against literature),
+ * so the text must live in the vocabulary that taxonomy and paper titles
+ * use — the term of art plus a self-contained definitional statement, never
+ * submission-specific wording.
+ */
+export const embeddingFacetSchema = z
+  .object({
+    /**
+     * The concept's term of art: the phrase a survey title or taxonomy node
+     * would use (2-5 words, one concept — never two joined by "and").
+     */
+    name: singleLine(answered(4, "facet name")).refine(
+      (value) => value.length <= 80,
+      { message: "facet name must stay a short term of art (at most 80 characters)" },
+    ),
+    /**
+     * One or two self-contained sentences defining the concept and what
+     * about it matters here — readable with zero context, no references to
+     * "the submission", "the attachment", or "we".
+     */
+    statement: answered(40, "facet statement")
+      .refine((value) => paragraphs(1).safeParse(value).success, {
+        message: "facet statement must be a single paragraph",
+      })
+      .refine((value) => value.length <= 600, {
+        message: "facet statement is runaway output; keep it to 1-2 sentences",
+      }),
+    /** Centrality of this facet to the submission's core, 0-1. */
+    relevance: z.number().min(0).max(1),
+  })
+  .strict();
+
+export type EmbeddingFacet = z.infer<typeof embeddingFacetSchema>;
+
+/**
+ * The submission distilled into embedding-ready text: one title+abstract
+ * document (the canonical whole-submission vector) plus 3-8 single-concept
+ * facets (multi-facet retrieval against the taxonomy's node vectors). The
+ * raw prompt is deliberately never embedded — it is long, multi-topic, and
+ * full of submission-specific artifacts that poison the vector; this record
+ * is the clean projection the embedding stage consumes.
+ */
+export const embeddingInputSchema = z
+  .object({
+    /** A paper-style title for the submission's scientific core; one line. */
+    title: singleLine(answered(8, "embedding title")).refine(
+      (value) => value.length <= 200,
+      { message: "embedding title must stay title-length (at most 200 characters)" },
+    ),
+    /**
+     * One paragraph, 3-6 sentences, written like a paper abstract of the
+     * scientific core: problem, objects of study, methods/theory involved,
+     * and what a successful outcome is. Self-contained plain prose.
+     */
+    abstract: answered(150, "embedding abstract")
+      .refine((value) => paragraphs(1).safeParse(value).success, {
+        message: "embedding abstract must be a single paragraph",
+      })
+      .refine((value) => value.length <= 2500, {
+        message: "embedding abstract is runaway output; keep it to 3-6 sentences",
+      }),
+    /** The submission's distinct concepts, most central first. */
+    facets: z.array(embeddingFacetSchema).min(3).max(8),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    const seen = new Set<string>();
+    value.facets.forEach((facet, index) => {
+      const key = facet.name.trim().toLowerCase();
+      if (seen.has(key)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["facets", index, "name"],
+          message: `duplicate facet "${facet.name}" — facets must be distinct concepts`,
+        });
+      }
+      seen.add(key);
+    });
+  });
+
+export type EmbeddingInput = z.infer<typeof embeddingInputSchema>;
+
+/**
+ * The classifier's decision, produced by a dedicated reasoning stage AFTER
+ * preprocessing (workflow 0.14.0): the primary reading of the submission,
+ * the strongest alternative reading (always a different type — the two
+ * options a human confirms between at the classification gate), the panel's
+ * chain-of-thought step count, the requested outputs — the submitter's
+ * explicit asks plus any ask the submission unmistakably implies — and the
+ * embedding input: the submission projected into clean retrieval text for
+ * the semantic panel-assembly stage. The deterministic classification.apply
+ * merge folds the primary decision into the structured input; the
+ * confirmation gate may override it with the alternative, another catalog
+ * type, or edited requested outputs.
+ */
+export const taskClassificationSchema = z
+  .object({
+    primary: classificationOptionSchema,
+    alternative: classificationOptionSchema,
+    /** How many reasoning steps a panel member should produce for this input. */
+    cotSteps: z.number().int().min(3).max(9),
+    /**
+     * The deliverables the panel must answer beyond the type's standard
+     * output: every explicit ask, plus asks the submission unmistakably
+     * implies. Empty when there are none.
+     */
+    requestedOutputs: z.array(requestedOutputSchema).max(4),
+    /** The submission as embedding-ready retrieval text (see the schema). */
+    embeddingInput: embeddingInputSchema,
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.primary.type === value.alternative.type) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["alternative", "type"],
+        message: "the alternative must be a different type than the primary",
+      });
+    }
+    const seen = new Set<string>();
+    value.requestedOutputs.forEach((entry, index) => {
+      if (seen.has(entry.title)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["requestedOutputs", index, "title"],
+          message: `duplicate requested-output title "${entry.title}"`,
+        });
+      }
+      seen.add(entry.title);
+    });
+  });
+
+export type TaskClassification = z.infer<typeof taskClassificationSchema>;
 
 /**
  * The two orchestrator-derived partitions of the processor's file map. The
@@ -458,12 +631,29 @@ export const taxonomyPositionSchema = z
     field: nonEmpty.optional(),
     subfield: nonEmpty.optional(),
     topic: nonEmpty.optional(),
-    matchedOn: z.enum(["name", "alias"]).optional(),
+    matchedOn: z.enum(["name", "alias", "embedding"]).optional(),
     matchedAlias: nonEmpty.optional(),
   })
   .strict();
 
 export type TaxonomyPosition = z.infer<typeof taxonomyPositionSchema>;
+
+/**
+ * One scored nearest-node candidate of an unmatched member, produced by the
+ * semantic matching lane: the node's name, level, full ancestor path, and
+ * the raw cosine similarity. The placer referees among these; the same list
+ * rides into the suggestion queue as the insert anchor's evidence.
+ */
+export const matchCandidateSchema = z
+  .object({
+    name: nonEmpty,
+    level: z.enum(["domain", "field", "subfield", "topic"]),
+    path: z.array(nonEmpty).min(1).max(4),
+    score: z.number().min(-1).max(1),
+  })
+  .strict();
+
+export type MatchCandidate = z.infer<typeof matchCandidateSchema>;
 
 /** One pool member after the deterministic taxonomy round-trip. */
 export const matchedPoolMemberSchema = poolMemberSchema
@@ -473,6 +663,10 @@ export const matchedPoolMemberSchema = poolMemberSchema
     position: taxonomyPositionSchema.optional(),
     /** Candidate node NAMES from the server's revise_query; empty when matched. */
     options: z.array(nonEmpty).max(100),
+    /** Raw cosine of an embedding auto-match (matchedOn "embedding" only). */
+    matchScore: z.number().min(-1).max(1).optional(),
+    /** Scored nearest nodes of an unmatched member (semantic lane on). */
+    candidates: z.array(matchCandidateSchema).max(8).optional(),
   })
   .superRefine((member, ctx) => {
     if (member.matched && member.position === undefined) {
@@ -500,6 +694,20 @@ export const poolMatchesSchema = z
     members: z.array(matchedPoolMemberSchema).max(400),
     /** The unmatched members, verbatim (term/count/variants/origins/options). */
     unmatched: z.array(matchedPoolMemberSchema).max(400),
+    /**
+     * The semantic lane's status for this run: enabled with the embedder id
+     * it matched in, or disabled with the reason (no served index, or a
+     * local embedder that failed the served conformance vectors). Absent on
+     * artifacts from before the lane existed.
+     */
+    embedding: z
+      .object({
+        enabled: z.boolean(),
+        embedderId: nonEmpty.optional(),
+        reason: nonEmpty.optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict()
   .superRefine((matches, ctx) => {
@@ -516,21 +724,30 @@ export const poolMatchesSchema = z
 
 export type PoolMatches = z.infer<typeof poolMatchesSchema>;
 
-/** One placement decision for a member the taxonomy did not carry. */
+/**
+ * One placement decision for a member the taxonomy did not carry. The three
+ * outcomes are the whole honest space: inject a new node (`place`), resolve
+ * to an existing node under another spelling (`already_present`), or state
+ * that no defensible decision exists (`undecidable`) — the legal exit that
+ * keeps a cornered model from fabricating a placement when its information
+ * genuinely does not suffice. Text fields refuse placeholder probes: a
+ * "placeholder" placement recorded into the shared tree pollutes every
+ * user's runs.
+ */
 export const placementDecisionSchema = z
   .object({
     /** The pool member's term, exactly as given. */
     term: nonEmpty,
-    outcome: z.enum(["place", "already_present"]),
+    outcome: z.enum(["place", "already_present", "undecidable"]),
     /** place: the canonical field name to inject. */
-    name: nonEmpty.optional(),
+    name: answered(4, "placement name").optional(),
     /** place: an existing node's name at domain/field/subfield depth. */
-    parent: nonEmpty.optional(),
+    parent: answered(4, "placement parent").optional(),
     /** place: other spellings that should resolve to the new node. */
     aliases: z.array(nonEmpty).max(12).optional(),
     /** already_present: the existing node the member resolves to. */
-    node: nonEmpty.optional(),
-    reason: nonEmpty,
+    node: answered(4, "existing node name").optional(),
+    reason: answered(12, "placement reason"),
   })
   .strict()
   .superRefine((decision, ctx) => {
@@ -544,7 +761,7 @@ export const placementDecisionSchema = z
       if (decision.node) {
         ctx.addIssue({ code: "custom", path: ["node"], message: "a place decision carries no existing node" });
       }
-    } else {
+    } else if (decision.outcome === "already_present") {
       if (!decision.node) {
         ctx.addIssue({ code: "custom", path: ["node"], message: "an already_present decision names the existing node" });
       }
@@ -553,6 +770,15 @@ export const placementDecisionSchema = z
           code: "custom",
           path: ["name"],
           message: "an already_present decision carries no new name or parent",
+        });
+      }
+    } else {
+      // undecidable: the reason IS the deliverable; everything else absent.
+      if (decision.name || decision.parent || decision.node || (decision.aliases?.length ?? 0) > 0) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["outcome"],
+          message: "an undecidable decision carries only the term and the reason",
         });
       }
     }
@@ -1123,6 +1349,56 @@ export const explanationBodySchema = z
 
 export type ExplanationBody = z.infer<typeof explanationBodySchema>;
 
+/** One diagnosed cause of a research obstacle, listed most-likely first. */
+export const obstacleCauseSchema = z
+  .object({
+    cause: nonEmpty,
+    /** Why this cause is implicated, grounded in the stated setup. */
+    rationale: nonEmpty,
+  })
+  .strict();
+
+/** One approach already tried against the obstacle, and how it fell short. */
+export const priorAttemptSchema = z
+  .object({
+    attempt: nonEmpty,
+    outcome: nonEmpty,
+  })
+  .strict();
+
+/** One candidate way past the obstacle, weighed on its own terms. */
+export const candidateSolutionSchema = z
+  .object({
+    approach: nonEmpty,
+    /** How and why it addresses the diagnosed cause. */
+    mechanism: paragraphs(1),
+    expectedEffect: nonEmpty,
+    /** The cost or risk of taking this route. */
+    risk: nonEmpty,
+  })
+  .strict();
+
+/**
+ * solution — a diagnosis-and-fix for a concrete research obstacle (a method,
+ * derivation, code, or architecture that is stuck). It frames the obstacle,
+ * ranks the likely causes, records what has already been tried, lays out
+ * candidate ways past it, recommends one, and gives a plan to validate the
+ * fix. Deliberately NOT a novelty shape: a correct fix need not be novel.
+ */
+export const solutionBodySchema = z
+  .object({
+    problemFraming: paragraphs(1),
+    diagnosis: z.array(obstacleCauseSchema).min(1).max(10),
+    priorAttempts: z.array(priorAttemptSchema).max(20),
+    candidateSolutions: z.array(candidateSolutionSchema).min(1).max(8),
+    recommendation: paragraphs(1),
+    validationPlan: z.array(nonEmpty).min(1).max(20),
+    residualRisks: z.array(nonEmpty).max(20),
+  })
+  .strict();
+
+export type SolutionBody = z.infer<typeof solutionBodySchema>;
+
 /**
  * One member's direct response to an explicitly requested output: the run's
  * section `title` echoed verbatim plus the answer itself. Uniform across all
@@ -1177,6 +1453,7 @@ export const developedOutputSchema = z
     interpretation: interpretationBodySchema.optional(),
     survey: surveyBodySchema.optional(),
     explanation: explanationBodySchema.optional(),
+    solution: solutionBodySchema.optional(),
     /**
      * The member's responses to the submitter's explicitly requested
      * outputs — present exactly when the run recorded any (run data,
@@ -1669,6 +1946,7 @@ export type BridgeReport = z.infer<typeof bridgeReportSchema>;
 /** Every schema an agent or activity node's `output.schema` may reference, by name. */
 export const artifactSchemas = {
   processorOutput: processorOutputSchema,
+  taskClassification: taskClassificationSchema,
   usefulFiles: usefulFilesSchema,
   ignoredFiles: ignoredFilesSchema,
   codeFiles: codeFilesSchema,

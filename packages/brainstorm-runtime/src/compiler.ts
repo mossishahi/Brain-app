@@ -231,6 +231,24 @@ async function persistArtifact(
   };
 }
 
+/** Whether `type` names a key of the run's loaded input-type catalog. */
+function isCatalogType(
+  type: JsonValue | undefined,
+  scope: ScopeReader,
+  state: JsonObject,
+): type is string {
+  if (typeof type !== "string") return false;
+  const knownTypes = resolveDataReference("catalog.inputTypes.types", scope, state, {
+    required: true,
+  });
+  return (
+    typeof knownTypes === "object" &&
+    knownTypes !== null &&
+    !Array.isArray(knownTypes) &&
+    Object.prototype.hasOwnProperty.call(knownTypes, type)
+  );
+}
+
 async function writeValidatedOutput(
   scope: ScopeReader,
   target: string,
@@ -244,19 +262,31 @@ async function writeValidatedOutput(
   if (schemaName === "processorOutput") {
     // The submission types are data (catalog/input-types.json), so the static
     // schema cannot enumerate them; membership is enforced here instead.
+    // Since workflow 0.14.0 the processor no longer classifies — `type` is
+    // absent on its output and merged in later (classification.apply), so the
+    // check runs exactly when the field is present: pre-split processors,
+    // the merge write, and the classification gate's re-write.
     const type = asObject(parsed, "processor output").type;
-    const knownTypes = resolveDataReference("catalog.inputTypes.types", scope, state, { required: true });
-    if (
-      typeof type !== "string" ||
-      typeof knownTypes !== "object" ||
-      knownTypes === null ||
-      Array.isArray(knownTypes) ||
-      !Object.prototype.hasOwnProperty.call(knownTypes, type)
-    ) {
+    if (type !== undefined && !isCatalogType(type, scope, state)) {
       throw new BrainstormRuntimeError(
         `node "${nodeId}" classified the submission as "${String(type)}", which is not a type of the loaded input-type catalog`,
         "INPUT_TYPE_NOT_IN_CATALOG",
       );
+    }
+  }
+  if (schemaName === "taskClassification") {
+    // Both offered readings must be types of the loaded catalog — the primary
+    // is merged into the run's input and the alternative is offered at the
+    // confirmation gate, so an invented label in either would derail the run.
+    const classification = asObject(parsed, "task classification");
+    for (const key of ["primary", "alternative"] as const) {
+      const type = asObject(classification[key], `classification ${key}`).type;
+      if (!isCatalogType(type, scope, state)) {
+        throw new BrainstormRuntimeError(
+          `node "${nodeId}" offered ${key} type "${String(type)}", which is not a type of the loaded input-type catalog`,
+          "INPUT_TYPE_NOT_IN_CATALOG",
+        );
+      }
     }
   }
   if (schemaName === "brainIdea" || schemaName === "redevelopment") {
@@ -324,6 +354,36 @@ async function writeValidatedOutput(
         `node "${nodeId}" must return exactly ${String(expected)} chain steps`,
         "CHAIN_LENGTH_MISMATCH",
       );
+    }
+  }
+  if (schemaName === "placements") {
+    // The placer must decide EVERY unmatched member — including deciding
+    // "undecidable" — in the given order. The failed-placer incident showed
+    // what an unconstrained list invites: one placeholder decision covering
+    // nothing, accepted, and every unmatched term silently dropped. The
+    // task schema is narrowed the same way; this is the authoritative
+    // re-check on write.
+    const bound = resolveDataReference("poolMatches.unmatched", scope, state, {
+      required: false,
+    });
+    if (Array.isArray(bound)) {
+      const expected = bound.flatMap((entry) => {
+        const term = (entry as { readonly term?: JsonValue }).term;
+        return typeof term === "string" ? [term] : [];
+      });
+      const returned = (asObject(parsed, "placements").decisions as JsonValue[]).map(
+        (decision) => asObject(decision, "placement decision").term,
+      );
+      if (
+        returned.length !== expected.length ||
+        returned.some((term, index) => term !== expected[index])
+      ) {
+        throw new BrainstormRuntimeError(
+          `node "${nodeId}" must return one decision for each of the ${expected.length} unmatched member(s), in their given order` +
+            (expected.length > 0 ? `: ${expected.join(" | ")}` : ""),
+          "PLACEMENT_COVERAGE_MISMATCH",
+        );
+      }
     }
   }
   if (schemaName === "codeAnnotations") {
@@ -735,6 +795,27 @@ function annotatedEntries(
   return files.filter(isJsonRecord);
 }
 
+/** Whether any node of the workflow produces the named artifact schema. */
+function producesSchema(node: ContentWorkflowNode, schema: string): boolean {
+  switch (node.kind) {
+    case "sequence":
+      return node.steps.some((step) => producesSchema(step, schema));
+    case "agent":
+    case "activity":
+      return node.output.schema === schema;
+    case "forEach":
+    case "repeatUntil":
+      return producesSchema(node.body, schema);
+    case "condition":
+      return (
+        producesSchema(node.then, schema) ||
+        (node.else !== undefined && producesSchema(node.else, schema))
+      );
+    default:
+      return false;
+  }
+}
+
 function builtinActivities(): Readonly<Record<string, DeterministicActivityHandler>> {
   return {
     "attachments.useful": (input) =>
@@ -754,6 +835,39 @@ function builtinActivities(): Readonly<Record<string, DeterministicActivityHandl
         (file) => typeof file.label === "string" && CODE_LABELS.has(file.label),
       );
       return { count: files.length, files: files as unknown as JsonValue };
+    },
+    "classification.apply": (input) => {
+      // Fold the classifier's primary decision into the structured input:
+      // type, cotSteps, and the requested outputs (omitted when empty, the
+      // same contract the processor used to follow). The confirmation gate
+      // downstream may overwrite type and requestedOutputs with the human's
+      // choice; everything else of the input rides through unchanged.
+      const processor = asObject(
+        validateArtifact("processorOutput", "classification.apply", input.input!),
+        "classification.apply input",
+      );
+      const classification = asObject(
+        validateArtifact(
+          "taskClassification",
+          "classification.apply",
+          input.classification!,
+        ),
+        "classification.apply classification",
+      );
+      const primary = asObject(classification.primary, "classification primary");
+      const requested = Array.isArray(classification.requestedOutputs)
+        ? classification.requestedOutputs
+        : [];
+      const { requestedOutputs: _dropped, ...rest } = processor;
+      return {
+        ...rest,
+        type: primary.type!,
+        cotSteps: classification.cotSteps!,
+        ...(requested.length > 0 ? { requestedOutputs: requested } : {}),
+        // The finite-output bound is declared over the file map; the merge
+        // never grows it, but the field must exist for the bound check.
+        files: Array.isArray(processor.files) ? processor.files : [],
+      };
     },
     "attachments.annotate": (input) => {
       const files = annotatedEntries("attachments.annotate", input.files);
@@ -829,6 +943,8 @@ class ContentCompiler {
   private readonly hostTools: readonly HostToolManifest[];
   private readonly enabledHostToolIds: ReadonlySet<string>;
   private readonly skillResolver: SkillResolver;
+  /** Whether this workflow classifies in a dedicated stage (>= 0.14.0). */
+  private readonly splitClassification: boolean;
 
   constructor(
     private readonly bundle: ContentBundle,
@@ -844,6 +960,7 @@ class ContentCompiler {
     this.skillResolver =
       options.skillResolver ?? new BundleSkillResolver(this.bundle);
     this.gateMode = options.humanGateMode ?? "manual";
+    this.splitClassification = producesSchema(this.content.root, "taskClassification");
     this.functions
       .registerSelector(STATE_SELECTOR, (scope) => scope.get(BRAINSTORM_STATE))
       .registerActivity(SNAPSHOT_ACTIVITY, (_input, scope) => scope.get(BRAINSTORM_STATE));
@@ -1087,6 +1204,67 @@ class ContentCompiler {
             enum: labels,
           })) ?? taskJsonSchema;
       }
+      // Split-classification bundles (>= 0.14.0): the processor's task schema
+      // drops the classification fields entirely, so the model cannot emit
+      // them — the classifier stage decides them and the deterministic merge
+      // writes them into the input.
+      if (node.output.schema === "processorOutput" && this.splitClassification) {
+        taskJsonSchema = removeSchemaProperties(taskJsonSchema, [
+          "type",
+          "cotSteps",
+          "requestedOutputs",
+        ]);
+      }
+      // The classifier's two offered readings are pinned to the loaded
+      // catalog's type keys, so a schema-constrained model cannot invent a
+      // label; membership is re-checked on write either way.
+      if (
+        node.output.schema === "taskClassification" &&
+        isJsonRecord(bindings.typeOptions) &&
+        Object.keys(bindings.typeOptions).length > 0
+      ) {
+        const labels = Object.keys(bindings.typeOptions);
+        for (const option of ["primary", "alternative"] as const) {
+          taskJsonSchema =
+            patchSchemaProperty(taskJsonSchema, [option, "type"], (type) => ({
+              ...type,
+              enum: labels,
+            })) ?? taskJsonSchema;
+        }
+      }
+      // The placer must cover exactly the unmatched members it was given:
+      // the decision count is pinned and the term field is narrowed to the
+      // given terms, so a schema-constrained model cannot skip a member,
+      // invent one, or answer with a placeholder list. Completeness and
+      // order are re-checked on write.
+      if (node.output.schema === "placements" && Array.isArray(bindings.unmatched)) {
+        const terms = bindings.unmatched.flatMap((entry) => {
+          const term = (entry as { readonly term?: JsonValue }).term;
+          return typeof term === "string" ? [term] : [];
+        });
+        taskJsonSchema =
+          patchSchemaProperty(taskJsonSchema, ["decisions"], (decisions) => {
+            const items = isJsonRecord(decisions.items) ? decisions.items : {};
+            const properties = isJsonRecord(items.properties) ? items.properties : {};
+            const termProperty = isJsonRecord(properties.term) ? properties.term : {};
+            return {
+              ...decisions,
+              minItems: terms.length,
+              maxItems: terms.length,
+              ...(terms.length > 0
+                ? {
+                    items: {
+                      ...items,
+                      properties: {
+                        ...properties,
+                        term: { ...termProperty, enum: terms },
+                      },
+                    },
+                  }
+                : {}),
+            };
+          }) ?? taskJsonSchema;
+      }
       // The code annotator must cover exactly the code files it was given:
       // the entry count is pinned and the path field is narrowed to the
       // given paths, so a schema-constrained model cannot skip or invent a
@@ -1155,6 +1333,33 @@ class ContentCompiler {
         enabledHostToolIds: this.enabledHostToolIds,
       };
       const capabilityPlan: ResolvedCapabilityPlan = resolveCapabilityPlan(brokerInput);
+      // Load-bearing capabilities fail LOUD, before any model call: a task
+      // whose skill marks a capability required must never run degraded —
+      // a forced answer without the capability poisons every downstream
+      // stage silently (the toolless-placer failure), while a failed task
+      // is visible, diagnosable, and retryable after the deployment is
+      // fixed. Degradable capabilities keep the catalog's whenUnavailable
+      // prompt treatment.
+      const mustHave = role.meta.requiredCapabilities ?? [];
+      if (mustHave.length > 0) {
+        const missing = mustHave.filter((capabilityId) =>
+          capabilityPlan.operations.some(
+            (operation) =>
+              operation.capabilityId === capabilityId &&
+              operation.source === "unavailable",
+          ),
+        );
+        if (missing.length > 0) {
+          throw new BrainstormRuntimeError(
+            `node "${node.id}" (skill "${node.skill}") requires ${missing
+              .map((capabilityId) => `"${capabilityId}"`)
+              .join(", ")} but the capability resolved unavailable on this deployment — ` +
+              "enable the backing host tools in the server settings (or run on a backend " +
+              "that provides them); this task refuses to run degraded",
+            "REQUIRED_CAPABILITY_UNAVAILABLE",
+          );
+        }
+      }
       const messages = [
         userMessage(
           renderTaskMessage(node.skill, node.output.schema, prompt.payload),
@@ -1436,6 +1641,12 @@ class ContentCompiler {
     } else {
       const promptName = this.functionName(node.id, "prompt");
       this.functions.registerSelector(promptName, (scope) => this.gatePrompt(node, scope));
+      // A classification gate lets the human pick ANY type of the loaded
+      // catalog, so the choice list ships in the gate metadata — the server
+      // renders it without loading the bundle.
+      const offersTypes = node.gate.actions.some(
+        (action) => action.editRule === "classification",
+      );
       gateNode = humanGate({
         id: `${node.id}-wait`,
         gateKey: node.id,
@@ -1446,6 +1657,9 @@ class ContentCompiler {
           show: node.gate.show ?? null,
           actions: node.gate.actions as unknown as JsonArray,
           skippable: node.skippable,
+          ...(offersTypes
+            ? { typeOptions: Object.keys(this.bundle.catalogs.inputTypes.types) }
+            : {}),
         },
       });
     }

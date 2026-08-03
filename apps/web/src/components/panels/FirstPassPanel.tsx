@@ -17,6 +17,7 @@ import type {
   InterpretOutputView,
   PaperView,
   ResolveOutputView,
+  SolutionOutputView,
   SurveyOutputView,
   VerifyOutputView,
 } from "@brainstorm-agentic/protocol";
@@ -35,6 +36,7 @@ const PRIMARY_TAB: Record<OutputShape, string> = {
   interpretation: "Interpretation",
   survey: "Landscape",
   explanation: "Explanation",
+  solution: "Solution",
 };
 
 type ChipTone = "ok" | "warn" | "bad" | "dim" | "accent";
@@ -474,6 +476,65 @@ function EstablishedConceptBody({ explanation }: { explanation: ExplainOutputVie
   );
 }
 
+function ResearchObstacleBody({ solution }: { solution: SolutionOutputView }) {
+  return (
+    <div>
+      <LabeledText label="Problem framing" text={solution.problemFraming} />
+      <div className="paper-section">
+        <p className="section-label">Diagnosis (most likely first)</p>
+        <ol className="chain-list">
+          {solution.diagnosis.map((entry, i) => (
+            <li key={i}>
+              <Clamp text={entry.cause} lines={2} />
+              <p className="dim small">{entry.rationale}</p>
+            </li>
+          ))}
+        </ol>
+      </div>
+      {solution.priorAttempts.length > 0 && (
+        <div className="paper-section">
+          <p className="section-label">Already tried</p>
+          <table className="paper-table">
+            <thead>
+              <tr>
+                <th>Attempt</th>
+                <th>Outcome</th>
+              </tr>
+            </thead>
+            <tbody>
+              {solution.priorAttempts.map((entry, i) => (
+                <tr key={i}>
+                  <td>{entry.attempt}</td>
+                  <td>{entry.outcome}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <div className="paper-section">
+        <p className="section-label">Candidate solutions</p>
+        <ul className="issue-list">
+          {solution.candidateSolutions.map((candidate, i) => (
+            <li key={i} className="issue-item">
+              <p className="section-label">{candidate.approach}</p>
+              <Clamp text={candidate.mechanism} />
+              <p className="dim small">expected: {candidate.expectedEffect}</p>
+              <p className="dim small">risk: {candidate.risk}</p>
+            </li>
+          ))}
+        </ul>
+      </div>
+      <div className="paper-section">
+        <p className="section-label">Recommendation</p>
+        <div className="callout">{solution.recommendation}</div>
+      </div>
+      <LabeledList label="Validation plan" items={solution.validationPlan} />
+      <LabeledList label="Residual risks" items={solution.residualRisks} />
+    </div>
+  );
+}
+
 function PrimaryBody({ idea }: { idea: BrainIdeaView }) {
   if (idea.paper) return <ResearchIdeaBody paper={idea.paper} />;
   if (idea.resolution) return <OpenProblemBody resolution={idea.resolution} />;
@@ -483,6 +544,7 @@ function PrimaryBody({ idea }: { idea: BrainIdeaView }) {
   if (idea.interpretation) return <EmpiricalResultBody interpretation={idea.interpretation} />;
   if (idea.survey) return <ResearchAreaBody survey={idea.survey} />;
   if (idea.explanation) return <EstablishedConceptBody explanation={idea.explanation} />;
+  if (idea.solution) return <ResearchObstacleBody solution={idea.solution} />;
   return null;
 }
 

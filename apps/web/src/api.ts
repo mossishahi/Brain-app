@@ -199,6 +199,12 @@ export const resumeInterruptedJob = (
     method: "POST",
   });
 
+/** Retries a failed job from its last checkpoint (re-runs only the failed task). */
+export const retryFailedJob = (
+  jobId: string,
+): Promise<ResumeInterruptedJobResponse> =>
+  request(`/jobs/${encodeURIComponent(jobId)}/retry`, { method: "POST" });
+
 export const getReadiness = (): Promise<ReadinessReport> =>
   request("/readiness");
 

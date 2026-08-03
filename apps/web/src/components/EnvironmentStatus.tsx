@@ -12,10 +12,11 @@ import type {
   ReadinessCheckId,
   ReadinessReport,
 } from "@brainstorm-agentic/protocol";
-import { GlobeIcon, QueueIcon, SparkIcon, TerminalIcon } from "./Icons";
+import { GlobeIcon, PlugIcon, QueueIcon, SparkIcon, TerminalIcon } from "./Icons";
 
 const ICONS: Partial<Record<ReadinessCheckId, ReactNode>> = {
   llm: <SparkIcon size={15} />,
+  capabilities: <PlugIcon size={15} />,
   internet: <GlobeIcon size={15} />,
   code: <TerminalIcon size={15} />,
   slurm: <QueueIcon size={15} />,
@@ -24,6 +25,7 @@ const ICONS: Partial<Record<ReadinessCheckId, ReactNode>> = {
 /** The registry has its own brain icon; the strip renders the other checks. */
 const STRIP_ORDER: readonly ReadinessCheckId[] = [
   "llm",
+  "capabilities",
   "code",
   "internet",
   "slurm",

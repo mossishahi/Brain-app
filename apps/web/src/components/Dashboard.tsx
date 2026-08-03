@@ -21,6 +21,7 @@ import {
   jobStreamUrl,
   resumeInterruptedJob,
   resumeJob,
+  retryFailedJob,
   useServerEvents,
 } from "../api";
 import {
@@ -35,7 +36,11 @@ import {
 import { ActivityFeed, Dot, SkeletonLines } from "./common";
 import { BackIcon, ChevronIcon } from "./Icons";
 import { PipelineGraph } from "./PipelineGraph";
-import { ProcessInputBody } from "./panels/ProcessInputPanel";
+import {
+  ClassificationDecided,
+  ClassificationGateCard,
+  ProcessInputBody,
+} from "./panels/ProcessInputPanel";
 import { DecomposeBody } from "./panels/DecomposePanel";
 import { SelectPanelBody } from "./panels/SelectPanelPanel";
 import { GateCard, GateDecided } from "./panels/ConfirmPanelPanel";
@@ -308,6 +313,19 @@ export function Dashboard({ jobId }: { jobId: string }) {
     }
   }, [jobId]);
 
+  const retryFailed = useCallback(async () => {
+    setResumingNow(true);
+    setResumeError(null);
+    try {
+      await retryFailedJob(jobId);
+      setJob(await getJob(jobId));
+    } catch (error) {
+      setResumeError(errorMessage(error));
+    } finally {
+      setResumingNow(false);
+    }
+  }, [jobId]);
+
   if (!job) {
     if (loadError) {
       return (
@@ -335,9 +353,27 @@ export function Dashboard({ jobId }: { jobId: string }) {
     switch (id) {
       case "process-input": {
         const stage = stageOf(job, id);
-        return stage?.output ? (
-          <ProcessInputBody output={stage.output} files={stage.files} />
-        ) : null;
+        if (!stage?.output && !stage?.classification) return null;
+        const classificationPending = stage.classification?.gate.state === "pending";
+        return (
+          <div>
+            {/* The classification confirmation rides on this stage: the gate
+                card while pending, the decided line afterwards. */}
+            {classificationPending && (
+              <ClassificationGateCard
+                pendingGate={job.pendingGate}
+                onAnswer={onGateAnswer}
+                onHold={onGateHold}
+              />
+            )}
+            {!classificationPending && stage.classification && (
+              <ClassificationDecided classification={stage.classification} />
+            )}
+            {stage.output && (
+              <ProcessInputBody output={stage.output} files={stage.files} />
+            )}
+          </div>
+        );
       }
       case "decompose-experts": {
         const stage = stageOf(job, id);
@@ -495,6 +531,24 @@ export function Dashboard({ jobId }: { jobId: string }) {
       )}
       {job.status === "failed" && job.error && !anyStageFailed && (
         <div className="banner banner-bad">{job.error}</div>
+      )}
+      {job.status === "failed" && (
+        <div className="banner credit-banner">
+          <span>
+            <strong>Failed.</strong> The checkpoints up to the failed task are
+            intact — a retry re-runs only the task that failed and continues
+            from there, never repeating completed work.
+            {resumeError && <> Retry failed: {resumeError}.</>}
+          </span>
+          <button
+            type="button"
+            className="btn"
+            disabled={resumingNow}
+            onClick={() => void retryFailed()}
+          >
+            {resumingNow ? "Retrying…" : "Retry from checkpoint"}
+          </button>
+        </div>
       )}
 
       <PipelineGraph

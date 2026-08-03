@@ -245,6 +245,7 @@ test("the registry endpoint is deployment-owned: PUT ignores it and health repor
       await requestJson<{
         version: string;
         contentRegistry: {
+          running: boolean;
           bundle?: string;
           effectiveVersion?: string;
           latest?: string;
@@ -257,6 +258,61 @@ test("the registry endpoint is deployment-owned: PUT ignores it and health repor
     assert.equal(health.contentRegistry.latest, latestPublishedVersion());
     assert.equal(health.contentRegistry.effectiveVersion, latestPublishedVersion());
     assert.equal(health.contentRegistry.pinnedVersion, undefined);
+    // Connected is a live verdict: the registry answered its probe and
+    // served the bundle index during this health call, so running is true
+    // WITH a resolved version — never one without the other.
+    assert.equal(health.contentRegistry.running, true);
+  } finally {
+    await server.close();
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("a registry that disappears flips health to disconnected instead of a stale connection", async () => {
+  const workspace = tempRoot();
+  const registry = await startTestRegistry(staticRegistryRoot);
+  const server = await startBrainServer({
+    workspace,
+    port: 0,
+    contentRegistryUrl: registry.url,
+    // The stale launch-time claim every probe must overrule.
+    contentRegistryStatus: { running: true, url: registry.url },
+    registryProbeTtlMs: 0,
+  });
+  try {
+    const before = (
+      await requestJson<{ contentRegistry: { running: boolean; effectiveVersion?: string } }>(
+        server,
+        "/api/health",
+      )
+    ).value;
+    assert.equal(before.contentRegistry.running, true);
+    assert.equal(before.contentRegistry.effectiveVersion, latestPublishedVersion());
+
+    await registry.close();
+    const after = (
+      await requestJson<{ contentRegistry: { running: boolean; effectiveVersion?: string } }>(
+        server,
+        "/api/health",
+      )
+    ).value;
+    assert.equal(
+      after.contentRegistry.running,
+      false,
+      "an unreachable registry must report disconnected, never the launch-time snapshot",
+    );
+    assert.equal(after.contentRegistry.effectiveVersion, undefined);
+
+    // The readiness gate reads the same live verdict: the registry check
+    // fails, so submissions are held rather than run against nothing.
+    const readiness = (
+      await requestJson<{ checks: Array<{ id: string; state: string }> }>(
+        server,
+        "/api/readiness",
+      )
+    ).value;
+    const registryCheck = readiness.checks.find((check) => check.id === "registry");
+    assert.equal(registryCheck?.state, "failed");
   } finally {
     await server.close();
     rmSync(workspace, { recursive: true, force: true });
@@ -1186,7 +1242,25 @@ test("manual gate can shrink, complete, and reload after restart", async () => {
       llm: { provider: "offline" },
     });
     const jobId = await submit(server, "Pause and shrink this panel");
-    const suspended = await waitFor(server, jobId, "suspended");
+    let suspended = await waitFor(server, jobId, "suspended");
+    // Split-classification bundles (>= 0.14.0) pause at the classification
+    // gate first; approve it to reach the panel gate this test targets.
+    if (suspended.pendingGate?.gateKey === "confirm-classification") {
+      const approvedClassification = await requestJson<JobDetail>(
+        server,
+        `/api/jobs/${jobId}/gate`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            gateKey: "confirm-classification",
+            action: "approve",
+          }),
+        },
+      );
+      assert.equal(approvedClassification.status, 200);
+      suspended = await waitFor(server, jobId, "suspended");
+      assert.equal(suspended.pendingGate?.gateKey, "confirm-panel");
+    }
     const contentDir = join(
       workspace,
       "workspace",
@@ -1899,11 +1973,15 @@ test("readiness reports required checks, gates submissions while red, and re-run
       }
     })();
     assert.equal(report.ready, false);
-    assert.equal(report.checks.length, 5);
+    assert.equal(report.checks.length, 6);
     const byId = new Map(report.checks.map((check) => [check.id, check]));
     assert.equal(byId.get("registry")?.state, "ok");
-    // Default settings: anthropic provider + slurm runner => all five required.
+    // Default settings: anthropic provider + slurm runner => all six required.
     assert.ok(report.checks.every((check) => check.required));
+    // The capabilities probe is pure evaluation (no stub needed): with the
+    // default enabled host tools every core capability resolves to a source.
+    assert.equal(byId.get("capabilities")?.state, "ok");
+    assert.match(byId.get("capabilities")?.message ?? "", /taxonomy-access: host tools/);
     assert.match(byId.get("llm")?.message ?? "", /Configure and verify/);
     // A failed check always carries fix advice (built-in hint without an LLM).
     assert.ok((byId.get("llm")?.advice ?? "").length > 0);
@@ -1946,6 +2024,8 @@ test("readiness reports required checks, gates submissions while red, and re-run
     const after = new Map(report.checks.map((check) => [check.id, check]));
     assert.equal(after.get("llm")?.state, "skipped");
     assert.equal(after.get("internet")?.state, "skipped");
+    // The offline executor never calls tools, so capabilities skip with it.
+    assert.equal(after.get("capabilities")?.state, "skipped");
     assert.equal(after.get("slurm")?.state, "ok");
     assert.equal(after.get("code")?.state, "ok");
 
@@ -2069,6 +2149,120 @@ fs.writeFileSync(checkpointPath, JSON.stringify(checkpoint, null, 2));
   assert.equal((await manager.detail(jobId)).status, "completed");
   // A finished job is no longer interrupted.
   await assert.rejects(manager.resumeInterrupted(jobId), /not interrupted/);
+  rmSync(workspace, { recursive: true, force: true });
+});
+
+test("failed jobs retry from their last checkpoint and re-run only the failed task", async () => {
+  const workspace = tempRoot();
+  const marker = join(workspace, "failed-retry-marker.txt");
+  const fakeCli = join(workspace, "fake-cli.mjs");
+  // The retried worker resumes and finishes: journal replay re-executed the
+  // failed task; here it simply rewrites the checkpoint to completed.
+  writeFileSync(
+    fakeCli,
+    `import fs from "node:fs"; import path from "node:path";
+const args = process.argv.slice(2);
+const value = (name) => args[args.indexOf(name) + 1];
+fs.appendFileSync(${JSON.stringify(marker)}, args[0] + "\\n");
+const checkpointPath = path.join(value("--session-root"), value("--run-id"), "checkpoint.json");
+const checkpoint = JSON.parse(fs.readFileSync(checkpointPath, "utf8"));
+checkpoint.status = "completed"; checkpoint.output = { retried: true }; delete checkpoint.error;
+checkpoint.seq += 1; checkpoint.updatedAt = Date.now();
+fs.writeFileSync(checkpointPath, JSON.stringify(checkpoint, null, 2));
+`,
+  );
+  const now = Date.now();
+  const manager = new JobManager({ workspace, workerPath: fakeCli, now: () => now });
+  const settings = await manager.settings.put({
+    ...manager.settings.get(),
+    runner: "local",
+    llm: { provider: "offline" },
+    creditRecovery: {
+      autoResume: true,
+      safetyBufferSeconds: 60,
+      openRouterModel: "openrouter/free",
+    },
+  });
+  const jobId = "failed-job";
+  const jobDir = join(workspace, "workspace", "jobs", jobId);
+  const sessionDir = join(workspace, "workspace", "sessions", jobId);
+  mkdirSync(jobDir, { recursive: true });
+  mkdirSync(sessionDir, { recursive: true });
+  writeFileSync(
+    join(jobDir, "job.json"),
+    JSON.stringify({
+      jobId,
+      topic: "one commentor subprocess crashed overnight",
+      status: "failed",
+      runner: "local",
+      createdAt: now - 60_000,
+      updatedAt: now - 30_000,
+      submissionCount: 1,
+      executionSettings: settings,
+    }),
+  );
+  writeFileSync(
+    join(sessionDir, "checkpoint.json"),
+    JSON.stringify({
+      runId: jobId,
+      workflowId: "brainstorm",
+      status: "failed",
+      input: {},
+      journal: [{ key: "brainstorm-root/process-input::result", kind: "agent", value: { status: "ok", output: {} } }],
+      pendingGates: [],
+      error: { name: "AgentTaskFailedError", message: "Claude Code process exited with code 1" },
+      seq: 9,
+      updatedAt: now - 30_000,
+    }),
+  );
+  // A second failed job with no checkpoint at all: nothing ran, nothing to resume.
+  const bareId = "failed-before-checkpoint";
+  mkdirSync(join(workspace, "workspace", "jobs", bareId), { recursive: true });
+  writeFileSync(
+    join(workspace, "workspace", "jobs", bareId, "job.json"),
+    JSON.stringify({
+      jobId: bareId,
+      topic: "failed at submission",
+      status: "failed",
+      error: "sbatch failed",
+      runner: "local",
+      createdAt: now - 60_000,
+      updatedAt: now - 30_000,
+      submissionCount: 1,
+      executionSettings: settings,
+    }),
+  );
+  manager.reload();
+  assert.equal((await manager.detail(jobId)).status, "failed");
+
+  assert.equal(await manager.retryFailed(jobId), "queued");
+  await waitUntil(() => existsSync(marker), 5_000);
+  assert.equal(readFileSync(marker, "utf8"), "resume\n", "the retry resumes, never restarts");
+  const record = JSON.parse(readFileSync(join(jobDir, "job.json"), "utf8")) as {
+    submissionCount: number;
+    error?: string;
+  };
+  assert.equal(record.submissionCount, 2);
+  assert.equal(record.error, undefined, "the stale failure is cleared on retry");
+  assert.ok(
+    existsSync(join(jobDir, "submit-retry-1.sh")),
+    "the retry script is kept beside the job",
+  );
+  await waitUntil(() => {
+    try {
+      return (
+        (JSON.parse(
+          readFileSync(join(sessionDir, "checkpoint.json"), "utf8"),
+        ) as { status: string }).status === "completed"
+      );
+    } catch {
+      return false;
+    }
+  }, 5_000);
+  assert.equal((await manager.detail(jobId)).status, "completed");
+  // A finished job is no longer retryable, and a checkpoint-less failure never is.
+  await assert.rejects(manager.retryFailed(jobId), /not failed/);
+  await assert.rejects(manager.retryFailed(bareId), /before its first checkpoint/);
   rmSync(workspace, { recursive: true, force: true });
 });
 
