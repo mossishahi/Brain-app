@@ -73,6 +73,34 @@ function attachmentKind(value: unknown): AttachmentSelectionKind {
   return value as AttachmentSelectionKind;
 }
 
+/**
+ * Registry probe budget. Deployments regularly sit on an HPC login node
+ * talking to a cloud registry: single round-trips spike well past a couple
+ * of seconds under login-node load, and a too-tight budget makes the strict
+ * verdict flicker "disconnected" for a whole TTL window over one aborted
+ * request.
+ */
+const REGISTRY_PROBE_TIMEOUT_MS = 8_000;
+
+/**
+ * One probe fetch with a single immediate retry: the two realistic flicker
+ * sources on long-lived deployments — a latency spike hitting the timeout,
+ * and a stale kept-alive socket through NAT dying on reuse — both succeed
+ * on the second attempt, while a genuinely dead registry still fails fast.
+ */
+async function probeFetch(url: URL | string): Promise<Response> {
+  const attempt = (): Promise<Response> =>
+    fetch(url, {
+      signal: AbortSignal.timeout(REGISTRY_PROBE_TIMEOUT_MS),
+      headers: { accept: "application/json" },
+    });
+  try {
+    return await attempt();
+  } catch {
+    return await attempt();
+  }
+}
+
 async function probeContentRegistry(
   registryUrl: string,
   status: ContentRegistryRuntimeStatus,
@@ -82,10 +110,7 @@ async function probeContentRegistry(
     url.pathname = url.pathname.replace(/\/mcp\/?$/, "/health");
     url.search = "";
     url.hash = "";
-    const response = await fetch(url, {
-      signal: AbortSignal.timeout(5_000),
-      headers: { accept: "application/json" },
-    });
+    const response = await probeFetch(url);
     status.running = response.ok;
     if (response.ok) {
       // Registry health announces its own process version; older registries
@@ -412,9 +437,7 @@ export async function startBrainServer(
       // The configured URL may be the MCP endpoint; the HTTP API lives at
       // the same origin without the /mcp suffix.
       const httpBase = contentRegistryUrl.replace(/\/+$/, "").replace(/\/mcp$/, "");
-      const response = await fetch(`${httpBase}/v1/index.json`, {
-        signal: AbortSignal.timeout(2_000),
-      });
+      const response = await probeFetch(`${httpBase}/v1/index.json`);
       if (response.ok) {
         const index = (await response.json()) as {
           bundles?: Array<{
