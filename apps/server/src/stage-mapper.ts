@@ -1473,7 +1473,10 @@ function buildReviews(
     cot?: string;
     comments: Map<number, CommentView>;
     decision?: JudgeDecisionView;
-    revision?: { touchedSteps: number[] };
+    revision?: {
+      touchedSteps: number[];
+      rewritten?: { index: number; text: string }[];
+    };
   }>();
   // Per-member revision replay: how many redevelopments landed, and the last
   // one's raw record — the source of the member's final output envelope.
@@ -1488,6 +1491,17 @@ function buildReviews(
     return found;
   };
   const seatLabel = (index: number): string => `Seat ${index + 1}`;
+
+  // Whether a journal key is the agent result of the given workflow node.
+  // TWO real shapes exist: a node compiled directly into a sequence keeps
+  // its wrapper segment ("…/judge-step/judge-step-execute::result"), while a
+  // node that IS a condition branch is pathed as then/else INSTEAD of its
+  // own id ("…/maybe-redevelop/then/redevelop-idea-execute::result"). The
+  // review's commentors and redeveloper both live under conditions, so a
+  // wrapper-only matcher silently hid every comment and every redevelopment
+  // from this reconstruction while the judge kept rendering.
+  const agentResultOf = (key: string, nodeId: string): boolean =>
+    key.endsWith(`/${nodeId}::result`) || key.endsWith(`/${nodeId}-execute::result`);
 
   // Working chain per member, replayed in journal order: it starts as the
   // first-pass chain and every redevelopment re-emits the complete chain, so
@@ -1514,7 +1528,8 @@ function buildReviews(
       if (text !== undefined) round.cot = text;
     }
     if (
-      /\/comment-step(?:\/comment-step-execute)?::result$/.test(entry.key) &&
+      (agentResultOf(entry.key, "comment-step") ||
+        agentResultOf(entry.key, "comment-step-bridge")) &&
       at.commentor !== undefined
     ) {
       const thinker = panel[at.member];
@@ -1524,11 +1539,9 @@ function buildReviews(
         const view = comment(output, author, seatLabel(panel.indexOf(author)));
         if (view) round.comments.set(at.commentor, view);
       }
-    } else if (/\/judge-step(?:\/judge-step-execute)?::result$/.test(entry.key)) {
+    } else if (agentResultOf(entry.key, "judge-step")) {
       round.decision = decision(output);
-    } else if (
-      /\/redevelop-idea(?:\/redevelop-idea-execute)?::result$/.test(entry.key)
-    ) {
+    } else if (agentResultOf(entry.key, "redevelop-idea")) {
       const revision = object(output);
       if (Array.isArray(revision?.steps)) {
         const replacement = revision.steps.filter(
@@ -1540,7 +1553,20 @@ function buildReviews(
         const touchedSteps = replacement
           .map((step, index) => (step === chain[index] ? 0 : index + 1))
           .filter((index) => index > 0);
-        round.revision = { touchedSteps };
+        round.revision = {
+          touchedSteps,
+          // The rewritten steps' NEW text rides along, so the dashboard can
+          // show what the redevelopment actually produced without hopping
+          // to the final chain view.
+          ...(touchedSteps.length > 0
+            ? {
+                rewritten: touchedSteps.map((index) => ({
+                  index,
+                  text: replacement[index - 1]!,
+                })),
+              }
+            : {}),
+        };
         chain.splice(0, chain.length, ...replacement);
         const state = memberRevisions.get(at.member);
         memberRevisions.set(at.member, {

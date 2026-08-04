@@ -474,7 +474,11 @@ export interface ReviewRoundView {
   readonly comments: readonly CommentView[];
   readonly decision?: JudgeDecisionView;
   /** Present when this round ended in a redevelopment: the runtime-computed change-set. */
-  readonly revision?: { readonly touchedSteps: readonly number[] };
+  readonly revision?: {
+    readonly touchedSteps: readonly number[];
+    /** The NEW text of each rewritten step, in touchedSteps order. */
+    readonly rewritten?: readonly { readonly index: number; readonly text: string }[];
+  };
 }
 
 export type ReviewStepOutcome = "pending" | "under-review" | "passed" | "force-passed";

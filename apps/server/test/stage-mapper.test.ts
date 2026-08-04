@@ -134,13 +134,36 @@ test("review view surfaces each member's final version; the first pass stays the
       novelty: "Revised novelty claim.",
       literature: firstIdea.literature,
     };
-    // The journal record of the revision: the agent result of the
-    // redevelop-idea execute step at member[0], step index 1, round 0.
+    // The journal records exactly as the runner writes them: a commentor's
+    // result (under the dispatch-comment CONDITION, so the branch label
+    // "else" replaces the node's own wrapper segment) and the redevelopment
+    // (under maybe-redevelop, same branch-form key). These key shapes are
+    // authoritative — a wrapper-only matcher regressed here once, hiding
+    // every comment and revision from the dashboard while runs were fine.
+    const commentEntry = {
+      key:
+        "brainstorm-root/review-members/member[0]/cotStep[1]/" +
+        "review-round-loop/iter[0]/review-round-body/gather-comments/" +
+        "gather-comments-fanout/commentor[0]/" +
+        "dispatch-comment/else/comment-step-execute::result",
+      kind: "agent",
+      value: {
+        taskId: "t-comment",
+        status: "ok",
+        output: {
+          verdict: "Interrupt",
+          step: 2,
+          reason: "The mechanism misattributes its guarantee to the wrong framework.",
+          suggestion: "",
+          evidence: noEvidence,
+        },
+      },
+    };
     const revisionEntry = {
       key:
-        "brainstorm-root/review-members/member[0]/review-steps/cotStep[1]/" +
-        "review-round/iter[0]/review-round-body/maybe-redevelop/then/" +
-        "redevelop-idea/redevelop-idea-execute::result",
+        "brainstorm-root/review-members/member[0]/cotStep[1]/" +
+        "review-round-loop/iter[0]/review-round-body/maybe-redevelop/then/" +
+        "redevelop-idea-execute::result",
       kind: "agent",
       value: {
         taskId: "t-revision",
@@ -159,7 +182,7 @@ test("review view surfaces each member's final version; the first pass stays the
         workflowId: "brainstorm",
         status: "completed",
         input: {},
-        journal: [revisionEntry],
+        journal: [commentEntry, revisionEntry],
         pendingGates: [],
         seq: 1,
         updatedAt: Date.now(),
@@ -233,6 +256,25 @@ test("review view surfaces each member's final version; the first pass stays the
       reviewed.finalIdea.literature?.length,
       1,
       "the first pass's literature record rides into the final version",
+    );
+
+    const round = reviewed.steps
+      .find((step) => step.index === 2)
+      ?.rounds.find((candidate) => candidate.round === 1);
+    assert.ok(round, "step 2 replays its review round");
+    assert.equal(
+      round.cot,
+      "Step two.",
+      "the round shows the text the reviewers actually saw (pre-revision)",
+    );
+    assert.equal(round.comments.length, 1, "the commentor's interrupt is replayed");
+    assert.equal(round.comments[0]?.verdict, "Interrupt");
+    assert.ok(round.revision, "the redevelopment is replayed into the round");
+    assert.deepEqual([...round.revision.touchedSteps], [2]);
+    assert.equal(
+      round.revision.rewritten?.[0]?.text,
+      "REVISED step two.",
+      "the rewritten step's new text rides along for display",
     );
 
     const untouched = reviewStage.members.find((member) => member.memberId === "member-2");

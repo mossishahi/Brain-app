@@ -223,6 +223,18 @@ function RoundFold({
                 : `Re-developed — step${revision.touchedSteps.length === 1 ? "" : "s"} ${revision.touchedSteps.join(", ")} rewritten, the rest carried verbatim`}
             </div>
           )}
+          {revision?.rewritten?.map((entry) => (
+            <details key={entry.index} className="review-fold">
+              <summary className="review-fold-head">
+                <span className="review-fold-name">
+                  step {entry.index} — rewritten text
+                </span>
+              </summary>
+              <div className="round-cot">
+                <div>{entry.text}</div>
+              </div>
+            </details>
+          ))}
         </div>
       )}
     </details>
