@@ -57,7 +57,7 @@ export interface TaxonomyTreeExport {
 
 export interface TaxonomySuggestionEntry {
   readonly term: string;
-  /** matched | place | already_present | undecided. */
+  /** matched | place | already_present | insert | undecided. */
   readonly kind: string;
   readonly detail?: unknown;
 }

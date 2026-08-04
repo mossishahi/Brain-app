@@ -819,13 +819,18 @@ export const suggestionReceiptSchema = z
     /** The taxonomy revision the decisions were recorded against. */
     revision: z.number().int().min(1),
     queued: z.number().int().min(0),
-    /** Echo of what was submitted: one entry per pool member. */
+    /**
+     * Echo of what was submitted: one entry per pool member. "insert" is a
+     * place-anchored insertion candidate carrying its nearest-node evidence
+     * — an unmatched term without a decision, or a placer-declared
+     * undecidable, when the semantic lane produced candidates.
+     */
     entries: z
       .array(
         z
           .object({
             term: nonEmpty,
-            kind: z.enum(["matched", "place", "already_present", "undecided"]),
+            kind: z.enum(["matched", "place", "already_present", "insert", "undecided"]),
           })
           .strict(),
       )
