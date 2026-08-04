@@ -285,10 +285,19 @@ function serveStatic(
     safe && existsSync(requested) && statSync(requested).isFile()
       ? requested
       : index;
+  // Vite emits content-hashed filenames under assets/, so those bytes can
+  // never change behind their URL: cache them forever and a page refresh
+  // re-downloads nothing but index.html.
+  const immutable = file !== index && decoded.startsWith("/assets/");
   res.writeHead(200, {
     "content-type": contentType(file),
     "content-length": statSync(file).size,
-    "cache-control": file === index ? "no-cache" : "public, max-age=3600",
+    "cache-control":
+      file === index
+        ? "no-cache"
+        : immutable
+          ? "public, max-age=31536000, immutable"
+          : "public, max-age=3600",
   });
   createReadStream(file).pipe(res);
 }

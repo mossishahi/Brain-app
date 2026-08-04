@@ -16,6 +16,7 @@ import {
 } from "@brainstorm-agentic/protocol";
 
 import { atomicWriteFile, atomicWriteJson, readJsonFile } from "./files.js";
+import { readJsonCached } from "./read-cache.js";
 
 const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5";
 /**
@@ -728,7 +729,9 @@ export class SettingsStore {
   }
 
   get(): ServerSettings {
-    const settings = validateStoredSettings(readJsonFile<unknown>(this.path));
+    // Hot path: read per request/SSE tick; the stamped cache makes an
+    // unchanged settings file cost one stat instead of a read+parse.
+    const settings = validateStoredSettings(readJsonCached<unknown>(this.path));
     return {
       ...settings,
       // The deployment's registry endpoint always wins over anything stored
@@ -751,21 +754,21 @@ export class SettingsStore {
   }
 
   getAnthropicApiKey(): string | undefined {
-    const key = readJsonFile<StoredCredentials>(
+    const key = readJsonCached<StoredCredentials>(
       this.credentialsPath,
     )?.anthropicApiKey;
     return typeof key === "string" && key.length > 0 ? key : undefined;
   }
 
   getClaudeSetupToken(): string | undefined {
-    const token = readJsonFile<StoredCredentials>(
+    const token = readJsonCached<StoredCredentials>(
       this.credentialsPath,
     )?.claudeSetupToken;
     return typeof token === "string" && token.length > 0 ? token : undefined;
   }
 
   getOpenRouterApiKey(): string | undefined {
-    const key = readJsonFile<StoredCredentials>(
+    const key = readJsonCached<StoredCredentials>(
       this.credentialsPath,
     )?.openRouterApiKey;
     return typeof key === "string" && key.length > 0 ? key : undefined;

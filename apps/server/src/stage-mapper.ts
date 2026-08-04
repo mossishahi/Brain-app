@@ -1,4 +1,3 @@
-import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type {
@@ -63,7 +62,7 @@ import {
   type StageView,
 } from "@brainstorm-agentic/protocol";
 
-import { readJsonFile } from "./files.js";
+import { readJsonCached, readJsonlCached } from "./read-cache.js";
 import type { JobRecord } from "./model.js";
 
 interface ArtifactRefFile {
@@ -117,7 +116,7 @@ function object(value: unknown): Record<string, unknown> | undefined {
 
 function readCheckpoint(sessionDir: string): WorkflowCheckpoint | undefined {
   try {
-    return readJsonFile<WorkflowCheckpoint>(join(sessionDir, "checkpoint.json"));
+    return readJsonCached<WorkflowCheckpoint>(join(sessionDir, "checkpoint.json"));
   } catch {
     return undefined;
   }
@@ -132,7 +131,7 @@ function readContentBundle(
   jobDir: string,
 ): { readonly id: string; readonly version: string } | undefined {
   try {
-    const pin = readJsonFile<{ bundle?: unknown; version?: unknown }>(
+    const pin = readJsonCached<{ bundle?: unknown; version?: unknown }>(
       join(jobDir, "content", "content-pin.json"),
     );
     if (typeof pin?.bundle === "string" && typeof pin.version === "string") {
@@ -144,40 +143,26 @@ function readContentBundle(
   return undefined;
 }
 
-function readEvents(jobDir: string): RunEvent[] {
-  const path = join(jobDir, "events.jsonl");
-  if (!existsSync(path)) return [];
-  try {
-    return readFileSync(path, "utf8")
-      .split(/\r?\n/)
-      .filter((line) => line.trim().length > 0)
-      .flatMap((line) => {
-        try {
-          return [JSON.parse(line) as RunEvent];
-        } catch {
-          return [];
-        }
-      });
-  } catch {
-    return [];
-  }
+/** Incremental: the event log is append-only, so only the tail is parsed. */
+function readEvents(jobDir: string): readonly RunEvent[] {
+  return readJsonlCached(join(jobDir, "events.jsonl")) as readonly RunEvent[];
 }
 
 function readArtifacts(sessionDir: string): ArtifactValue[] {
   const directory = join(sessionDir, "artifacts");
   let index: ArtifactIndexFile | undefined;
   try {
-    index = readJsonFile<ArtifactIndexFile>(join(directory, "index.json"));
+    index = readJsonCached<ArtifactIndexFile>(join(directory, "index.json"));
   } catch {
     return [];
   }
   const values: ArtifactValue[] = [];
   for (const ref of index?.refs ?? []) {
     try {
-      values.push({
-        ref,
-        value: JSON.parse(readFileSync(join(directory, ref.id), "utf8")) as unknown,
-      });
+      // Artifact payloads are immutable once written, so the stamped cache
+      // reads each one exactly once for the server's lifetime.
+      const value = readJsonCached<unknown>(join(directory, ref.id));
+      if (value !== undefined) values.push({ ref, value });
     } catch {
       // Atomic index/payload updates can briefly expose an incomplete snapshot.
     }

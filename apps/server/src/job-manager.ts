@@ -39,6 +39,7 @@ import {
   renderSlurmTemplate,
 } from "./command.js";
 import { atomicWriteFile, atomicWriteJson, readJsonFile } from "./files.js";
+import { readJsonCached, statStamp } from "./read-cache.js";
 import type { JobRecord } from "./model.js";
 import {
   SettingsStore,
@@ -361,7 +362,7 @@ export class JobManager {
 
   private checkpoint(jobId: string): WorkflowCheckpoint | undefined {
     try {
-      return readJsonFile<WorkflowCheckpoint>(
+      return readJsonCached<WorkflowCheckpoint>(
         join(this.sessionDir(jobId), "checkpoint.json"),
       );
     } catch {
@@ -450,8 +451,30 @@ export class JobManager {
     }
   }
 
-  private async slurmAlive(id: string | undefined): Promise<boolean> {
-    if (!id) return false;
+  /**
+   * Scheduler probes are cached briefly: `detail()` runs on every request
+   * and SSE tick, and spawning squeue/sacct per call both lags the response
+   * and hammers the scheduler. A few seconds of staleness in "is the SLURM
+   * job alive" is invisible next to the poller cadence.
+   */
+  private static readonly SLURM_ALIVE_TTL_MS = 5_000;
+  private readonly slurmAliveCache = new Map<
+    string,
+    { at: number; alive: Promise<boolean> }
+  >();
+
+  private slurmAlive(id: string | undefined): Promise<boolean> {
+    if (!id) return Promise.resolve(false);
+    const cached = this.slurmAliveCache.get(id);
+    if (cached && this.now() - cached.at < JobManager.SLURM_ALIVE_TTL_MS) {
+      return cached.alive;
+    }
+    const alive = this.probeSlurmAlive(id);
+    this.slurmAliveCache.set(id, { at: this.now(), alive });
+    return alive;
+  }
+
+  private async probeSlurmAlive(id: string): Promise<boolean> {
     try {
       const queue = await execute("squeue", ["-h", "-j", id, "-o", "%T"], {
         env: this.env,
@@ -535,16 +558,44 @@ export class JobManager {
     return record;
   }
 
+  /**
+   * Built details memoized by a fingerprint of everything the build reads:
+   * the record itself, the reconciled status, the settings, and the stat
+   * stamps of the workspace files (checkpoint, event log, artifact index,
+   * content pin). SSE ticks, polls, and page refreshes hit the cache for
+   * the price of four stats; a change in any input rebuilds exactly once.
+   */
+  private readonly detailCache = new Map<
+    string,
+    { fingerprint: string; value: JobDetail }
+  >();
+
   async detail(jobId: string): Promise<JobDetail> {
     const record = this.record(jobId);
     const status = await this.reconcile(record);
-    return buildJobDetail({
+    const sessionDir = this.sessionDir(jobId);
+    const jobDir = this.jobDir(jobId);
+    const settings = record.executionSettings ?? this.settings.get();
+    const fingerprint = [
+      JSON.stringify(record),
+      status,
+      JSON.stringify(settings),
+      statStamp(join(sessionDir, "checkpoint.json")),
+      statStamp(join(jobDir, "events.jsonl")),
+      statStamp(join(sessionDir, "artifacts", "index.json")),
+      statStamp(join(jobDir, "content", "content-pin.json")),
+    ].join("|");
+    const cached = this.detailCache.get(jobId);
+    if (cached && cached.fingerprint === fingerprint) return cached.value;
+    const value = buildJobDetail({
       record,
       status,
-      sessionDir: this.sessionDir(jobId),
-      jobDir: this.jobDir(jobId),
-      settings: record.executionSettings ?? this.settings.get(),
+      sessionDir,
+      jobDir,
+      settings,
     });
+    this.detailCache.set(jobId, { fingerprint, value });
+    return value;
   }
 
   /** Statuses whose workspace files no process writes to anymore. */
@@ -564,15 +615,9 @@ export class JobManager {
     const key = `${status}:${record.updatedAt}`;
     const cached = this.summaryCache.get(record.jobId);
     if (cached?.key === key) return cached.value;
-    const value = compactJobDetail(
-      buildJobDetail({
-        record,
-        status,
-        sessionDir: this.sessionDir(record.jobId),
-        jobDir: this.jobDir(record.jobId),
-        settings: record.executionSettings ?? this.settings.get(),
-      }),
-    );
+    // Live jobs ride the fingerprint-cached detail, so a list snapshot
+    // costs stats — not a rebuild — when nothing changed.
+    const value = compactJobDetail(await this.detail(record.jobId));
     if (JobManager.SETTLED_STATUSES.has(status)) {
       this.summaryCache.set(record.jobId, { key, value });
     }
