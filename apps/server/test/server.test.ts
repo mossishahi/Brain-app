@@ -588,6 +588,38 @@ test("OpenRouter parser credentials are verified and kept write-only", async () 
   }
 });
 
+test("clearing a stored credential actually removes it", async () => {
+  // Regression: the clear branch deleted the key, then the carry-forward branch
+  // two lines later restored it from a value read BEFORE the delete — so a user
+  // could never remove their OpenRouter key. No test covered the clear path; the
+  // transactionality tests only covered setting and redaction.
+  const workspace = tempRoot();
+  try {
+    const store = new SettingsStore(workspace, {
+      validateOpenRouter: async () => undefined,
+    });
+    const base = store.get();
+    await store.put({
+      ...base,
+      llm: { provider: "offline", agentSdk: base.llm.agentSdk },
+      creditRecovery: { ...base.creditRecovery, openRouterApiKey: "secret-key" },
+    });
+    assert.equal(store.getOpenRouterApiKey(), "secret-key");
+
+    const stored = store.get();
+    await store.put({
+      ...stored,
+      llm: { provider: "offline", agentSdk: stored.llm.agentSdk },
+      // The clear flag is nested under creditRecovery, alongside the key it clears.
+      creditRecovery: { ...stored.creditRecovery, clearOpenRouterApiKey: true },
+    });
+    assert.equal(store.getOpenRouterApiKey(), undefined, "the cleared key must be gone");
+    assert.equal(store.get().creditRecovery.openRouterKeyConfigured, false);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("Claude Agent settings populate setup-token environment without leaking developer keys", async () => {
   const workspace = tempRoot();
   try {
