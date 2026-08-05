@@ -1,7 +1,7 @@
 import type { HumanGateNode as ContentHumanGateNode } from "@brainstorm-agentic/content";
 import type { JsonObject, JsonValue, ScopeReader } from "@brainstorm-agentic/core";
 
-import { resolveDataReference, writeDataReference } from "./data-ref.js";
+import { type ReferenceRoots, resolveDataReference, writeDataReference } from "./data-ref.js";
 import { BrainstormRuntimeError } from "./errors.js";
 import { validateArtifact } from "./state.js";
 
@@ -113,12 +113,17 @@ export function autoApproveDecision(node: ContentHumanGateNode): HumanGateDecisi
  * either action of a gate that edits the panel — additions are an explicit
  * host capability layered on the content's remove-only rule, so the
  * submitter can seat expertise the automatic selection missed).
+ *
+ * A classification revise is checked against the in-memory content bundle
+ * (`roots`), never against run state: the input-type catalog is deliberately
+ * not state-backed, so it cannot reach the checkpoint journal.
  */
 export function applyGateDecision(
   state: JsonObject,
   scope: ScopeReader,
   node: ContentHumanGateNode,
   response: JsonValue,
+  roots: ReferenceRoots,
 ): JsonObject {
   const decision = normalizedDecision(response);
   const action = node.gate.actions.find((candidate) => candidate.id === decision.action);
@@ -211,8 +216,9 @@ export function applyGateDecision(
       const edited: Record<string, JsonValue> = { ...current };
       if (hasType) {
         const type = decision.type;
-        const knownTypes = resolveDataReference("catalog.inputTypes.types", scope, next, {
+        const knownTypes = resolveDataReference("bundle.inputTypes.types", scope, next, {
           required: true,
+          roots,
         });
         if (
           typeof type !== "string" ||

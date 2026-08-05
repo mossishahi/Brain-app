@@ -255,7 +255,7 @@ test("rejects references to undeclared params and unknown catalogs", () => {
   const selector = findActivity(bundle.workflows["brainstorm"]!.root, "select-panel");
   selector.bind["panelSize"] = "params.committeeSize";
   const processor = findAgent(bundle.workflows["brainstorm"]!.root, "process-input");
-  processor.bind!["typeOptions"] = "catalog.faculties";
+  processor.bind!["typeOptions"] = "bundle.faculties";
   const issues = validateBundle(bundle);
   assert.ok(issues.some((i) => i.code === "UNKNOWN_PARAM"));
   assert.ok(issues.some((i) => i.code === "UNKNOWN_CATALOG"));
@@ -264,7 +264,7 @@ test("rejects references to undeclared params and unknown catalogs", () => {
 test("rejects review builtins used outside a repeatUntil loop", () => {
   const bundle = freshBundle();
   const processor = findAgent(bundle.workflows["brainstorm"]!.root, "process-input");
-  processor.bind!["typeOptions"] = "review.allowedVerdicts";
+  processor.bind!["typeOptions"] = "reviews[member.id].allowedVerdicts";
   expectIssue(bundle, "REVIEW_REF_OUTSIDE_LOOP");
 });
 

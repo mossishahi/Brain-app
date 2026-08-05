@@ -73,7 +73,27 @@ function own(value: Record<string, JsonValue>, key: string): JsonValue | undefin
   return Object.prototype.hasOwnProperty.call(value, key) ? value[key] : undefined;
 }
 
-function rootValue(name: string, scope: ScopeReader, state: JsonObject): JsonValue | undefined {
+/**
+ * Read-only reference roots supplied by the compiler rather than the run's
+ * state: the content bundle's own projections (`bundle.*`). They resolve like
+ * any other root but are NEVER state-backed, so nothing they carry can reach
+ * the checkpoint journal — which is the point. Content prose (input-type
+ * outlines, shape guides, verdict descriptions) is bound into tasks straight
+ * out of the in-memory bundle instead of being threaded through state.
+ *
+ * Roots take precedence over both loop scope and state so a node output key or
+ * loop variable can never shadow content, and `writeDataReference` refuses to
+ * assign through one.
+ */
+export type ReferenceRoots = Readonly<Record<string, JsonValue>>;
+
+function rootValue(
+  name: string,
+  scope: ScopeReader,
+  state: JsonObject,
+  roots: ReferenceRoots | undefined,
+): JsonValue | undefined {
+  if (roots && Object.prototype.hasOwnProperty.call(roots, name)) return roots[name];
   if (scope.has(name)) return scope.get(name);
   return own(state as Record<string, JsonValue>, name);
 }
@@ -101,18 +121,20 @@ function readAt(value: JsonValue | undefined, token: PathToken, ref: string): Js
 }
 
 /**
- * Safely resolves a data reference against lexical loop variables first and
- * the runtime-owned state object second. Wildcards project the remaining path
- * over array elements or object values in stable insertion order.
+ * Safely resolves a data reference against compiler-supplied read-only roots
+ * first (`bundle.*`), lexical loop variables second, and the runtime-owned
+ * state object last. Wildcards project the remaining path over array elements
+ * or object values in stable insertion order.
  */
 export function resolveDataReference(
   ref: string,
   scope: ScopeReader,
   state: JsonObject,
-  options: { readonly required?: boolean } = {},
+  options: { readonly required?: boolean; readonly roots?: ReferenceRoots } = {},
 ): JsonValue | undefined {
   const tokens = parseDataReference(ref);
   const root = tokens[0] as Extract<PathToken, { kind: "property" }>;
+  const { roots } = options;
 
   const walk = (value: JsonValue | undefined, offset: number): JsonValue | undefined => {
     if (offset >= tokens.length) return value;
@@ -127,7 +149,10 @@ export function resolveDataReference(
       return values.map((entry) => walk(entry, offset + 1) ?? null);
     }
     if (token.kind === "dynamic") {
-      const key = dynamicKey(resolveDataReference(token.ref, scope, state, { required: true }), token.ref);
+      const key = dynamicKey(
+        resolveDataReference(token.ref, scope, state, { required: true, ...(roots ? { roots } : {}) }),
+        token.ref,
+      );
       const next =
         typeof key === "number"
           ? readAt(value, { kind: "index", index: key }, ref)
@@ -137,7 +162,7 @@ export function resolveDataReference(
     return walk(readAt(value, token, ref), offset + 1);
   };
 
-  const result = walk(rootValue(root.key, scope, state), 1);
+  const result = walk(rootValue(root.key, scope, state, roots), 1);
   if (result === undefined && options.required !== false) {
     throw new DataReferenceError(`data reference "${ref}" did not resolve`);
   }
@@ -207,12 +232,14 @@ export function resolveBindValue(
   binding: BindValue,
   scope: ScopeReader,
   state: JsonObject,
+  roots?: ReferenceRoots,
 ): JsonValue {
   const ref = typeof binding === "string" ? binding : binding.ref;
-  let value: JsonValue = resolveDataReference(ref, scope, state, { required: true })!;
+  const withRoots = roots ? { roots } : {};
+  let value: JsonValue = resolveDataReference(ref, scope, state, { required: true, ...withRoots })!;
   if (typeof binding !== "string" && binding.through !== undefined) {
     if (!Array.isArray(value)) throw new DataReferenceError(`through projection on "${ref}" requires an array`);
-    const through = resolveDataReference(binding.through, scope, state, { required: true });
+    const through = resolveDataReference(binding.through, scope, state, { required: true, ...withRoots });
     if (typeof through !== "number" || !Number.isSafeInteger(through) || through < 0) {
       throw new DataReferenceError(`through reference "${binding.through}" must resolve to a non-negative integer`);
     }
@@ -231,6 +258,7 @@ function materializedKeys(
   ref: string,
   scope: ScopeReader,
   state: JsonObject,
+  roots: ReferenceRoots | undefined,
 ): readonly (string | number)[] {
   const tokens = parseDataReference(ref);
   return tokens.map((token) => {
@@ -239,7 +267,10 @@ function materializedKeys(
     if (token.kind === "wildcard") {
       throw new DataReferenceError(`wildcards are not valid assignment targets: "${ref}"`);
     }
-    return dynamicKey(resolveDataReference(token.ref, scope, state, { required: true }), token.ref);
+    return dynamicKey(
+      resolveDataReference(token.ref, scope, state, { required: true, ...(roots ? { roots } : {}) }),
+      token.ref,
+    );
   });
 }
 
@@ -255,10 +286,19 @@ export function writeDataReference(
   target: string,
   value: JsonValue,
   scope: ScopeReader,
+  roots?: ReferenceRoots,
 ): DataReferenceWrite {
-  const keys = materializedKeys(target, scope, state);
+  const keys = materializedKeys(target, scope, state, roots);
   if (keys.length === 0 || typeof keys[0] !== "string") {
     throw new DataReferenceError(`assignment target "${target}" needs a string root`);
+  }
+  // Content roots are read-only by construction: allowing a write here would
+  // both mutate the bundle projection and smuggle content into the journaled
+  // state, defeating the reason `bundle.*` is not state-backed.
+  if (roots && Object.prototype.hasOwnProperty.call(roots, keys[0])) {
+    throw new DataReferenceError(
+      `assignment target "${target}" writes through the read-only content root "${keys[0]}"`,
+    );
   }
   const next = structuredClone(state) as Record<string, JsonValue>;
   let cursor: Record<string, JsonValue> | JsonValue[] = next;

@@ -121,6 +121,15 @@ const nodeBase = {
   notes: z.string().optional(),
 };
 
+/**
+ * What a review seat is doing at its current walk position. Declared in content
+ * so the pipeline can say which stage of a round a node represents, and the
+ * runtime — never the model — stamps it on the seat.
+ */
+export const REVIEW_PHASES = ["commenting", "judging", "redeveloping"] as const;
+export type ReviewPhaseName = (typeof REVIEW_PHASES)[number];
+const reviewPhaseSchema = z.enum(REVIEW_PHASES);
+
 export type WorkflowNode =
   | SequenceNode
   | AgentNode
@@ -150,6 +159,12 @@ export interface AgentNode {
   bind?: Record<string, BindValue>;
   /** Where the agent's validated structured output lands, and the schema it must satisfy. */
   output: { key: string; schema: string };
+  /**
+   * Inside a review loop, what the seat is doing while this node runs. The
+   * runtime stamps it on the seat before the node executes, so the dashboard
+   * can show a live per-seat phase (the model never reports it).
+   */
+  reviewPhase?: ReviewPhaseName;
 }
 
 /**
@@ -179,8 +194,13 @@ export interface ForEachNode {
   /** Optional reference to an item to skip (e.g. the member under review). */
   exclude?: string;
   mode: "parallel" | "sequential";
-  /** Optional cap on simultaneous branches in parallel mode. */
+  /**
+   * Cap on simultaneous branches. REQUIRED in parallel mode: unbounded fan-out
+   * would let one run open as many provider sessions as the collection is long.
+   */
   maxConcurrency?: number;
+  /** Inside a review loop, the phase to stamp on the seat while this node runs. */
+  reviewPhase?: ReviewPhaseName;
   body: WorkflowNode;
 }
 
@@ -191,10 +211,23 @@ export interface RepeatUntilNode {
   body: WorkflowNode;
   /** Evaluated after each iteration; the loop exits as soon as it holds. */
   until: ConditionExpr;
-  /** Hard bound on iterations — required; there are no unbounded loops. */
-  maxIterations: number;
+  /**
+   * Hard bound on iterations — required; there are no unbounded loops. Either a
+   * literal integer, or `params.<name>` naming a positive-integer workflow param
+   * with a finite declared `max`. In the param form the loop compiles to that
+   * declared `max`, so the static bound stays finite while the per-run budget is
+   * enforced by `until` — which keeps the budget in exactly one place.
+   */
+  maxIterations: number | string;
   /** What happens when the bound is hit before `until` holds. */
   onExhausted: "proceed" | "fail";
+  /**
+   * The review seat this loop owns: a data reference resolving to a member id.
+   * Declaring it is what makes `reviews[<seat>].*` addressable in the body, and
+   * it is what keeps two seats reviewed in parallel from colliding — every write
+   * the body makes is qualified by this seat.
+   */
+  seat?: string;
 }
 
 export interface ConditionNode {
@@ -261,6 +294,7 @@ export const workflowNodeSchema: z.ZodType<WorkflowNode> = z.lazy(() =>
         route: identifier,
         bind: z.record(z.string().min(1), bindValueSchema).optional(),
         output: z.object({ key: dataRefSchema, schema: z.string().min(1) }).strict(),
+        reviewPhase: reviewPhaseSchema.optional(),
       })
       .strict(),
     z
@@ -282,17 +316,28 @@ export const workflowNodeSchema: z.ZodType<WorkflowNode> = z.lazy(() =>
         exclude: dataRefSchema.optional(),
         mode: z.enum(["parallel", "sequential"]),
         maxConcurrency: z.number().int().min(1).optional(),
+        reviewPhase: reviewPhaseSchema.optional(),
         body: workflowNodeSchema,
       })
-      .strict(),
+      .strict()
+      .superRefine((node, ctx) => {
+        if (node.mode === "parallel" && node.maxConcurrency === undefined) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["maxConcurrency"],
+            message: "a parallel forEach must declare maxConcurrency — unbounded fan-out is rejected",
+          });
+        }
+      }),
     z
       .object({
         ...nodeBase,
         kind: z.literal("repeatUntil"),
         body: workflowNodeSchema,
         until: conditionExprSchema,
-        maxIterations: z.number().int().min(1),
+        maxIterations: z.union([z.number().int().min(1), dataRefSchema]),
         onExhausted: z.enum(["proceed", "fail"]),
+        seat: dataRefSchema.optional(),
       })
       .strict(),
     z
