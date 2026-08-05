@@ -12,6 +12,7 @@ import {
   statSync,
   symlinkSync,
   writeFileSync,
+  readdirSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -66,7 +67,7 @@ function latestPublishedVersion(): string {
 
 async function startTestBrainServer(
   options: Omit<StartBrainServerOptions, "contentRegistryUrl" | "contentRegistryStatus">,
-): Promise<RunningBrainServer> {
+): Promise<RunningBrainServer & { readonly registryReads: readonly string[] }> {
   const registry = await startTestRegistry(staticRegistryRoot);
   try {
     const server = await startBrainServer({
@@ -76,6 +77,7 @@ async function startTestBrainServer(
     });
     return {
       ...server,
+      registryReads: registry.reads,
       close: async () => {
         await server.close();
         await registry.close();
@@ -1323,16 +1325,29 @@ test("manual gate can shrink, complete, and reload after restart", async () => {
       manifestSha256: string;
       manifest: { files: Array<{ path: string }> };
     };
-    const cacheRoot = join(
-      contentDir,
-      pin.bundle,
-      pin.version,
-      pin.manifestSha256,
+    // Content is fetched into memory and never written to disk, so the job's
+    // content directory holds the pin and nothing else: no copy of the
+    // pipeline is left behind after (or during) a run.
+    assert.deepEqual(
+      readdirSync(contentDir).sort(),
+      ["content-pin.json"],
+      "the run leaves only its provenance pin on disk",
     );
-    assert.ok(existsSync(join(cacheRoot, "skills", "roles", "processor.md")));
-    // The panel stage runs before the gate, so its roles are fetched by now —
-    // the single decomposer on older published bundles, the pool-builder +
-    // placer split on newer ones.
+
+    // Lazy fetching is now observed where it actually happens — the documents
+    // the run requested from the registry — rather than through a disk
+    // side-effect that no longer exists.
+    // The double logs full registry paths; compare on bundle-relative ones.
+    const prefix = `bundles/${pin.bundle}/${pin.version}/`;
+    const fetched = new Set(
+      server.registryReads
+        .filter((path) => path.startsWith(prefix))
+        .map((path) => path.slice(prefix.length)),
+    );
+    assert.ok(
+      fetched.has("skills/roles/processor.md"),
+      "a role whose stage has run is fetched",
+    );
     const shippedRoles = new Set(pin.manifest.files.map((file) => file.path));
     const panelRoles = [
       "skills/roles/decomposer.md",
@@ -1341,11 +1356,11 @@ test("manual gate can shrink, complete, and reload after restart", async () => {
     ].filter((path) => shippedRoles.has(path));
     assert.ok(panelRoles.length > 0, "the pinned bundle ships a panel-stage role");
     for (const path of panelRoles) {
-      assert.ok(existsSync(join(cacheRoot, path)), `${path} fetched by suspension`);
+      assert.ok(fetched.has(path), `${path} fetched by suspension`);
     }
     for (const notReached of ["brain", "commentor", "judge", "chair"]) {
       assert.equal(
-        existsSync(join(cacheRoot, "skills", "roles", `${notReached}.md`)),
+        fetched.has(`skills/roles/${notReached}.md`),
         false,
         `${notReached} must not be fetched before its stage is reached`,
       );
@@ -1419,14 +1434,13 @@ test("manual gate can shrink, complete, and reload after restart", async () => {
     );
     assert.equal(answered.status, 200);
     const completed = await waitFor(server, jobId, "completed");
-    // Fetched content is ephemeral: a terminal run deletes its cached bundle
-    // copies, keeping only the pin as the provenance record.
-    assert.equal(
-      existsSync(cacheRoot),
-      false,
-      "the cached bundle copies are deleted once the run completes",
+    // Content never reaches disk at all — not during the run and not after it
+    // — so the completed job's content directory still holds only the pin.
+    assert.deepEqual(
+      readdirSync(contentDir).sort(),
+      ["content-pin.json"],
+      "a completed run leaves only its provenance pin on disk",
     );
-    assert.ok(existsSync(join(contentDir, "content-pin.json")));
     const confirm = completed.stages[3]!;
     assert.equal(confirm.id, "confirm-panel");
     assert.equal(confirm.id === "confirm-panel" && confirm.gate.state, "shrunk");

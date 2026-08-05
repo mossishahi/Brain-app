@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -13,7 +14,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import {
-  ContentRegistryCache,
+  ContentRegistryStore,
   parseContentRegistryManifest,
   readContentPin,
   writeContentPin,
@@ -77,8 +78,8 @@ test("pin roundtrip rejects modified manifest metadata", () => {
   }
 });
 
-test("cache fetches one exact file, verifies it, and deduplicates concurrency", async () => {
-  const root = mkdtempSync(join(tmpdir(), "registry-cache-"));
+test("store fetches one exact file, verifies it, deduplicates, and writes nothing to disk", async () => {
+  const root = mkdtempSync(join(tmpdir(), "registry-store-"));
   const pin = fixturePin();
   let reads = 0;
   const fake = {
@@ -92,18 +93,26 @@ test("cache fetches one exact file, verifies it, and deduplicates concurrency", 
     },
   } as ContentRegistryClient;
   try {
-    const cache = new ContentRegistryCache(root, pin, fake);
+    const store = new ContentRegistryStore(pin, fake);
     const [first, second] = await Promise.all([
-      cache.ensure("skills/roles/processor.md"),
-      cache.ensure("skills/roles/processor.md"),
+      store.ensure("skills/roles/processor.md"),
+      store.ensure("skills/roles/processor.md"),
     ]);
     assert.equal(first, second);
-    assert.equal(reads, 1);
-    await cache.ensure("skills/roles/processor.md");
-    assert.equal(reads, 1, "verified disk cache avoids another MCP read");
-    assert.equal(cache.rolePath("judge"), "skills/roles/judge.md");
+    assert.equal(reads, 1, "concurrent requests for one file share a single fetch");
+    const again = await store.ensure("skills/roles/processor.md");
+    assert.equal(reads, 1, "an already-loaded document is not re-fetched");
+
+    // ensure() yields the document itself, not a path.
+    assert.ok(again.includes("name: processor"), "the fetched role text is returned");
+    assert.equal(store.loaded().get("skills/roles/processor.md"), again);
+
+    // The point of the store: content is an input, never a copy left behind.
+    assert.deepEqual(readdirSync(root), [], "nothing is written to disk");
+
+    assert.equal(store.rolePath("judge"), "skills/roles/judge.md");
     assert.equal(
-      cache.techniquePath("deep-understanding"),
+      store.techniquePath("deep-understanding"),
       "skills/techniques/deep-understanding.md",
     );
   } finally {

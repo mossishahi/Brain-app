@@ -2,17 +2,20 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 import {
+  ContentValidationError,
   loadControlContent,
-  readSkillFile,
+  memoryContentSource,
+  parseSkillText,
   type ContentBundle,
   type Skill,
+  type ValidationIssue,
 } from "@brainstorm-agentic/content";
 import type {
   ResolvedRole,
   SkillResolver,
 } from "@brainstorm-agentic/brainstorm-runtime";
 import {
-  ContentRegistryCache,
+  ContentRegistryStore,
   ContentRegistryClient,
   normalizeContentRegistryUrl,
   readContentPin,
@@ -20,13 +23,21 @@ import {
   type ContentRegistryPin,
 } from "@brainstorm-agentic/registry-client";
 
+/** Parses a fetched, hash-verified skill document straight from memory. */
+function skillFromText(text: string, path: string): Skill {
+  const issues: ValidationIssue[] = [];
+  const skill = parseSkillText(text, path, issues);
+  if (!skill || issues.length > 0) throw new ContentValidationError(issues);
+  return skill;
+}
+
 class LazyRegistrySkillResolver implements SkillResolver {
   private readonly resolved = new Map<string, Promise<ResolvedRole>>();
 
-  constructor(private readonly cache: ContentRegistryCache) {}
+  constructor(private readonly store: ContentRegistryStore) {}
 
   hasRole(name: string): boolean {
-    return this.cache.roleNames().has(name);
+    return this.store.roleNames().has(name);
   }
 
   resolveRole(name: string): Promise<ResolvedRole> {
@@ -38,16 +49,12 @@ class LazyRegistrySkillResolver implements SkillResolver {
   }
 
   private async resolve(name: string): Promise<ResolvedRole> {
-    const role = readSkillFile(
-      await this.cache.ensure(this.cache.rolePath(name)),
-    );
+    const rolePath = this.store.rolePath(name);
+    const role = skillFromText(await this.store.ensure(rolePath), rolePath);
     const techniques: Skill[] = [];
     for (const techniqueName of role.meta.techniques) {
-      techniques.push(
-        readSkillFile(
-          await this.cache.ensure(this.cache.techniquePath(techniqueName)),
-        ),
-      );
+      const path = this.store.techniquePath(techniqueName);
+      techniques.push(skillFromText(await this.store.ensure(path), path));
     }
     return { role, techniques };
   }
@@ -59,14 +66,16 @@ export interface LazyRegistryContent {
   readonly pin: ContentRegistryPin;
   /** The open registry connection — also carries the taxonomy MCP tools. */
   readonly client: ContentRegistryClient;
-  /** The on-disk cache root of this pinned bundle (for post-run cleanup). */
-  readonly cacheRoot: string;
+  /** The pinned taxonomy document, held in memory like the rest of the bundle. */
+  readonly taxonomySeed: string | undefined;
   close(): Promise<void>;
 }
 
 /**
- * Opens a version-pinned lazy content view. Existing pins are usable offline
- * for already cached resources; a network read happens only for a cache miss.
+ * Opens a version-pinned lazy content view held entirely in memory. Nothing is
+ * written to disk, so a run leaves no copy of the pipeline behind; the pin
+ * (names and hashes only) is the durable record, and a resume re-fetches the
+ * same immutable version and re-verifies every byte.
  */
 export async function openLazyRegistryContent(options: {
   readonly registryUrl: string;
@@ -96,22 +105,22 @@ export async function openLazyRegistryContent(options: {
     writeContentPin(pinPath, pin);
   }
 
-  const cache = new ContentRegistryCache(options.contentDir, pin, client);
-  await cache.ensureMany([
+  const store = new ContentRegistryStore(pin, client);
+  await store.ensureMany([
     pin.manifest.entrypoints.workflow,
     ...pin.manifest.entrypoints.controls,
   ]);
   const bundle = loadControlContent(
-    cache.root,
+    memoryContentSource(`${pin.bundle}@${pin.version}`, store.loaded()),
     pin.manifest.entrypoints.workflow,
-    cache.roleNames(),
+    store.roleNames(),
   );
   return {
     bundle,
-    skillResolver: new LazyRegistrySkillResolver(cache),
+    skillResolver: new LazyRegistrySkillResolver(store),
     pin,
     client,
-    cacheRoot: cache.root,
+    taxonomySeed: store.loaded().get("catalog/taxonomy.json"),
     close: () => client.close(),
   };
 }

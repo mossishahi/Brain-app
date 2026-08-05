@@ -240,6 +240,7 @@ export class ContentRegistryClient {
   });
   private readonly transport: StreamableHTTPClientTransport;
   private connected = false;
+  private connecting: Promise<void> | undefined;
 
   constructor(readonly url: string) {
     this.transport = new StreamableHTTPClientTransport(
@@ -247,10 +248,28 @@ export class ContentRegistryClient {
     );
   }
 
+  /**
+   * Connects once, even under concurrency.
+   *
+   * The `connected` flag alone cannot guard this: it is set only AFTER the
+   * await, so callers racing into a not-yet-connected client all observe
+   * `false` and all call through — and the MCP client rejects every connect
+   * after the first with "Already connected to a transport". Concurrent
+   * callers therefore share one in-flight attempt; a failed attempt is
+   * cleared so a later call can retry.
+   */
   async connect(): Promise<void> {
     if (this.connected) return;
-    await this.client.connect(this.transport);
-    this.connected = true;
+    this.connecting ??= this.client.connect(this.transport).then(
+      () => {
+        this.connected = true;
+      },
+      (error: unknown) => {
+        this.connecting = undefined;
+        throw error;
+      },
+    );
+    return this.connecting;
   }
 
   async readText(path: string): Promise<string> {
@@ -340,35 +359,32 @@ export class ContentRegistryClient {
   }
 }
 
-function cacheDestination(root: string, relativePath: string): string {
-  const safe = safeRegistryPath(relativePath);
-  const resolvedRoot = resolve(root);
-  const destination = resolve(resolvedRoot, ...safe.split("/"));
-  if (!destination.startsWith(`${resolvedRoot}${sep}`)) {
-    throw new Error(`cache path escapes root: "${safe}"`);
-  }
-  return destination;
-}
-
-export class ContentRegistryCache {
+/**
+ * The pinned bundle's documents, held in memory for the life of the process.
+ *
+ * Content is an input to a run, not something the host keeps: nothing here is
+ * ever written to disk, so a run leaves no copy of the pipeline behind and
+ * there is no cache to invalidate, clean up, or serve stale bytes. The version
+ * pin — names and hashes only, no content — remains the durable record of what
+ * ran, and a resume re-fetches the same immutable version and re-verifies it.
+ */
+export class ContentRegistryStore {
   private readonly files: ReadonlyMap<string, ContentRegistryManifestFile>;
   private readonly inFlight = new Map<string, Promise<string>>();
-  readonly root: string;
+  private readonly contents = new Map<string, string>();
 
   constructor(
-    readonly cacheRoot: string,
     readonly pin: ContentRegistryPin,
     private readonly client: ContentRegistryClient,
   ) {
     this.files = new Map(
       pin.manifest.files.map((entry) => [entry.path, entry]),
     );
-    this.root = resolve(
-      cacheRoot,
-      pin.bundle,
-      pin.version,
-      pin.manifestSha256,
-    );
+  }
+
+  /** Every document fetched so far, for building an in-memory ContentSource. */
+  loaded(): ReadonlyMap<string, string> {
+    return this.contents;
   }
 
   has(path: string): boolean {
@@ -414,21 +430,14 @@ export class ContentRegistryCache {
   private async ensureInner(path: string): Promise<string> {
     const entry = this.files.get(path);
     if (!entry) throw new Error(`manifest does not list "${path}"`);
-    const destination = cacheDestination(this.root, path);
-    if (existsSync(destination)) {
-      const existing = readFileSync(destination);
-      if (
-        existing.length === entry.bytes &&
-        createHash("sha256").update(existing).digest("hex") === entry.sha256
-      ) {
-        return destination;
-      }
-      rmSync(destination, { force: true });
-    }
+    const cached = this.contents.get(path);
+    if (cached !== undefined) return cached;
     const registryPath =
       `bundles/${this.pin.bundle}/${this.pin.version}/${path}`;
     const text = await this.client.readText(registryPath);
     const contents = Buffer.from(text, "utf8");
+    // Verified before use, exactly as when this was disk-backed: the pin is
+    // only a provenance record if every byte it names is checked on arrival.
     if (contents.length !== entry.bytes) {
       throw new Error(
         `Brain Registry file "${path}" has ${contents.length} bytes; expected ${entry.bytes}`,
@@ -438,11 +447,8 @@ export class ContentRegistryCache {
     if (actual !== entry.sha256) {
       throw new Error(`Brain Registry file "${path}" failed SHA-256 verification`);
     }
-    mkdirSync(dirname(destination), { recursive: true });
-    const temporary = `${destination}.tmp-${process.pid}-${randomUUID()}`;
-    writeFileSync(temporary, contents);
-    renameSync(temporary, destination);
-    return destination;
+    this.contents.set(path, text);
+    return text;
   }
 }
 

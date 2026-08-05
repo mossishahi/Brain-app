@@ -63,20 +63,28 @@ function taxonomyForRun(
   sessionRoot: string,
   runId: string,
 ): TaxonomyAccess | undefined {
-  const seed = localTaxonomySeedPath(lazy ? lazy.cacheRoot : contentDir);
-  if (!existsSync(seed)) {
-    // A bundle that ships no taxonomy: fall back to the live registry when one
-    // is connected, so such a bundle still resolves rather than losing the
-    // capability outright.
-    return lazy ? new RegistryTaxonomyService(lazy.client) : undefined;
+  // Registry runs carry the pinned taxonomy in memory with the rest of the
+  // bundle; local runs read the seed from the content directory.
+  if (lazy) {
+    if (lazy.taxonomySeed === undefined) {
+      return new RegistryTaxonomyService(lazy.client);
+    }
+    return new PinnedTaxonomyService(
+      LocalTaxonomyService.fromText(
+        lazy.taxonomySeed,
+        join(sessionRoot, runId, "taxonomy-suggestions"),
+      ),
+      new RegistryTaxonomyService(lazy.client),
+    );
   }
-  const pinned = new LocalTaxonomyService(
+  const seed = localTaxonomySeedPath(contentDir);
+  if (!existsSync(seed)) {
+    return undefined;
+  }
+  return new LocalTaxonomyService(
     seed,
     join(sessionRoot, runId, "taxonomy-suggestions"),
   );
-  return lazy
-    ? new PinnedTaxonomyService(pinned, new RegistryTaxonomyService(lazy.client))
-    : pinned;
 }
 
 /**
@@ -108,27 +116,6 @@ async function prepareRunCodeEnvironment(
       }`,
     );
     return undefined;
-  }
-}
-
-/**
- * Content copies are fetched for the run and deleted after it: once a run
- * reaches a terminal state the cached bundle files are removed, leaving only
- * the pin (the provenance record). Suspended and credit-blocked runs keep the
- * cache — they resume from it, re-fetching nothing.
- */
-function cleanupContentCache(
-  lazy: LazyRegistryContent | undefined,
-  result: RunResult,
-): void {
-  if (!lazy) return;
-  if (result.status !== "completed" && result.status !== "failed" && result.status !== "cancelled") {
-    return;
-  }
-  try {
-    rmSync(lazy.cacheRoot, { recursive: true, force: true });
-  } catch {
-    // Cache cleanup must never mask the run result.
   }
 }
 
@@ -526,7 +513,6 @@ async function main(): Promise<void> {
       reportResult(result, sessionRoot);
       for (const tree of trees) console.log(`Expertise tree: ${tree}`);
       for (const file of finals) console.log(`Final output: ${file}`);
-      cleanupContentCache(lazy, result);
     } finally {
       await lazy?.close();
     }
@@ -591,7 +577,6 @@ async function main(): Promise<void> {
       reportResult(result, sessionRoot);
       for (const tree of trees) console.log(`Expertise tree: ${tree}`);
       for (const file of finals) console.log(`Final output: ${file}`);
-      cleanupContentCache(lazy, result);
     } finally {
       await lazy?.close();
     }

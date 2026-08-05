@@ -135,6 +135,7 @@ function taxonomyToolResult(value: unknown) {
 function protocolServer(
   files: ReadonlyMap<string, string>,
   taxonomy: TestTaxonomy | null,
+  reads: string[],
 ): Server {
   const server = new Server(
     { name: "brain-test-registry", version: "0.1.0" },
@@ -151,6 +152,7 @@ function protocolServer(
   }));
   server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
     const path = pathFromUri(request.params.uri);
+    reads.push(path);
     const text = files.get(path);
     if (text === undefined) throw new Error(`missing test resource "${path}"`);
     return {
@@ -278,9 +280,17 @@ function readBody(req: IncomingMessage): Promise<unknown> {
 export async function startTestRegistry(root: string): Promise<{
   readonly url: string;
   readonly httpServer: HttpServer;
+  /**
+   * Bundle-relative paths actually read over MCP, in request order. Content is
+   * held in memory by the worker and never written to disk, so this is how a
+   * test observes WHICH documents a run fetched — e.g. that a role is not
+   * fetched before its stage is reached.
+   */
+  readonly reads: readonly string[];
   close(): Promise<void>;
 }> {
   const files = filesBelow(root);
+  const reads: string[] = [];
   const taxonomy = loadTestTaxonomy(files);
   const sessions = new Map<
     string,
@@ -326,7 +336,7 @@ export async function startTestRegistry(root: string): Promise<{
       res.writeHead(400).end();
       return;
     }
-    const server = protocolServer(files, taxonomy);
+    const server = protocolServer(files, taxonomy, reads);
     let transport!: StreamableHTTPServerTransport;
     transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
@@ -354,6 +364,7 @@ export async function startTestRegistry(root: string): Promise<{
   return {
     url: `http://127.0.0.1:${port}/mcp`,
     httpServer,
+    reads,
     close: async () => {
       await Promise.allSettled(
         [...sessions.values()].map(({ server }) => server.close()),

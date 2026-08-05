@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, dirname, join, relative, sep } from "node:path";
 import type { ZodType } from "zod";
 
 import { parseFrontMatter } from "./frontmatter.js";
@@ -29,12 +29,93 @@ function structuralIssue(path: string, message: string): ValidationIssue {
   return { code: "SCHEMA_INVALID", path, message };
 }
 
-function parseJsonFile<T>(filePath: string, schema: ZodType<T>, issues: ValidationIssue[]): T | undefined {
-  let raw: string;
-  try {
-    raw = readFileSync(filePath, "utf8");
-  } catch (err) {
-    issues.push(structuralIssue(filePath, `cannot read file: ${(err as Error).message}`));
+/**
+ * Where a bundle's documents come from.
+ *
+ * Content is an INPUT to a run, not something the host keeps: a registry-backed
+ * run holds the fetched bundle in memory for the life of the process and never
+ * writes it to disk, while local development reads a directory. Both satisfy
+ * this interface, so the loader and validator are identical either way.
+ */
+export interface ContentSource {
+  /** Human-readable origin, used to locate validation issues. */
+  readonly label: string;
+  /** Reads a bundle-relative path; undefined when the source has no such file. */
+  read(relativePath: string): string | undefined;
+  /** Bundle-relative paths under `prefix` ending in `suffix`, sorted. */
+  list(prefix: string, suffix: string): readonly string[];
+}
+
+/** A bundle materialized on disk — local development and the offline path. */
+export function directoryContentSource(contentDir: string): ContentSource {
+  const walk = (dir: string, suffix: string, out: string[]): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) walk(full, suffix, out);
+      else if (entry.isFile() && entry.name.endsWith(suffix)) out.push(full);
+    }
+  };
+  return {
+    label: contentDir,
+    read(relativePath) {
+      try {
+        return readFileSync(join(contentDir, relativePath), "utf8");
+      } catch {
+        return undefined;
+      }
+    },
+    list(prefix, suffix) {
+      const root = join(contentDir, prefix);
+      const absolute: string[] = [];
+      walk(root, suffix, absolute);
+      return absolute
+        .map((file) => relative(contentDir, file).split(sep).join("/"))
+        .sort();
+    },
+  };
+}
+
+/**
+ * A bundle held only in memory — the registry path. Nothing here ever touches
+ * the filesystem, so a run leaves no copy of the pipeline behind; the version
+ * pin (which carries no content, only names and hashes) stays the durable
+ * record of what ran.
+ */
+export function memoryContentSource(
+  label: string,
+  files: ReadonlyMap<string, string>,
+): ContentSource {
+  return {
+    label,
+    read: (relativePath) => files.get(relativePath),
+    list(prefix, suffix) {
+      const scope = prefix.endsWith("/") ? prefix : `${prefix}/`;
+      return [...files.keys()]
+        .filter((path) => path.startsWith(scope) && path.endsWith(suffix))
+        .sort();
+    },
+  };
+}
+
+function sourceOf(source: ContentSource | string): ContentSource {
+  return typeof source === "string" ? directoryContentSource(source) : source;
+}
+
+/** Where an issue in a bundle-relative file is reported. */
+function at(source: ContentSource, relativePath: string): string {
+  return `${source.label}/${relativePath}`;
+}
+
+function parseJsonFile<T>(
+  source: ContentSource,
+  relativePath: string,
+  schema: ZodType<T>,
+  issues: ValidationIssue[],
+): T | undefined {
+  const filePath = at(source, relativePath);
+  const raw = source.read(relativePath);
+  if (raw === undefined) {
+    issues.push(structuralIssue(filePath, "cannot read file"));
     return undefined;
   }
   let json: unknown;
@@ -54,36 +135,48 @@ function parseJsonFile<T>(filePath: string, schema: ZodType<T>, issues: Validati
   return result.data;
 }
 
-function listFiles(dir: string, suffix: string): string[] {
-  const out: string[] = [];
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const full = join(dir, entry.name);
-    if (entry.isDirectory()) {
-      out.push(...listFiles(full, suffix));
-    } else if (entry.isFile() && entry.name.endsWith(suffix)) {
-      out.push(full);
-    }
-  }
-  return out.sort();
-}
-
-function safeListFiles(dir: string, suffix: string, issues: ValidationIssue[]): string[] {
+function safeListFiles(
+  source: ContentSource,
+  prefix: string,
+  suffix: string,
+  issues: ValidationIssue[],
+): readonly string[] {
   try {
-    return listFiles(dir, suffix);
+    return source.list(prefix, suffix);
   } catch (err) {
-    issues.push(structuralIssue(dir, `cannot list directory: ${(err as Error).message}`));
+    issues.push(structuralIssue(at(source, prefix), `cannot list: ${(err as Error).message}`));
     return [];
   }
 }
 
-function parseSkillFile(filePath: string, issues: ValidationIssue[]): Skill | undefined {
-  let raw: string;
-  try {
-    raw = readFileSync(filePath, "utf8");
-  } catch (err) {
-    issues.push(structuralIssue(filePath, `cannot read file: ${(err as Error).message}`));
+/** Parses skill text that has already been read (and hash-verified) elsewhere. */
+export function parseSkillText(
+  text: string,
+  filePath: string,
+  issues: ValidationIssue[],
+): Skill | undefined {
+  return parseSkillBody(text, filePath, issues);
+}
+
+function parseSkillFile(
+  source: ContentSource,
+  relativePath: string,
+  issues: ValidationIssue[],
+): Skill | undefined {
+  const filePath = at(source, relativePath);
+  const raw = source.read(relativePath);
+  if (raw === undefined) {
+    issues.push(structuralIssue(filePath, "cannot read file"));
     return undefined;
   }
+  return parseSkillBody(raw, filePath, issues);
+}
+
+function parseSkillBody(
+  raw: string,
+  filePath: string,
+  issues: ValidationIssue[],
+): Skill | undefined {
   let parsed;
   try {
     parsed = parseFrontMatter(raw);
@@ -108,14 +201,27 @@ function parseSkillFile(filePath: string, issues: ValidationIssue[]): Skill | un
 
 export function readSkillFile(filePath: string): Skill {
   const issues: ValidationIssue[] = [];
-  const skill = parseSkillFile(filePath, issues);
+  let raw: string;
+  try {
+    raw = readFileSync(filePath, "utf8");
+  } catch (err) {
+    throw new ContentValidationError([
+      structuralIssue(filePath, `cannot read file: ${(err as Error).message}`),
+    ]);
+  }
+  const skill = parseSkillText(raw, filePath, issues);
   if (!skill || issues.length > 0) throw new ContentValidationError(issues);
   return skill;
 }
 
 export function readWorkflowFile(filePath: string): WorkflowDefinition {
   const issues: ValidationIssue[] = [];
-  const workflow = parseJsonFile(filePath, workflowSchema, issues);
+  const workflow = parseJsonFile(
+    directoryContentSource(dirname(filePath)),
+    basename(filePath),
+    workflowSchema,
+    issues,
+  );
   if (!workflow || issues.length > 0) throw new ContentValidationError(issues);
   return workflow;
 }
@@ -125,40 +231,37 @@ export function readWorkflowFile(filePath: string): WorkflowDefinition {
  * directory (JSON documents and skill front matter), without cross-validation.
  * Throws ContentValidationError when any document is unreadable or malformed.
  */
-export function readContentBundle(contentDir: string): ContentBundle {
+export function readContentBundle(from: ContentSource | string): ContentBundle {
+  const source = sourceOf(from);
   const issues: ValidationIssue[] = [];
 
   const workflows: Record<string, WorkflowDefinition> = {};
-  for (const file of safeListFiles(join(contentDir, "workflows"), ".workflow.json", issues)) {
-    const workflow = parseJsonFile(file, workflowSchema, issues);
+  for (const file of safeListFiles(source, "workflows", ".workflow.json", issues)) {
+    const workflow = parseJsonFile(source, file, workflowSchema, issues);
     if (!workflow) continue;
     if (workflows[workflow.name]) {
-      issues.push(structuralIssue(file, `duplicate workflow name "${workflow.name}"`));
+      issues.push(structuralIssue(at(source, file), `duplicate workflow name "${workflow.name}"`));
       continue;
     }
     workflows[workflow.name] = workflow;
   }
   if (Object.keys(workflows).length === 0 && issues.length === 0) {
-    issues.push(structuralIssue(join(contentDir, "workflows"), "no workflow definitions found"));
+    issues.push(structuralIssue(at(source, "workflows"), "no workflow definitions found"));
   }
 
-  const routes = parseJsonFile(join(contentDir, "routes", "model-routes.json"), routesSchema, issues);
-  const activities = parseJsonFile(
-    join(contentDir, "catalog", "activity-handlers.json"),
-    activitiesSchema,
-    issues,
-  );
-  const capabilities = parseJsonFile(join(contentDir, "capabilities", "capabilities.json"), capabilitiesSchema, issues);
-  const inputTypes = parseJsonFile(join(contentDir, "catalog", "input-types.json"), inputTypesCatalogSchema, issues);
-  const verdicts = parseJsonFile(join(contentDir, "catalog", "verdicts.json"), verdictsCatalogSchema, issues);
-  const departments = parseJsonFile(join(contentDir, "catalog", "departments.json"), departmentsCatalogSchema, issues);
+  const routes = parseJsonFile(source, "routes/model-routes.json", routesSchema, issues);
+  const activities = parseJsonFile(source, "catalog/activity-handlers.json", activitiesSchema, issues);
+  const capabilities = parseJsonFile(source, "capabilities/capabilities.json", capabilitiesSchema, issues);
+  const inputTypes = parseJsonFile(source, "catalog/input-types.json", inputTypesCatalogSchema, issues);
+  const verdicts = parseJsonFile(source, "catalog/verdicts.json", verdictsCatalogSchema, issues);
+  const departments = parseJsonFile(source, "catalog/departments.json", departmentsCatalogSchema, issues);
 
   const skills: Record<string, Skill> = {};
-  for (const file of safeListFiles(join(contentDir, "skills"), ".md", issues)) {
-    const skill = parseSkillFile(file, issues);
+  for (const file of safeListFiles(source, "skills", ".md", issues)) {
+    const skill = parseSkillFile(source, file, issues);
     if (!skill) continue;
     if (skills[skill.meta.name]) {
-      issues.push({ code: "DUPLICATE_SKILL", path: file, message: `duplicate skill name "${skill.meta.name}"` });
+      issues.push({ code: "DUPLICATE_SKILL", path: at(source, file), message: `duplicate skill name "${skill.meta.name}"` });
       continue;
     }
     skills[skill.meta.name] = skill;
@@ -218,8 +321,8 @@ function projectInputTypes(catalog: InputTypesCatalog): LoadedInputTypes {
  * linting; every loop must be bounded. Throws ContentValidationError listing
  * every issue found.
  */
-export function loadContent(contentDir: string): ContentBundle {
-  const bundle = readContentBundle(contentDir);
+export function loadContent(from: ContentSource | string): ContentBundle {
+  const bundle = readContentBundle(from);
   const issues = validateBundle(bundle);
   if (issues.length > 0) {
     throw new ContentValidationError(issues);
@@ -232,46 +335,19 @@ export function loadContent(contentDir: string): ContentBundle {
  * and technique files remain absent until an agent node first executes.
  */
 export function loadControlContent(
-  contentDir: string,
+  from: ContentSource | string,
   workflowPath: string,
   availableRoleNames: ReadonlySet<string>,
 ): ContentBundle {
+  const source = sourceOf(from);
   const issues: ValidationIssue[] = [];
-  const workflow = parseJsonFile(
-    join(contentDir, workflowPath),
-    workflowSchema,
-    issues,
-  );
-  const routes = parseJsonFile(
-    join(contentDir, "routes", "model-routes.json"),
-    routesSchema,
-    issues,
-  );
-  const activities = parseJsonFile(
-    join(contentDir, "catalog", "activity-handlers.json"),
-    activitiesSchema,
-    issues,
-  );
-  const capabilities = parseJsonFile(
-    join(contentDir, "capabilities", "capabilities.json"),
-    capabilitiesSchema,
-    issues,
-  );
-  const inputTypes = parseJsonFile(
-    join(contentDir, "catalog", "input-types.json"),
-    inputTypesCatalogSchema,
-    issues,
-  );
-  const verdicts = parseJsonFile(
-    join(contentDir, "catalog", "verdicts.json"),
-    verdictsCatalogSchema,
-    issues,
-  );
-  const departments = parseJsonFile(
-    join(contentDir, "catalog", "departments.json"),
-    departmentsCatalogSchema,
-    issues,
-  );
+  const workflow = parseJsonFile(source, workflowPath, workflowSchema, issues);
+  const routes = parseJsonFile(source, "routes/model-routes.json", routesSchema, issues);
+  const activities = parseJsonFile(source, "catalog/activity-handlers.json", activitiesSchema, issues);
+  const capabilities = parseJsonFile(source, "capabilities/capabilities.json", capabilitiesSchema, issues);
+  const inputTypes = parseJsonFile(source, "catalog/input-types.json", inputTypesCatalogSchema, issues);
+  const verdicts = parseJsonFile(source, "catalog/verdicts.json", verdictsCatalogSchema, issues);
+  const departments = parseJsonFile(source, "catalog/departments.json", departmentsCatalogSchema, issues);
   if (
     issues.length > 0 ||
     !workflow ||

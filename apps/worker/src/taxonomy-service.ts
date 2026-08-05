@@ -138,14 +138,25 @@ export class LocalTaxonomyService implements TaxonomyAccess {
   private readonly domains: SeedNode[] = [];
   private embeddingsCache: TaxonomyEmbeddings | undefined;
 
+  /** Builds the service from seed TEXT — the registry path holds it in memory. */
+  static fromText(text: string, suggestionsDir: string): LocalTaxonomyService {
+    return new LocalTaxonomyService({ text }, suggestionsDir);
+  }
+
   constructor(
-    seedPath: string,
+    seed: string | { readonly text: string },
     private readonly suggestionsDir: string,
   ) {
-    if (!existsSync(seedPath)) {
-      throw new Error(`taxonomy seed not found at "${seedPath}"`);
+    let raw: string;
+    if (typeof seed === "string") {
+      if (!existsSync(seed)) {
+        throw new Error(`taxonomy seed not found at "${seed}"`);
+      }
+      raw = readFileSync(seed, "utf8");
+    } else {
+      raw = seed.text;
     }
-    const doc = JSON.parse(readFileSync(seedPath, "utf8")) as {
+    const doc = JSON.parse(raw) as {
       revision?: number;
       nodes: SeedNode[];
     };
