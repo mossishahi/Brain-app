@@ -44,14 +44,17 @@ import { buildRuntime, providerConfigFromEnv } from "./wiring.js";
 import { openLazyRegistryContent, type LazyRegistryContent } from "./registry-content.js";
 import {
   LocalTaxonomyService,
+  PinnedTaxonomyService,
   RegistryTaxonomyService,
   localTaxonomySeedPath,
 } from "./taxonomy-service.js";
 
 /**
- * Shared-taxonomy access for a run: registry-backed when the run is connected
- * to the Brain Registry (the live multi-user store), otherwise a read-only
- * local service over the bundle's seed catalog with suggestions kept per-run.
+ * Shared-taxonomy access for a run. Reads always resolve against the taxonomy
+ * the run PINNED (a control input of the bundle), so panel assembly costs no
+ * network round trips and is reproducible across runs. When the run is
+ * connected to the registry, suggestions are submitted to the live shared
+ * store; otherwise they are recorded per-run on disk.
  * Absent only for pre-taxonomy bundles that carry no seed.
  */
 function taxonomyForRun(
@@ -60,13 +63,20 @@ function taxonomyForRun(
   sessionRoot: string,
   runId: string,
 ): TaxonomyAccess | undefined {
-  if (lazy) return new RegistryTaxonomyService(lazy.client);
-  const seed = localTaxonomySeedPath(contentDir);
-  if (!existsSync(seed)) return undefined;
-  return new LocalTaxonomyService(
+  const seed = localTaxonomySeedPath(lazy ? lazy.cacheRoot : contentDir);
+  if (!existsSync(seed)) {
+    // A bundle that ships no taxonomy: fall back to the live registry when one
+    // is connected, so such a bundle still resolves rather than losing the
+    // capability outright.
+    return lazy ? new RegistryTaxonomyService(lazy.client) : undefined;
+  }
+  const pinned = new LocalTaxonomyService(
     seed,
     join(sessionRoot, runId, "taxonomy-suggestions"),
   );
+  return lazy
+    ? new PinnedTaxonomyService(pinned, new RegistryTaxonomyService(lazy.client))
+    : pinned;
 }
 
 /**

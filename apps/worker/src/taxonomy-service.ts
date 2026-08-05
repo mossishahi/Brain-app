@@ -336,3 +336,44 @@ export class LocalTaxonomyService implements TaxonomyAccess {
 export function localTaxonomySeedPath(contentDir: string): string {
   return join(contentDir, "catalog", "taxonomy.json");
 }
+
+/**
+ * The run's taxonomy access when connected to the Brain Registry: reads are
+ * answered from the version PINNED by the run, writes go to the registry.
+ *
+ * Reads used to be one MCP round trip per pool member — up to 200 sequential
+ * network calls on the critical path of every run, which dominated panel
+ * assembly latency. The taxonomy is a control input of the pinned bundle, so
+ * resolving it in-process removes that entirely and makes panel seating
+ * REPRODUCIBLE: the same submission against the same pin now seats the same
+ * panel, instead of drifting with whatever the shared tree happened to hold.
+ *
+ * Suggestions still reach the live registry — they are a write, off the
+ * critical path — so every run keeps contributing to the shared tree, and
+ * accepted edits reach users through the next published taxonomy revision.
+ */
+export class PinnedTaxonomyService implements TaxonomyAccess {
+  constructor(
+    private readonly pinned: LocalTaxonomyService,
+    private readonly registry: RegistryTaxonomyService,
+  ) {}
+
+  resolve(query: string, optionLimit?: number): Promise<TaxonomyResolveResult> {
+    return this.pinned.resolve(query, optionLimit);
+  }
+
+  tree(root?: string): Promise<TaxonomyTreeExport> {
+    return this.pinned.tree(root);
+  }
+
+  embeddings(): Promise<TaxonomyEmbeddings | undefined> {
+    return this.pinned.embeddings();
+  }
+
+  suggest(
+    entries: readonly TaxonomySuggestionEntry[],
+    submittedBy?: string,
+  ): Promise<TaxonomySuggestionReceipt> {
+    return this.registry.suggest(entries, submittedBy);
+  }
+}
