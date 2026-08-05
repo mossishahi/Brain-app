@@ -242,7 +242,20 @@ function RoundFold({
 }
 
 export function ReviewBody({ stage }: { stage: ReviewStage }) {
-  const cursor = stage.cursor;
+  // No global cursor: each seat carries its own progress, so several seats can
+  // be under review at once.
+  const activeSeats = stage.members.filter((member) => member.progress !== undefined);
+  const cursor =
+    activeSeats.length === 1
+      ? {
+          member: stage.members.indexOf(activeSeats[0]!) + 1,
+          memberCount: stage.members.length,
+          step: activeSeats[0]!.progress!.step,
+          stepCount: activeSeats[0]!.progress!.stepCount,
+          round: activeSeats[0]!.progress!.round,
+          maxRounds: stage.maxRounds,
+        }
+      : undefined;
   // Fold state: user choices override the defaults (the step under review
   // opens itself and follows the walk; finished steps start collapsed;
   // rounds inside an open step start open).

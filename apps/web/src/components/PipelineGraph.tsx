@@ -2,7 +2,7 @@
 import type { KeyboardEvent } from "react";
 import { STAGE_IDS } from "@brainstorm-agentic/protocol";
 import type {
-  ReviewCursorView,
+  ReviewProgressSummary,
   StageId,
   StageStatus,
   StageView,
@@ -57,7 +57,7 @@ export function PipelineGraph({
 }: {
   stages: ReadonlyMap<StageId, StageView>;
   selected: StageId;
-  cursor?: ReviewCursorView;
+  cursor?: ReviewProgressSummary;
   onSelect: (id: StageId) => void;
 }) {
   return (
@@ -132,7 +132,9 @@ export function PipelineGraph({
                   y={TOP + NODE_H / 2 + 4}
                   textAnchor="middle"
                 >
-                  {`${cursor.member}/${cursor.memberCount} · ${cursor.step}/${cursor.stepCount} · r${cursor.round}`}
+                  {cursor.activeSeats > 1
+                    ? `${cursor.activeSeats} seats · ${cursor.membersComplete}/${cursor.memberCount}`
+                    : `${cursor.membersComplete + 1}/${cursor.memberCount}${cursor.step !== undefined ? ` · ${cursor.step}/${cursor.stepCount} · r${cursor.round}` : ""}`}
                 </text>
               )}
               <text

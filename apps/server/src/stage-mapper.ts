@@ -48,7 +48,9 @@ import {
   type PendingGateView,
   type ProcessorOutputView,
   type ProposalView,
-  type ReviewCursorView,
+  type ReviewPhase,
+  type ReviewProgressSummary,
+  type ReviewSeatProgress,
   type ReviewMemberView,
   type ReviewRoundView,
   type ReviewStepView,
@@ -1468,7 +1470,8 @@ function buildReviews(
   entries: readonly JournalEntry[],
   events: readonly RunEvent[],
   stageActive: boolean,
-): { members: ReviewMemberView[]; cursor?: ReviewCursorView; complete: boolean } {
+  maxRounds: number,
+): { members: ReviewMemberView[]; maxRounds: number; complete: boolean } {
   const rounds = new Map<string, {
     cot?: string;
     comments: Map<number, CommentView>;
@@ -1599,7 +1602,7 @@ function buildReviews(
       const passed = views.some((round) => round.decision?.verdict === "Pass");
       const forcePassed =
         !passed &&
-        views.length >= 4 &&
+        views.length >= maxRounds &&
         views[views.length - 1]?.decision !== undefined;
       return {
         index: stepIndex + 1,
@@ -1645,49 +1648,123 @@ function buildReviews(
     };
   });
 
-  let cursor: ReviewCursorView | undefined;
-  const deepest = [...activePaths(events)]
-    .filter((path) => path.includes("/review-members/"))
-    .sort((a, b) => b.split("/").length - a.split("/").length)[0];
-  if (deepest) {
-    const at = coordinates(deepest);
-    if (at.member !== undefined && at.step !== undefined) {
-      cursor = {
-        member: at.member + 1,
-        memberCount: panel.length,
-        step: at.step + 1,
-        stepCount: members[at.member]?.steps.length ?? processorOutput?.cotSteps ?? 0,
-        round: (at.round ?? members[at.member]?.steps[at.step]?.rounds.length ?? 0) + 1,
-        maxRounds: 4,
-      };
+  // Per-seat progress, derived from each seat's OWN deepest active node path.
+  // There is deliberately no single cursor: seats may be reviewed concurrently,
+  // and a per-seat shape lets a view render each seat independently.
+  const phaseOf = (path: string): ReviewPhase | undefined => {
+    if (path.includes("/judge-step")) return "judging";
+    if (path.includes("/redevelop-idea")) return "redeveloping";
+    if (path.includes("/gather-comments") || path.includes("/comment-step")) return "commenting";
+    return undefined;
+  };
+  const deepestByMember = new Map<number, string>();
+  for (const path of activePaths(events)) {
+    if (!path.includes("/review-members/")) continue;
+    const at = coordinates(path);
+    if (at.member === undefined) continue;
+    const incumbent = deepestByMember.get(at.member);
+    if (incumbent === undefined || path.split("/").length > incumbent.split("/").length) {
+      deepestByMember.set(at.member, path);
     }
   }
-  if (!cursor && stageActive) {
+  const progressFor = new Map<number, ReviewSeatProgress>();
+  for (const [memberIndex, path] of deepestByMember) {
+    const at = coordinates(path);
+    const member = members[memberIndex];
+    if (!member || at.step === undefined) continue;
+    const phase = phaseOf(path);
+    progressFor.set(memberIndex, {
+      step: at.step + 1,
+      stepCount: member.steps.length || processorOutput?.cotSteps || 0,
+      round: (at.round ?? member.steps[at.step]?.rounds.length ?? 0) + 1,
+      ...(phase ? { phase } : {}),
+    });
+  }
+  // Fall back to the first unfinished step so an active stage always shows a
+  // position, even in the window between node events.
+  if (progressFor.size === 0 && stageActive) {
     outer: for (const [memberIndex, member] of members.entries()) {
       for (const [stepIndex, step] of member.steps.entries()) {
         if (step.outcome === "pending" || step.outcome === "under-review") {
-          cursor = {
-            member: memberIndex + 1,
-            memberCount: members.length,
+          progressFor.set(memberIndex, {
             step: stepIndex + 1,
             stepCount: member.steps.length,
-            round: Math.min(4, Math.max(1, step.rounds.length || 1)),
-            maxRounds: 4,
-          };
+            round: Math.min(maxRounds, Math.max(1, step.rounds.length || 1)),
+          });
           break outer;
         }
       }
     }
   }
+  const withProgress = members.map((member, memberIndex) => {
+    const progress = progressFor.get(memberIndex);
+    if (!progress) return member;
+    return {
+      ...member,
+      progress,
+      // Mirror the live phase onto the step under review, so a per-step status
+      // light needs no cross-referencing.
+      steps: member.steps.map((step) =>
+        step.index === progress.step && progress.phase !== undefined
+          ? { ...step, phase: progress.phase }
+          : step,
+      ),
+    };
+  });
   const complete =
-    members.length > 0 &&
-    members.every((member) =>
+    withProgress.length > 0 &&
+    withProgress.every((member) =>
       member.steps.length > 0 &&
       member.steps.every((step) =>
         step.outcome === "passed" || step.outcome === "force-passed"
       )
     );
-  return { members, ...(cursor ? { cursor } : {}), complete };
+  return { members: withProgress, maxRounds, complete };
+}
+
+/**
+ * Collapses per-seat progress into the compact list-view summary. The
+ * single-seat position is filled in only when exactly one seat is active, so a
+ * one-line status never implies a global cursor that does not exist.
+ */
+/** Default review round budget when a checkpoint has not been written yet. */
+const DEFAULT_REVIEW_ROUNDS = 4;
+
+/**
+ * The run's review round budget, read from the params it pinned at submission
+ * (`checkpoint.input` carries the initial brainstorm state). Never hardcoded,
+ * so a bundle that changes the budget cannot desync the dashboard.
+ */
+function reviewRoundBudget(checkpoint: WorkflowCheckpoint | undefined): number {
+  const state = object(checkpoint?.input?.["__brainstormState"]);
+  const value = object(state?.["params"])?.["maxReviewRounds"];
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 1
+    ? value
+    : DEFAULT_REVIEW_ROUNDS;
+}
+
+function reviewSummary(review: {
+  members: readonly ReviewMemberView[];
+  maxRounds: number;
+}): ReviewProgressSummary {
+  const active = review.members.filter((member) => member.progress !== undefined);
+  const complete = review.members.filter(
+    (member) =>
+      member.steps.length > 0 &&
+      member.steps.every(
+        (step) => step.outcome === "passed" || step.outcome === "force-passed",
+      ),
+  ).length;
+  const only = active.length === 1 ? active[0]!.progress! : undefined;
+  return {
+    membersComplete: complete,
+    memberCount: review.members.length,
+    activeSeats: active.length,
+    maxRounds: review.maxRounds,
+    ...(only
+      ? { step: only.step, stepCount: only.stepCount, round: only.round }
+      : {}),
+  };
 }
 
 function stageStatus(
@@ -1960,6 +2037,7 @@ export function buildJobDetail(input: MapperInput): JobDetail {
     events,
     reviewTiming.active ||
       (checkpoint?.status === "running" && reviewJournalPresent),
+    reviewRoundBudget(checkpoint),
   );
   const bridgeOutput =
     bridgeReport(artifact(artifacts, "bridgeReport")) ??
@@ -2367,7 +2445,7 @@ export function buildJobDetail(input: MapperInput): JobDetail {
       ...reviewBase,
       id: "review-members",
       members: review.members,
-      ...(review.cursor ? { cursor: review.cursor } : {}),
+      maxRounds: review.maxRounds,
     },
     {
       ...bridgeBase,
@@ -2424,7 +2502,7 @@ export function buildJobDetail(input: MapperInput): JobDetail {
       ...(activeStage ? { activeStage } : {}),
       completedStages: stages.filter((stage) => stage.status === "completed").length,
       totalStages: STAGE_IDS.length,
-      ...(review.cursor ? { reviewCursor: review.cursor } : {}),
+      ...(review.members.length > 0 ? { review: reviewSummary(review) } : {}),
     },
     ...(input.record.error ?? checkpoint?.error?.message
       ? { error: input.record.error ?? checkpoint?.error?.message }

@@ -404,7 +404,7 @@ export function Dashboard({ jobId }: { jobId: string }) {
       }
       case "review-members": {
         const stage = stageOf(job, id);
-        return stage && (stage.members.length > 0 || stage.cursor) ? (
+        return stage && stage.members.length > 0 ? (
           <ReviewBody stage={stage} />
         ) : null;
       }
@@ -554,7 +554,7 @@ export function Dashboard({ jobId }: { jobId: string }) {
       <PipelineGraph
         stages={stageMap}
         selected={selected}
-        cursor={reviewStage?.status === "active" ? reviewStage.cursor : undefined}
+        cursor={reviewStage?.status === "active" ? job.progress?.review : undefined}
         onSelect={onSelectStage}
       />
 
