@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   loadContent,
+  MIN_SUPPORTED_WORKFLOW_VERSION,
   SHAPE_FIELDS,
   validateBundle,
   type ForEachNode,
@@ -17,14 +18,36 @@ import {
   publishedContentDirs,
 } from "./helpers.js";
 
-test("every published Brain Registry version loads and cross-validates with zero issues", () => {
+function belowMinSupported(version: string): boolean {
+  const left = version.split(".").map(Number);
+  const right = MIN_SUPPORTED_WORKFLOW_VERSION.split(".").map(Number);
+  for (let index = 0; index < 3; index += 1) {
+    const a = left[index] ?? 0;
+    const b = right[index] ?? 0;
+    if (a !== b) return a < b;
+  }
+  return false;
+}
+
+test("every supported published Brain Registry version loads and cross-validates with zero issues", () => {
   const published = publishedContentDirs();
   assert.ok(published.length > 0, "the registry index publishes at least one version");
-  for (const { version, dir } of published) {
+  for (const { version, dir } of published.filter((entry) => !belowMinSupported(entry.version))) {
     const bundle = loadContent(dir);
     assert.deepEqual(validateBundle(bundle), [], `bundle ${version} has validation issues`);
     assert.ok(bundle.workflows["brainstorm"], `bundle ${version} ships the brainstorm workflow`);
     assert.equal(bundle.workflows["brainstorm"]!.version, version);
+  }
+});
+
+test("published versions below the supported floor are retired, not half-loadable", () => {
+  // The per-seat review vocabulary (reviews[<seat>].*) and the read-only
+  // bundle.* content root replaced catalog.*/review.*/round.*. Older published
+  // bundles are deliberately unloadable rather than partially working: a run
+  // must never execute a document whose references this runtime cannot resolve.
+  const retired = publishedContentDirs().filter((entry) => belowMinSupported(entry.version));
+  for (const { version, dir } of retired) {
+    assert.throws(() => loadContent(dir), `retired bundle ${version} must not load`);
   }
 });
 
@@ -80,7 +103,7 @@ test("the classification stage decides the type and gates before any panel cost"
   assert.equal(classifier.skill, "classifier");
   assert.deepEqual(classifier.bind?.["input"], { ref: "input", omit: ["files"] });
   assert.equal(classifier.bind?.["files"], "input.files");
-  assert.equal(classifier.bind?.["typeOptions"], "catalog.inputTypes.types");
+  assert.equal(classifier.bind?.["typeOptions"], "bundle.inputTypes.types");
   assert.deepEqual(classifier.output, {
     key: "classification",
     schema: "taskClassification",
@@ -382,7 +405,7 @@ test("the interdisciplinary seat is woven deterministically and comments through
   assert.equal(disciplinary.skill, "commentor");
   assert.equal(disciplinary.bind?.["roster"], undefined, "disciplinary seats stay roster-blind");
   for (const node of [bridge, disciplinary]) {
-    assert.deepEqual(node.output, { key: "round.comments[commentor.id]", schema: "comment" });
+    assert.deepEqual(node.output, { key: "reviews[member.id].current.comments[commentor.id]", schema: "comment" });
   }
 
   // The interdisciplinary skill mirrors the commentor contract: same verdict
@@ -433,13 +456,35 @@ test("review nests member -> step -> bounded round, with commentors excluding th
 
   const round = findNode(root, "review-round") as RepeatUntilNode;
   assert.equal(round.kind, "repeatUntil");
-  assert.equal(round.maxIterations, 4, "1 initial review + at most 3 redevelopments");
   assert.equal(round.onExhausted, "proceed", "hitting the cap force-passes the step");
-  assert.deepEqual(round.until, { ref: "round.decision.verdict", equals: "Pass" });
+
+  // The round budget is declared in exactly ONE place — the maxReviewRounds
+  // param. The loop's static bound is that param's ceiling; the per-run budget
+  // is enforced by the runtime-stamped finalRound flag, so no literal round
+  // count appears in the loop, the guard, or the dashboard.
+  assert.equal(round.maxIterations, "params.maxReviewRounds");
+  const budget = bundle.workflows["brainstorm"]!.params["maxReviewRounds"];
+  assert.ok(budget, "the workflow declares the review round budget as a param");
+  assert.equal(typeof budget!.max, "number", "the param bounds the loop with a finite ceiling");
+
+  // The loop owns exactly one seat, which is what keeps two members reviewed
+  // in parallel from colliding on shared review state.
+  assert.equal(round.seat, "member.id");
+  assert.deepEqual(round.until, {
+    any: [
+      { ref: "reviews[member.id].current.decision.verdict", equals: "Pass" },
+      { ref: "reviews[member.id].finalRound", equals: true },
+    ],
+  });
 
   const commentors = findNode(root, "gather-comments") as ForEachNode;
   assert.equal(commentors.mode, "parallel");
   assert.equal(commentors.exclude, "member", "the thinker never comments on their own step");
+  assert.equal(
+    typeof commentors.maxConcurrency,
+    "number",
+    "every parallel fan-out declares a concurrency cap — unbounded fan-out is rejected",
+  );
 
   const commentor = findAgent(root, "comment-step");
   const chainBind = commentor.bind?.["chain"];
@@ -458,10 +503,23 @@ test("review nests member -> step -> bounded round, with commentors excluding th
   const redev = findAgent(root, "redevelop-idea");
   assert.equal(redev.output.schema, "redevelopment");
 
-  // The redevelopment budget in the condition matches the loop bound: on the
-  // final permitted round a failing step is force-passed instead of redeveloped.
-  const guard = JSON.stringify(gate.if);
-  assert.ok(guard.includes(`"notEquals":${round.maxIterations}`) || guard.includes(`"notEquals": ${round.maxIterations}`));
+  // The guard reads the SAME runtime flag the loop exits on, so the budget can
+  // never desync between them — and it carries no literal round count.
+  assert.deepEqual(gate.if, {
+    all: [
+      { ref: "reviews[member.id].current.decision.verdict", notEquals: "Pass" },
+      { ref: "reviews[member.id].finalRound", notEquals: true },
+    ],
+  });
+  assert.ok(
+    !JSON.stringify(gate.if).includes(String(budget!.default)),
+    "the redevelop guard must not hardcode the round budget",
+  );
+
+  // The runtime stamps a live per-seat phase before the long-running review
+  // nodes, so the dashboard can show what each seat is doing without a cursor.
+  assert.equal(findAgent(root, "judge-step").reviewPhase, "judging");
+  assert.equal(findAgent(root, "redevelop-idea").reviewPhase, "redeveloping");
 });
 
 test("the chair receives papers and novelty only — never the chain of thought", () => {
@@ -636,17 +694,17 @@ test("the developing skills read outline, shape, and shape rules from the refere
     const node = findAgent(root, nodeId);
     assert.equal(
       node.bind?.["outline"],
-      "catalog.inputTypes.outlines[input.type]",
+      "bundle.inputTypes.outlines[input.type]",
       `${nodeId} binds the outline for the submission's type`,
     );
     assert.equal(
       node.bind?.["shape"],
-      "catalog.inputTypes.shapes[input.type]",
+      "bundle.inputTypes.shapes[input.type]",
       `${nodeId} binds the shape for the submission's type`,
     );
     assert.equal(
       node.bind?.["shapeGuide"],
-      "catalog.inputTypes.shapeGuides[input.type]",
+      "bundle.inputTypes.shapeGuides[input.type]",
       `${nodeId} binds the mechanical rules of the submission's shape`,
     );
     const skill = bundle.skills[skillName]!;

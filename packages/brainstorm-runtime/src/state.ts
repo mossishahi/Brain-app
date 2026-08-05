@@ -1,6 +1,7 @@
 import {
   artifactSchemas,
-  type ContentBundle,
+  type ReviewPhaseName,
+  type VerdictsCatalog,
   type WorkflowDefinition as ContentWorkflowDefinition,
 } from "@brainstorm-agentic/content";
 import type { JsonObject, JsonValue, ScopeReader } from "@brainstorm-agentic/core";
@@ -47,7 +48,6 @@ function positiveParam(
 }
 
 export function createInitialState(
-  bundle: ContentBundle,
   workflow: ContentWorkflowDefinition,
   submission: JsonValue,
   overrides: Readonly<Record<string, JsonValue>> = {},
@@ -63,30 +63,22 @@ export function createInitialState(
     positiveParam(name, value, definition);
     params[name] = value;
   }
-  const verdicts = asJson<JsonObject>(bundle.catalogs.verdicts);
   return {
     session: { submission },
     params,
-    catalog: {
-      // The projected input-types reference: types (name -> description, in
-      // disambiguation order) plus shapes/guidance/outlines projections, all
-      // sourced from the bundle's single catalog/input-types.json.
-      inputTypes: asJson<JsonObject>(bundle.catalogs.inputTypes),
-      verdicts,
-      departments: asJson<JsonObject>(bundle.catalogs.departments),
-    },
     ideas: {},
-    round: { comments: {} },
-    review: {
-      round: 0,
-      allowedVerdicts: object(verdicts.verdicts, "catalog verdicts"),
-      history: [],
-    },
+    // Per-seat review scratch state, keyed by member id. Nothing here is
+    // shared between seats, which is what allows two members' walks to be
+    // reviewed in parallel: every key a review branch writes is qualified by
+    // its member id, so mergeParallelStates only ever sees one-sided adds.
+    // Seats are created lazily by initializeReview — the panel is not known
+    // when the run starts.
+    reviews: {},
     // The per-member objection ledger: one compact, ANONYMIZED record per
     // review round (judge verdict, its issues content-only, and the
     // change-set of the redevelopment that followed, when one did). The
-    // runtime — never a model — writes it; review.history is the per-round
-    // projection bound into commentor/judge/redeveloper tasks.
+    // runtime — never a model — writes it; the seat's `history` is the
+    // per-round projection bound into commentor/judge/redeveloper tasks.
     reviewLog: {},
     _runtime: {
       artifacts: {},
@@ -128,8 +120,9 @@ export function validateArtifact(
  * chain (touched steps rewritten, unaffected steps copied verbatim), and the
  * runtime — never the model — computes the change-set by exact per-step
  * comparison against the previous chain. Chain length is invariant. The
- * change-set is stashed on `round` so finishReviewRound can fold it into the
- * member's review-ledger record, and the previous idea's `literature` rides
+ * change-set is stashed on the seat's `current` so finishReviewRound can fold
+ * it into the member's review-ledger record, and the previous idea's
+ * `literature` rides
  * through unchanged (the reviser reworks reasoning, not its grounding
  * record).
  */
@@ -179,12 +172,16 @@ export function applyRedevelopment(
       ? { literature: structuredClone(previous.literature) }
       : {}),
   };
-  const next = writeDataReference(state, "ideas[member.id]", revisedIdea, scope).state;
-  const round = object(next.round, "round");
-  return {
-    ...next,
-    round: { ...round, touched, untouched },
-  };
+  const withIdea = writeDataReference(state, "ideas[member.id]", revisedIdea, scope).state;
+  const current = object(reviewSeat(withIdea, memberId).current, `reviews.${memberId}.current`);
+  // Spread `current` so the judge's decision survives — finishReviewRound
+  // reads it in this same iteration.
+  return writeDataReference(
+    withIdea,
+    "reviews[member.id].current",
+    { ...current, touched, untouched },
+    scope,
+  ).state;
 }
 
 function isObject(value: JsonValue | undefined): value is JsonObject {
@@ -228,7 +225,23 @@ function mergeValue(
   );
 }
 
-/** Three-way merge of isolated branch states, applied in stable item order. */
+/**
+ * Three-way merge of isolated branch states, applied in stable item order.
+ *
+ * INVARIANT — every key a parallel branch writes must be qualified by that
+ * branch's item id. The merge is generic and gives NO compile-time signal
+ * when this is violated: two branches writing different values to one shared
+ * path throw PARALLEL_STATE_CONFLICT mid-run, and two branches writing one
+ * shared ARRAY path (e.g. an artifact-history entry) throw unconditionally,
+ * because mergeValue deliberately refuses to guess how to combine arrays.
+ *
+ * This is what makes parallel review possible: a review branch touches only
+ * `reviews[memberId]`, `reviewLog[memberId]`, `ideas[memberId]`, and
+ * `_runtime.artifacts` keys derived from those member-qualified write paths,
+ * so two seats' key sets never intersect and the merge sees only one-sided
+ * adds. Introducing a seat-independent write inside a parallel body silently
+ * reintroduces the collision.
+ */
 export function mergeParallelStates(
   base: JsonObject,
   branches: readonly JsonValue[],
@@ -270,6 +283,62 @@ function memberHistory(state: JsonObject, memberId: string): JsonValue[] {
   return Array.isArray(entries) ? (structuredClone(entries) as JsonValue[]) : [];
 }
 
+/**
+ * What a seat is doing at its current walk position. Aliased from the content
+ * schema rather than restated, so the vocabulary has exactly one definition
+ * shared by the bundle, the runtime writer, and the dashboard protocol.
+ */
+export type ReviewPhase = ReviewPhaseName;
+
+/** One seat's review scratch state; a missing seat reads as empty, never throws. */
+function reviewSeat(state: JsonObject, memberId: string): JsonObject {
+  const reviews = state.reviews;
+  if (!isObject(reviews)) return {};
+  const seat = (reviews as JsonObject)[memberId];
+  return isObject(seat) ? seat : {};
+}
+
+/**
+ * Copy-on-write seat replacement. The copy is load-bearing for parallel
+ * review: mutating a shared `reviews` object in place would alias base and
+ * branch, and the three-way merge decides what to keep by comparing them.
+ */
+function putSeat(state: MutableJsonObject, memberId: string, seat: JsonObject): void {
+  const reviews = isObject(state.reviews) ? { ...(state.reviews as JsonObject) } : {};
+  reviews[memberId] = seat;
+  state.reviews = reviews;
+}
+
+/**
+ * The verdicts available this round, as NAMES ONLY — the descriptions stay in
+ * the bundle and are zipped back in at bind time, so verdict prose never
+ * reaches the journaled state. Applies the catalog's own sequencing rule: a
+ * verdict listed in `noImmediateRepeat` may not follow itself at the same
+ * walk position.
+ */
+function allowedVerdictNames(verdicts: VerdictsCatalog, lastVerdict: JsonValue | undefined): string[] {
+  const prohibited = new Set(verdicts.sequencing.noImmediateRepeat);
+  return Object.keys(verdicts.verdicts).filter(
+    (name) => !(name === lastVerdict && prohibited.has(name)),
+  );
+}
+
+/**
+ * The run's review round budget, from the single workflow param that owns it.
+ * Read here so no literal round count exists anywhere in content or code.
+ */
+function roundBudget(state: JsonObject): number {
+  const params = state.params;
+  const value = isObject(params) ? (params as JsonObject).maxReviewRounds : undefined;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) {
+    throw new BrainstormRuntimeError(
+      'workflow param "maxReviewRounds" must be a positive integer',
+      "INVALID_WORKFLOW_PARAM",
+    );
+  }
+  return value;
+}
+
 /** An issue as the ledger keeps it: the content, with evidence collapsed to its kind. */
 function ledgerIssue(value: JsonValue): JsonObject {
   const issue = typeof value === "object" && value !== null && !Array.isArray(value)
@@ -290,41 +359,54 @@ function ledgerIssue(value: JsonValue): JsonObject {
   };
 }
 
-export function initializeReview(state: JsonObject, scope: ScopeReader): JsonObject {
+/**
+ * Opens a seat's review at a new walk position. The seat object is built
+ * FRESH rather than spread: dropping `lastVerdict` at each new chain step is
+ * deliberate, and it is what scopes the no-immediate-repeat rule to a single
+ * position (a Build ending step N must not forbid a Build opening step N+1).
+ */
+export function initializeReview(
+  state: JsonObject,
+  scope: ScopeReader,
+  verdicts: VerdictsCatalog,
+): JsonObject {
   const next = mutableState(state);
-  const catalog = object(next.catalog, "catalog");
-  const verdictCatalog = object(catalog.verdicts, "catalog.verdicts");
-  next.review = {
+  const memberId = reviewMemberId(next, scope);
+  putSeat(next, memberId, {
     round: 0,
-    allowedVerdicts: object(verdictCatalog.verdicts, "catalog.verdicts.verdicts"),
-    history: memberHistory(next, reviewMemberId(next, scope)),
-  };
-  next.round = { comments: {} };
+    allowedVerdicts: allowedVerdictNames(verdicts, undefined),
+    history: memberHistory(next, memberId),
+    phase: "commenting",
+    current: { comments: {} },
+  });
   return next;
 }
 
-export function prepareReviewRound(state: JsonObject, scope: ScopeReader): JsonObject {
+export function prepareReviewRound(
+  state: JsonObject,
+  scope: ScopeReader,
+  verdicts: VerdictsCatalog,
+): JsonObject {
   const next = mutableState(state);
-  const review = object(next.review, "review");
-  const catalog = object(next.catalog, "catalog");
-  const verdictCatalog = object(catalog.verdicts, "catalog.verdicts");
-  const verdicts = object(verdictCatalog.verdicts, "catalog.verdicts.verdicts");
-  const sequencing = object(verdictCatalog.sequencing, "catalog.verdicts.sequencing");
-  const prohibited = Array.isArray(sequencing.noImmediateRepeat)
-    ? sequencing.noImmediateRepeat
-    : [];
-  const lastVerdict = review.lastVerdict;
-  const allowed: MutableJsonObject = {};
-  for (const [name, description] of Object.entries(verdicts)) {
-    if (!(lastVerdict === name && prohibited.includes(name))) allowed[name] = description;
-  }
-  next.review = {
-    ...review,
-    round: typeof review.round === "number" ? review.round + 1 : 1,
-    allowedVerdicts: allowed,
-    history: memberHistory(next, reviewMemberId(next, scope)),
-  };
-  next.round = { comments: {} };
+  const memberId = reviewMemberId(next, scope);
+  const seat = reviewSeat(next, memberId);
+  const round = (typeof seat.round === "number" ? seat.round : 0) + 1;
+  putSeat(next, memberId, {
+    // The spread carries `lastVerdict` across rounds at the same position —
+    // it is the input to the sequencing rule.
+    ...seat,
+    round,
+    allowedVerdicts: allowedVerdictNames(verdicts, seat.lastVerdict),
+    history: memberHistory(next, memberId),
+    // The single derived expression of the round budget: the loop's exit
+    // condition and the redevelop guard both read this flag, so no literal
+    // round count appears in content or in the dashboard.
+    finalRound: round >= roundBudget(next),
+    phase: "commenting",
+    // Reset wholesale so last round's comments AND decision are dropped; the
+    // loop's until-condition must never be satisfied by a stale verdict.
+    current: { comments: {} },
+  });
   return next;
 }
 
@@ -334,31 +416,50 @@ export function prepareReviewRound(state: JsonObject, scope: ScopeReader): JsonO
  * number, verdict, reason, content-only issues, and the change-set of the
  * redevelopment that followed (when one did) — to the member's ledger.
  */
+/**
+ * Stamps what the seat is doing before a review node runs. The runtime — never
+ * the model — writes it, and it lives under the seat, so it is merge-safe when
+ * seats are reviewed in parallel and it gives the dashboard a live per-seat
+ * phase instead of one global cursor.
+ */
+export function setReviewPhase(
+  state: JsonObject,
+  scope: ScopeReader,
+  phase: ReviewPhase,
+): JsonObject {
+  const next = mutableState(state);
+  const memberId = reviewMemberId(next, scope);
+  putSeat(next, memberId, { ...reviewSeat(next, memberId), phase });
+  return next;
+}
+
 export function finishReviewRound(state: JsonObject, scope: ScopeReader): JsonObject {
   const next = mutableState(state);
-  const review = object(next.review, "review");
-  const round = object(next.round, "round");
-  const decision = object(round.decision, "round.decision");
+  const memberId = reviewMemberId(next, scope);
+  const seat = reviewSeat(next, memberId);
+  const current = object(seat.current, `reviews.${memberId}.current`);
+  const decision = object(current.decision, `reviews.${memberId}.current.decision`);
   if (typeof decision.verdict !== "string") {
     throw new BrainstormRuntimeError("review round has no decision verdict", "INVALID_REVIEW_STATE");
   }
-  next.review = { ...review, lastVerdict: decision.verdict };
+  // The spread keeps `current` intact: the loop's until-condition reads this
+  // round's decision after this activity runs.
+  putSeat(next, memberId, { ...seat, lastVerdict: decision.verdict });
 
-  const memberId = reviewMemberId(next, scope);
   const stepIndex = resolveDataReference("stepIndex", scope, next, { required: true });
   if (typeof stepIndex !== "number") {
     throw new BrainstormRuntimeError("review loop has no stepIndex in scope", "INVALID_REVIEW_STATE");
   }
   const record: JsonObject = {
     step: stepIndex,
-    round: typeof review.round === "number" ? review.round : 0,
+    round: typeof seat.round === "number" ? seat.round : 0,
     verdict: decision.verdict,
     reason: typeof decision.reason === "string" ? decision.reason : "",
     issues: (Array.isArray(decision.issues) ? decision.issues : []).map(ledgerIssue),
-    ...(Array.isArray(round.touched)
+    ...(Array.isArray(current.touched)
       ? {
-          touched: structuredClone(round.touched),
-          untouched: Array.isArray(round.untouched) ? structuredClone(round.untouched) : [],
+          touched: structuredClone(current.touched),
+          untouched: Array.isArray(current.untouched) ? structuredClone(current.untouched) : [],
         }
       : {}),
   };

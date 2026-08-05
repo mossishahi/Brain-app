@@ -47,6 +47,7 @@ import {
 
 import {
   jsonEqual,
+  type ReferenceRoots,
   resolveBindValue,
   resolveDataReference,
   writeDataReference,
@@ -70,6 +71,8 @@ import {
   initializeReview,
   mergeParallelStates,
   prepareReviewRound,
+  type ReviewPhase,
+  setReviewPhase,
   validateArtifact,
 } from "./state.js";
 
@@ -169,11 +172,12 @@ function unique(values: readonly string[]): readonly string[] {
 function resolveBindings(
   bindings: Readonly<Record<string, BindValue>> | undefined,
   scope: ScopeReader,
+  roots: ReferenceRoots,
 ): JsonObject {
   const state = stateFrom(scope);
   const output: Record<string, JsonValue> = {};
   for (const [name, binding] of Object.entries(bindings ?? {})) {
-    output[name] = resolveBindValue(binding, scope, state);
+    output[name] = resolveBindValue(binding, scope, state, roots);
   }
   return output;
 }
@@ -181,11 +185,19 @@ function resolveBindings(
 function evaluateCondition(
   expression: ConditionExpr,
   scope: ScopeReader,
+  roots: ReferenceRoots,
 ): boolean {
-  if ("all" in expression) return expression.all.every((entry) => evaluateCondition(entry, scope));
-  if ("any" in expression) return expression.any.some((entry) => evaluateCondition(entry, scope));
-  if ("not" in expression) return !evaluateCondition(expression.not, scope);
-  const actual = resolveDataReference(expression.ref, scope, stateFrom(scope), { required: false });
+  if ("all" in expression) {
+    return expression.all.every((entry) => evaluateCondition(entry, scope, roots));
+  }
+  if ("any" in expression) {
+    return expression.any.some((entry) => evaluateCondition(entry, scope, roots));
+  }
+  if ("not" in expression) return !evaluateCondition(expression.not, scope, roots);
+  const actual = resolveDataReference(expression.ref, scope, stateFrom(scope), {
+    required: false,
+    roots,
+  });
   if ("equals" in expression) return actual === expression.equals;
   return actual !== expression.notEquals;
 }
@@ -236,10 +248,12 @@ function isCatalogType(
   type: JsonValue | undefined,
   scope: ScopeReader,
   state: JsonObject,
+  roots: ReferenceRoots,
 ): type is string {
   if (typeof type !== "string") return false;
-  const knownTypes = resolveDataReference("catalog.inputTypes.types", scope, state, {
+  const knownTypes = resolveDataReference("bundle.inputTypes.types", scope, state, {
     required: true,
+    roots,
   });
   return (
     typeof knownTypes === "object" &&
@@ -256,6 +270,7 @@ async function writeValidatedOutput(
   nodeId: string,
   raw: JsonValue,
   context: FunctionContext,
+  roots: ReferenceRoots,
 ): Promise<JsonObject> {
   const state = stateFrom(scope);
   const parsed = validateArtifact(schemaName, nodeId, raw);
@@ -267,7 +282,7 @@ async function writeValidatedOutput(
     // check runs exactly when the field is present: pre-split processors,
     // the merge write, and the classification gate's re-write.
     const type = asObject(parsed, "processor output").type;
-    if (type !== undefined && !isCatalogType(type, scope, state)) {
+    if (type !== undefined && !isCatalogType(type, scope, state, roots)) {
       throw new BrainstormRuntimeError(
         `node "${nodeId}" classified the submission as "${String(type)}", which is not a type of the loaded input-type catalog`,
         "INPUT_TYPE_NOT_IN_CATALOG",
@@ -281,7 +296,7 @@ async function writeValidatedOutput(
     const classification = asObject(parsed, "task classification");
     for (const key of ["primary", "alternative"] as const) {
       const type = asObject(classification[key], `classification ${key}`).type;
-      if (!isCatalogType(type, scope, state)) {
+      if (!isCatalogType(type, scope, state, roots)) {
         throw new BrainstormRuntimeError(
           `node "${nodeId}" offered ${key} type "${String(type)}", which is not a type of the loaded input-type catalog`,
           "INPUT_TYPE_NOT_IN_CATALOG",
@@ -302,11 +317,9 @@ async function writeValidatedOutput(
       );
     }
     const shape = populatedShape(developed as Parameters<typeof populatedShape>[0]);
-    // Description-only bundles (pre-0.2.0) map no shapes; for them any single
-    // populated shape is acceptable, so the pairing check only runs when the
-    // loaded catalog actually declares one.
-    const expectedShape = resolveDataReference("catalog.inputTypes.shapes[input.type]", scope, state, {
+    const expectedShape = resolveDataReference("bundle.inputTypes.shapes[input.type]", scope, state, {
       required: false,
+      roots,
     });
     if (expectedShape !== undefined && shape !== expectedShape) {
       throw new BrainstormRuntimeError(
@@ -411,13 +424,15 @@ async function writeValidatedOutput(
   }
   if (schemaName === "comment" || schemaName === "judgeDecision") {
     const verdict = asObject(parsed, schemaName).verdict;
-    const allowed = resolveDataReference("review.allowedVerdicts", scope, state, { required: true });
+    // The seat carries allowed verdicts as NAMES; descriptions live in the
+    // bundle and are zipped in at bind time, so no verdict prose is journaled.
+    const allowed = resolveDataReference("reviews[member.id].allowedVerdicts", scope, state, {
+      required: true,
+    });
     if (
       typeof verdict !== "string" ||
-      typeof allowed !== "object" ||
-      allowed === null ||
-      Array.isArray(allowed) ||
-      !Object.prototype.hasOwnProperty.call(allowed, verdict)
+      !Array.isArray(allowed) ||
+      !allowed.includes(verdict)
     ) {
       throw new BrainstormRuntimeError(
         `node "${nodeId}" returned verdict "${String(verdict)}" which is not allowed this round`,
@@ -470,7 +485,7 @@ async function writeValidatedOutput(
     }
   }
   const stored = schemaName === "experts" ? canonicalizeExpertsTree(parsed) : parsed;
-  const write = writeDataReference(state, target, stored, scope);
+  const write = writeDataReference(state, target, stored, scope, roots);
   let next = write.state;
   if (schemaName === "redevelopment") {
     next = applyRedevelopment(next, scope, parsed, nodeId);
@@ -795,27 +810,6 @@ function annotatedEntries(
   return files.filter(isJsonRecord);
 }
 
-/** Whether any node of the workflow produces the named artifact schema. */
-function producesSchema(node: ContentWorkflowNode, schema: string): boolean {
-  switch (node.kind) {
-    case "sequence":
-      return node.steps.some((step) => producesSchema(step, schema));
-    case "agent":
-    case "activity":
-      return node.output.schema === schema;
-    case "forEach":
-    case "repeatUntil":
-      return producesSchema(node.body, schema);
-    case "condition":
-      return (
-        producesSchema(node.then, schema) ||
-        (node.else !== undefined && producesSchema(node.else, schema))
-      );
-    default:
-      return false;
-  }
-}
-
 function builtinActivities(): Readonly<Record<string, DeterministicActivityHandler>> {
   return {
     "attachments.useful": (input) =>
@@ -943,8 +937,14 @@ class ContentCompiler {
   private readonly hostTools: readonly HostToolManifest[];
   private readonly enabledHostToolIds: ReadonlySet<string>;
   private readonly skillResolver: SkillResolver;
-  /** Whether this workflow classifies in a dedicated stage (>= 0.14.0). */
-  private readonly splitClassification: boolean;
+  /**
+   * The read-only `bundle.*` reference roots: the content projections every
+   * task binds against, resolved straight out of the in-memory bundle. They
+   * are deliberately NOT part of the run state, so no catalog prose — input
+   * type outlines, shape guides, verdict descriptions — can reach a journaled
+   * activity result or `checkpoint.input`, and nothing can write through them.
+   */
+  private readonly roots: ReferenceRoots;
 
   constructor(
     private readonly bundle: ContentBundle,
@@ -960,7 +960,13 @@ class ContentCompiler {
     this.skillResolver =
       options.skillResolver ?? new BundleSkillResolver(this.bundle);
     this.gateMode = options.humanGateMode ?? "manual";
-    this.splitClassification = producesSchema(this.content.root, "taskClassification");
+    this.roots = {
+      bundle: {
+        inputTypes: structuredClone(this.bundle.catalogs.inputTypes) as unknown as JsonObject,
+        verdicts: structuredClone(this.bundle.catalogs.verdicts) as unknown as JsonObject,
+        departments: structuredClone(this.bundle.catalogs.departments) as unknown as JsonObject,
+      },
+    };
     this.functions
       .registerSelector(STATE_SELECTOR, (scope) => scope.get(BRAINSTORM_STATE))
       .registerActivity(SNAPSHOT_ACTIVITY, (_input, scope) => scope.get(BRAINSTORM_STATE));
@@ -976,7 +982,7 @@ class ContentCompiler {
       }),
       functions: this.functions,
       createInput: (submission, params = {}) => ({
-        [BRAINSTORM_STATE]: createInitialState(this.bundle, this.content, submission, params),
+        [BRAINSTORM_STATE]: createInitialState(this.content, submission, params),
       }),
     };
   }
@@ -1067,7 +1073,7 @@ class ContentCompiler {
             (extraVars.length > 0 ? `; unexpected: ${extraVars.join(", ")}` : ""),
         );
       }
-      const bindings = resolveBindings(node.bind, scope);
+      const bindings = resolveBindings(node.bind, scope, this.roots);
       if (node.output.schema === "judgeDecision" && isJsonRecord(bindings.comments)) {
         // The merged comments object arrives in panel seating order every
         // round; re-key it in a deterministic per-round order so the judge's
@@ -1077,11 +1083,31 @@ class ContentCompiler {
         const state = stateFrom(scope);
         const member = resolveDataReference("member.id", scope, state, { required: false });
         const step = resolveDataReference("stepIndex", scope, state, { required: false });
-        const round = resolveDataReference("review.round", scope, state, { required: false });
+        const round = resolveDataReference("reviews[member.id].round", scope, state, { required: false });
         (bindings as Record<string, JsonValue>).comments = shuffleKeyOrder(
           bindings.comments,
           `${String(member)}|${String(step)}|${String(round)}|${Object.keys(bindings.comments).join("|")}`,
         );
+      }
+      // The seat carries this round's allowed verdicts as NAMES so verdict
+      // prose never enters the journaled state. Zip the descriptions back in
+      // from the bundle here: the model still receives the full contract, and
+      // the rest of the pipeline keeps seeing a record.
+      if (
+        (node.output.schema === "comment" || node.output.schema === "judgeDecision") &&
+        Array.isArray(bindings.verdictOptions)
+      ) {
+        const catalog = this.bundle.catalogs.verdicts.verdicts;
+        const zipped: Record<string, JsonValue> = {};
+        for (const name of bindings.verdictOptions) {
+          if (typeof name !== "string" || !Object.prototype.hasOwnProperty.call(catalog, name)) {
+            throw new WorkflowConfigError(
+              `node "${node.id}" was offered verdict "${String(name)}", which the bundle's verdict catalog does not define`,
+            );
+          }
+          zipped[name] = structuredClone(catalog[name]) as unknown as JsonValue;
+        }
+        (bindings as Record<string, JsonValue>).verdictOptions = zipped;
       }
       let taskJsonSchema = jsonSchema;
       if (
@@ -1204,11 +1230,11 @@ class ContentCompiler {
             enum: labels,
           })) ?? taskJsonSchema;
       }
-      // Split-classification bundles (>= 0.14.0): the processor's task schema
-      // drops the classification fields entirely, so the model cannot emit
-      // them — the classifier stage decides them and the deterministic merge
+      // The processor never classifies: its task schema drops the
+      // classification fields entirely so the model cannot emit them. The
+      // dedicated classifier stage decides them and the deterministic merge
       // writes them into the input.
-      if (node.output.schema === "processorOutput" && this.splitClassification) {
+      if (node.output.schema === "processorOutput") {
         taskJsonSchema = removeSchemaProperties(taskJsonSchema, [
           "type",
           "cotSteps",
@@ -1442,16 +1468,36 @@ class ContentCompiler {
         node.id,
         raw,
         context,
+        this.roots,
       );
     });
 
     return sequence(
       [
+        // A declared review phase is stamped on the seat before the task runs,
+        // inside the sequence this node already compiles to — so no journal
+        // path changes and the dashboard sees the live phase while the (long)
+        // model call is in flight.
+        ...(node.reviewPhase !== undefined
+          ? [activity(this.reviewPhaseActivity(node.id, node.reviewPhase), {
+              id: `${node.id}-phase`,
+              resultKey: BRAINSTORM_STATE,
+            })]
+          : []),
         agent(builderName, { id: `${node.id}-execute`, resultKey }),
         activity(applyName, { id: `${node.id}-store`, resultKey: BRAINSTORM_STATE }),
       ],
       { id: node.id, description: node.notes },
     );
+  }
+
+  /** Registers (once per node) the activity that stamps a seat's review phase. */
+  private reviewPhaseActivity(nodeId: string, phase: ReviewPhase): string {
+    const name = this.functionName(nodeId, "phase");
+    this.functions.registerActivity(name, (_input, scope) =>
+      setReviewPhase(stateFrom(scope), scope, phase),
+    );
+    return name;
   }
 
   private compileActivity(node: ContentActivityNode): WorkflowNode {
@@ -1462,7 +1508,7 @@ class ContentCompiler {
       throw new WorkflowConfigError(`activity node "${node.id}" has no deterministic handler "${node.handler}"`);
     }
     this.functions.registerActivity(functionName, async (_input, scope, context) => {
-      const bindings = resolveBindings(node.bind, scope);
+      const bindings = resolveBindings(node.bind, scope, this.roots);
       const output = await handler(bindings, {
         runId: context.runId,
         nodePath: context.nodePath,
@@ -1491,6 +1537,7 @@ class ContentCompiler {
         node.id,
         parsed,
         context,
+        this.roots,
       );
     });
     return activity(functionName, {
@@ -1568,16 +1615,42 @@ class ContentCompiler {
     );
   }
 
+  /**
+   * A repeatUntil bound is either a literal, or `params.<name>` naming a
+   * positive-integer param. The core AST needs a STATIC bound (it is validated
+   * as a literal and the compiler runs before a run supplies its params), so the
+   * param form compiles to that param's declared `max` — a finite ceiling — and
+   * the per-run budget is enforced by the loop's `until` condition against the
+   * runtime-stamped seat flag. That keeps the budget declared in exactly one
+   * place while the static loop bound stays provably finite.
+   */
+  private resolveLoopBound(node: ContentRepeatUntilNode): number {
+    if (typeof node.maxIterations === "number") return node.maxIterations;
+    const ref = node.maxIterations;
+    const name = ref.startsWith("params.") ? ref.slice("params.".length) : undefined;
+    const declared = name === undefined ? undefined : this.content.params[name];
+    if (!declared || typeof declared.max !== "number" || !Number.isSafeInteger(declared.max)) {
+      throw new WorkflowConfigError(
+        `repeatUntil "${node.id}" sources maxIterations from "${ref}", which must name a workflow param declaring a finite integer max`,
+      );
+    }
+    return declared.max;
+  }
+
   private compileRepeatUntil(node: ContentRepeatUntilNode): WorkflowNode {
     const initializeName = this.functionName(node.id, "initialize");
     const prepareName = this.functionName(node.id, "prepare");
     const finishName = this.functionName(node.id, "finish");
     const conditionName = this.functionName(node.id, "until");
     this.functions
-      .registerActivity(initializeName, (_input, scope) => initializeReview(stateFrom(scope), scope))
-      .registerActivity(prepareName, (_input, scope) => prepareReviewRound(stateFrom(scope), scope))
+      .registerActivity(initializeName, (_input, scope) =>
+        initializeReview(stateFrom(scope), scope, this.bundle.catalogs.verdicts),
+      )
+      .registerActivity(prepareName, (_input, scope) =>
+        prepareReviewRound(stateFrom(scope), scope, this.bundle.catalogs.verdicts),
+      )
       .registerActivity(finishName, (_input, scope) => finishReviewRound(stateFrom(scope), scope))
-      .registerCondition(conditionName, (scope) => evaluateCondition(node.until, scope));
+      .registerCondition(conditionName, (scope) => evaluateCondition(node.until, scope, this.roots));
 
     const iterationBody = sequence(
       [
@@ -1594,7 +1667,7 @@ class ContentCompiler {
           id: `${node.id}-loop`,
           body: iterationBody,
           condition: conditionName,
-          maxIterations: node.maxIterations,
+          maxIterations: this.resolveLoopBound(node),
           onMaxIterations: node.onExhausted === "proceed" ? "continue" : "fail",
           resultKey: BRAINSTORM_STATE,
         }),
@@ -1607,7 +1680,7 @@ class ContentCompiler {
     node: Extract<ContentWorkflowNode, { kind: "condition" }>,
   ): WorkflowNode {
     const conditionName = this.functionName(node.id, "condition");
-    this.functions.registerCondition(conditionName, (scope) => evaluateCondition(node.if, scope));
+    this.functions.registerCondition(conditionName, (scope) => evaluateCondition(node.if, scope, this.roots));
     return condition(
       conditionName,
       this.compileNode(node.then),
@@ -1630,7 +1703,7 @@ class ContentCompiler {
       if (response === undefined) {
         throw new BrainstormRuntimeError(`human gate "${node.id}" has no response`, "INVALID_GATE_DECISION");
       }
-      return applyGateDecision(stateFrom(scope), scope, node, response);
+      return applyGateDecision(stateFrom(scope), scope, node, response, this.roots);
     });
 
     let gateNode: WorkflowNode;

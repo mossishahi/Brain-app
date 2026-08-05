@@ -1,4 +1,4 @@
-import { artifactSchemas, SHAPE_FIELDS } from "./schemas/artifacts.js";
+import { artifactSchemas, NOVELTY_SHAPES, SHAPE_FIELDS, type OutputShape } from "./schemas/artifacts.js";
 import type {
   ActivityRegistry,
   BindValue,
@@ -16,10 +16,46 @@ import type {
 /** Hard ceiling for repeatUntil bounds: anything above is treated as effectively unbounded. */
 export const MAX_REPEAT_BOUND = 10;
 
+/**
+ * The oldest workflow document this runtime can execute. Versions below it use
+ * the retired `catalog.*` / `review.*` / `round.*` reference vocabulary, which
+ * was replaced by the read-only `bundle.*` content root and per-seat
+ * `reviews[<seat>].*` review state. Such documents are rejected with one named
+ * issue rather than a cascade of unresolvable-reference errors.
+ */
+export const MIN_SUPPORTED_WORKFLOW_VERSION = "0.15.0";
+
 /** Runtime-provided reference roots that are always in scope. */
 const SESSION_ROOT = "session";
-/** Runtime-provided reference roots that only exist inside a repeatUntil review round. */
-const REVIEW_FIELDS = new Set(["allowedVerdicts", "round", "history"]);
+/**
+ * The read-only content root: bundle projections resolved straight out of the
+ * in-memory bundle. Never state-backed, never writable, so nothing it carries
+ * can reach the checkpoint journal.
+ */
+const BUNDLE_ROOT = "bundle";
+/** Per-seat review state; only addressable inside a repeatUntil review round. */
+const REVIEWS_ROOT = "reviews";
+/** The fields a seat carries under `reviews[<seat>]`. */
+const REVIEW_FIELDS = new Set([
+  "allowedVerdicts",
+  "round",
+  "history",
+  "lastVerdict",
+  "phase",
+  "finalRound",
+  "current",
+]);
+
+function semverBelow(candidate: string, floor: string): boolean {
+  const left = candidate.split(".").map(Number);
+  const right = floor.split(".").map(Number);
+  for (let index = 0; index < 3; index += 1) {
+    const a = left[index] ?? 0;
+    const b = right[index] ?? 0;
+    if (a !== b) return a < b;
+  }
+  return false;
+}
 
 export interface ContentBundle {
   workflows: Record<string, WorkflowDefinition>;
@@ -72,12 +108,14 @@ export type IssueCode =
   | "UNKNOWN_PARAM"
   | "UNKNOWN_CATALOG"
   | "REVIEW_REF_OUTSIDE_LOOP"
+  | "WORKFLOW_VERSION_UNSUPPORTED"
   | "UNKNOWN_VERDICT"
   | "DUPLICATE_SKILL"
   | "EMPTY_INPUT_TYPES"
   | "INPUT_TYPES_MIXED_FORMAT"
   | "OUTLINE_SHAPE_MISMATCH"
-  | "OUTLINE_SECTION_STUB";
+  | "OUTLINE_SECTION_STUB"
+  | "SHAPE_NOVELTY_CONTRADICTION";
 
 export interface ValidationIssue {
   code: IssueCode;
@@ -282,6 +320,36 @@ function validateInputTypes(inputTypes: ContentBundle["catalogs"]["inputTypes"],
           message: `matches forbidden pattern "${name}" (${pattern})`,
         });
       }
+    }
+  }
+
+  // A shape's prose rule must agree with NOVELTY_SHAPES about whether the
+  // novelty field exists. They disagreed once in shipped content — the
+  // resolution rule told the model to omit a field the validator required — and
+  // both texts land in the SAME prompt, so whichever the model followed, either
+  // validation or review saw a violation. Checked at load rather than trusted.
+  // shapeGuides is keyed by TYPE (the loader projects each shape's rule onto the
+  // types that map to it), so resolve the shape before consulting NOVELTY_SHAPES.
+  for (const [typeName, rule] of Object.entries(inputTypes.shapeGuides)) {
+    if (rule.trim().length === 0) continue;
+    const shape = inputTypes.shapes[typeName];
+    if (!shape) continue;
+    const saysOmit = /No `novelty` field for this shape/i.test(rule);
+    const saysRequired = /`novelty`[^\n]*required for this shape/i.test(rule);
+    const wantsNovelty = NOVELTY_SHAPES.has(shape as OutputShape);
+    if (wantsNovelty && saysOmit) {
+      issues.push({
+        code: "SHAPE_NOVELTY_CONTRADICTION",
+        path: `${at} > shapeRules.${shape}`,
+        message: `shape "${shape}" requires a novelty statement but its rule tells the model to omit it`,
+      });
+    }
+    if (!wantsNovelty && saysRequired) {
+      issues.push({
+        code: "SHAPE_NOVELTY_CONTRADICTION",
+        path: `${at} > shapeRules.${shape}`,
+        message: `shape "${shape}" carries no novelty field but its rule tells the model one is required`,
+      });
     }
   }
 
@@ -572,6 +640,16 @@ function validateWorkflow(
   issues: ValidationIssue[],
 ): void {
   const wfPath = `workflow ${workflow.name}`;
+  if (semverBelow(workflow.version, MIN_SUPPORTED_WORKFLOW_VERSION)) {
+    issues.push({
+      code: "WORKFLOW_VERSION_UNSUPPORTED",
+      path: wfPath,
+      message:
+        `workflow version ${workflow.version} predates ${MIN_SUPPORTED_WORKFLOW_VERSION}; it uses the retired ` +
+        `catalog.*/review.*/round.* reference vocabulary and is no longer loadable`,
+    });
+    return;
+  }
   const paramNames = new Set(Object.keys(workflow.params));
   const producedSchemas = new Map<string, Set<string>>();
   walkNodes(workflow.root, (node) => {
@@ -596,18 +674,56 @@ function validateWorkflow(
     if (node.kind === "terminal") terminals += 1;
 
     if (node.kind === "repeatUntil") {
-      const max = (node as { maxIterations?: unknown }).maxIterations;
-      if (typeof max !== "number" || !Number.isInteger(max) || max < 1) {
+      // The bound is either a literal, or `params.<name>` naming a param whose
+      // declared `max` becomes the static ceiling (the per-run budget is then
+      // enforced by `until`, so the number lives in exactly one place). Either
+      // way a finite integer ceiling must be provable here — there are no
+      // unbounded loops.
+      const declaredBound = (node as { maxIterations?: unknown }).maxIterations;
+      let bound: number | undefined;
+      if (typeof declaredBound === "number") {
+        bound = declaredBound;
+      } else if (typeof declaredBound === "string") {
+        const name = declaredBound.startsWith("params.")
+          ? declaredBound.slice("params.".length)
+          : undefined;
+        const param = name === undefined ? undefined : workflow.params[name];
+        if (!param) {
+          issues.push({
+            code: "UNKNOWN_PARAM",
+            path: at,
+            message: `maxIterations "${declaredBound}" must name a declared workflow param as params.<name>`,
+          });
+        } else if (typeof param.max !== "number" || !Number.isInteger(param.max)) {
+          issues.push({
+            code: "UNBOUNDED_LOOP",
+            path: at,
+            message: `maxIterations "${declaredBound}" names param "${name}", which declares no finite integer max to bound the loop with`,
+          });
+        } else {
+          bound = param.max;
+        }
+      }
+      if (bound === undefined) {
+        if (typeof declaredBound === "number" || declaredBound === undefined) {
+          issues.push({
+            code: "UNBOUNDED_LOOP",
+            path: at,
+            message:
+              "repeatUntil must declare a positive integer maxIterations, or params.<name> naming a param with a finite max — unbounded loops are rejected",
+          });
+        }
+      } else if (!Number.isInteger(bound) || bound < 1) {
         issues.push({
           code: "UNBOUNDED_LOOP",
           path: at,
           message: "repeatUntil must declare a positive integer maxIterations — unbounded loops are rejected",
         });
-      } else if (max > MAX_REPEAT_BOUND) {
+      } else if (bound > MAX_REPEAT_BOUND) {
         issues.push({
           code: "LOOP_BOUND_TOO_HIGH",
           path: at,
-          message: `maxIterations ${max} exceeds the ceiling of ${MAX_REPEAT_BOUND} and is treated as effectively unbounded`,
+          message: `maxIterations ${bound} exceeds the ceiling of ${MAX_REPEAT_BOUND} and is treated as effectively unbounded`,
         });
       }
     }
@@ -783,25 +899,39 @@ function checkRef(ref: string, scope: Set<string>, inRepeatUntil: boolean, ctx: 
     }
     return;
   }
-  if (root === "catalog") {
+  if (root === BUNDLE_ROOT) {
     if (segments.length < 2 || !ctx.catalogNames.has(segments[1]!)) {
       ctx.issues.push({
         code: "UNKNOWN_CATALOG",
         path: at,
-        message: `"${ref}" references a catalog that is not part of the bundle`,
+        message: `"${ref}" references a bundle projection that is not part of the bundle`,
       });
     }
     return;
   }
-  if (root === "review") {
+  if (root === REVIEWS_ROOT) {
     if (!inRepeatUntil) {
       ctx.issues.push({
         code: "REVIEW_REF_OUTSIDE_LOOP",
         path: at,
-        message: `"${ref}" uses the review builtin outside a repeatUntil loop`,
+        message: `"${ref}" uses per-seat review state outside a repeatUntil loop`,
       });
-    } else if (segments.length < 2 || !REVIEW_FIELDS.has(segments[1]!)) {
-      ctx.issues.push({ code: "UNKNOWN_REF", path: at, message: `"${ref}" is not a known review builtin` });
+      return;
+    }
+    // `reviews` is always seat-qualified: the bracket segment names the seat
+    // and is stripped above, so the first surviving segment is the seat field.
+    // A bare `reviews.<field>` reference would address the seat map itself,
+    // which is exactly the seat-independent access that breaks parallel review.
+    if (!/^reviews\[/.test(ref)) {
+      ctx.issues.push({
+        code: "UNKNOWN_REF",
+        path: at,
+        message: `"${ref}" must address a single seat as reviews[<seat>].…`,
+      });
+      return;
+    }
+    if (segments.length < 2 || !REVIEW_FIELDS.has(segments[1]!)) {
+      ctx.issues.push({ code: "UNKNOWN_REF", path: at, message: `"${ref}" is not a known review field` });
     }
     return;
   }
