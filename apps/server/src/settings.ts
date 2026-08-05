@@ -957,7 +957,10 @@ export class SettingsStore {
     if (update.submittedOpenRouterApiKey !== undefined) {
       nextCredentials.openRouterApiKey =
         update.submittedOpenRouterApiKey;
-    } else if (currentOpenRouterKey) {
+    } else if (currentOpenRouterKey && !update.clearOpenRouterApiKey) {
+      // Guarded on the clear flag: without that guard this restored the key the
+      // clear above had just deleted (currentOpenRouterKey is read before it),
+      // so a user could never actually remove their OpenRouter key.
       nextCredentials.openRouterApiKey ??= currentOpenRouterKey;
     }
     if (Object.keys(nextCredentials).length === 0) {
