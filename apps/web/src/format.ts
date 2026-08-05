@@ -115,9 +115,17 @@ export function jobStatusLine(job: JobSummary): string {
     case "running": {
       const active = job.progress?.activeStage;
       if (active === "review-members") {
-        const c = job.progress?.reviewCursor;
-        if (c) {
-          return `review · member ${c.member}/${c.memberCount} · step ${c.step}/${c.stepCount} · round ${c.round}`;
+        const r = job.progress?.review;
+        if (r) {
+          // With one active seat show its position; with several, report the
+          // count rather than inventing a single cursor.
+          if (r.activeSeats > 1) {
+            return `review · ${r.activeSeats} seats · ${r.membersComplete}/${r.memberCount} done`;
+          }
+          if (r.step !== undefined) {
+            return `review · seat ${r.membersComplete + 1}/${r.memberCount} · step ${r.step}/${r.stepCount} · round ${r.round}`;
+          }
+          return `review · ${r.membersComplete}/${r.memberCount} done`;
         }
         return "reviewing…";
       }

@@ -487,6 +487,8 @@ export interface ReviewStepView {
   /** 1-based chain-of-thought step index. */
   readonly index: number;
   readonly outcome: ReviewStepOutcome;
+  /** While this step is under review, what the seat is doing on it. */
+  readonly phase?: ReviewPhase;
   readonly rounds: readonly ReviewRoundView[];
 }
 
@@ -507,18 +509,48 @@ export interface ReviewMemberView {
   readonly finalIdea?: BrainIdeaView;
   /** How many redevelopments the review applied to this member's chain. */
   readonly revisionCount?: number;
+  /** Present while this seat is actively under review. */
+  readonly progress?: ReviewSeatProgress;
 }
 
-export interface ReviewCursorView {
-  /** 1-based member position and total. */
-  readonly member: number;
+/**
+ * What a seat is doing at its current walk position. Mirrors REVIEW_PHASES in
+ * the content package (protocol keeps zero dependencies by design); the runtime
+ * — never the model — stamps it.
+ */
+export type ReviewPhase = "commenting" | "judging" | "redeveloping";
+
+/**
+ * One seat's live position in its OWN walk. Per-seat rather than one global
+ * cursor, because seats may be reviewed concurrently — and because a per-seat
+ * shape is what lets a view render each seat's status independently.
+ */
+/**
+ * Compact review progress for list views. Stays correct when several seats are
+ * reviewed at once: the single-seat position is filled in only when exactly one
+ * seat is active, so a one-line status never invents a global cursor.
+ */
+export interface ReviewProgressSummary {
+  /** Seats whose walk is finished, and the roster size. */
+  readonly membersComplete: number;
   readonly memberCount: number;
-  /** 1-based chain step and total. */
+  /** How many seats are under review right now. */
+  readonly activeSeats: number;
+  readonly maxRounds: number;
+  /** The active seat's position — present only when exactly one seat is active. */
+  readonly step?: number;
+  readonly stepCount?: number;
+  readonly round?: number;
+}
+
+export interface ReviewSeatProgress {
+  /** 1-based chain step under review, and the chain length. */
   readonly step: number;
   readonly stepCount: number;
-  /** 1-based review round on the current step. */
+  /** 1-based review round on that step. */
   readonly round: number;
-  readonly maxRounds: number;
+  /** What the seat is doing right now, while the round is in flight. */
+  readonly phase?: ReviewPhase;
 }
 
 /** One member's novelty claim, audited across fields after review. */
@@ -666,7 +698,12 @@ export interface FirstPassStage extends StageBase {
 
 export interface ReviewStage extends StageBase {
   readonly id: "review-members";
-  readonly cursor?: ReviewCursorView;
+  /**
+   * The run's review round budget, read from the workflow param the run pinned
+   * — never assumed by the client, so a run started under a different budget
+   * still renders correctly.
+   */
+  readonly maxRounds: number;
   readonly members: readonly ReviewMemberView[];
 }
 
@@ -733,7 +770,7 @@ export interface JobSummary {
     readonly activeStage?: StageId;
     readonly completedStages: number;
     readonly totalStages: number;
-    readonly reviewCursor?: ReviewCursorView;
+    readonly review?: ReviewProgressSummary;
   };
   readonly error?: string;
   readonly creditBlock?: {
