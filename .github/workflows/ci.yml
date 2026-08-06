@@ -22,12 +22,12 @@ jobs:
       # change that the app cannot execute — but it means CI must check out both
       # repositories side by side, exactly as a developer has them.
       - name: Check out the app
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: app
 
       - name: Check out the Brain Registry (tags included)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: mossishahi/Brain
           path: brain
@@ -37,7 +37,7 @@ jobs:
           # nothing to validate against.
           fetch-depth: 0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: npm
@@ -62,10 +62,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: app
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: mossishahi/Brain
           path: brain
