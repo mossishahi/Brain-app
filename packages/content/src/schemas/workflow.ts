@@ -115,6 +115,17 @@ export const conditionExprSchema: z.ZodType<ConditionExpr> = z.lazy(() =>
 // workflow nodes
 // ---------------------------------------------------------------------------
 
+/**
+ * The workflow document dialect this runtime executes. A bundle declares the
+ * protocol it targets in bundle.json; the host refuses one it does not
+ * implement, rather than loading it and failing later in a way that looks like
+ * a content bug.
+ */
+export const WORKFLOW_API_VERSION = "brainstorm.workflow/v1";
+export const SUPPORTED_RUNTIME_PROTOCOLS: ReadonlySet<string> = new Set([
+  WORKFLOW_API_VERSION,
+]);
+
 const nodeBase = {
   id: identifier,
   /** Free-text documentation for humans and runtime implementers. */
@@ -391,7 +402,7 @@ export const workflowNodeSchema: z.ZodType<WorkflowNode> = z.lazy(() =>
 
 export const workflowSchema = z
   .object({
-    apiVersion: z.literal("brainstorm.workflow/v1"),
+    apiVersion: z.literal(WORKFLOW_API_VERSION),
     name: identifier,
     version: semver,
     description: z.string().min(1),

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import {
   ContentValidationError,
   loadControlContent,
+  SUPPORTED_RUNTIME_PROTOCOLS,
   memoryContentSource,
   parseSkillText,
   type ContentBundle,
@@ -103,6 +104,18 @@ export async function openLazyRegistryContent(options: {
     }
     pin = await client.resolvePin(options.bundle ?? "brainstorm", options.version);
     writeContentPin(pinPath, pin);
+  }
+
+  // Refuse a bundle built for a runtime dialect this host does not implement.
+  // The declaration was parsed into the pin but never checked, so a future
+  // bundle would have loaded here and failed somewhere downstream looking like
+  // a content bug rather than a version mismatch.
+  if (!SUPPORTED_RUNTIME_PROTOCOLS.has(pin.manifest.runtimeProtocol)) {
+    throw new Error(
+      `bundle ${pin.bundle}@${pin.version} targets runtime protocol ` +
+        `"${pin.manifest.runtimeProtocol}", which this app does not implement ` +
+        `(supported: ${[...SUPPORTED_RUNTIME_PROTOCOLS].join(", ")}). Update the app.`,
+    );
   }
 
   const store = new ContentRegistryStore(pin, client);
