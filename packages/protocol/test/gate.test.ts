@@ -98,12 +98,50 @@ test("custom seats count toward both the minimum and the maximum", () => {
   assert.equal(maxed.full, true, "kept + added reaching the cap must close the add affordance");
 });
 
-test("an empty proposal is not treated as a shrink", () => {
-  // Nothing was removed, so the answer must not claim seats were dropped —
-  // `kept.length < proposed.length` alone would be false here anyway, but the
-  // guard is what makes that explicit rather than accidental.
+test("an empty proposal approves with only custom seats", () => {
   const decision = panelGateDecision({ proposed: [], checked: new Set(), added: custom(3) });
   assert.equal(decision.shrinking, false);
   assert.equal(decision.total, 3);
   assert.equal(decision.label, "Approve panel + 3 custom");
+  assert.equal(decision.submittable, true);
+  // An approve must not carry a members list, whatever the proposal was.
+  assert.equal(panelGateRequest("g", decision, custom(3)).members, undefined);
+});
+
+test("unchecking every proposed seat is refused, because the server refuses it", () => {
+  // A shrink names the seats to KEEP, and job-manager rejects an empty keep
+  // list ("shrink needs the member ids to keep"). Adding custom seats makes the
+  // panel a legal SIZE, so the size checks all pass and the gate looked
+  // answerable — the button was live and the answer came back a 400. The client
+  // has to mirror the server's rule, not just its arithmetic.
+  const decision = panelGateDecision({
+    proposed: seats(4),
+    checked: new Set(),
+    added: custom(2),
+  });
+  assert.equal(decision.total, 2, "a legal size on its own");
+  assert.equal(decision.tooFew, false, "so the size check does not catch it");
+  assert.equal(decision.submittable, false, "but it is still not answerable");
+  assert.match(decision.blockedReason ?? "", /at least one of the proposed seats/);
+});
+
+test("a panel pushed over the maximum blocks submission, not just adding", () => {
+  // `full` closes the ADD affordance, which does not help once the panel is
+  // already at the cap: re-checking a proposed seat pushes the total past it
+  // with nothing disabled. The server enforces "at most N (kept + added)".
+  const proposed = seats(PANEL_EDIT_LIMITS.maxMembers);
+  const decision = panelGateDecision({
+    proposed,
+    checked: all(PANEL_EDIT_LIMITS.maxMembers),
+    added: custom(1),
+  });
+  assert.equal(decision.total, PANEL_EDIT_LIMITS.maxMembers + 1);
+  assert.equal(decision.submittable, false);
+  assert.match(decision.blockedReason ?? "", /at most/);
+});
+
+test("an ordinary panel is submittable and names no reason", () => {
+  const decision = panelGateDecision({ proposed: seats(6), checked: all(6), added: [] });
+  assert.equal(decision.submittable, true);
+  assert.equal(decision.blockedReason, undefined);
 });

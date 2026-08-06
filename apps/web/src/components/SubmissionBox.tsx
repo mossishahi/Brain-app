@@ -1,6 +1,7 @@
 import {
   lazy,
   Suspense,
+  useCallback,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -204,6 +205,14 @@ function modelDisplay(settings: ServerSettings | null): {
  * (its 64px FAB assumption, its shadows, its colours) back to this app's
  * tokens. Plain buttons and a flex row express the same thing, react to the
  * theme through the same CSS variables as everything else, and cost nothing.
+ *
+ * What SpeedDial did give away for free, and is therefore written out here, is
+ * the keyboard contract that role="menu" promises: arrow keys move between
+ * options, Home/End jump to the ends, only the active option is a tab stop
+ * (a roving tabindex — seven tab stops for one control is worse than none),
+ * opening moves focus into the menu, and closing puts it back on the trigger.
+ * Declaring the role without the behaviour is the worse of the two failures:
+ * it tells a screen reader to expect a menu and then hands it a row of buttons.
  */
 function AttachmentPicker({
   disabled,
@@ -213,59 +222,143 @@ function AttachmentPicker({
   readonly onSelect: (kind: AttachmentSelectionKind) => void;
 }) {
   const [open, setOpen] = useState(false);
+  /** Which option is the single tab stop, and what focus follows on open. */
+  const [active, setActive] = useState(0);
   const root = useRef<HTMLDivElement | null>(null);
+  const trigger = useRef<HTMLButtonElement | null>(null);
+  const options = useRef<(HTMLButtonElement | null)[]>([]);
+  /** Set when the fan closes, so focus returns only for a real close. */
+  const restoreFocus = useRef(false);
 
-  // Closing on outside-press and on Escape: without both, the fan stays open
-  // behind whatever the user does next.
+  const close = useCallback((returnFocus: boolean) => {
+    restoreFocus.current = returnFocus;
+    setOpen(false);
+  }, []);
+
   useEffect(() => {
     if (!open) return;
     const onPointerDown = (event: PointerEvent) => {
-      if (!root.current?.contains(event.target as Node)) setOpen(false);
-    };
-    const onKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
+      // A pointer close must NOT pull focus back to the trigger: the user is
+      // already on their way somewhere else.
+      if (!root.current?.contains(event.target as Node)) close(false);
     };
     document.addEventListener("pointerdown", onPointerDown);
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("pointerdown", onPointerDown);
-      document.removeEventListener("keydown", onKeyDown);
-    };
-  }, [open]);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [open, close]);
 
   // A disabled trigger cannot be re-opened, so a fan left open when the box
-  // becomes disabled would be unclosable.
+  // becomes disabled would be unclosable. No focus return: nothing to focus.
   useEffect(() => {
-    if (disabled) setOpen(false);
-  }, [disabled]);
+    if (disabled) close(false);
+  }, [disabled, close]);
+
+  // Focus follows the fan in both directions. Closing returns it to the trigger
+  // rather than dropping it on <body>, which is what strands a keyboard user —
+  // and it must happen before the fan is hidden, or the browser blurs the
+  // element out from under them.
+  useEffect(() => {
+    if (open) {
+      options.current[active]?.focus();
+      return;
+    }
+    if (restoreFocus.current) {
+      restoreFocus.current = false;
+      trigger.current?.focus();
+    }
+    // `active` deliberately excluded: re-running on every arrow key would fight
+    // the roving focus below, which already moves focus itself.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  const move = (to: number) => {
+    const wrapped = (to + PICKER_OPTIONS.length) % PICKER_OPTIONS.length;
+    setActive(wrapped);
+    options.current[wrapped]?.focus();
+  };
+
+  const onMenuKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    switch (event.key) {
+      case "ArrowRight":
+      case "ArrowDown":
+        event.preventDefault();
+        move(active + 1);
+        break;
+      case "ArrowLeft":
+      case "ArrowUp":
+        event.preventDefault();
+        move(active - 1);
+        break;
+      case "Home":
+        event.preventDefault();
+        move(0);
+        break;
+      case "End":
+        event.preventDefault();
+        move(PICKER_OPTIONS.length - 1);
+        break;
+      case "Escape":
+        event.preventDefault();
+        close(true);
+        break;
+      case "Tab":
+        // Tabbing away is a legitimate exit, but it must not leave an expanded
+        // menu behind claiming to own the focus that just left.
+        close(false);
+        break;
+      default:
+        break;
+    }
+  };
 
   return (
     <div className="attach-picker" ref={root}>
       <button
         type="button"
+        ref={trigger}
         className="attach-trigger"
         aria-label="Attach from server"
+        aria-haspopup="menu"
         aria-expanded={open}
+        aria-controls="attach-fan"
         disabled={disabled}
-        onClick={() => setOpen((previous) => !previous)}
+        onClick={() => {
+          setActive(0);
+          setOpen((previous) => !previous);
+        }}
       >
         <span aria-hidden>+</span>
       </button>
-      <div className={`attach-fan${open ? " attach-fan-open" : ""}`} role="menu" aria-hidden={!open}>
-        {PICKER_OPTIONS.map((option) => (
+      <div
+        id="attach-fan"
+        className={`attach-fan${open ? " attach-fan-open" : ""}`}
+        role="menu"
+        aria-label="Attach from server"
+        // Only hidden while closed. Marking a subtree aria-hidden while it holds
+        // focus is its own serious bug, which is why the close path moves focus
+        // out first.
+        aria-hidden={!open}
+        onKeyDown={onMenuKeyDown}
+      >
+        {PICKER_OPTIONS.map((option, index) => (
           <button
             key={option.kind}
             type="button"
             role="menuitem"
+            ref={(node) => {
+              options.current[index] = node;
+            }}
             className="attach-option"
-            aria-label={option.label}
-            title={`${option.label} — ${option.hint}`}
-            // Kept out of the tab order while collapsed: a hidden fan must not
-            // hand out focus stops the user cannot see.
-            tabIndex={open ? 0 : -1}
+            // The hint reaches keyboard and touch users through the app's own
+            // tooltip (shown on :hover AND :focus-visible); `title` alone is
+            // mouse-hover only, so it read as decoration to everyone else.
+            data-tooltip={`${option.label} — ${option.hint}`}
+            aria-label={`${option.label} — ${option.hint}`}
+            // A roving tabindex: the fan is one tab stop, not seven, and while
+            // it is closed it is none.
+            tabIndex={open && index === active ? 0 : -1}
             onClick={() => {
               onSelect(option.kind);
-              setOpen(false);
+              close(true);
             }}
           >
             {option.icon}

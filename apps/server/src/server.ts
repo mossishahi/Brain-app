@@ -59,6 +59,12 @@ const POLL_MS = 2_000;
 const REGISTRY_HEARTBEAT_MS = 15_000;
 /** Telemetry is not time-critical; a slow cadence keeps it out of the way. */
 const TELEMETRY_FLUSH_MS = 60_000;
+/**
+ * How long close() will wait for an in-flight telemetry cycle before giving up
+ * on it. Generous relative to the cycle's own 2s network timeout, and short
+ * enough that a wedged cycle can never hold a shutdown open.
+ */
+const CLOSE_DRAIN_GRACE_MS = 5_000;
 /** Interrupted-job scans hit squeue/sacct, so they poll far less often. */
 const INTERRUPTED_SCAN_MS = 30_000;
 const ATTACHMENT_KINDS = new Set<AttachmentSelectionKind>([
@@ -1143,15 +1149,19 @@ export async function startBrainServer(
       };
     },
   );
-  // The in-flight telemetry cycle, if one is running. `close()` awaits it:
-  // clearInterval only stops FUTURE ticks, and this callback's body outlives the
-  // tick that started it — it appends to the spool and then flushes over the
-  // network. Without the handle, close() resolves while a write is still in
-  // flight, so a caller that shuts the server down and then removes its
-  // workspace races a file being recreated under it.
+  // The in-flight telemetry cycle, if one is running.
+  //
+  // clearInterval stops future ticks but not the async body a tick has already
+  // started, which appends to the spool and then flushes. close() awaits this
+  // so shutdown does not resolve mid-write. Scope, precisely: this covers the
+  // SERVER's own spool writes only. The worker writes far more of the
+  // workspace, from a detached process the server cannot await by design (a run
+  // must survive a server restart) — so "closed" still does not mean "nothing
+  // in this workspace is being written". It only means the server itself is
+  // done.
   let telemetryCycle: Promise<void> | undefined;
   const telemetryPoll = setInterval(() => {
-    telemetryCycle = (async () => {
+    const cycle = (async () => {
       if (manager.settings.get().telemetry?.enabled !== false) {
         try {
           telemetryCollector.collect(await manager.list());
@@ -1161,8 +1171,13 @@ export async function startBrainServer(
       }
       await telemetrySender.flush();
     })().finally(() => {
-      telemetryCycle = undefined;
+      // Only retire the handle if it is still ours. Clearing unconditionally
+      // would let a slow cycle, settling after a later tick had stored its own
+      // promise, erase that newer one — and close() would then await nothing
+      // while a write was still in flight.
+      if (telemetryCycle === cycle) telemetryCycle = undefined;
     });
+    telemetryCycle = cycle;
   }, TELEMETRY_FLUSH_MS);
   const registryPoll = setInterval(() => {
     void probeContentRegistry(contentRegistryUrl, contentRegistry);
@@ -1190,9 +1205,6 @@ export async function startBrainServer(
       clearInterval(registryPoll);
       clearInterval(telemetryPoll);
       if (appUpdateTimer) clearInterval(appUpdateTimer);
-      // Never rejects (flush swallows send failures), but awaited defensively so
-      // a future change there cannot turn shutdown into an unhandled rejection.
-      await telemetryCycle?.catch(() => undefined);
       readiness.close();
       watchers.forEach((entry) => entry.close());
       for (const stream of [...jobStreams]) stream.close();
@@ -1203,6 +1215,23 @@ export async function startBrainServer(
         httpServer.close((error) => (error ? reject(error) : resolveClose()));
         httpServer.closeAllConnections();
       });
+      // Last, once the listener is down: awaiting here rather than at the top
+      // means shutdown does not yield while the server is still accepting
+      // requests, which would have kept new work arriving during teardown.
+      //
+      // The cycle never rejects (flush swallows send failures) and its network
+      // leg carries its own abort timeout, but the race is bounded here anyway
+      // so no future change inside it can leave close() hanging.
+      if (telemetryCycle) {
+        let bail: NodeJS.Timeout | undefined;
+        await Promise.race([
+          telemetryCycle.catch(() => undefined),
+          new Promise<void>((settle) => {
+            bail = setTimeout(settle, CLOSE_DRAIN_GRACE_MS);
+          }),
+        ]);
+        if (bail) clearTimeout(bail);
+      }
     },
   };
 }

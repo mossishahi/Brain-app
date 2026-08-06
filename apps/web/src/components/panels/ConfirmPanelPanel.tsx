@@ -223,10 +223,10 @@ export function GateCard({
     checked,
     added: addedSeats,
   });
-  const { total, shrinking, tooFew, full } = decision;
+  const { total, shrinking, submittable, full } = decision;
 
   const answer = async () => {
-    if (!gateKey || tooFew) return;
+    if (!gateKey || !submittable) return;
     setPhase("busy");
     setError(null);
     const req: GateAnswerRequest = panelGateRequest(gateKey, decision, addedSeats);
@@ -311,18 +311,15 @@ export function GateCard({
           <button
             type="button"
             className="btn btn-primary"
-            disabled={phase !== "idle" || !gateKey || tooFew}
+            disabled={phase !== "idle" || !gateKey || !submittable}
             onClick={() => void answer()}
           >
             {buttonLabel}
           </button>
-          {tooFew && (
-            <p className="dim small">
-              A panel needs at least {PANEL_EDIT_LIMITS.minMembers} seats —
-              re-check members or add custom ones.
-            </p>
+          {decision.blockedReason !== undefined && (
+            <p className="dim small">{decision.blockedReason}</p>
           )}
-          {full && (
+          {full && decision.blockedReason === undefined && (
             <p className="dim small">
               The panel is at its {PANEL_EDIT_LIMITS.maxMembers}-seat maximum.
             </p>

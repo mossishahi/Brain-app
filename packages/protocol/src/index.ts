@@ -1219,10 +1219,19 @@ export function panelGateDecision(input: {
   readonly total: number;
   /** True when the user unchecked at least one proposed seat. */
   readonly shrinking: boolean;
-  /** True when the panel is below the minimum, so the gate cannot be answered. */
+  /** True when the panel is below the minimum. */
   readonly tooFew: boolean;
-  /** True when no further seat may be added. */
+  /** True when no further seat may be ADDED (drives the add affordance only). */
   readonly full: boolean;
+  /**
+   * Whether the gate can be answered at all. Every rule the server enforces on
+   * a gate answer is mirrored here, so the card cannot offer a button whose
+   * request the server will reject. The two disagreeing is what produced a live
+   * "Continue" that answered with a 400.
+   */
+  readonly submittable: boolean;
+  /** Why not, when `submittable` is false. Shown to the user verbatim. */
+  readonly blockedReason?: string;
   readonly label: string;
 } {
   const kept = input.proposed.filter((seat) => input.checked.has(seat.id)).map((seat) => seat.id);
@@ -1231,12 +1240,28 @@ export function panelGateDecision(input: {
   // action into a shrink. An always-enabled "approve" used to silently discard
   // the selection — seats stayed unchecked on screen but the full panel ran.
   const shrinking = input.proposed.length > 0 && kept.length < input.proposed.length;
+  const tooFew = total < PANEL_EDIT_LIMITS.minMembers;
+  // A shrink names the seats to KEEP, so it cannot name none — the server
+  // rejects an empty keep-list outright. Unchecking every proposed seat and
+  // adding custom ones is therefore not an answer the server accepts, even
+  // though the resulting panel would be a legal size. That combination is
+  // exactly what used to leave "Continue" enabled and then fail with a 400.
+  const keptNone = shrinking && kept.length === 0;
+  const blockedReason = tooFew
+    ? `A panel needs at least ${PANEL_EDIT_LIMITS.minMembers} seats — re-check members or add custom ones.`
+    : total > PANEL_EDIT_LIMITS.maxMembers
+      ? `A panel may seat at most ${PANEL_EDIT_LIMITS.maxMembers} members — uncheck a seat or remove a custom one.`
+      : keptNone
+        ? "Keep at least one of the proposed seats — a panel cannot be replaced wholesale from here."
+        : undefined;
   return {
     kept,
     total,
     shrinking,
-    tooFew: total < PANEL_EDIT_LIMITS.minMembers,
+    tooFew,
     full: total >= PANEL_EDIT_LIMITS.maxMembers,
+    submittable: blockedReason === undefined,
+    ...(blockedReason !== undefined ? { blockedReason } : {}),
     label:
       (shrinking
         ? `Continue with ${kept.length} of ${input.proposed.length} seats`
