@@ -10,6 +10,7 @@
  * (default ~/.brainstorm-agentic/workspace/sessions), one directory per run.
  */
 import { randomUUID } from "node:crypto";
+import { createRequire } from "node:module";
 import {
   appendFileSync,
   existsSync,
@@ -26,6 +27,7 @@ import { scoreExpertiseTree } from "@brainstorm-agentic/brainstorm-runtime";
 import { loadContent } from "@brainstorm-agentic/content";
 import type {
   ArtifactStore,
+  JsonObject,
   JsonValue,
   RunEvent,
   RunEventListener,
@@ -40,6 +42,13 @@ import {
 
 import { defaultSessionRoot, loadDotEnv } from "./env.js";
 import { FsArtifactStore, FsCheckpointStore } from "./fs-stores.js";
+import {
+  deriveRunSummary,
+  installId,
+  TelemetrySpool,
+  TELEMETRY_SCHEMA_VERSION,
+  type TelemetryEvent,
+} from "@brainstorm-agentic/telemetry";
 import { buildRuntime, providerConfigFromEnv } from "./wiring.js";
 import { openLazyRegistryContent, type LazyRegistryContent } from "./registry-content.js";
 import {
@@ -338,6 +347,130 @@ function eventListener(verbose: boolean, eventsFile: string | undefined): RunEve
   };
 }
 
+/**
+ * Records one compact summary of the finished run in the local spool. The
+ * server drains and sends it; this only ever writes a file, so a worker on a
+ * network-less node behaves identically and telemetry can never delay or fail a
+ * run. Every failure here is swallowed for the same reason.
+ *
+ * Opt-out is enforced by the caller (the environment carries the setting), so a
+ * user who has switched telemetry off produces no record at all rather than one
+ * that is written and then withheld.
+ */
+function recordRunSummary(options: {
+  readonly workspace: string;
+  readonly sessionRoot: string;
+  readonly runId: string;
+  readonly result: RunResult;
+  readonly eventsFile: string | undefined;
+  readonly pin: LazyRegistryContent["pin"] | undefined;
+  readonly provider: string;
+  readonly runner: "local" | "slurm";
+  readonly modelsByRoute: Readonly<Record<string, string>> | undefined;
+}): void {
+  try {
+    const events: JsonObject[] = [];
+    if (options.eventsFile !== undefined && existsSync(options.eventsFile)) {
+      for (const line of readFileSync(options.eventsFile, "utf8").split("\n")) {
+        if (line.trim().length === 0) continue;
+        try {
+          events.push(JSON.parse(line) as JsonObject);
+        } catch {
+          // A torn trailing line is not worth losing the summary over.
+        }
+      }
+    }
+    const checkpointPath = join(options.sessionRoot, options.runId, "checkpoint.json");
+    let journal: JsonObject[] = [];
+    let state: JsonObject | undefined;
+    if (existsSync(checkpointPath)) {
+      const checkpoint = JSON.parse(readFileSync(checkpointPath, "utf8")) as JsonObject;
+      journal = Array.isArray(checkpoint.journal) ? (checkpoint.journal as JsonObject[]) : [];
+      // The last journaled activity result is the run's final state.
+      for (const entry of journal) {
+        const value = entry.value;
+        if (
+          entry.kind === "activity" &&
+          typeof value === "object" && value !== null && !Array.isArray(value) &&
+          "reviews" in value
+        ) {
+          state = value as JsonObject;
+        }
+      }
+    }
+    const summary = deriveRunSummary({
+      status: options.result.status,
+      events,
+      journal,
+      ...(state ? { state } : {}),
+    });
+    const event: TelemetryEvent = {
+      type: "run.summary",
+      schemaVersion: TELEMETRY_SCHEMA_VERSION,
+      eventId: randomUUID(),
+      installId: installId(options.workspace),
+      at: new Date().toISOString(),
+      appVersion: APP_VERSION,
+      platform: `${process.platform}-${process.arch}`,
+      runner: options.runner,
+      provider: options.provider,
+      ...(options.pin
+        ? {
+            bundle: {
+              name: options.pin.bundle,
+              version: options.pin.version,
+              digest: options.pin.manifestSha256,
+            },
+          }
+        : {}),
+      ...(summary.taxonomy?.revision !== undefined
+        ? { taxonomyRevision: summary.taxonomy.revision }
+        : {}),
+      ...(options.modelsByRoute ? { modelsByRoute: options.modelsByRoute } : {}),
+      runId: options.runId,
+      summary,
+    };
+    new TelemetrySpool(options.workspace).append(event);
+  } catch {
+    // Telemetry is never a reason for a run to report differently.
+  }
+}
+
+/** Read from package.json so the version is declared in exactly one place. */
+const APP_VERSION: string = (() => {
+  try {
+    return (
+      createRequire(import.meta.url)("../../package.json") as { version?: string }
+    ).version ?? "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+})();
+
+/** The workspace that owns this session root — where the install id lives. */
+function defaultWorkspaceRoot(sessionRoot: string): string {
+  return dirname(sessionRoot);
+}
+
+/** The per-route model ids the deployment configured, for cross-model comparison. */
+function modelsByRouteFromEnv(
+  env: NodeJS.ProcessEnv,
+): Readonly<Record<string, string>> | undefined {
+  const raw = env.BRAINSTORM_AGENTIC_MODELS_BY_ROUTE;
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
+    const models: Record<string, string> = {};
+    for (const [route, model] of Object.entries(parsed)) {
+      if (typeof model === "string") models[route] = model;
+    }
+    return Object.keys(models).length > 0 ? models : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function reportResult(result: RunResult, sessionRoot: string): void {
   console.log("");
   if (result.status === "completed") {
@@ -510,6 +643,21 @@ async function main(): Promise<void> {
       });
       const trees = await writeExpertiseTrees(artifacts, sessionRoot, runId);
       const finals = await writeFinalOutputs(artifacts, sessionRoot, runId);
+      // Opt-out is honored here: with telemetry off, no record is produced at
+      // all rather than one written and then withheld.
+      if (process.env.BRAINSTORM_AGENTIC_TELEMETRY !== "off") {
+        recordRunSummary({
+          workspace: defaultWorkspaceRoot(sessionRoot),
+          sessionRoot,
+          runId,
+          result,
+          eventsFile,
+          pin: lazy?.pin,
+          provider: offline ? "offline" : (process.env.BRAINSTORM_AGENTIC_PROVIDER ?? "unknown"),
+          runner: process.env.SLURM_JOB_ID ? "slurm" : "local",
+          modelsByRoute: modelsByRouteFromEnv(process.env),
+        });
+      }
       reportResult(result, sessionRoot);
       for (const tree of trees) console.log(`Expertise tree: ${tree}`);
       for (const file of finals) console.log(`Final output: ${file}`);
@@ -574,6 +722,21 @@ async function main(): Promise<void> {
       });
       const trees = await writeExpertiseTrees(artifacts, sessionRoot, runId);
       const finals = await writeFinalOutputs(artifacts, sessionRoot, runId);
+      // Opt-out is honored here: with telemetry off, no record is produced at
+      // all rather than one written and then withheld.
+      if (process.env.BRAINSTORM_AGENTIC_TELEMETRY !== "off") {
+        recordRunSummary({
+          workspace: defaultWorkspaceRoot(sessionRoot),
+          sessionRoot,
+          runId,
+          result,
+          eventsFile,
+          pin: lazy?.pin,
+          provider: offline ? "offline" : (process.env.BRAINSTORM_AGENTIC_PROVIDER ?? "unknown"),
+          runner: process.env.SLURM_JOB_ID ? "slurm" : "local",
+          modelsByRoute: modelsByRouteFromEnv(process.env),
+        });
+      }
       reportResult(result, sessionRoot);
       for (const tree of trees) console.log(`Expertise tree: ${tree}`);
       for (const file of finals) console.log(`Final output: ${file}`);

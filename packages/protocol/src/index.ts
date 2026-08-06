@@ -901,6 +901,21 @@ export interface ServerSettings {
     readonly openRouterKeyConfigured?: boolean;
   };
   /**
+   * Anonymous usage reporting. One compact record per finished run — timings,
+   * counts and version stamps, never submission text — plus a heartbeat while a
+   * run is in flight. Opt-out: switching it off produces no record at all,
+   * rather than one written and then withheld.
+   *
+   * Diagnostics are NOT covered by this setting. A diagnostic bundle carries a
+   * run's own logs and can include the submitter's material, so it is only ever
+   * sent by an explicit per-report action after a preview.
+   */
+  readonly telemetry?: {
+    readonly enabled: boolean;
+    /** Where records are sent. Empty disables sending regardless of `enabled`. */
+    readonly ingestUrl: string;
+  };
+  /**
    * Recovery of interrupted jobs (SLURM timeouts, node failures, power
    * cuts): the scheduler resubmits an orphaned job from its last checkpoint.
    * Defaults to enabled; auto-resume pauses after repeated attempts without
@@ -996,6 +1011,11 @@ export interface ServerSettingsUpdate {
   readonly slurmTemplate: string;
   readonly runner: RunnerKind;
   readonly panelConfirmation: "manual" | "auto";
+  /** Anonymous usage reporting; omitted leaves the stored value unchanged. */
+  readonly telemetry?: {
+    readonly enabled: boolean;
+    readonly ingestUrl?: string;
+  };
   /**
    * Deployment-owned: accepted for wire compatibility but IGNORED by the
    * server — the registry endpoint is not a user setting.

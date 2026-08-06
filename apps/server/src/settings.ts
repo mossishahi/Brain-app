@@ -99,6 +99,21 @@ set -euo pipefail
 ${SLURM_COMMAND_TAG}
 `;
 
+/**
+ * The ingest origin derived from the content-registry endpoint: same host,
+ * same TLS, one thing to deploy and keep in sync. Empty when no registry is
+ * configured, which disables sending.
+ */
+export function ingestUrlFor(contentRegistryUrl: string | undefined): string {
+  if (!contentRegistryUrl) return "";
+  try {
+    const url = new URL(contentRegistryUrl);
+    return `${url.protocol}//${url.host}`;
+  } catch {
+    return "";
+  }
+}
+
 export function defaultServerSettings(
   contentRegistryUrl = DEFAULT_CONTENT_REGISTRY_URL,
 ): ServerSettings {
@@ -114,6 +129,12 @@ export function defaultServerSettings(
       safetyBufferSeconds: 60,
       openRouterModel: "openrouter/free",
       openRouterKeyConfigured: false,
+    },
+    telemetry: {
+      enabled: true,
+      // The deployment's own registry origin also receives ingest, so there is
+      // no second endpoint to configure or keep in sync.
+      ingestUrl: ingestUrlFor(contentRegistryUrl),
     },
     interruptedRecovery: {
       autoResume: true,
@@ -167,6 +188,7 @@ function validateCommonSettings(value: unknown): {
   readonly contentRegistry: Record<string, unknown>;
   readonly hostTools?: Record<string, unknown>;
   readonly updateCheck?: "off" | "notify";
+  readonly telemetry?: Record<string, unknown>;
 } {
   const input = object(value, "settings");
   const template = input.slurmTemplate;
@@ -215,6 +237,11 @@ function validateCommonSettings(value: unknown): {
     input.interruptedRecovery !== undefined
       ? object(input.interruptedRecovery, "interruptedRecovery")
       : undefined;
+  const telemetry =
+    input.telemetry !== undefined ? object(input.telemetry, "telemetry") : undefined;
+  if (telemetry !== undefined && typeof telemetry.enabled !== "boolean") {
+    throw new Error("telemetry.enabled must be a boolean");
+  }
   const updateCheck = input.updateCheck;
   if (
     updateCheck !== undefined &&
@@ -230,6 +257,7 @@ function validateCommonSettings(value: unknown): {
     llm,
     creditRecovery,
     ...(interruptedRecovery !== undefined ? { interruptedRecovery } : {}),
+    ...(telemetry !== undefined ? { telemetry } : {}),
     contentRegistry,
     hostTools,
     ...(updateCheck !== undefined ? { updateCheck } : {}),

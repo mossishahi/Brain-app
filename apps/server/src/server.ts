@@ -28,6 +28,8 @@ import {
 
 import { createReadinessAdvisor } from "./advisor.js";
 import { JobConflictError, JobManager } from "./job-manager.js";
+import { TelemetrySpool } from "@brainstorm-agentic/telemetry";
+import { TelemetrySender } from "./telemetry-sender.js";
 import type { ContentRegistryRuntimeStatus } from "./model.js";
 import {
   ReadinessService,
@@ -54,6 +56,8 @@ const SNAPSHOT_THROTTLE_MS = 500;
 const HEARTBEAT_MS = 15_000;
 const POLL_MS = 2_000;
 const REGISTRY_HEARTBEAT_MS = 15_000;
+/** Telemetry is not time-critical; a slow cadence keeps it out of the way. */
+const TELEMETRY_FLUSH_MS = 60_000;
 /** Interrupted-job scans hit squeue/sacct, so they poll far less often. */
 const INTERRUPTED_SCAN_MS = 30_000;
 const ATTACHMENT_KINDS = new Set<AttachmentSelectionKind>([
@@ -1079,6 +1083,15 @@ export async function startBrainServer(
   const interruptedPoll = setInterval(() => {
     void manager.resumeInterruptedJobs().finally(broadcast);
   }, INTERRUPTED_SCAN_MS);
+  // Telemetry rides an existing timer rather than adding its own: a flush is
+  // a no-op when the spool is empty, which is the common case.
+  const telemetrySender = new TelemetrySender(new TelemetrySpool(options.workspace), {
+    enabled: () => manager.settings.get().telemetry?.enabled !== false,
+    ingestUrl: () => manager.settings.get().telemetry?.ingestUrl,
+  });
+  const telemetryPoll = setInterval(() => {
+    void telemetrySender.flush();
+  }, TELEMETRY_FLUSH_MS);
   const registryPoll = setInterval(() => {
     void probeContentRegistry(contentRegistryUrl, contentRegistry);
   }, REGISTRY_HEARTBEAT_MS);
@@ -1103,6 +1116,7 @@ export async function startBrainServer(
       clearInterval(poll);
       clearInterval(interruptedPoll);
       clearInterval(registryPoll);
+      clearInterval(telemetryPoll);
       if (appUpdateTimer) clearInterval(appUpdateTimer);
       readiness.close();
       watchers.forEach((entry) => entry.close());

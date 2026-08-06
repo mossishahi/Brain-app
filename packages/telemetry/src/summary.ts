@@ -1,0 +1,322 @@
+import type { JsonObject, JsonValue } from "@brainstorm-agentic/core";
+
+import type {
+  ClassificationFact,
+  FailureFact,
+  PanelFact,
+  ReviewFact,
+  RoleFact,
+  RunSummary,
+  StageFact,
+  TaxonomyFact,
+} from "./types.js";
+
+/**
+ * The inputs a run leaves behind. Deliberately structural rather than typed
+ * against the runtime's own interfaces: the summary is derived from a finished
+ * run's recorded facts, and coupling it to live types would make every runtime
+ * refactor a telemetry change.
+ */
+export interface RunFacts {
+  readonly status: string;
+  readonly events: readonly JsonObject[];
+  readonly journal: readonly JsonObject[];
+  /** The final brainstorm state, from the last journaled activity result. */
+  readonly state?: JsonObject;
+}
+
+function str(value: JsonValue | undefined): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function num(value: JsonValue | undefined): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function obj(value: JsonValue | undefined): JsonObject | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as JsonObject)
+    : undefined;
+}
+
+function arr(value: JsonValue | undefined): readonly JsonValue[] {
+  return Array.isArray(value) ? value : [];
+}
+
+/** The stage a node path belongs to: the first segment under the workflow root. */
+function stageOf(path: string): string | undefined {
+  const parts = path.split("/");
+  return parts.length >= 2 ? parts[1] : undefined;
+}
+
+/** Whether a path names a stage itself rather than something nested inside it. */
+function isStagePath(path: string): boolean {
+  return path.split("/").length === 2;
+}
+
+function stageFacts(events: readonly JsonObject[]): StageFact[] {
+  const started = new Map<string, number>();
+  const facts = new Map<string, { status: StageFact["status"]; durationMs?: number; agentTasks: number }>();
+  const ensure = (id: string) =>
+    facts.get(id) ?? facts.set(id, { status: "incomplete", agentTasks: 0 }).get(id)!;
+
+  for (const event of events) {
+    const type = str(event.type);
+    const path = str(event.path);
+    const at = num(event.at);
+    if (!type || !path) continue;
+    const stage = stageOf(path);
+    if (!stage) continue;
+
+    if (type === "agent:started") ensure(stage).agentTasks += 1;
+    if (!isStagePath(path)) continue;
+    if (type === "node:started" && at !== undefined) started.set(path, at);
+    if (type === "node:completed" || type === "node:failed") {
+      const fact = ensure(stage);
+      const begin = started.get(path);
+      if (begin !== undefined && at !== undefined) fact.durationMs = at - begin;
+      // A stage that restarts (a retry or a credit resume) sheds its earlier
+      // failure: the last outcome recorded is the one that stands.
+      fact.status = type === "node:completed" ? "completed" : "failed";
+    }
+  }
+  return [...facts].map(([stageId, fact]) => ({ stageId, ...fact }));
+}
+
+/**
+ * Per-role cost and latency. `taskKind` is already stamped on every agent
+ * event, and token usage rides the journaled AgentResult — the two are joined
+ * on taskId, which is stable across retries and resumes.
+ */
+function roleFacts(
+  events: readonly JsonObject[],
+  journal: readonly JsonObject[],
+): RoleFact[] {
+  interface MutableRole {
+    role: string;
+    tasks: number;
+    failures: number;
+    durationMs: number;
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheWriteTokens: number;
+    reasoningTokens: number;
+  }
+  const roles = new Map<string, MutableRole>();
+  const ensure = (role: string): MutableRole => {
+    const existing = roles.get(role);
+    if (existing) return existing;
+    const fresh: MutableRole = {
+      role,
+      tasks: 0,
+      failures: 0,
+      durationMs: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      reasoningTokens: 0,
+    };
+    roles.set(role, fresh);
+    return fresh;
+  };
+
+  const startedAt = new Map<string, number>();
+  const kindOfTask = new Map<string, string>();
+  for (const event of events) {
+    const type = str(event.type);
+    const taskId = str(event.taskId);
+    const kind = str(event.taskKind);
+    const at = num(event.at);
+    if (!type || !taskId || !kind) continue;
+    kindOfTask.set(taskId, kind);
+    if (type === "agent:started" && at !== undefined) startedAt.set(taskId, at);
+    if (type === "agent:completed") {
+      const fact = ensure(kind);
+      fact.tasks += 1;
+      if (str(event.status) === "error") fact.failures += 1;
+      const begin = startedAt.get(taskId);
+      if (begin !== undefined && at !== undefined) fact.durationMs += at - begin;
+    }
+  }
+
+  // Usage is not on the event stream — it rides the journaled AgentResult.
+  for (const entry of journal) {
+    if (str(entry.kind) !== "agent") continue;
+    const value = obj(entry.value);
+    const taskId = str(value?.taskId);
+    const usage = obj(value?.usage);
+    if (!taskId || !usage) continue;
+    const role = kindOfTask.get(taskId);
+    if (!role) continue;
+    const fact = ensure(role);
+    fact.inputTokens += num(usage.inputTokens) ?? 0;
+    fact.outputTokens += num(usage.outputTokens) ?? 0;
+    fact.cacheReadTokens += num(usage.cacheReadInputTokens) ?? 0;
+    fact.cacheWriteTokens += num(usage.cacheWriteInputTokens) ?? 0;
+    fact.reasoningTokens += num(usage.reasoningTokens) ?? 0;
+  }
+  return [...roles.values()];
+}
+
+function classificationFact(state: JsonObject | undefined): ClassificationFact | undefined {
+  const input = obj(state?.input);
+  if (!input) return undefined;
+  const gates = obj(obj(state?._runtime)?.gates);
+  const decision = gates ? obj(Object.values(gates).find((value) => obj(value)?.action)) : undefined;
+  const action = str(decision?.action);
+  return {
+    ...(str(input.type) !== undefined ? { type: str(input.type)! } : {}),
+    ...(num(input.cotSteps) !== undefined ? { cotSteps: num(input.cotSteps)! } : {}),
+    requestedOutputs: arr(input.requestedOutputs).length,
+    ...(action === "approve" || action === "revise" ? { gateAction: action } : {}),
+  };
+}
+
+function panelFact(state: JsonObject | undefined): PanelFact | undefined {
+  const members = arr(obj(state?.panel)?.members);
+  if (members.length === 0) return undefined;
+  const fields = new Set<string>();
+  let interdisciplinary = false;
+  let custom = 0;
+  for (const raw of members) {
+    const member = obj(raw);
+    if (!member) continue;
+    const umbrella = str(member.umbrella);
+    if (umbrella) fields.add(umbrella);
+    if (str(member.seat) === "interdisciplinary") interdisciplinary = true;
+    if (str(member.id)?.startsWith("member-user-")) custom += 1;
+  }
+  return {
+    seats: members.length,
+    distinctFields: fields.size,
+    hasInterdisciplinarySeat: interdisciplinary,
+    removedSeats: 0,
+    customSeats: custom,
+  };
+}
+
+/**
+ * Review outcomes, read from the per-member ledger the runtime writes. The
+ * ledger is content-only by construction (no commentor identity), and only its
+ * counts are taken here — never any objection text.
+ */
+function reviewFact(state: JsonObject | undefined): ReviewFact | undefined {
+  const log = obj(state?.reviewLog);
+  if (!log) return undefined;
+  const verdicts: Record<string, number> = {};
+  const roundsHistogram: Record<string, number> = {};
+  let mustAddress = 0;
+  let verified = 0;
+  let authority = 0;
+  let redevelopments = 0;
+  let passed = 0;
+  let forcePassed = 0;
+  let anyEntries = false;
+
+  for (const memberEntries of Object.values(log)) {
+    // Rounds are appended chronologically; the last entry at a walk position
+    // is that step's outcome.
+    const byStep = new Map<number, JsonObject[]>();
+    for (const raw of arr(memberEntries)) {
+      const entry = obj(raw);
+      const step = num(entry?.step);
+      if (!entry || step === undefined) continue;
+      anyEntries = true;
+      byStep.set(step, [...(byStep.get(step) ?? []), entry]);
+      const verdict = str(entry.verdict);
+      if (verdict) verdicts[verdict] = (verdicts[verdict] ?? 0) + 1;
+      if (Array.isArray(entry.touched)) redevelopments += 1;
+      for (const rawIssue of arr(entry.issues)) {
+        const issue = obj(rawIssue);
+        if (!issue) continue;
+        if (issue.mustAddress === true) mustAddress += 1;
+        if (str(issue.basis) === "verified") verified += 1;
+        else authority += 1;
+      }
+    }
+    for (const rounds of byStep.values()) {
+      const last = rounds[rounds.length - 1];
+      const outcome = str(last?.verdict);
+      if (outcome === "Pass") passed += 1;
+      else forcePassed += 1;
+      const key = String(rounds.length);
+      roundsHistogram[key] = (roundsHistogram[key] ?? 0) + 1;
+    }
+  }
+  if (!anyEntries) return undefined;
+  return {
+    stepsPassed: passed,
+    stepsForcePassed: forcePassed,
+    roundsHistogram,
+    verdicts,
+    mustAddressIssues: mustAddress,
+    verifiedIssues: verified,
+    authorityIssues: authority,
+    redevelopments,
+  };
+}
+
+function taxonomyFact(state: JsonObject | undefined): TaxonomyFact | undefined {
+  const matches = obj(state?.poolMatches);
+  if (!matches) return undefined;
+  const ids: string[] = [];
+  const matchedOn: Record<string, number> = {};
+  for (const raw of arr(matches.members)) {
+    const member = obj(raw);
+    const position = obj(member?.match) ?? obj(member?.position);
+    const id = str(position?.id) ?? str(position?.nodeId);
+    if (id) ids.push(id);
+    const lane = str(position?.matchedOn);
+    if (lane) matchedOn[lane] = (matchedOn[lane] ?? 0) + 1;
+  }
+  return {
+    ...(num(matches.revision) !== undefined ? { revision: num(matches.revision)! } : {}),
+    resolvedNodeIds: [...new Set(ids)].sort(),
+    matchedOn,
+    unmatched: arr(matches.unmatched).length,
+    suggested: num(obj(state?.suggestionReceipt)?.queued) ?? 0,
+  };
+}
+
+/** Failures as error CLASSES: a message could echo submission text. */
+function failureFacts(events: readonly JsonObject[]): FailureFact[] {
+  const failures: FailureFact[] = [];
+  for (const event of events) {
+    const type = str(event.type);
+    if (type !== "node:failed" && type !== "run:failed") continue;
+    const error = obj(event.error);
+    const path = str(event.path);
+    failures.push({
+      ...(path ? { nodePath: path, ...(stageOf(path) ? { stageId: stageOf(path)! } : {}) } : {}),
+      errorName: str(error?.name) ?? "Error",
+    });
+  }
+  return failures;
+}
+
+/** Builds the one compact record that answers most questions about a run. */
+export function deriveRunSummary(facts: RunFacts): RunSummary {
+  const { events, journal, state } = facts;
+  const times = events.map((event) => num(event.at)).filter((at): at is number => at !== undefined);
+  const started = events.find((event) => str(event.type) === "run:started");
+  const review = reviewFact(state);
+  const taxonomy = taxonomyFact(state);
+  const classification = classificationFact(state);
+  const panel = panelFact(state);
+  return {
+    status: facts.status,
+    ...(times.length >= 2
+      ? { durationMs: Math.max(...times) - Math.min(...times) }
+      : {}),
+    resumed: started?.resumed === true,
+    stages: stageFacts(events),
+    roles: roleFacts(events, journal),
+    ...(classification ? { classification } : {}),
+    ...(panel ? { panel } : {}),
+    ...(review ? { review } : {}),
+    ...(taxonomy ? { taxonomy } : {}),
+    failures: failureFacts(events),
+  };
+}
