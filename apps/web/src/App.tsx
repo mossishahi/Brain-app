@@ -1,7 +1,6 @@
 /** App shell: hand-rolled hash router, theme toggle, and the settings drawer. */
 import { useCallback, useEffect, useState } from "react";
 import { ConfigProvider, theme as antdTheme } from "antd";
-import { AmbientBackdrop } from "./components/AmbientBackdrop";
 import { Dashboard } from "./components/Dashboard";
 import { Landing } from "./components/Landing";
 import { SettingsDrawer } from "./components/SettingsDrawer";
@@ -68,7 +67,8 @@ export function App() {
             : antdTheme.defaultAlgorithm,
       }}
     >
-      <AmbientBackdrop theme={theme} />
+      {/* Decorative only; theming and suppression live entirely in CSS. */}
+      <div className="ambient" aria-hidden="true" />
       <div className="app-foreground">
         {/* A real header bar (in flow, sticky) so the controls never overlay
             page text, however narrow the viewport gets. */}

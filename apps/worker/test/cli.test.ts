@@ -33,16 +33,33 @@ function testTaxonomy(root: string): { taxonomy: TaxonomyAccess } | Record<strin
 }
 
 const brainRepoRoot = fileURLToPath(new URL("../../../../../brain/", import.meta.url));
-function materializedVersionDir(version: string): string {
+/**
+ * The newest published bundle, read from the store's own index.
+ *
+ * Deliberately not a pinned version: these tests want "a real bundle", and a
+ * hardcoded one silently becomes a museum piece. This file used to pin 0.1.0,
+ * which kept passing until the workflow schema gained a requirement that
+ * ancient bundles cannot satisfy — at which point the whole file failed at
+ * import, on a rule that has nothing to do with what it tests. Old versions
+ * stay in the store on purpose (a pinned run must still resolve), so nothing
+ * prunes them and nothing would have flagged the staleness.
+ */
+function latestMaterializedDir(): string {
   execFileSync(
     process.execPath,
     [join(brainRepoRoot, "scripts", "materialize-store.mjs"), "--quiet"],
     { stdio: "inherit" },
   );
-  return `${join(brainRepoRoot, ".registry-store", "bundles", "brainstorm", version)}/`;
+  const storeRoot = join(brainRepoRoot, ".registry-store");
+  const index = JSON.parse(readFileSync(join(storeRoot, "index.json"), "utf8")) as {
+    bundles: readonly { id: string; latest: string }[];
+  };
+  const brainstorm = index.bundles.find((bundle) => bundle.id === "brainstorm");
+  if (!brainstorm) throw new Error("the materialized store publishes no brainstorm bundle");
+  return `${join(storeRoot, "bundles", "brainstorm", brainstorm.latest)}/`;
 }
 const registryContentDir =
-  process.env.BRAIN_TEST_CONTENT_DIR ?? materializedVersionDir("0.1.0");
+  process.env.BRAIN_TEST_CONTENT_DIR ?? latestMaterializedDir();
 const registryBundle = loadContent(registryContentDir);
 
 test("Agent SDK environment settings map to executor configuration", () => {

@@ -7,7 +7,11 @@ import type {
   PanelMemberView,
   PendingGateView,
 } from "@brainstorm-agentic/protocol";
-import { PANEL_EDIT_LIMITS } from "@brainstorm-agentic/protocol";
+import {
+  PANEL_EDIT_LIMITS,
+  panelGateDecision,
+  panelGateRequest,
+} from "@brainstorm-agentic/protocol";
 import { errorMessage } from "../../api";
 import { formatClock } from "../../format";
 import { SeatCard } from "../common";
@@ -214,27 +218,18 @@ export function GateCard({
     });
   };
 
-  const kept = members.filter((m) => checked.has(m.id));
-  const total = kept.length + addedSeats.length;
-  // The checkboxes ARE the decision: removing a seat turns the single submit
-  // action into a shrink. A separate always-enabled "approve" button used to
-  // silently discard the selection — the seats stayed unchecked on screen but
-  // the full panel ran.
-  const shrinking = members.length > 0 && kept.length < members.length;
-  const tooFew = total < PANEL_EDIT_LIMITS.minMembers;
-  const full = total >= PANEL_EDIT_LIMITS.maxMembers;
+  const decision = panelGateDecision({
+    proposed: members,
+    checked,
+    added: addedSeats,
+  });
+  const { total, shrinking, tooFew, full } = decision;
 
   const answer = async () => {
     if (!gateKey || tooFew) return;
     setPhase("busy");
     setError(null);
-    const req: GateAnswerRequest = {
-      gateKey,
-      ...(shrinking
-        ? { action: "shrink" as const, members: kept.map((m) => m.id) }
-        : { action: "approve" as const }),
-      ...(addedSeats.length > 0 ? { addedMembers: addedSeats } : {}),
-    };
+    const req: GateAnswerRequest = panelGateRequest(gateKey, decision, addedSeats);
     try {
       await onAnswer(req);
       setPhase("resuming");
@@ -244,11 +239,7 @@ export function GateCard({
     }
   };
 
-  const buttonLabel =
-    (shrinking
-      ? `Continue with ${kept.length} of ${members.length} seats`
-      : "Approve panel") +
-    (addedSeats.length > 0 ? ` + ${addedSeats.length} custom` : "");
+  const buttonLabel = decision.label;
 
   return (
     // Any interaction inside the confirmation card pauses the countdown: the

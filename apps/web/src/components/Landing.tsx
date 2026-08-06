@@ -12,6 +12,7 @@ import {
   cachedJobs,
   cancelJob,
   diagnoseReadiness,
+  blockedReadiness,
   errorMessage,
   getHealth,
   getJobs,
@@ -363,9 +364,12 @@ export function Landing({
       await submitJob(topic, attachmentPaths);
       setJobs(await getJobs());
     } catch (error) {
-      // A readiness 409 is handled by the submission box's waiting card,
-      // not as an error banner.
-      if (!(error instanceof Error && errorMessage(error).startsWith("Environment is not ready"))) {
+      // A readiness 409 is handled by the submission box's waiting card, not as
+      // an error banner. Recognised by the payload's shape, not by the prose:
+      // matching the message text means any rewording of the server's sentence
+      // silently turns the waiting card into an error banner, and nothing in
+      // either file would show the two had drifted apart.
+      if (blockedReadiness(error) === undefined) {
         setSubmitError(errorMessage(error));
       }
       throw error;

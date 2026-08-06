@@ -8,6 +8,7 @@ import type {
   AttachmentSelectionKind,
   BrowseServerFilesResponse,
   CancelJobResponse,
+  DiagnosticPreview,
   GateAnswerRequest,
   HealthResponse,
   JobDetail,
@@ -23,6 +24,7 @@ import type {
   ServerSettings,
   ServerSettingsUpdate,
   SearchServerFilesResponse,
+  SendDiagnosticsResponse,
   SubmitJobRequest,
   SubmitJobResponse,
   ToolUsageReport,
@@ -204,6 +206,14 @@ export const retryFailedJob = (
   jobId: string,
 ): Promise<ResumeInterruptedJobResponse> =>
   request(`/jobs/${encodeURIComponent(jobId)}/retry`, { method: "POST" });
+
+/** What WOULD be sent. Reading this sends nothing. */
+export const previewDiagnostics = (jobId: string): Promise<DiagnosticPreview> =>
+  request(`/jobs/${encodeURIComponent(jobId)}/diagnostics`);
+
+/** Sends the report. Only ever called from an explicit user action. */
+export const sendDiagnostics = (jobId: string): Promise<SendDiagnosticsResponse> =>
+  request(`/jobs/${encodeURIComponent(jobId)}/diagnostics`, { method: "POST" });
 
 export const getReadiness = (): Promise<ReadinessReport> =>
   request("/readiness");

@@ -113,14 +113,30 @@ body {
  * window shape — both shaders degrade to flat colour when forced into an extreme
  * aspect, so the scene is never cropped to a sliver or a letterbox.
  */
-.ambient-vanta {
+/*
+ * The ambient backdrop.
+ *
+ * This was a WebGL scene (three.js + Vanta): ~600KB of engine to draw a soft
+ * blur behind the page, an animation loop running whenever the app was open,
+ * and a reach into the library's minified internals to throttle it. It also
+ * rendered DIFFERENTLY on different monitors, because 3D output depends on the
+ * GPU, the device pixel ratio and the display's colour profile — the per-theme
+ * opacities below were tuned by eye against one screen.
+ *
+ * Layered CSS gradients produce the same effect with no JavaScript, no GPU
+ * program, and identical output everywhere. The suppression rule at the bottom
+ * used to be duplicated as a string inside the component so it could stop the
+ * render loop; with no loop to stop, the media query is the whole mechanism.
+ */
+.ambient {
   --ambient-clear-x: clamp(300px, 44vw, 620px);
   --ambient-clear-y: clamp(300px, 40vh, 760px);
-  position: fixed !important;
+  position: fixed;
   inset: 0;
   z-index: 0;
   pointer-events: none;
-  transition: opacity 600ms ease;
+  overflow: hidden;
+  /* The reading column stays clear; colour only ever shows in the margin. */
   -webkit-mask-image: radial-gradient(
     ellipse var(--ambient-clear-x) var(--ambient-clear-y) at 50% 46%,
     transparent 0,
@@ -135,52 +151,85 @@ body {
   );
 }
 
-.ambient-vanta canvas {
-  width: 100% !important;
-  height: 100% !important;
-}
-
 /*
- * Per-theme strength, checked against renders: the clouds need presence to read
- * as sky at all, while the halo's ring turns into a plum wash over the whole
- * page above ~0.2.
+ * Two drifting layers rather than one, so the colour field is never static but
+ * also never repeats on an obvious cycle. Only `transform` is animated, which
+ * the compositor handles without repainting — the practical difference from the
+ * old render loop is that this costs nothing measurable.
  */
-.ambient-vanta-light {
-  opacity: 0.72;
-}
-
-.ambient-vanta-dark {
-  opacity: 0.15;
-}
-
-/* Crossfade target; two classes deep so it outranks the per-theme opacities. */
-.ambient-vanta.ambient-vanta-hidden {
-  opacity: 0;
-}
-
-.ambient-vanta-dark canvas {
-  filter: brightness(0.62) contrast(1.15) saturate(1.4);
-}
-
-/* Colorize neutral HALO highlights so no white/gray band survives. */
-.ambient-vanta-dark::after {
+.ambient::before,
+.ambient::after {
   content: "";
   position: absolute;
-  inset: 0;
-  z-index: 1;
-  pointer-events: none;
-  background: linear-gradient(180deg, #6a164c, #24215e);
-  mix-blend-mode: color;
+  /* Oversized so the drift never exposes an edge. */
+  inset: -25%;
+  background-repeat: no-repeat;
+  will-change: transform;
+}
+
+.ambient::before {
+  animation: ambient-drift-a 90s ease-in-out infinite alternate;
+}
+
+.ambient::after {
+  animation: ambient-drift-b 120s ease-in-out infinite alternate;
+}
+
+:root[data-theme="light"] .ambient::before {
+  background-image:
+    radial-gradient(40% 50% at 18% 22%, rgba(120, 160, 235, 0.42), transparent 70%),
+    radial-gradient(45% 45% at 84% 30%, rgba(150, 190, 240, 0.34), transparent 72%);
+}
+
+:root[data-theme="light"] .ambient::after {
+  background-image:
+    radial-gradient(50% 45% at 30% 88%, rgba(196, 214, 245, 0.40), transparent 70%),
+    radial-gradient(42% 42% at 76% 78%, rgba(168, 196, 238, 0.30), transparent 72%);
 }
 
 /*
- * Suppress only on genuinely compact/mobile input surfaces, not portrait
- * desktop monitors. The same query is mirrored by AmbientBackdrop.tsx so its
- * WebGL loops stop whenever these canvases are hidden.
+ * The dark theme carries far less light: the original scene needed opacity 0.15
+ * because anything stronger washed the whole page plum. These alphas encode the
+ * same restraint directly.
+ */
+:root[data-theme="dark"] .ambient::before {
+  background-image:
+    radial-gradient(40% 50% at 16% 24%, rgba(146, 32, 104, 0.20), transparent 70%),
+    radial-gradient(44% 46% at 86% 28%, rgba(52, 46, 140, 0.22), transparent 72%);
+}
+
+:root[data-theme="dark"] .ambient::after {
+  background-image:
+    radial-gradient(48% 46% at 28% 86%, rgba(38, 34, 96, 0.24), transparent 70%),
+    radial-gradient(42% 42% at 78% 80%, rgba(106, 22, 76, 0.18), transparent 72%);
+}
+
+@keyframes ambient-drift-a {
+  from { transform: translate3d(-2%, -1%, 0) scale(1.02); }
+  to   { transform: translate3d(2%, 1.5%, 0) scale(1.06); }
+}
+
+@keyframes ambient-drift-b {
+  from { transform: translate3d(1.5%, 1%, 0) scale(1.05); }
+  to   { transform: translate3d(-1.5%, -1.5%, 0) scale(1.01); }
+}
+
+/*
+ * Compact/touch surfaces and reduced-motion get no backdrop at all. This is now
+ * the ONLY place the rule lives — it used to be mirrored as a string constant in
+ * the component, with nothing keeping the two in sync.
  */
 @media (max-width: 720px), (hover: none) and (pointer: coarse), (prefers-reduced-motion: reduce) {
-  .ambient-vanta {
+  .ambient {
     display: none;
+  }
+}
+
+/* Motion is decorative: hold the layers still rather than removing the colour. */
+@media (prefers-reduced-motion: reduce) {
+  .ambient::before,
+  .ambient::after {
+    animation: none;
   }
 }
 
@@ -520,6 +569,95 @@ input[type="radio"] {
 
 .credit-banner {
   border-color: var(--warn);
+}
+
+/*
+ * The diagnostic report affordance, inside the failed-run banner.
+ *
+ * The preview claims the whole banner row rather than sitting beside the retry
+ * button: it is a list the reader is meant to actually read before deciding,
+ * and a list squeezed into a flex gap does not get read.
+ */
+.diag-start {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.diag-preview {
+  flex-basis: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.diag-lead {
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.diag-list {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.diag-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.diag-what {
+  color: var(--text);
+}
+
+.diag-size {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/*
+ * Drawn in the warning colour, not as quiet metadata: it marks the parts a
+ * reader might not want to send, which is the one thing on this list they most
+ * need to notice.
+ */
+.diag-flag {
+  font-size: 12px;
+  color: var(--warn);
+  border: 1px solid var(--warn);
+  border-radius: var(--radius);
+  padding: 0 6px;
+}
+
+.diag-excluded {
+  color: var(--text-dim);
+}
+
+.diag-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.diag-error {
+  color: var(--bad);
+  font-size: 12px;
+  margin: 0;
+}
+
+.diag-sent {
+  color: var(--ok);
+  font-size: 13px;
+  margin: 0;
 }
 
 .reconnect-line {
@@ -3769,4 +3907,95 @@ button.server-file-name {
 .ghost-hint {
   font-size: 11px;
   color: var(--text-dim);
+}
+
+/*
+ * The attachment picker (replaces MUI's SpeedDial).
+ *
+ * The fan is always in the DOM and collapses by transform + opacity rather than
+ * display:none, so it animates on the compositor and the options keep a stable
+ * layout box. `visibility` is what actually takes it out of hit-testing at the
+ * end of the transition — opacity alone would leave invisible buttons clickable.
+ */
+.attach-picker {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  z-index: 12;
+}
+
+.attach-trigger {
+  width: 30px;
+  height: 30px;
+  display: inline-grid;
+  place-items: center;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  border-radius: 50%;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.attach-trigger:hover:not(:disabled) {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+}
+
+.attach-trigger:disabled {
+  opacity: 0.4;
+}
+
+.attach-trigger[aria-expanded="true"] span {
+  transform: rotate(45deg);
+}
+
+.attach-trigger span {
+  display: block;
+  transition: transform 160ms ease;
+}
+
+.attach-fan {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-left: 6px;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateX(-6px);
+  transition:
+    opacity 160ms ease,
+    transform 160ms ease,
+    visibility 0s linear 160ms;
+}
+
+.attach-fan-open {
+  opacity: 1;
+  visibility: visible;
+  transform: none;
+  transition-delay: 0s;
+}
+
+.attach-option {
+  width: 28px;
+  height: 28px;
+  display: inline-grid;
+  place-items: center;
+  color: var(--text-dim);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  font-size: 13px;
+}
+
+.attach-option:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .attach-fan,
+  .attach-trigger span {
+    transition: none;
+  }
 }

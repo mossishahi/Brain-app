@@ -1200,6 +1200,66 @@ export interface GateAnswerRequest {
   readonly requestedOutputs?: readonly RequestedOutputView[];
 }
 
+/**
+ * The panel gate's decision, derived from what the user has checked and added.
+ *
+ * Pure, and deliberately here rather than inside the gate card: it is the rule
+ * that decides whether a run proceeds with the panel the classifier proposed or
+ * a different one, and it was previously only expressible by rendering a React
+ * component. The card renders this; it does not decide it.
+ */
+export function panelGateDecision(input: {
+  /** The seats the classifier proposed, in order. */
+  readonly proposed: readonly { readonly id: string }[];
+  /** Ids the user still has checked. */
+  readonly checked: ReadonlySet<string>;
+  readonly added: readonly CustomSeatRequest[];
+}): {
+  readonly kept: readonly string[];
+  readonly total: number;
+  /** True when the user unchecked at least one proposed seat. */
+  readonly shrinking: boolean;
+  /** True when the panel is below the minimum, so the gate cannot be answered. */
+  readonly tooFew: boolean;
+  /** True when no further seat may be added. */
+  readonly full: boolean;
+  readonly label: string;
+} {
+  const kept = input.proposed.filter((seat) => input.checked.has(seat.id)).map((seat) => seat.id);
+  const total = kept.length + input.added.length;
+  // The checkboxes ARE the decision: unchecking a seat turns the single submit
+  // action into a shrink. An always-enabled "approve" used to silently discard
+  // the selection — seats stayed unchecked on screen but the full panel ran.
+  const shrinking = input.proposed.length > 0 && kept.length < input.proposed.length;
+  return {
+    kept,
+    total,
+    shrinking,
+    tooFew: total < PANEL_EDIT_LIMITS.minMembers,
+    full: total >= PANEL_EDIT_LIMITS.maxMembers,
+    label:
+      (shrinking
+        ? `Continue with ${kept.length} of ${input.proposed.length} seats`
+        : "Approve panel") +
+      (input.added.length > 0 ? ` + ${input.added.length} custom` : ""),
+  };
+}
+
+/** The request that answers the panel gate for a given decision. */
+export function panelGateRequest(
+  gateKey: string,
+  decision: { readonly kept: readonly string[]; readonly shrinking: boolean },
+  added: readonly CustomSeatRequest[],
+): GateAnswerRequest {
+  return {
+    gateKey,
+    ...(decision.shrinking
+      ? { action: "shrink" as const, members: decision.kept }
+      : { action: "approve" as const }),
+    ...(added.length > 0 ? { addedMembers: added } : {}),
+  };
+}
+
 export interface CancelJobResponse {
   readonly jobId: string;
   readonly status: JobStatus;
@@ -1218,6 +1278,44 @@ export interface ResumeJobResponse {
 export interface ResumeInterruptedJobResponse {
   readonly jobId: string;
   readonly status: JobStatus;
+}
+
+/** One part of a diagnostic report, as the preview describes it. */
+export interface DiagnosticComponent {
+  readonly id: string;
+  readonly description: string;
+  readonly bytes: number;
+  /**
+   * Whether this part can contain material the submitter wrote or referenced.
+   * Shown in the preview so the decision to send is informed rather than
+   * implied.
+   */
+  readonly mayContainYourContent: boolean;
+}
+
+/**
+ * Response of GET /api/jobs/:jobId/diagnostics: a description of what a report
+ * WOULD contain. Reading it sends nothing.
+ */
+export interface DiagnosticPreview {
+  readonly jobId: string;
+  readonly status: string;
+  readonly components: readonly DiagnosticComponent[];
+  readonly totalBytes: number;
+  /** Named so the preview is honest about what is deliberately held back. */
+  readonly excluded: readonly string[];
+  /**
+   * Whether an endpoint is configured to receive the report. False means the
+   * POST would fail, so the affordance can say that before it is used rather
+   * than after.
+   */
+  readonly canSend: boolean;
+}
+
+/** Response of POST /api/jobs/:jobId/diagnostics. */
+export interface SendDiagnosticsResponse {
+  readonly sent: boolean;
+  readonly bytes: number;
 }
 
 export interface TrashJobResponse {

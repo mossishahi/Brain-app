@@ -45,6 +45,31 @@ function tempRoot(prefix = "brain-server-"): string {
   return mkdtempSync(join(tmpdir(), prefix));
 }
 
+/**
+ * Removes a test workspace, tolerating a worker that has not finished.
+ *
+ * A job's status comes from its checkpoint, and the worker writes its telemetry
+ * record AFTER the checkpoint marks the run terminal. The worker is also
+ * deliberately detached and unref'd so a run survives a server restart, so
+ * neither the server nor a test can await it. "completed" therefore means the
+ * pipeline finished, not that nothing is still writing — and a plain recursive
+ * remove races the tail of that bookkeeping and fails with ENOTEMPTY.
+ *
+ * This retries briefly rather than ignoring the error, so a directory that is
+ * genuinely stuck still fails the test instead of leaking silently.
+ */
+async function removeWorkspace(root: string): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      rmSync(root, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (attempt >= 20) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+}
+
 const brainRepoRoot = fileURLToPath(new URL("../../../../../brain/", import.meta.url));
 function materializedStoreRoot(): string {
   execFileSync(
@@ -192,7 +217,7 @@ test("settings roundtrip and template validation", async () => {
     assert.match(invalid.value.message, new RegExp(SLURM_COMMAND_TAG.replace(/[{}]/g, "\\$&")));
   } finally {
     await server.close();
-    rmSync(workspace, { recursive: true, force: true });
+    await removeWorkspace(workspace);
   }
 });
 
@@ -266,7 +291,7 @@ test("the registry endpoint is deployment-owned: PUT ignores it and health repor
     assert.equal(health.contentRegistry.running, true);
   } finally {
     await server.close();
-    rmSync(workspace, { recursive: true, force: true });
+    await removeWorkspace(workspace);
   }
 });
 
@@ -317,7 +342,7 @@ test("a registry that disappears flips health to disconnected instead of a stale
     assert.equal(registryCheck?.state, "failed");
   } finally {
     await server.close();
-    rmSync(workspace, { recursive: true, force: true });
+    await removeWorkspace(workspace);
   }
 });
 
@@ -347,7 +372,7 @@ test("Anthropic jobs are rejected before creation until settings are verified", 
     assert.equal(jobs.length, 0);
   } finally {
     await server.close();
-    rmSync(workspace, { recursive: true, force: true });
+    await removeWorkspace(workspace);
   }
 });
 
@@ -435,7 +460,7 @@ test("Anthropic settings are connection-tested, redacted, and transactional", as
     );
   } finally {
     await server.close();
-    rmSync(workspace, { recursive: true, force: true });
+    await removeWorkspace(workspace);
   }
 });
 
@@ -514,7 +539,7 @@ test("Claude Agent SDK setup tokens are verified, redacted, and transactional", 
     assert.equal(credentials.includes("bad-setup-token"), false);
   } finally {
     await server.close();
-    rmSync(workspace, { recursive: true, force: true });
+    await removeWorkspace(workspace);
   }
 });
 
@@ -545,7 +570,7 @@ test("verified settings populate orchestration environment without exposing the 
       "claude-writer",
     );
   } finally {
-    rmSync(workspace, { recursive: true, force: true });
+    await removeWorkspace(workspace);
   }
 });
 
@@ -586,7 +611,7 @@ test("OpenRouter parser credentials are verified and kept write-only", async () 
     ]);
   } finally {
     await server.close();
-    rmSync(workspace, { recursive: true, force: true });
+    await removeWorkspace(workspace);
   }
 });
 
@@ -607,6 +632,7 @@ test("a diagnostic preview describes exactly what would be sent, and excludes th
         components: Array<{ id: string; bytes: number; mayContainYourContent: boolean }>;
         totalBytes: number;
         excluded: string[];
+        canSend: boolean;
       }>(server, `/api/jobs/${jobId}/diagnostics`)
     ).value;
 
@@ -623,9 +649,25 @@ test("a diagnostic preview describes exactly what would be sent, and excludes th
     assert.equal(checkpoint.mayContainYourContent, false, "only step names, never their results");
     assert.ok(preview.excluded.length > 0, "the preview names what is held back");
     assert.ok(preview.totalBytes > 0);
+
+    // No ingest endpoint is configured in this test's settings, so the preview
+    // must say so. Without this the dashboard offers a Send button that can
+    // only ever fail, and the user finds out after committing to the send
+    // rather than before.
+    assert.equal(
+      preview.canSend,
+      false,
+      "an unconfigured destination has to be visible in the preview, not discovered on POST",
+    );
+    const attempted = await requestJson<{ error?: string }>(
+      server,
+      `/api/jobs/${jobId}/diagnostics`,
+      { method: "POST" },
+    );
+    assert.equal(attempted.status, 409, "and the POST refuses rather than pretending to send");
   } finally {
     await server.close();
-    rmSync(workspace, { recursive: true, force: true });
+    await removeWorkspace(workspace);
   }
 });
 
@@ -657,7 +699,7 @@ test("clearing a stored credential actually removes it", async () => {
     assert.equal(store.getOpenRouterApiKey(), undefined, "the cleared key must be gone");
     assert.equal(store.get().creditRecovery.openRouterKeyConfigured, false);
   } finally {
-    rmSync(workspace, { recursive: true, force: true });
+    await removeWorkspace(workspace);
   }
 });
 
@@ -702,7 +744,7 @@ test("Claude Agent settings populate setup-token environment without leaking dev
     assert.equal(env.BRAINSTORM_AGENTIC_AGENT_THINKING, "disabled");
     assert.equal(env.BRAINSTORM_AGENTIC_AGENT_FALLBACK_MODEL, "haiku");
   } finally {
-    rmSync(workspace, { recursive: true, force: true });
+    await removeWorkspace(workspace);
   }
 });
 
@@ -795,7 +837,7 @@ test("fake sbatch submission records id and cancellation calls scancel", async (
     assert.equal(readFileSync(cancelRecord, "utf8"), "123");
   } finally {
     await server.close();
-    rmSync(workspace, { recursive: true, force: true });
+    await removeWorkspace(workspace);
   }
 });
 
@@ -938,7 +980,7 @@ test("local offline job completes with every dashboard artifact", async () => {
     assert.ok(detail.stages[8]!.id === "done" && detail.stages[8].summary);
   } finally {
     await server.close();
-    rmSync(workspace, { recursive: true, force: true });
+    await removeWorkspace(workspace);
   }
 });
 
@@ -1007,7 +1049,7 @@ test("attachments are ingested at submission and partitioned into useful and ign
     );
   } finally {
     await server.close();
-    rmSync(workspace, { recursive: true, force: true });
+    await removeWorkspace(workspace);
   }
 });
 
@@ -1301,7 +1343,7 @@ test("server file picker starts at its roots, reaches any readable path, and sna
     assert.match(staleSubmit.value.message ?? "", /does not exist/);
   } finally {
     await server.close();
-    rmSync(workspace, { recursive: true, force: true });
+    await removeWorkspace(workspace);
   }
 });
 
@@ -1526,7 +1568,7 @@ test("manual gate can shrink, complete, and reload after restart", async () => {
     assert.ok(reloaded.value.stages[7]!.id === "synthesize-proposal");
   } finally {
     await server.close();
-    rmSync(workspace, { recursive: true, force: true });
+    await removeWorkspace(workspace);
   }
 });
 
@@ -1573,7 +1615,7 @@ test("jobs SSE emits a snapshot containing a newly submitted job", async () => {
     controller.abort();
     if (jobId) await server.manager.cancel(jobId);
     await server.close();
-    rmSync(workspace, { recursive: true, force: true });
+    await removeWorkspace(workspace);
   }
 });
 
@@ -2034,7 +2076,7 @@ test("POST /api/jobs/:id/resume rejects unknown and non-blocked jobs", async () 
     await server.manager.cancel(jobId);
   } finally {
     await server.close();
-    rmSync(workspace, { recursive: true, force: true });
+    await removeWorkspace(workspace);
   }
 });
 
@@ -2151,7 +2193,7 @@ test("readiness reports required checks, gates submissions while red, and re-run
     assert.equal(llmProbeCalls, callsBefore);
   } finally {
     await server.close();
-    rmSync(workspace, { recursive: true, force: true });
+    await removeWorkspace(workspace);
   }
 });
 

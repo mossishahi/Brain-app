@@ -7,9 +7,6 @@ import {
   useState,
 } from "react";
 import type { KeyboardEvent, ReactNode } from "react";
-import SpeedDial from "@mui/material/SpeedDial";
-import SpeedDialAction from "@mui/material/SpeedDialAction";
-import SpeedDialIcon from "@mui/material/SpeedDialIcon";
 import {
   FileImageOutlined,
   FileOutlined,
@@ -198,80 +195,84 @@ function modelDisplay(settings: ServerSettings | null): {
   };
 }
 
-function AttachmentSpeedDial({
+/**
+ * The attachment picker: a small trigger that fans its options out to the right.
+ *
+ * Hand-rolled rather than MUI's SpeedDial. That component brought
+ * @mui/material and both emotion packages into the bundle for this one widget,
+ * and most of its configuration here was spent overriding MUI's own defaults
+ * (its 64px FAB assumption, its shadows, its colours) back to this app's
+ * tokens. Plain buttons and a flex row express the same thing, react to the
+ * theme through the same CSS variables as everything else, and cost nothing.
+ */
+function AttachmentPicker({
   disabled,
   onSelect,
 }: {
   readonly disabled: boolean;
   readonly onSelect: (kind: AttachmentSelectionKind) => void;
 }) {
+  const [open, setOpen] = useState(false);
+  const root = useRef<HTMLDivElement | null>(null);
+
+  // Closing on outside-press and on Escape: without both, the fan stays open
+  // behind whatever the user does next.
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!root.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open]);
+
+  // A disabled trigger cannot be re-opened, so a fan left open when the box
+  // becomes disabled would be unclosable.
+  useEffect(() => {
+    if (disabled) setOpen(false);
+  }, [disabled]);
+
   return (
-    <SpeedDial
-      ariaLabel="Attach from server"
-      direction="right"
-      icon={<SpeedDialIcon />}
-      FabProps={{ size: "small", disabled }}
-      sx={{
-        position: "relative",
-        display: "inline-flex",
-        zIndex: 12,
-        "& .MuiSpeedDial-fab": {
-          width: 30,
-          height: 30,
-          minHeight: 30,
-          color: "var(--text)",
-          backgroundColor: "transparent",
-          boxShadow: "none",
-          "&:hover": {
-            color: "var(--accent)",
-            backgroundColor:
-              "color-mix(in srgb, var(--text) 6%, transparent)",
-            boxShadow: "none",
-          },
-        },
-        "& .MuiSpeedDial-actions": {
-          // MUI assumes a 64px default FAB and compensates with -32px.
-          // Our 30px FAB needs no negative overlap compensation.
-          marginLeft: 0,
-          paddingLeft: "6px",
-          gap: 0,
-        },
-      }}
-    >
-      {PICKER_OPTIONS.map((option) => (
-        <SpeedDialAction
-          key={option.kind}
-          icon={option.icon}
-          slotProps={{
-            fab: {
-              "aria-label": option.label,
-              sx: {
-                width: 28,
-                height: 28,
-                minHeight: 28,
-                margin: "2px",
-                color: "var(--text-dim)",
-                backgroundColor: "var(--surface)",
-                border: "1px solid var(--border)",
-                boxShadow: "none",
-                fontSize: 13,
-                "&:hover": {
-                  color: "var(--accent)",
-                  backgroundColor: "var(--surface)",
-                  borderColor: "var(--accent)",
-                  boxShadow: "none",
-                },
-              },
-            },
-            tooltip: {
-              title: `${option.label} — ${option.hint}`,
-              placement: "top",
-            },
-          }}
-          onClick={() => onSelect(option.kind)}
-        />
-      ))}
-    </SpeedDial>
+    <div className="attach-picker" ref={root}>
+      <button
+        type="button"
+        className="attach-trigger"
+        aria-label="Attach from server"
+        aria-expanded={open}
+        disabled={disabled}
+        onClick={() => setOpen((previous) => !previous)}
+      >
+        <span aria-hidden>+</span>
+      </button>
+      <div className={`attach-fan${open ? " attach-fan-open" : ""}`} role="menu" aria-hidden={!open}>
+        {PICKER_OPTIONS.map((option) => (
+          <button
+            key={option.kind}
+            type="button"
+            role="menuitem"
+            className="attach-option"
+            aria-label={option.label}
+            title={`${option.label} — ${option.hint}`}
+            // Kept out of the tab order while collapsed: a hidden fan must not
+            // hand out focus stops the user cannot see.
+            tabIndex={open ? 0 : -1}
+            onClick={() => {
+              onSelect(option.kind);
+              setOpen(false);
+            }}
+          >
+            {option.icon}
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -773,7 +774,7 @@ export function SubmissionBox({
 
           <div className="composer-footer">
             <div className="composer-footer-left">
-              <AttachmentSpeedDial
+              <AttachmentPicker
                 disabled={
                   submitting ||
                   attachments.length >=

@@ -1,0 +1,13 @@
+// Tests only. The main tsconfig sets "types": [] on purpose — this package is
+// the browser contract and must not depend on node, which is exactly why it
+// restates shared knowledge instead of importing it. Compiling the tests under
+// their own config keeps node's globals out of the shipped build.
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": ".",
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}

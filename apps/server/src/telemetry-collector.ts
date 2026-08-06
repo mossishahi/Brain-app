@@ -2,7 +2,11 @@ import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
-import type { JobSummary } from "@brainstorm-agentic/protocol";
+import type {
+  DiagnosticComponent,
+  DiagnosticPreview,
+  JobSummary,
+} from "@brainstorm-agentic/protocol";
 import {
   TELEMETRY_SCHEMA_VERSION,
   type TelemetryEvent,
@@ -107,27 +111,12 @@ export class TelemetryCollector {
   }
 }
 
-/** One component of a diagnostic bundle, as the preview describes it. */
-export interface DiagnosticComponent {
-  readonly id: string;
-  readonly description: string;
-  readonly bytes: number;
-  /**
-   * Whether this component can contain material the submitter wrote or
-   * referenced. The preview shows this so the decision to send is informed
-   * rather than implied.
-   */
-  readonly mayContainYourContent: boolean;
-}
-
-export interface DiagnosticPreview {
-  readonly jobId: string;
-  readonly status: string;
-  readonly components: readonly DiagnosticComponent[];
-  readonly totalBytes: number;
-  /** Named so the preview is honest about what is deliberately held back. */
-  readonly excluded: readonly string[];
-}
+/**
+ * The preview shapes are owned by `protocol` (the browser contract) and
+ * re-exported here so the collector and the dashboard cannot describe the same
+ * report differently.
+ */
+export type { DiagnosticComponent, DiagnosticPreview };
 
 /** Bytes of the last `limit` lines of a file, and the lines themselves. */
 function tailLines(path: string, limit: number): string[] {
@@ -153,6 +142,11 @@ const EVENT_TAIL_LINES = 400;
 export function buildDiagnostic(
   jobsDir: string,
   job: JobSummary,
+  /**
+   * Whether an endpoint is configured. Passed in rather than read here so the
+   * preview can warn before the button is used instead of failing after.
+   */
+  canSend: boolean,
 ): { readonly preview: DiagnosticPreview; readonly report: Record<string, unknown> } {
   const jobDir = join(jobsDir, job.jobId);
   const eventsPath = join(jobDir, "events.jsonl");
@@ -238,6 +232,7 @@ export function buildDiagnostic(
         "Your attachments",
         "API keys and credentials",
       ],
+      canSend,
     },
     report,
   };

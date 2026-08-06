@@ -978,7 +978,8 @@ export async function startBrainServer(
         const jobId = decodeURIComponent(diagPreviewMatch[1]!);
         const job = (await manager.list()).find((entry) => entry.jobId === jobId);
         if (!job) throw new HttpError(404, `job "${jobId}" was not found`);
-        sendJson(res, 200, buildDiagnostic(manager.jobsDir, job).preview);
+        const configured = manager.settings.get().telemetry?.ingestUrl !== undefined;
+        sendJson(res, 200, buildDiagnostic(manager.jobsDir, job, configured).preview);
         return;
       }
       if (req.method === "POST" && diagPreviewMatch) {
@@ -989,7 +990,7 @@ export async function startBrainServer(
         if (!ingestUrl) {
           throw new HttpError(409, "no diagnostics endpoint is configured");
         }
-        const { report, preview } = buildDiagnostic(manager.jobsDir, job);
+        const { report, preview } = buildDiagnostic(manager.jobsDir, job, true);
         try {
           const response = await fetch(`${ingestUrl.replace(/\/+$/, "")}/v1/diagnostics`, {
             method: "POST",
@@ -1142,8 +1143,15 @@ export async function startBrainServer(
       };
     },
   );
+  // The in-flight telemetry cycle, if one is running. `close()` awaits it:
+  // clearInterval only stops FUTURE ticks, and this callback's body outlives the
+  // tick that started it — it appends to the spool and then flushes over the
+  // network. Without the handle, close() resolves while a write is still in
+  // flight, so a caller that shuts the server down and then removes its
+  // workspace races a file being recreated under it.
+  let telemetryCycle: Promise<void> | undefined;
   const telemetryPoll = setInterval(() => {
-    void (async () => {
+    telemetryCycle = (async () => {
       if (manager.settings.get().telemetry?.enabled !== false) {
         try {
           telemetryCollector.collect(await manager.list());
@@ -1152,7 +1160,9 @@ export async function startBrainServer(
         }
       }
       await telemetrySender.flush();
-    })();
+    })().finally(() => {
+      telemetryCycle = undefined;
+    });
   }, TELEMETRY_FLUSH_MS);
   const registryPoll = setInterval(() => {
     void probeContentRegistry(contentRegistryUrl, contentRegistry);
@@ -1180,6 +1190,9 @@ export async function startBrainServer(
       clearInterval(registryPoll);
       clearInterval(telemetryPoll);
       if (appUpdateTimer) clearInterval(appUpdateTimer);
+      // Never rejects (flush swallows send failures), but awaited defensively so
+      // a future change there cannot turn shutdown into an unhandled rejection.
+      await telemetryCycle?.catch(() => undefined);
       readiness.close();
       watchers.forEach((entry) => entry.close());
       for (const stream of [...jobStreams]) stream.close();

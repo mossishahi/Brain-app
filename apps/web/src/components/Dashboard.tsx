@@ -36,6 +36,7 @@ import {
 import { ActivityFeed, Dot, SkeletonLines } from "./common";
 import { BackIcon, ChevronIcon } from "./Icons";
 import { PipelineGraph } from "./PipelineGraph";
+import { SendDiagnostics } from "./SendDiagnostics";
 import {
   ClassificationDecided,
   ClassificationGateCard,
@@ -548,6 +549,7 @@ export function Dashboard({ jobId }: { jobId: string }) {
           >
             {resumingNow ? "Retrying…" : "Retry from checkpoint"}
           </button>
+          <SendDiagnostics jobId={jobId} />
         </div>
       )}
 
