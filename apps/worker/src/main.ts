@@ -49,7 +49,11 @@ import {
   TELEMETRY_SCHEMA_VERSION,
   type TelemetryEvent,
 } from "@brainstorm-agentic/telemetry";
-import { buildRuntime, providerConfigFromEnv } from "./wiring.js";
+import {
+  buildRuntime,
+  modelsByRouteFromEnv,
+  providerConfigFromEnv,
+} from "./wiring.js";
 import { openLazyRegistryContent, type LazyRegistryContent } from "./registry-content.js";
 import {
   LocalTaxonomyService,
@@ -450,25 +454,6 @@ const APP_VERSION: string = (() => {
 /** The workspace that owns this session root — where the install id lives. */
 function defaultWorkspaceRoot(sessionRoot: string): string {
   return dirname(sessionRoot);
-}
-
-/** The per-route model ids the deployment configured, for cross-model comparison. */
-function modelsByRouteFromEnv(
-  env: NodeJS.ProcessEnv,
-): Readonly<Record<string, string>> | undefined {
-  const raw = env.BRAINSTORM_AGENTIC_MODELS_BY_ROUTE;
-  if (!raw) return undefined;
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
-    const models: Record<string, string> = {};
-    for (const [route, model] of Object.entries(parsed)) {
-      if (typeof model === "string") models[route] = model;
-    }
-    return Object.keys(models).length > 0 ? models : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 function reportResult(result: RunResult, sessionRoot: string): void {

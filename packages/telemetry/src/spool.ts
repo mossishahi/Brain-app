@@ -56,23 +56,34 @@ export class TelemetrySpool {
     } catch {
       return [];
     }
+    let raw: string;
     try {
-      return readFileSync(staged, "utf8")
-        .split("\n")
-        .filter((line) => line.trim().length > 0)
-        .flatMap((line) => {
-          try {
-            return [JSON.parse(line) as TelemetryEvent];
-          } catch {
-            // A torn trailing line from a crash mid-append: drop it.
-            return [];
-          }
-        });
+      raw = readFileSync(staged, "utf8");
     } catch {
+      // The staged file is deliberately NOT removed here. A transient read
+      // failure (EIO, EACCES, out of memory) must cost a retry, not the batch:
+      // deleting it would hand the caller an empty array with nothing left to
+      // restore, silently destroying records it never saw.
+      try {
+        renameSync(staged, this.path);
+      } catch {
+        // Even the rename failed; the staged file remains on disk for the
+        // operator rather than being discarded.
+      }
       return [];
-    } finally {
-      rmSync(staged, { force: true });
     }
+    rmSync(staged, { force: true });
+    return raw
+      .split("\n")
+      .filter((line) => line.trim().length > 0)
+      .flatMap((line) => {
+        try {
+          return [JSON.parse(line) as TelemetryEvent];
+        } catch {
+          // A torn trailing line from a crash mid-append: drop it.
+          return [];
+        }
+      });
   }
 
   /** Returns undelivered records to the spool after a failed send. */

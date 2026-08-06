@@ -630,6 +630,31 @@ function canonicalizeExpertsTree(tree: JsonValue): JsonValue {
  * narrow per-task what the static artifact schema must leave open (allowed
  * verdicts per review round, the submission-type label per run).
  */
+/**
+ * Asserts that a schema pin actually applied.
+ *
+ * These narrowings are what stop a constrained model from emitting a verdict it
+ * was not offered, a step the review has not reached, or a requested section
+ * that was never asked for. When a patch silently fails to apply, the model is
+ * handed an UNCONSTRAINED schema and the violation only surfaces later as a
+ * failed run — or, worse, not at all, because the executor's retry validator
+ * derives its own rules from this same delivered schema and quietly checks
+ * nothing when the pin is missing. A patch that does not apply is a content or
+ * schema bug, not a runtime data condition, so it fails loudly here.
+ */
+function pinned(
+  patched: JsonObject | undefined,
+  nodeId: string,
+  what: string,
+): JsonObject {
+  if (patched === undefined) {
+    throw new WorkflowConfigError(
+      `node "${nodeId}" could not pin ${what} into its task schema; the artifact schema shape changed and the model would be left unconstrained`,
+    );
+  }
+  return patched;
+}
+
 function patchSchemaProperty(
   schema: JsonObject,
   path: readonly string[],
@@ -1116,11 +1141,10 @@ class ContentCompiler {
         isJsonRecord(bindings.verdictOptions)
       ) {
         const allowed = Object.keys(bindings.verdictOptions);
-        taskJsonSchema =
-          patchSchemaProperty(taskJsonSchema, ["verdict"], (verdict) => ({
+        taskJsonSchema = pinned(patchSchemaProperty(taskJsonSchema, ["verdict"], (verdict) => ({
             ...verdict,
             enum: allowed,
-          })) ?? taskJsonSchema;
+          })), node.id, "the allowed verdicts");
       }
       // Step targets are bounded by the live walk position, which only the
       // task knows: narrow the schema maxima so a constrained model cannot
@@ -1133,18 +1157,21 @@ class ContentCompiler {
         bindings.currentStep >= 1
       ) {
         const reviewedThrough = bindings.currentStep;
-        taskJsonSchema =
+        taskJsonSchema = pinned(
           node.output.schema === "comment"
-            ? (patchSchemaProperty(taskJsonSchema, ["step"], (step) => ({
+            ? patchSchemaProperty(taskJsonSchema, ["step"], (step) => ({
                 ...step,
                 maximum: reviewedThrough,
-              })) ?? taskJsonSchema)
-            : (patchArrayItemProperty(
+              }))
+            : patchArrayItemProperty(
                 taskJsonSchema,
                 "issues",
                 "step",
                 (step) => ({ ...step, maximum: reviewedThrough }),
-              ) ?? taskJsonSchema);
+              ),
+          node.id,
+          "the reviewed step bound",
+        );
       }
       // The submission types are catalog data, so the static artifact schemas
       // leave `type` as an open string; each task narrows it to what is
@@ -1157,8 +1184,7 @@ class ContentCompiler {
       ) {
         const label = bindings.type;
         const shape = typeof bindings.shape === "string" ? bindings.shape : undefined;
-        taskJsonSchema =
-          patchSchemaProperty(taskJsonSchema, ["output"], (output) => {
+        taskJsonSchema = pinned(patchSchemaProperty(taskJsonSchema, ["output"], (output) => {
             const envelope =
               patchSchemaProperty(output, ["type"], (type) => ({ ...type, enum: [label] })) ??
               output;
@@ -1166,7 +1192,7 @@ class ContentCompiler {
             return shape !== undefined && !required.includes(shape)
               ? { ...envelope, required: [...required, shape] }
               : envelope;
-          }) ?? taskJsonSchema;
+          }), node.id, "the output type label");
       }
       // The submitter's explicitly requested outputs are run data the static
       // envelope leaves optional. When the run recorded any, the section
@@ -1177,8 +1203,7 @@ class ContentCompiler {
       // all. Presence and order are re-checked on write either way.
       if (node.output.schema === "brainIdea" || node.output.schema === "redevelopment") {
         const asks = requestedOutputsOf(bindings.input);
-        taskJsonSchema =
-          patchSchemaProperty(taskJsonSchema, ["output"], (output) => {
+        taskJsonSchema = pinned(patchSchemaProperty(taskJsonSchema, ["output"], (output) => {
             const properties = isJsonRecord(output.properties) ? output.properties : {};
             const required = (Array.isArray(output.required) ? output.required : []).filter(
               (entry): entry is string => typeof entry === "string",
@@ -1216,7 +1241,7 @@ class ContentCompiler {
               },
               required: required.includes("requested") ? required : [...required, "requested"],
             };
-          }) ?? taskJsonSchema;
+          }), node.id, "the required shape body");
       }
       if (
         node.output.schema === "processorOutput" &&
@@ -1224,11 +1249,10 @@ class ContentCompiler {
         Object.keys(bindings.typeOptions).length > 0
       ) {
         const labels = Object.keys(bindings.typeOptions);
-        taskJsonSchema =
-          patchSchemaProperty(taskJsonSchema, ["type"], (type) => ({
+        taskJsonSchema = pinned(patchSchemaProperty(taskJsonSchema, ["type"], (type) => ({
             ...type,
             enum: labels,
-          })) ?? taskJsonSchema;
+          })), node.id, "the requested output sections");
       }
       // The processor never classifies: its task schema drops the
       // classification fields entirely so the model cannot emit them. The
@@ -1251,11 +1275,10 @@ class ContentCompiler {
       ) {
         const labels = Object.keys(bindings.typeOptions);
         for (const option of ["primary", "alternative"] as const) {
-          taskJsonSchema =
-            patchSchemaProperty(taskJsonSchema, [option, "type"], (type) => ({
+          taskJsonSchema = pinned(patchSchemaProperty(taskJsonSchema, [option, "type"], (type) => ({
               ...type,
               enum: labels,
-            })) ?? taskJsonSchema;
+            })), node.id, "the processor type options");
         }
       }
       // The placer must cover exactly the unmatched members it was given:
@@ -1268,8 +1291,7 @@ class ContentCompiler {
           const term = (entry as { readonly term?: JsonValue }).term;
           return typeof term === "string" ? [term] : [];
         });
-        taskJsonSchema =
-          patchSchemaProperty(taskJsonSchema, ["decisions"], (decisions) => {
+        taskJsonSchema = pinned(patchSchemaProperty(taskJsonSchema, ["decisions"], (decisions) => {
             const items = isJsonRecord(decisions.items) ? decisions.items : {};
             const properties = isJsonRecord(items.properties) ? items.properties : {};
             const termProperty = isJsonRecord(properties.term) ? properties.term : {};
@@ -1289,7 +1311,7 @@ class ContentCompiler {
                   }
                 : {}),
             };
-          }) ?? taskJsonSchema;
+          }), node.id, "the classifier type options");
       }
       // The code annotator must cover exactly the code files it was given:
       // the entry count is pinned and the path field is narrowed to the
@@ -1301,8 +1323,7 @@ class ContentCompiler {
           return typeof path === "string" ? [path] : [];
         });
         if (paths.length > 0) {
-          taskJsonSchema =
-            patchSchemaProperty(taskJsonSchema, ["files"], (files) => {
+          taskJsonSchema = pinned(patchSchemaProperty(taskJsonSchema, ["files"], (files) => {
               const items = isJsonRecord(files.items) ? files.items : {};
               const properties = isJsonRecord(items.properties) ? items.properties : {};
               const pathProperty = isJsonRecord(properties.path) ? properties.path : {};
@@ -1318,7 +1339,7 @@ class ContentCompiler {
                   },
                 },
               };
-            }) ?? taskJsonSchema;
+            }), node.id, "the placement coverage");
         }
       }
       const stepwise = stepwiseContract(node.output.schema, bindings);

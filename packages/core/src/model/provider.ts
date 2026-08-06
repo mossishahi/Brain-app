@@ -38,12 +38,6 @@ export interface ModelProvider {
   getCapabilities(modelId: string, options?: CallOptions): Promise<ModelCapabilities | undefined>;
   /** Single-shot completion. Must reject with an AbortError when the signal fires. */
   complete(request: ModelRequest, options?: CallOptions): Promise<ModelResponse>;
-  /**
-   * Advertise which normalized operations this provider can handle natively
-   * for the given model. Returns empty when the provider offers no built-in
-   * operations beyond standard chat completion.
-   */
-  getNativeOffers?(modelId: string, options?: CallOptions): Promise<readonly ProviderNativeOffer[]>;
 }
 
 /** Requirements an agent can declare so a router can pick a suitable model. */
@@ -93,12 +87,3 @@ export function satisfiesRequirements(
   return true;
 }
 
-/** Picks the first listed model satisfying the requirements, or undefined. */
-export async function negotiateModel(
-  provider: ModelProvider,
-  requirements: CapabilityRequirements,
-  options?: CallOptions,
-): Promise<ModelDescriptor | undefined> {
-  const models = await provider.listModels(options);
-  return models.find((model) => satisfiesRequirements(model.capabilities, requirements));
-}

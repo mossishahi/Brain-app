@@ -11,7 +11,6 @@ import type {
 } from "../src/index.js";
 import {
   addUsage,
-  negotiateModel,
   responseText,
   satisfiesRequirements,
   textBlock,
@@ -72,16 +71,6 @@ test("satisfiesRequirements checks capability flags and token minimums", () => {
   assert.ok(!satisfiesRequirements(baseCapabilities, { minOutputTokens: 2000 }));
 });
 
-test("negotiateModel picks the first model satisfying the requirements", async () => {
-  const provider = new FakeProvider([
-    { modelId: "small", capabilities: baseCapabilities },
-    { modelId: "big", capabilities: { ...baseCapabilities, toolUse: true, maxContextTokens: 200000 } },
-  ]);
-  const chosen = await negotiateModel(provider, { toolUse: true, minContextTokens: 100000 });
-  assert.equal(chosen?.modelId, "big");
-  const none = await negotiateModel(provider, { thinking: true });
-  assert.equal(none, undefined);
-});
 
 test("normalized responses expose content blocks, stop reasons, and usage", async () => {
   const provider = new FakeProvider([{ modelId: "small", capabilities: baseCapabilities }]);

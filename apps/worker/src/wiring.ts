@@ -434,7 +434,14 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
  * name a bundle may declare); the three legacy per-route variables remain
  * readable so older submit scripts keep resuming.
  */
-function modelsByRouteFromEnv(env: NodeJS.ProcessEnv): Record<string, string> {
+/**
+ * The per-route model ids this run will actually execute with.
+ *
+ * Exported because the telemetry path needs the SAME answer: a second parser
+ * (which existed, and validated differently) could report a configuration the
+ * executor never used, quietly poisoning any comparison across models.
+ */
+export function modelsByRouteFromEnv(env: NodeJS.ProcessEnv): Record<string, string> {
   const models: Record<string, string> = {};
   for (const routeName of ["reasoning", "writing", "balanced"] as const) {
     const value = env[`BRAINSTORM_AGENTIC_MODEL_${routeName.toUpperCase()}`]?.trim();
@@ -451,8 +458,15 @@ function modelsByRouteFromEnv(env: NodeJS.ProcessEnv): Record<string, string> {
           }
         }
       }
-    } catch {
-      // A malformed override falls back to the legacy per-route variables.
+    } catch (error) {
+      // Silently ignoring this meant every task ran on the default model while
+      // the user believed their per-route choices were in effect — a cost and
+      // quality change with no signal anywhere. The server writes this variable
+      // itself, so a parse failure is a real defect, not user error.
+      console.error(
+        `[config] BRAINSTORM_AGENTIC_MODELS_BY_ROUTE could not be parsed, so per-route ` +
+          `model selection is being IGNORED: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
   return models;
