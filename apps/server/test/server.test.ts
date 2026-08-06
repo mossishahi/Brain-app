@@ -590,6 +590,45 @@ test("OpenRouter parser credentials are verified and kept write-only", async () 
   }
 });
 
+test("a diagnostic preview describes exactly what would be sent, and excludes the submitter's work", async () => {
+  const workspace = tempRoot();
+  const server = await startTestBrainServer({ workspace, port: 0 });
+  try {
+    await putSettings(server, {
+      runner: "local",
+      panelConfirmation: "auto",
+      llm: { provider: "offline" },
+    });
+    const jobId = await submit(server, "A submission whose text must never be sent");
+    await waitFor(server, jobId, "completed");
+
+    const preview = (
+      await requestJson<{
+        components: Array<{ id: string; bytes: number; mayContainYourContent: boolean }>;
+        totalBytes: number;
+        excluded: string[];
+      }>(server, `/api/jobs/${jobId}/diagnostics`)
+    ).value;
+
+    // The preview must name every component, so "send diagnostics" is an
+    // informed decision rather than an implied one.
+    assert.deepEqual(
+      preview.components.map((component) => component.id).sort(),
+      ["checkpoint", "events", "job"],
+    );
+    // ...and be honest about which parts can carry the submitter's material.
+    const events = preview.components.find((component) => component.id === "events")!;
+    assert.equal(events.mayContainYourContent, true, "the activity log names files and queries");
+    const checkpoint = preview.components.find((component) => component.id === "checkpoint")!;
+    assert.equal(checkpoint.mayContainYourContent, false, "only step names, never their results");
+    assert.ok(preview.excluded.length > 0, "the preview names what is held back");
+    assert.ok(preview.totalBytes > 0);
+  } finally {
+    await server.close();
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("clearing a stored credential actually removes it", async () => {
   // Regression: the clear branch deleted the key, then the carry-forward branch
   // two lines later restored it from a value read BEFORE the delete — so a user

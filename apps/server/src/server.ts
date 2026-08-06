@@ -28,8 +28,9 @@ import {
 
 import { createReadinessAdvisor } from "./advisor.js";
 import { JobConflictError, JobManager } from "./job-manager.js";
-import { TelemetrySpool } from "@brainstorm-agentic/telemetry";
+import { installId, TelemetrySpool } from "@brainstorm-agentic/telemetry";
 import { TelemetrySender } from "./telemetry-sender.js";
+import { buildDiagnostic, TelemetryCollector } from "./telemetry-collector.js";
 import type { ContentRegistryRuntimeStatus } from "./model.js";
 import {
   ReadinessService,
@@ -968,6 +969,45 @@ export async function startBrainServer(
         return;
       }
 
+      // A diagnostic report is NEVER sent automatically and is NOT covered by
+      // the telemetry setting: it can carry material the submitter wrote, so it
+      // takes a deliberate per-report action. The preview exists so that
+      // decision is informed rather than implied.
+      const diagPreviewMatch = /^\/api\/jobs\/([^/]+)\/diagnostics$/.exec(path);
+      if (req.method === "GET" && diagPreviewMatch) {
+        const jobId = decodeURIComponent(diagPreviewMatch[1]!);
+        const job = (await manager.list()).find((entry) => entry.jobId === jobId);
+        if (!job) throw new HttpError(404, `job "${jobId}" was not found`);
+        sendJson(res, 200, buildDiagnostic(manager.jobsDir, job).preview);
+        return;
+      }
+      if (req.method === "POST" && diagPreviewMatch) {
+        const jobId = decodeURIComponent(diagPreviewMatch[1]!);
+        const job = (await manager.list()).find((entry) => entry.jobId === jobId);
+        if (!job) throw new HttpError(404, `job "${jobId}" was not found`);
+        const ingestUrl = manager.settings.get().telemetry?.ingestUrl;
+        if (!ingestUrl) {
+          throw new HttpError(409, "no diagnostics endpoint is configured");
+        }
+        const { report, preview } = buildDiagnostic(manager.jobsDir, job);
+        try {
+          const response = await fetch(`${ingestUrl.replace(/\/+$/, "")}/v1/diagnostics`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(report),
+            signal: AbortSignal.timeout(15_000),
+          });
+          if (!response.ok) {
+            throw new HttpError(502, `the diagnostics endpoint answered ${response.status}`);
+          }
+          sendJson(res, 200, { sent: true, bytes: preview.totalBytes });
+        } catch (error) {
+          if (error instanceof HttpError) throw error;
+          throw new HttpError(502, "could not reach the diagnostics endpoint");
+        }
+        return;
+      }
+
       const gateHoldMatch = /^\/api\/jobs\/([^/]+)\/gate-hold$/.exec(path);
       if (req.method === "POST" && gateHoldMatch) {
         const jobId = decodeURIComponent(gateHoldMatch[1]!);
@@ -1089,8 +1129,30 @@ export async function startBrainServer(
     enabled: () => manager.settings.get().telemetry?.enabled !== false,
     ingestUrl: () => manager.settings.get().telemetry?.ingestUrl,
   });
+  const telemetryCollector = new TelemetryCollector(
+    new TelemetrySpool(options.workspace),
+    manager.jobsDir,
+    () => {
+      const current = manager.settings.get();
+      return {
+        installId: installId(options.workspace),
+        appVersion: VERSION,
+        provider: current.llm.provider,
+        runner: current.runner === "slurm" ? "slurm" : "local",
+      };
+    },
+  );
   const telemetryPoll = setInterval(() => {
-    void telemetrySender.flush();
+    void (async () => {
+      if (manager.settings.get().telemetry?.enabled !== false) {
+        try {
+          telemetryCollector.collect(await manager.list());
+        } catch {
+          // Collection is never a reason to disturb the server.
+        }
+      }
+      await telemetrySender.flush();
+    })();
   }, TELEMETRY_FLUSH_MS);
   const registryPoll = setInterval(() => {
     void probeContentRegistry(contentRegistryUrl, contentRegistry);
