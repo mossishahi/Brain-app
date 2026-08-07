@@ -931,6 +931,16 @@ export interface ServerSettings {
   readonly hostTools?: {
     readonly enabledToolIds: readonly string[];
   };
+  /**
+   * Per-run capability overrides, snapshotted into the job's execution
+   * settings at submit time. Keys are capability ids from the content
+   * bundle's catalog (e.g. "web-search"); `false` disables the capability
+   * for the run — both its host tools and any provider-native equivalent —
+   * and the agent is told the user switched it off. Absent keys (and `true`)
+   * keep the deployment default. Never set on the global settings document;
+   * it exists here so the submit-time snapshot carries it through resumes.
+   */
+  readonly capabilityOverrides?: Readonly<Record<string, boolean>>;
 }
 
 /* --------------------------------------------------- task types and models */
@@ -1064,6 +1074,38 @@ export interface SubmitJobRequest {
    * submission time.
    */
   readonly attachments?: readonly string[];
+  /**
+   * Per-run capability toggles. Keys are capability ids from the content
+   * bundle's catalog (see GET /api/capabilities); `false` disables the
+   * capability for this run — its host tools AND any provider-native
+   * equivalent (e.g. Anthropic's built-in web search) — and the agents are
+   * told the user switched it off. Absent keys and `true` keep the
+   * deployment default. The map is snapshotted into the job's execution
+   * settings, so every resume replays the same policy.
+   */
+  readonly capabilityOverrides?: Readonly<Record<string, boolean>>;
+}
+
+/** One toggleable capability, as reported by GET /api/capabilities. */
+export interface CapabilityOption {
+  /** Catalog id, e.g. "web-search". */
+  readonly id: string;
+  /** Catalog description (what the agents can do with it). */
+  readonly description: string;
+  /** Operation ids behind the capability, e.g. ["web.search", "web.fetch"]. */
+  readonly operations: readonly string[];
+  /**
+   * Non-overridable: runtime infrastructure the workflow hard-requires
+   * (e.g. taxonomy-access). The UI renders these locked-on; submitted
+   * overrides for them are ignored.
+   */
+  readonly locked: boolean;
+}
+
+export interface CapabilityOptionsResponse {
+  /** Catalog version the options were read from. */
+  readonly version: string;
+  readonly capabilities: readonly CapabilityOption[];
 }
 
 /** Logical server-side attachment type selected in the webapp. */
@@ -1456,6 +1498,18 @@ export interface HealthResponse {
 }
 
 /**
+ * Response of POST /api/update: the one-click self-update was handed to a
+ * detached updater and this server is about to exit. The browser should keep
+ * polling /api/health and reload the tab once a server with a different
+ * version answers; `logFile` is where the updater records every step (and
+ * any rollback) for diagnosis.
+ */
+export interface UpdateAppResponse {
+  readonly updatingTo: string;
+  readonly logFile: string;
+}
+
+/**
  * Server-sent events. `jobs` and `readiness` stream on /api/stream; `job` on
  * /api/jobs/:id/stream.
  */
@@ -1488,9 +1542,11 @@ export interface ToolUsageReport {
 /**
  * REST surface (all JSON):
  *   GET  /api/health                          -> HealthResponse
+ *   POST /api/update                          -> UpdateAppResponse   (starts the detached self-updater and exits; 409 when no release is known, self-update is disabled, or the checkout is dirty)
  *   GET  /api/settings                        -> ServerSettings
  *   PUT  /api/settings                        -> ServerSettings (body: ServerSettingsUpdate; Anthropic credentials are connection-tested before any save)
  *   GET  /api/model-options                   -> ModelOptionsResponse (task types from the pinned bundle + provider model catalog)
+ *   GET  /api/capabilities                    -> CapabilityOptionsResponse (toggleable capabilities from the pinned bundle's catalog)
  *   PUT  /api/settings/models-by-route        -> ServerSettings (body: ModelsByRouteUpdate; no credential re-verification)
  *   GET  /api/jobs                            -> JobSummary[]
  *   GET  /api/attachments/roots               -> ServerAttachmentRootsResponse

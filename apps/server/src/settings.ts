@@ -152,6 +152,7 @@ export function defaultServerSettings(
       enabledToolIds: [
         "attachment_list",
         "attachment_read",
+        "attachment_search",
         "taxonomy_tree",
         "taxonomy_resolve",
       ],
@@ -442,7 +443,19 @@ function validateHostTools(
       throw new Error("hostTools.enabledToolIds entries must be non-empty strings");
     }
   }
-  return { enabledToolIds: ids as string[] };
+  const enabledToolIds = [...(ids as string[])];
+  // Migration: attachment_search shipped after deployments persisted their
+  // enabled list. It is the same risk class as attachment_read (a scoped
+  // read), so a store that allows reads gains search rather than having the
+  // whole attachment-access capability degrade to "unavailable" because one
+  // new operation resolves nowhere.
+  if (
+    enabledToolIds.includes("attachment_read") &&
+    !enabledToolIds.includes("attachment_search")
+  ) {
+    enabledToolIds.push("attachment_search");
+  }
+  return { enabledToolIds };
 }
 
 function validateStoredSettings(value: unknown): StoredServerSettings {
@@ -807,6 +820,18 @@ export class SettingsStore {
     settings: ServerSettings = this.get(),
   ): NodeJS.ProcessEnv {
     const env = { ...base };
+    // Per-run capability disables ride the execution-settings snapshot.
+    // Emitted before the provider branch so every provider — including
+    // offline's early return — carries them to the worker's broker.
+    const disabledCapabilities = Object.entries(
+      settings.capabilityOverrides ?? {},
+    )
+      .filter(([, enabled]) => enabled === false)
+      .map(([capabilityId]) => capabilityId);
+    if (disabledCapabilities.length > 0) {
+      env.BRAINSTORM_AGENTIC_DISABLED_CAPABILITIES =
+        disabledCapabilities.join(",");
+    }
     if (settings.llm.provider === "anthropic") {
       const apiKey = this.getAnthropicApiKey();
       if (!apiKey) {

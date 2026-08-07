@@ -46,6 +46,8 @@ export interface BrainstormRuntimeOptions {
   readonly hostTools?: readonly HostToolManifest[];
   /** User-enabled host tool IDs for the capability broker. */
   readonly enabledHostToolIds?: ReadonlySet<string>;
+  /** Capability ids the user disabled for THIS run (per-submission override). */
+  readonly disabledCapabilityIds?: ReadonlySet<string>;
 }
 
 export interface StartBrainstormOptions {
@@ -83,6 +85,7 @@ export class BrainstormRuntime {
       providerOffers: options.providerOffers,
       hostTools: options.hostTools,
       enabledHostToolIds: options.enabledHostToolIds,
+      disabledCapabilityIds: options.disabledCapabilityIds,
       skillResolver: options.skillResolver,
     });
     this.checkpoints = options.checkpoints ?? new InMemoryCheckpointStore();

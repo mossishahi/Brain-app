@@ -22,6 +22,7 @@ import { LuBrain } from "react-icons/lu";
 import {
   ATTACHMENT_LIMITS,
   type AttachmentSelectionKind,
+  type CapabilityOptionsResponse,
   type ModelOptionsResponse,
   type ReadinessCheckId,
   type ReadinessReport,
@@ -31,6 +32,7 @@ import {
 import {
   blockedReadiness,
   errorMessage,
+  getCapabilityOptions,
   getHealth,
   getModelOptions,
   getSettings,
@@ -379,6 +381,7 @@ export function SubmissionBox({
   readonly onSubmit: (
     topic: string,
     attachmentPaths: readonly string[],
+    capabilityOverrides: Readonly<Record<string, boolean>>,
   ) => Promise<void>;
   readonly onOpenSettings: () => void;
   readonly readiness: ReadinessReport | null;
@@ -390,6 +393,7 @@ export function SubmissionBox({
   const [heldSubmission, setHeldSubmission] = useState<{
     readonly topic: string;
     readonly attachmentPaths: readonly string[];
+    readonly capabilityOverrides: Readonly<Record<string, boolean>>;
   } | null>(null);
   const [attachments, setAttachments] = useState<
     readonly ValidatedAttachment[]
@@ -413,6 +417,18 @@ export function SubmissionBox({
   const [modelDraft, setModelDraft] = useState<Record<string, string>>({});
   const [modelError, setModelError] = useState<string | null>(null);
   const [savingModels, setSavingModels] = useState(false);
+  const [capabilityMenuOpen, setCapabilityMenuOpen] = useState(false);
+  const [capabilityOptions, setCapabilityOptions] =
+    useState<CapabilityOptionsResponse | null>(null);
+  const [capabilityError, setCapabilityError] = useState<string | null>(null);
+  /**
+   * Per-run capability switches: capability id -> enabled. Only ids the user
+   * touched are present; they ride the next submission (and stay selected in
+   * the composer for follow-up runs until changed).
+   */
+  const [capabilityDraft, setCapabilityDraft] = useState<
+    Record<string, boolean>
+  >({});
   const [registryConnected, setRegistryConnected] = useState(false);
   const [registryTarget, setRegistryTarget] = useState("Brain Registry");
   const [registryPage, setRegistryPage] = useState<string | undefined>();
@@ -618,11 +634,12 @@ export function SubmissionBox({
   const launch = async (
     topic: string,
     attachmentPaths: readonly string[],
+    capabilityOverrides: Readonly<Record<string, boolean>>,
   ): Promise<void> => {
     setSubmitting(true);
     setSubmitPhase("Starting pipeline…");
     try {
-      await onSubmit(topic, attachmentPaths);
+      await onSubmit(topic, attachmentPaths, capabilityOverrides);
       setValue("");
       setAttachments([]);
       setUrlDraft("");
@@ -632,7 +649,7 @@ export function SubmissionBox({
       // A 409 with a readiness payload means the environment turned red
       // between our check and the server's: hold and wait it out.
       if (blockedReadiness(error) !== undefined) {
-        setHeldSubmission({ topic, attachmentPaths });
+        setHeldSubmission({ topic, attachmentPaths, capabilityOverrides });
       }
       // Any other server error is owned by the parent; retain selections.
     } finally {
@@ -661,15 +678,16 @@ export function SubmissionBox({
           : attachments;
       if (!checked) return;
       const attachmentPaths = checked.map((attachment) => attachment.path);
+      const capabilityOverrides = { ...capabilityDraft };
       // The environment gate: while any required check is not green, hold
       // the submission and show the waiting card; it fires automatically
       // the moment the report turns ready.
       if (readiness !== null && !readiness.ready) {
-        setHeldSubmission({ topic, attachmentPaths });
+        setHeldSubmission({ topic, attachmentPaths, capabilityOverrides });
         onRecheckReadiness();
         return;
       }
-      await launch(topic, attachmentPaths);
+      await launch(topic, attachmentPaths, capabilityOverrides);
       return;
     } catch {
       // The parent owns the server error; retain selections for retry.
@@ -683,7 +701,11 @@ export function SubmissionBox({
   useEffect(() => {
     if (heldSubmission === null || submitting) return;
     if (readiness === null || !readiness.ready) return;
-    void launch(heldSubmission.topic, heldSubmission.attachmentPaths);
+    void launch(
+      heldSubmission.topic,
+      heldSubmission.attachmentPaths,
+      heldSubmission.capabilityOverrides,
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [readiness?.ready, heldSubmission, submitting]);
 
@@ -715,6 +737,24 @@ export function SubmissionBox({
       setModelError(errorMessage(error));
     }
   };
+
+  const toggleCapabilityMenu = async (): Promise<void> => {
+    if (capabilityMenuOpen) {
+      setCapabilityMenuOpen(false);
+      return;
+    }
+    setCapabilityMenuOpen(true);
+    setCapabilityError(null);
+    try {
+      setCapabilityOptions(await getCapabilityOptions());
+    } catch (error) {
+      setCapabilityError(errorMessage(error));
+    }
+  };
+
+  const disabledCapabilityCount = Object.values(capabilityDraft).filter(
+    (enabled) => enabled === false,
+  ).length;
 
   const saveModels = async (): Promise<void> => {
     if (savingModels) return;
@@ -882,6 +922,103 @@ export function SubmissionBox({
               )}
             </div>
             <div className="composer-footer-right">
+              <div className="model-picker capability-picker">
+                <button
+                  type="button"
+                  className="composer-model"
+                  title="Enable or disable agent capabilities for the next run"
+                  aria-haspopup="dialog"
+                  aria-expanded={capabilityMenuOpen}
+                  aria-label={
+                    disabledCapabilityCount > 0
+                      ? `Capabilities: ${disabledCapabilityCount} disabled for the next run`
+                      : "Capabilities: all enabled"
+                  }
+                  onClick={() => void toggleCapabilityMenu()}
+                >
+                  <span className="composer-model-name">Capabilities</span>
+                  {disabledCapabilityCount > 0 && (
+                    <span className="composer-model-profile">
+                      {disabledCapabilityCount} off
+                    </span>
+                  )}
+                  <DownOutlined aria-hidden />
+                </button>
+                {capabilityMenuOpen && (
+                  <div
+                    className="model-popover"
+                    role="dialog"
+                    aria-label="Capabilities for the next run"
+                    onKeyDown={(event) => {
+                      if (event.key === "Escape") setCapabilityMenuOpen(false);
+                    }}
+                  >
+                    <div className="model-popover-header">
+                      <span className="model-popover-title">
+                        Capabilities for the next run
+                      </span>
+                    </div>
+                    {capabilityError && (
+                      <p className="error-text">{capabilityError}</p>
+                    )}
+                    {!capabilityOptions && !capabilityError && (
+                      <p className="model-popover-hint">Loading…</p>
+                    )}
+                    {capabilityOptions?.capabilities.map((capability) => {
+                      const enabled =
+                        capability.locked ||
+                        (capabilityDraft[capability.id] ?? true);
+                      return (
+                        <label
+                          key={capability.id}
+                          className="model-popover-row"
+                          title={capability.description}
+                        >
+                          <span className="model-popover-type">
+                            {titleCase(capability.id.replace(/-/g, " "))}
+                            {capability.locked && " (always on)"}
+                          </span>
+                          <input
+                            type="checkbox"
+                            checked={enabled}
+                            disabled={capability.locked || submitting}
+                            onChange={(event) =>
+                              setCapabilityDraft((current) => ({
+                                ...current,
+                                [capability.id]: event.target.checked,
+                              }))
+                            }
+                          />
+                        </label>
+                      );
+                    })}
+                    <p className="model-popover-hint">
+                      Disabled capabilities are switched off for the next
+                      submission only — the agents are told you turned them
+                      off, and any provider-native equivalent is off too.
+                    </p>
+                    <div className="model-popover-footer">
+                      <button
+                        type="button"
+                        className="btn btn-small"
+                        disabled={disabledCapabilityCount === 0}
+                        onClick={() => setCapabilityDraft({})}
+                      >
+                        Enable all
+                      </button>
+                      <span className="model-popover-actions">
+                        <button
+                          type="button"
+                          className="btn btn-small"
+                          onClick={() => setCapabilityMenuOpen(false)}
+                        >
+                          Done
+                        </button>
+                      </span>
+                    </div>
+                  </div>
+                )}
+              </div>
               <div className="model-picker">
                 <button
                   type="button"

@@ -730,14 +730,18 @@ test("Pass path executes member -> step -> round order and keeps C-O-T from chai
   );
   assert.ok((await app.artifacts.list()).length > 0);
   // Capabilities are declared by the content, so the expectation reads the
-  // loaded bundle: each task carries exactly its role's effective set.
+  // loaded bundle: each task carries exactly its role's declared set.
   assert.deepEqual(
     executor.tasks("processor")[0]!.task.allowedCapabilities,
     roleCapabilities("processor"),
   );
-  assert.deepEqual(executor.tasks("processor")[0]!.task.tools, roleCapabilities("processor"));
   assert.deepEqual(chair.task.allowedCapabilities, roleCapabilities("chair"));
-  assert.deepEqual(chair.task.tools, roleCapabilities("chair"));
+  // task.tools follows the broker PLAN, not the declaration: this fixture
+  // wires only the taxonomy host tools, so processor/chair capabilities all
+  // resolve unavailable — the model gets the whenUnavailable prose and no
+  // tools, never a tool the prompt just said it does not have.
+  assert.deepEqual(executor.tasks("processor")[0]!.task.tools, []);
+  assert.deepEqual(chair.task.tools, []);
 
   // The orchestrator partitions the processor's file map deterministically:
   // every later model call receives the useful files only, and the raw map is

@@ -283,6 +283,7 @@ export function stageForPath(path: string): StageId | undefined {
 const TOOL_CAPABILITY: Readonly<Record<string, ActivityCapability>> = {
   attachment_list: "attachment-access",
   attachment_read: "attachment-access",
+  attachment_search: "attachment-access",
   Read: "attachment-access",
   Glob: "attachment-access",
   Grep: "attachment-access",
@@ -297,6 +298,18 @@ const TOOL_CAPABILITY: Readonly<Record<string, ActivityCapability>> = {
   taxonomy_tree: "taxonomy-access",
   taxonomy_resolve: "taxonomy-access",
 };
+
+/**
+ * Capability lookup for a logged tool name. In-process MCP tools arrive with
+ * Claude Code's full name (`mcp__<server>__<tool>`); the capability table
+ * keys bare tool names, so strip the server prefix before looking up.
+ */
+function toolCapability(toolName: string): ActivityCapability | undefined {
+  return (
+    TOOL_CAPABILITY[toolName] ??
+    TOOL_CAPABILITY[toolName.replace(/^mcp__.+?__/, "")]
+  );
+}
 
 const DETAIL_KINDS = new Set(["code", "query", "url", "path", "text"]);
 
@@ -328,7 +341,7 @@ function timings(events: readonly RunEvent[]): Map<StageId, StageTiming> {
       const timing = result.get(stage)!;
       if (event.type === "agent:progress") {
         const capability = event.progress.toolName
-          ? TOOL_CAPABILITY[event.progress.toolName]
+          ? toolCapability(event.progress.toolName)
           : undefined;
         const detail = activityDetail(event.progress);
         timing.activity.push({

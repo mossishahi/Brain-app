@@ -292,6 +292,7 @@ export class JobManager {
   async submit(
     topic: string,
     attachments: readonly string[] = [],
+    capabilityOverrides?: Readonly<Record<string, boolean>>,
   ): Promise<string> {
     if (topic.trim().length === 0) throw new Error("topic must not be empty");
     if (
@@ -302,7 +303,20 @@ export class JobManager {
         `a job may contain at most ${ATTACHMENT_LIMITS.maxReferences} attachments`,
       );
     }
-    const settings = this.settings.get();
+    // Per-run capability overrides join the settings snapshot up front, so
+    // the launch command, the execution environment, and every later resume
+    // (which re-reads record.executionSettings) all replay the same policy.
+    const overrides = Object.fromEntries(
+      Object.entries(capabilityOverrides ?? {}).filter(
+        ([, enabled]) => typeof enabled === "boolean",
+      ),
+    );
+    const settings: ServerSettings = {
+      ...structuredClone(this.settings.get()),
+      ...(Object.keys(overrides).length > 0
+        ? { capabilityOverrides: overrides }
+        : {}),
+    };
     if (
       settings.llm.provider === "anthropic" &&
       (!settings.llm.model || !settings.llm.apiKeyConfigured)

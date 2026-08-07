@@ -90,6 +90,29 @@ test("Agent SDK environment settings map to executor configuration", () => {
   });
 });
 
+test("per-run disabled capabilities parse from the submit environment", () => {
+  const config = providerConfigFromEnv(
+    {
+      BRAINSTORM_AGENTIC_PROVIDER: "claude-agent",
+      CLAUDE_CODE_OAUTH_TOKEN: "setup-token",
+      BRAINSTORM_AGENTIC_DISABLED_CAPABILITIES: "web-search, code-execution",
+    },
+    false,
+  );
+  assert.deepEqual(config.disabledCapabilities, [
+    "web-search",
+    "code-execution",
+  ]);
+  const absent = providerConfigFromEnv(
+    {
+      BRAINSTORM_AGENTIC_PROVIDER: "claude-agent",
+      CLAUDE_CODE_OAUTH_TOKEN: "setup-token",
+    },
+    false,
+  );
+  assert.equal(absent.disabledCapabilities, undefined);
+});
+
 test("offline run completes end to end with file-backed stores and auto-approved gate", async () => {
   const root = tempRoot();
   try {

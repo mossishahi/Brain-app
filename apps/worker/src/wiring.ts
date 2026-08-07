@@ -82,6 +82,8 @@ export interface ProviderConfig {
   readonly maxOutputTokens?: number;
   /** User-enabled host tool IDs from settings. */
   readonly enabledHostToolIds?: readonly string[];
+  /** Capability ids the user disabled for THIS run (per-submission override). */
+  readonly disabledCapabilities?: readonly string[];
 }
 
 export interface RuntimeWiringOptions {
@@ -379,6 +381,24 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
     if (options.taxonomy) enabledHostToolIds.add(manifest.toolId);
     else enabledHostToolIds.delete(manifest.toolId);
   }
+  // Same truthfulness rule for the attachment tools: a run with no ingested
+  // attachment store has nothing for them to read, so the broker must resolve
+  // attachment-access unavailable (whenUnavailable prose) instead of offering
+  // tools that can only refuse.
+  if (attachmentRoots.length === 0) {
+    for (const manifest of ATTACHMENT_MANIFESTS) {
+      enabledHostToolIds.delete(manifest.toolId);
+    }
+  }
+
+  // Per-run capability disables from the submission. taxonomy-access is
+  // deliberately exempt: it is runtime infrastructure (the placer hard-requires
+  // it), not a user-facing ability of the panel.
+  const disabledCapabilityIds = new Set(
+    (options.providerConfig.disabledCapabilities ?? []).filter(
+      (capabilityId) => capabilityId !== "taxonomy-access",
+    ),
+  );
 
   // Provider-native operation offers for the capability broker: web search,
   // web fetch, and code execution run natively on both provider paths (as
@@ -422,6 +442,7 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
     providerOffers,
     hostTools: ALL_HOST_TOOL_MANIFESTS,
     enabledHostToolIds,
+    disabledCapabilityIds,
     humanGateMode: options.autoApproveGates ? "autoApproveSkippable" : "manual",
     checkpoints: options.checkpoints,
     artifacts: options.artifacts,
@@ -538,6 +559,13 @@ export function providerConfigFromEnv(env: NodeJS.ProcessEnv, offline: boolean):
     ...(env.ANTHROPIC_BASE_URL ? { baseURL: env.ANTHROPIC_BASE_URL } : {}),
     ...(env.BRAINSTORM_AGENTIC_HOST_TOOLS
       ? { enabledHostToolIds: env.BRAINSTORM_AGENTIC_HOST_TOOLS.split(",").filter(Boolean) }
+      : {}),
+    ...(env.BRAINSTORM_AGENTIC_DISABLED_CAPABILITIES
+      ? {
+          disabledCapabilities: env.BRAINSTORM_AGENTIC_DISABLED_CAPABILITIES.split(",")
+            .map((id) => id.trim())
+            .filter(Boolean),
+        }
       : {}),
   };
 }

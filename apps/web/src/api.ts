@@ -8,6 +8,7 @@ import type {
   AttachmentSelectionKind,
   BrowseServerFilesResponse,
   CancelJobResponse,
+  CapabilityOptionsResponse,
   DiagnosticPreview,
   GateAnswerRequest,
   HealthResponse,
@@ -29,6 +30,7 @@ import type {
   SubmitJobResponse,
   ToolUsageReport,
   TrashJobResponse,
+  UpdateAppResponse,
   ValidateAttachmentsResponse,
 } from "@brainstorm-agentic/protocol";
 
@@ -136,14 +138,25 @@ export const getJobs = async (): Promise<readonly JobSummary[]> => {
 export const submitJob = (
   topic: string,
   attachments: readonly string[] = [],
+  capabilityOverrides: Readonly<Record<string, boolean>> = {},
 ): Promise<SubmitJobResponse> =>
   request(
     "/jobs",
     jsonInit("POST", {
       topic,
       ...(attachments.length > 0 ? { attachments } : {}),
+      ...(Object.keys(capabilityOverrides).length > 0
+        ? { capabilityOverrides }
+        : {}),
     } satisfies SubmitJobRequest),
   );
+
+export const getCapabilityOptions = (): Promise<CapabilityOptionsResponse> =>
+  request("/capabilities");
+
+/** Starts the one-click self-update; the server exits right after answering. */
+export const postUpdateApp = (): Promise<UpdateAppResponse> =>
+  request("/update", jsonInit("POST", {}));
 
 export const getAttachmentRoots = (): Promise<ServerAttachmentRootsResponse> =>
   request("/attachments/roots");

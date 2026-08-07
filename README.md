@@ -57,6 +57,19 @@ npm run launch
 The host defaults to `127.0.0.1:8787` and `~/.brainstorm-agentic`. Use
 `--attachment-roots`, `--workspace`, `--ip`, and `--port` to override deployment settings.
 
+## Updates
+
+Users never run git or npm again after installing. Releases are annotated
+`app/v<semver>` tags; the running server checks for them half-hourly and the
+webapp surfaces a lower-left "Update now" card (also shown at launch). One
+click hands the server to a detached updater that checks out the release,
+reinstalls, rebuilds, and relaunches on the same port — the browser tab
+reloads itself into the new version, and active runs (detached worker
+processes over workspace files) keep going and are adopted by the new server.
+A failed update rolls back to the previous checkout and relaunches it; every
+step is logged under `<workspace>/self-update/`. Skills-bundle updates need no
+action at all: new runs resolve the latest published bundle automatically.
+
 ### Developer-only registry overrides
 
 The registry endpoint is deliberately NOT a user setting (the webapp shows it read-only and the

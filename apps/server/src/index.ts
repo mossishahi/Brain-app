@@ -57,3 +57,12 @@ export type {
   JobRecord,
   ContentRegistryRuntimeStatus,
 } from "./model.js";
+export {
+  applyAppUpdate,
+  buildUpdaterScript,
+  checkAppUpdate,
+  type AppUpdate,
+  type ApplyAppUpdateOptions,
+  type RelaunchCommand,
+  type StartedAppUpdate,
+} from "./self-update.js";

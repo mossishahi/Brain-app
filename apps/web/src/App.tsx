@@ -5,6 +5,7 @@ import { Dashboard } from "./components/Dashboard";
 import { Landing } from "./components/Landing";
 import { SettingsDrawer } from "./components/SettingsDrawer";
 import { TrashView } from "./components/TrashView";
+import { UpdateToast } from "./components/UpdateToast";
 import { GearIcon, MoonIcon, SunIcon } from "./components/Icons";
 
 type Route =
@@ -103,6 +104,7 @@ export function App() {
           )}
         </div>
         {settingsOpen && <SettingsDrawer onClose={() => setSettingsOpen(false)} />}
+        <UpdateToast />
       </div>
     </ConfigProvider>
   );

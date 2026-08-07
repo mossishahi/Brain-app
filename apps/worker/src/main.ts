@@ -114,6 +114,13 @@ async function prepareRunCodeEnvironment(
   offline: boolean,
 ): Promise<CodeRuntimeEnvironment | undefined> {
   if (offline) return undefined;
+  const disabledCapabilities = new Set(
+    (process.env.BRAINSTORM_AGENTIC_DISABLED_CAPABILITIES ?? "")
+      .split(",")
+      .map((id) => id.trim())
+      .filter(Boolean),
+  );
+  if (disabledCapabilities.has("code-execution")) return undefined;
   const enabled = new Set(
     (process.env.BRAINSTORM_AGENTIC_HOST_TOOLS ?? "").split(",").filter(Boolean),
   );

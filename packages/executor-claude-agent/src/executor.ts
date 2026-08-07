@@ -6,8 +6,8 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { createHash } from "node:crypto";
-import { mkdirSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { lstatSync, mkdirSync, rmSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 
 import {
@@ -37,6 +37,11 @@ import {
   resolveCreditReset,
   type CreditResetResolution,
 } from "@brainstorm-agentic/credit-recovery";
+import {
+  attachmentTools,
+  ATTACHMENT_LIST_MANIFEST,
+  ATTACHMENT_SEARCH_MANIFEST,
+} from "@brainstorm-agentic/host-tools";
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -303,12 +308,29 @@ function taxonomySdkToolNames(): readonly string[] {
   ];
 }
 
-/** True when the task's skill declared the taxonomy-access capability. */
-function taskUsesTaxonomy(task: AgentTask): boolean {
+/**
+ * True when the task may use the capability: the broker plan is the
+ * authority when present (a per-run disable resolves every operation
+ * "unavailable", so plan-aware gating removes the backing tools too);
+ * tasks without a plan fall back to the declared capability list.
+ */
+function taskUsesCapability(task: AgentTask, capabilityId: string): boolean {
+  if (task.capabilityPlan) {
+    return task.capabilityPlan.operations.some(
+      (operation) =>
+        operation.capabilityId === capabilityId &&
+        operation.source !== "unavailable",
+    );
+  }
   return (
     Array.isArray(task.allowedCapabilities) &&
-    task.allowedCapabilities.includes("taxonomy-access")
+    task.allowedCapabilities.includes(capabilityId)
   );
+}
+
+/** True when the task's skill declared the taxonomy-access capability. */
+function taskUsesTaxonomy(task: AgentTask): boolean {
+  return taskUsesCapability(task, "taxonomy-access");
 }
 
 /**
@@ -386,6 +408,100 @@ function taxonomyServer(
             return errorResult(error);
           }
         },
+      ),
+    ],
+  });
+}
+
+/** In-process MCP server name carrying the deterministic attachment tools. */
+const ATTACHMENTS_SERVER = "attachments";
+
+/** Full Claude Code tool names for the in-process attachments MCP server. */
+function attachmentsSdkToolNames(): readonly string[] {
+  return [
+    `mcp__${ATTACHMENTS_SERVER}__attachment_list`,
+    `mcp__${ATTACHMENTS_SERVER}__attachment_search`,
+  ];
+}
+
+/**
+ * In-process MCP server exposing the deterministic attachment tools over the
+ * job's ingested roots: `attachment_list` (inventory, flat or tree) and
+ * `attachment_search` (one-call grep across every text attachment). Reading
+ * file CONTENT stays on Claude Code's built-in Read — it natively renders
+ * PDFs and images, which this transport cannot — but enumerating and locating
+ * are deterministic host work, so they run here instead of burning model
+ * turns on shell loops.
+ */
+function attachmentsServer(
+  roots: readonly string[],
+): ReturnType<typeof createSdkMcpServer> {
+  const tools = new Map(
+    attachmentTools(roots).map((tool) => [tool.definition.name, tool]),
+  );
+  const call = async (name: string, args: unknown) => {
+    const tool = tools.get(name);
+    if (!tool) {
+      return {
+        content: [
+          { type: "text" as const, text: `tool "${name}" is not available` },
+        ],
+        isError: true as const,
+      };
+    }
+    try {
+      const result = await tool.execute(args as JsonValue, {
+        runId: "claude-agent-sdk",
+      });
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text:
+              typeof result.output === "string"
+                ? result.output
+                : JSON.stringify(result.output),
+          },
+        ],
+        ...(result.isError === true ? { isError: true as const } : {}),
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: error instanceof Error ? error.message : String(error),
+          },
+        ],
+        isError: true as const,
+      };
+    }
+  };
+  return createSdkMcpServer({
+    name: ATTACHMENTS_SERVER,
+    version: "1.0.0",
+    tools: [
+      sdkTool(
+        "attachment_list",
+        ATTACHMENT_LIST_MANIFEST.definition.description ?? "",
+        {
+          prefix: z.string().optional(),
+          shape: z.enum(["flat", "tree"]).optional(),
+        },
+        async (args) => call("attachment_list", args),
+      ),
+      sdkTool(
+        "attachment_search",
+        ATTACHMENT_SEARCH_MANIFEST.definition.description ?? "",
+        {
+          query: z.string().min(1),
+          regex: z.boolean().optional(),
+          caseSensitive: z.boolean().optional(),
+          prefix: z.string().optional(),
+          filesOnly: z.boolean().optional(),
+          maxResults: z.number().int().min(1).max(500).optional(),
+        },
+        async (args) => call("attachment_search", args),
       ),
     ],
   });
@@ -617,6 +733,14 @@ function toolMessage(name: string, input: unknown): string {
     }
     case "Bash":
       return "Running a verification command";
+    case `mcp__${ATTACHMENTS_SERVER}__attachment_list`:
+      return "Listing the attachment inventory";
+    case `mcp__${ATTACHMENTS_SERVER}__attachment_search`: {
+      const query = shortText(args.query);
+      return query
+        ? `Searching the attachments — ${query}`
+        : "Searching the attachments";
+    }
     case STRUCTURED_OUTPUT_TOOL:
       return "Submitting the structured output";
     default:
@@ -631,6 +755,8 @@ const TOOL_END_LABELS: Readonly<Record<string, string>> = {
   Glob: "File discovery",
   Grep: "File search",
   Bash: "Verification command",
+  [`mcp__${ATTACHMENTS_SERVER}__attachment_list`]: "Attachment inventory",
+  [`mcp__${ATTACHMENTS_SERVER}__attachment_search`]: "Attachment search",
   [STRUCTURED_OUTPUT_TOOL]: "Structured output",
 };
 
@@ -1014,9 +1140,68 @@ function insideDirectory(root: string, candidate: string): boolean {
 }
 
 /**
- * Claude Code's native file tools are provider-specific and powerful. Scope
- * them to the disposable task workspace plus server-ingested attachment roots
- * so an attachment-aware role cannot read arbitrary host files.
+ * Absolute prefixes shell commands may always touch: interpreters, system
+ * libraries, and scratch space. Everything else outside the run's own roots
+ * is user territory the task has no business in.
+ */
+const SHELL_SYSTEM_PREFIXES = [
+  "/usr/",
+  "/bin/",
+  "/sbin/",
+  "/lib/",
+  "/lib64/",
+  "/opt/",
+  "/dev/",
+  "/tmp/",
+  "/private/tmp/",
+  "/var/folders/",
+  "/private/var/folders/",
+  "/System/",
+  "/Library/",
+  "/Applications/",
+  "/nix/",
+  "/snap/",
+] as const;
+
+/**
+ * Path-like tokens of a shell command: absolute paths, `~`/`$HOME`
+ * expansions, all normalized (so `..` hops resolve before scoping). The
+ * boundary class keeps URLs (`https://…` — double slash) and mid-word
+ * slashes (`s/a/b/`, `$1/2`) out; regex literals like `'/ERROR/'` may still
+ * match, which is why callers only act on tokens that EXIST on disk — a
+ * nonexistent path cannot leak anything.
+ */
+function shellPathCandidates(
+  command: string,
+  taskRoot: string,
+): readonly string[] {
+  const out: string[] = [];
+  const pattern =
+    /(?:^|[\s"'`=(:;,|&<>])((?:~|\$HOME|\$\{HOME\})?\/(?!\/)[^\s"'`;:,|&<>)]*|\.\.\/[^\s"'`;:,|&<>)]*)/g;
+  for (const match of command.matchAll(pattern)) {
+    let token = match[1]!;
+    if (token.startsWith("~")) token = homedir() + token.slice(1);
+    else if (token.startsWith("${HOME}")) token = homedir() + token.slice(7);
+    else if (token.startsWith("$HOME")) token = homedir() + token.slice(5);
+    // `../…` hops resolve against the task workspace (the shell's cwd).
+    out.push(isAbsolute(token) ? resolve(token) : resolve(taskRoot, token));
+  }
+  return out;
+}
+
+/**
+ * Claude Code's native tools are provider-specific and powerful. Scope them
+ * to the disposable task workspace plus server-ingested attachment roots so
+ * an attachment-aware role cannot read arbitrary host files:
+ *
+ * - Read/Glob/Grep: the supplied path must sit inside the roots.
+ * - Bash: no existing file or directory outside the roots (plus system
+ *   prefixes for interpreters and scratch space) may appear in the command —
+ *   the `for f in …; do sed …` shell-loop that bypassed both the scope and
+ *   the attachment access ledger. Text-level checks cannot bind a determined
+ *   adversary, but they keep an honest model on the audited Read /
+ *   attachment_search path, and the deny message tells it exactly where to
+ *   go instead.
  */
 function fileAccessHooks(
   config: ClaudeAgentExecutorConfig,
@@ -1026,7 +1211,14 @@ function fileAccessHooks(
     taskRoot,
     ...(config.attachmentRoots ?? []).map((root) => resolve(root)),
   ];
-  const hook = async (input: unknown): Promise<UnknownRecord> => {
+  const deny = (reason: string): UnknownRecord => ({
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: "deny",
+      permissionDecisionReason: reason,
+    },
+  });
+  const readHook = async (input: unknown): Promise<UnknownRecord> => {
     const event = record(input);
     if (event.hook_event_name !== "PreToolUse") return { continue: true };
     if (
@@ -1051,20 +1243,51 @@ function fileAccessHooks(
     if (roots.some((root) => insideDirectory(root, candidate))) {
       return { continue: true };
     }
-    return {
-      hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: "deny",
-        permissionDecisionReason:
-          "File access is limited to this run's ingested attachments.",
-      },
-    };
+    return deny("File access is limited to this run's ingested attachments.");
+  };
+  const shellHook = async (input: unknown): Promise<UnknownRecord> => {
+    const event = record(input);
+    if (event.hook_event_name !== "PreToolUse") return { continue: true };
+    if (event.tool_name !== "Bash") return { continue: true };
+    const toolInput = record(event.tool_input);
+    const command =
+      typeof toolInput.command === "string" ? toolInput.command : "";
+    for (const candidate of shellPathCandidates(command, taskRoot)) {
+      if (roots.some((root) => insideDirectory(root, candidate))) continue;
+      if (
+        SHELL_SYSTEM_PREFIXES.some(
+          (prefix) =>
+            candidate.startsWith(prefix) || candidate === prefix.slice(0, -1),
+        )
+      ) {
+        continue;
+      }
+      let exists = false;
+      try {
+        lstatSync(candidate);
+        exists = true;
+      } catch {
+        // Nonexistent paths (including regex literals that merely look like
+        // paths) cannot leak anything; let the command run.
+      }
+      if (!exists) continue;
+      return deny(
+        `Shell commands may only touch this run's task workspace and ingested attachments; "${candidate}" is outside them. ` +
+          "Read attached files with the Read tool, locate content across attachments with the attachment_search tool, " +
+          "list them with attachment_list, and run scripts from the workspace using relative paths and PATH-resolved interpreters.",
+      );
+    }
+    return { continue: true };
   };
   return {
     PreToolUse: [
       {
         matcher: "Read|Glob|Grep",
-        hooks: [hook],
+        hooks: [readHook],
+      },
+      {
+        matcher: "Bash",
+        hooks: [shellHook],
       },
     ],
   };
@@ -1080,12 +1303,16 @@ function queryOptions(
   const builtinTools = allowedTools(task);
   const wantsTaxonomy =
     config.taxonomy !== undefined && taskUsesTaxonomy(task);
+  const wantsAttachments =
+    (config.attachmentRoots?.length ?? 0) > 0 &&
+    taskUsesCapability(task, "attachment-access");
   const tools = [
     ...builtinTools,
     ...(capture.stepwise !== undefined
       ? [stepwiseSdkToolName(capture.stepwise.spec)]
       : []),
     ...(wantsTaxonomy ? taxonomySdkToolNames() : []),
+    ...(wantsAttachments ? attachmentsSdkToolNames() : []),
   ];
   const disallowedTools = KNOWN_BUILTIN_TOOLS.filter(
     (name) => !tools.includes(name),
@@ -1124,6 +1351,9 @@ function queryOptions(
       : {}),
     ...(wantsTaxonomy
       ? { [TAXONOMY_SERVER]: taxonomyServer(config.taxonomy!) }
+      : {}),
+    ...(wantsAttachments
+      ? { [ATTACHMENTS_SERVER]: attachmentsServer(config.attachmentRoots!) }
       : {}),
   };
   if (Object.keys(mcpServers).length > 0) {
@@ -1192,6 +1422,9 @@ async function executeQuery(
     let finalResult: UnknownRecord | undefined;
     const progressState = newProgressState(config);
     let messageCount = 0;
+    const wantsAttachments =
+      (config.attachmentRoots?.length ?? 0) > 0 &&
+      taskUsesCapability(task, "attachment-access");
     for await (const message of queryFn({
       prompt: [
         messagePrompt(task.modelRequest.messages),
@@ -1200,6 +1433,17 @@ async function executeQuery(
               "",
               "Your structured output submission is FINAL and recorded verbatim as your answer.",
               'Never submit placeholder, trial, or test values (such as "test" or "ok") to probe the output tool.',
+            ]
+          : []),
+        ...(wantsAttachments
+          ? [
+              "",
+              "Enumerating and locating attachment content is deterministic host work: use the " +
+                "attachment_list tool for the inventory and the attachment_search tool to find " +
+                "where something is mentioned across every attached file in one call. Do not " +
+                "re-derive these with shell loops (`for f in ...; do cat/sed ...`) or by reading " +
+                "files one by one to look for a term — read a file's content only once you know " +
+                "you need that file, and reserve script execution for actual computation.",
             ]
           : []),
         ...(validationIssues.length > 0

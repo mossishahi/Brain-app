@@ -547,15 +547,110 @@ input[type="radio"] {
   color: var(--bad);
 }
 
-.update-notices {
+/*
+ * Update surface: a card stack pinned to the lower-left corner (visible on
+ * every view), and a full-page overlay while the self-update restarts the
+ * server and this tab waits to reload itself.
+ */
+.update-toast-stack {
+  position: fixed;
+  left: 16px;
+  bottom: 16px;
+  z-index: 120;
   display: flex;
   flex-direction: column;
   gap: 8px;
-  margin-bottom: 12px;
+  max-width: min(360px, calc(100vw - 32px));
 }
 
-.update-notices .banner {
+.update-toast {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+  padding: 12px 14px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.update-toast strong {
+  color: var(--text);
+  display: block;
+  margin-bottom: 4px;
+}
+
+.update-toast p {
+  margin: 0 0 8px;
+}
+
+.update-toast code {
+  word-break: break-all;
+}
+
+.update-toast-actionable {
+  border-color: var(--accent);
+}
+
+.update-toast-error {
+  border-color: var(--bad);
+}
+
+.update-toast-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.update-toast .btn-primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+.update-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--surface) 72%, transparent);
+  backdrop-filter: blur(2px);
+}
+
+.update-overlay-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.25);
+  padding: 24px 28px;
+  max-width: 420px;
+  text-align: center;
+}
+
+.update-overlay-card h3 {
+  margin: 10px 0 6px;
+}
+
+.update-overlay-card p {
   margin: 0;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.update-spinner {
+  display: inline-block;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  animation: update-spin 0.9s linear infinite;
+}
+
+@keyframes update-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .credit-banner,

@@ -27,6 +27,13 @@ export interface BrokerInput {
   readonly hostTools: readonly HostToolManifest[];
   /** User-enabled host tool ids (from settings). */
   readonly enabledHostToolIds: ReadonlySet<string>;
+  /**
+   * Capability ids the user disabled for THIS run. A disabled capability
+   * resolves every operation to "unavailable" regardless of provider offers
+   * or enabled host tools, and its unavailable-instruction says so — the
+   * agent must not claim the ability was missing, only switched off.
+   */
+  readonly disabledCapabilityIds?: ReadonlySet<string>;
 }
 
 // ---------------------------------------------------------------------------
@@ -50,6 +57,26 @@ export function resolveCapabilityPlan(input: BrokerInput): ResolvedCapabilityPla
 
   for (const capability of input.requiredCapabilities) {
     const capUnavailableOps: string[] = [];
+    const disabled =
+      input.disabledCapabilityIds?.has(capability.capabilityId) === true;
+
+    // A user-disabled capability short-circuits resolution entirely: no
+    // provider native, no host tool, and an instruction that names the
+    // disable so the agent reports it honestly instead of guessing.
+    if (disabled) {
+      for (const opId of capability.operations) {
+        operations.push({
+          operationId: opId,
+          source: "unavailable",
+          toolNames: [],
+          capabilityId: capability.capabilityId,
+        });
+      }
+      unavailableInstructions.push(
+        `[${capability.capabilityId}] The user disabled this capability for this run. ${capability.whenUnavailable}`,
+      );
+      continue;
+    }
 
     for (const opId of capability.operations) {
       // 1. Check provider offers

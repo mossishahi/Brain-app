@@ -250,6 +250,174 @@ test("scopes Claude Code file tools to ingested attachment roots", async () => {
   }
 });
 
+test("Bash commands are scoped: reads outside the roots are denied, workspace/system/attachment use passes", async () => {
+  const captured: ClaudeAgentQueryInput[] = [];
+  const root = mkdtempSync(join(tmpdir(), "claude-agent-attachments-"));
+  try {
+    writeFileSync(join(root, "data.csv"), "a,b\n1,2\n");
+    await new ClaudeAgentExecutor({
+      token: "setup-token-secret",
+      attachmentRoots: [root],
+      queryFn: successQuery(captured),
+    }).execute(structuredTask, {
+      runId: "run-shell-scope",
+      nodePath: "root/brain",
+    });
+    const hooks = captured[0]!.options.hooks as {
+      PreToolUse: Array<{
+        matcher: string;
+        hooks: Array<(input: unknown) => Promise<Record<string, unknown>>>;
+      }>;
+    };
+    const shellEntry = hooks.PreToolUse.find(
+      (entry) => entry.matcher === "Bash",
+    );
+    assert.ok(shellEntry, "a Bash PreToolUse hook is installed");
+    const guard = shellEntry.hooks[0]!;
+    const run = (command: string) =>
+      guard({
+        hook_event_name: "PreToolUse",
+        tool_name: "Bash",
+        tool_input: { command },
+      });
+    const denied = (result: Record<string, unknown>): boolean =>
+      (
+        result.hookSpecificOutput as { permissionDecision?: string } | undefined
+      )?.permissionDecision === "deny";
+
+    // The exact shell-loop pattern that bypassed the scope and the ledger.
+    assert.ok(
+      denied(
+        await run(
+          `for f in main.py data/__init__.py; do sed -n '1,15p' "/etc/$f"; done`,
+        ),
+      ) === false,
+      "nonexistent /etc/main.py paths pass (nothing to leak)",
+    );
+    assert.ok(
+      denied(await run("cat /etc/passwd")),
+      "reading an existing file outside the roots is denied",
+    );
+    assert.ok(
+      denied(await run("ls ~/")),
+      "the home directory is outside the roots",
+    );
+    assert.ok(
+      denied(await run('sed -n "1,5p" "$HOME/.ssh/config" || ls $HOME')),
+      "$HOME expansions are scoped",
+    );
+
+    // Legitimate code-execution stays untouched.
+    assert.ok(!denied(await run("python3 analysis.py")), "relative script run");
+    assert.ok(
+      !denied(await run(`head -5 "${join(root, "data.csv")}"`)),
+      "attachment reads pass",
+    );
+    assert.ok(
+      !denied(await run("/usr/bin/env python3 -c 'print(1)' > out.txt 2>/dev/null")),
+      "system interpreters and /dev pass",
+    );
+    assert.ok(
+      !denied(await run("awk '/ERROR/ {print}' local.log")),
+      "regex literals that merely look like paths pass",
+    );
+    assert.ok(
+      !denied(await run("curl -s https://example.com/data.json")),
+      "URLs are not treated as paths",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("attachment-capable tasks get the deterministic attachment MCP tools", async () => {
+  const captured: ClaudeAgentQueryInput[] = [];
+  const root = mkdtempSync(join(tmpdir(), "claude-agent-attachments-"));
+  try {
+    await new ClaudeAgentExecutor({
+      token: "setup-token-secret",
+      attachmentRoots: [root],
+      queryFn: successQuery(captured),
+    }).execute(structuredTask, {
+      runId: "run-attachment-mcp",
+      nodePath: "root/brain",
+    });
+    const options = captured[0]!.options;
+    const tools = options.tools as string[];
+    assert.ok(tools.includes("mcp__attachments__attachment_list"));
+    assert.ok(tools.includes("mcp__attachments__attachment_search"));
+    const servers = options.mcpServers as Record<string, unknown>;
+    assert.ok(servers.attachments, "the attachments MCP server is mounted");
+    // The prompt steers deterministic listing/search away from shell loops.
+    assert.ok(captured[0]!.prompt.includes("attachment_search"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a per-run-disabled attachment capability removes builtin and MCP attachment tools", async () => {
+  const captured: ClaudeAgentQueryInput[] = [];
+  const root = mkdtempSync(join(tmpdir(), "claude-agent-attachments-"));
+  try {
+    const disabledTask: AgentTask = {
+      ...structuredTask,
+      capabilityPlan: {
+        operations: [
+          {
+            operationId: "attachment.list",
+            source: "unavailable",
+            toolNames: [],
+            capabilityId: "attachment-access",
+          },
+          {
+            operationId: "attachment.read",
+            source: "unavailable",
+            toolNames: [],
+            capabilityId: "attachment-access",
+          },
+          {
+            operationId: "attachment.search",
+            source: "unavailable",
+            toolNames: [],
+            capabilityId: "attachment-access",
+          },
+          {
+            operationId: "web.search",
+            source: "provider",
+            toolNames: ["WebSearch"],
+            capabilityId: "web-search",
+          },
+        ],
+        hostToolDefinitions: [],
+        providerNativeKeys: ["WebSearch"],
+        unavailableInstructions:
+          "## Unavailable capabilities\n\n[attachment-access] disabled",
+      },
+    };
+    await new ClaudeAgentExecutor({
+      token: "setup-token-secret",
+      attachmentRoots: [root],
+      queryFn: successQuery(captured),
+    }).execute(disabledTask, {
+      runId: "run-attachment-disabled",
+      nodePath: "root/brain",
+    });
+    const options = captured[0]!.options;
+    const tools = options.tools as string[];
+    assert.ok(!tools.includes("Read"));
+    assert.ok(!tools.includes("Glob"));
+    assert.ok(!tools.includes("Grep"));
+    assert.ok(!tools.includes("mcp__attachments__attachment_list"));
+    assert.ok(!tools.includes("mcp__attachments__attachment_search"));
+    assert.ok(tools.includes("WebSearch"));
+    const servers = options.mcpServers as Record<string, unknown> | undefined;
+    assert.ok(!servers || servers.attachments === undefined);
+    assert.ok(!captured[0]!.prompt.includes("attachment_search"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("reports granular tool/status progress without exposing assistant text", async () => {
   const reported: Array<{ kind: string; message: string }> = [];
   const executor = new ClaudeAgentExecutor({

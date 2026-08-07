@@ -669,13 +669,13 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                   checked={enabledHostTools.includes("attachment_list") && enabledHostTools.includes("attachment_read")}
                   onChange={(e) => {
                     if (e.target.checked) {
-                      setEnabledHostTools((prev) => [...new Set([...prev, "attachment_list", "attachment_read"])]);
+                      setEnabledHostTools((prev) => [...new Set([...prev, "attachment_list", "attachment_read", "attachment_search"])]);
                     } else {
-                      setEnabledHostTools((prev) => prev.filter((id) => id !== "attachment_list" && id !== "attachment_read"));
+                      setEnabledHostTools((prev) => prev.filter((id) => id !== "attachment_list" && id !== "attachment_read" && id !== "attachment_search"));
                     }
                   }}
                 />
-                Attachment access (read submission files)
+                Attachment access (list, read, and search submission files)
               </label>
               <label className="radio-row">
                 <input

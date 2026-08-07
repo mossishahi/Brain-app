@@ -1,7 +1,6 @@
 /** View 1 — prompt entry plus live job cards. */
 import { useCallback, useEffect, useState } from "react";
 import type {
-  HealthResponse,
   JobSummary,
   ReadinessCheckId,
   ReadinessReport,
@@ -14,7 +13,6 @@ import {
   diagnoseReadiness,
   blockedReadiness,
   errorMessage,
-  getHealth,
   getJobs,
   getReadiness,
   getSettings,
@@ -180,114 +178,8 @@ function JobCard({ job }: { readonly job: JobSummary }) {
   );
 }
 
-/** Last bundle version this browser has acknowledged as "seen". */
-const BUNDLE_ACK_KEY = "brain-acked-bundle-version";
-
-function ackedBundleVersion(): string | null {
-  try {
-    return localStorage.getItem(BUNDLE_ACK_KEY);
-  } catch {
-    return null;
-  }
-}
-
-function ackBundleVersion(version: string): void {
-  try {
-    localStorage.setItem(BUNDLE_ACK_KEY, version);
-  } catch {
-    // Storage unavailable; the notice simply reappears next visit.
-  }
-}
-
-/**
- * Pull-based update notices: a newly published skills bundle (new runs pick
- * it up automatically — the notice only informs), a newer bundle while a
- * deployment pin holds runs behind it, and a newer app release tag. Nothing
- * here changes behavior; skill updates need no user action at all.
- */
-function UpdateNotices() {
-  const [health, setHealth] = useState<HealthResponse | null>(null);
-  const [ackedVersion, setAckedVersion] = useState<string | null>(ackedBundleVersion);
-
-  useEffect(() => {
-    let live = true;
-    const poll = () => {
-      getHealth()
-        .then((response) => {
-          if (live) setHealth(response);
-        })
-        .catch(() => undefined);
-    };
-    poll();
-    const timer = window.setInterval(poll, 5 * 60_000);
-    return () => {
-      live = false;
-      window.clearInterval(timer);
-    };
-  }, []);
-
-  // First visit establishes the baseline silently: "updated" only means
-  // "newer than what this browser saw before", never "newer than nothing".
-  useEffect(() => {
-    const latest = health?.contentRegistry.latest;
-    if (latest && ackedVersion === null) {
-      ackBundleVersion(latest);
-      setAckedVersion(latest);
-    }
-  }, [health, ackedVersion]);
-
-  if (!health) return null;
-  const registry = health.contentRegistry;
-  const bundleBehind =
-    registry.latest !== undefined &&
-    registry.pinnedVersion !== undefined &&
-    registry.latest !== registry.pinnedVersion;
-  const skillsUpdated =
-    registry.latest !== undefined &&
-    registry.pinnedVersion === undefined &&
-    ackedVersion !== null &&
-    registry.latest !== ackedVersion;
-  if (!bundleBehind && !skillsUpdated && !health.appUpdate) return null;
-  return (
-    <div className="update-notices">
-      {skillsUpdated && (
-        <div className="banner banner-actionable">
-          <span>
-            Brain skills updated: <strong>{registry.bundle ?? "brainstorm"} v{registry.latest}</strong>
-            {registry.latestNotes ? <> — {registry.latestNotes}</> : null}. New
-            pipelines use it automatically; nothing to do.
-          </span>
-          <button
-            type="button"
-            className="btn btn-small"
-            onClick={() => {
-              ackBundleVersion(registry.latest!);
-              setAckedVersion(registry.latest!);
-            }}
-          >
-            Got it
-          </button>
-        </div>
-      )}
-      {bundleBehind && (
-        <div className="banner">
-          Bundle <strong>{registry.latest}</strong> is published — runs are
-          pinned to {registry.pinnedVersion} by the deployment.
-          {registry.latestNotes ? <> {registry.latestNotes}</> : null}
-        </div>
-      )}
-      {health.appUpdate && (
-        <div className="banner">
-          App <strong>{health.appUpdate.version}</strong> is available
-          (running {health.version}).
-          {health.appUpdate.notes ? <> {health.appUpdate.notes}</> : null}{" "}
-          Update with <code>git pull</code>, rebuild, and restart — active
-          runs resume from their checkpoints.
-        </div>
-      )}
-    </div>
-  );
-}
+// Update notices (app releases, skills bundles) live in <UpdateToast/>,
+// mounted by the app shell so they surface on every view, not just here.
 
 export function Landing({
   onOpenSettings,
@@ -358,10 +250,11 @@ export function Landing({
   const submit = async (
     topic: string,
     attachmentPaths: readonly string[],
+    capabilityOverrides: Readonly<Record<string, boolean>>,
   ): Promise<void> => {
     setSubmitError(null);
     try {
-      await submitJob(topic, attachmentPaths);
+      await submitJob(topic, attachmentPaths, capabilityOverrides);
       setJobs(await getJobs());
     } catch (error) {
       // A readiness 409 is handled by the submission box's waiting card, not as
@@ -388,7 +281,6 @@ export function Landing({
   return (
     <main className="landing">
       <div className="landing-column">
-        <UpdateNotices />
         <SubmissionBox
           onSubmit={submit}
           onOpenSettings={onOpenSettings}

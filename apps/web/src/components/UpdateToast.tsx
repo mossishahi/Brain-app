@@ -1,0 +1,294 @@
+/**
+ * The app's one update surface, mounted once in the shell so it is visible on
+ * every view (landing, dashboard, trash) — a stack of cards in the lower-left
+ * corner:
+ *
+ * - a newer APP release: actionable. "Update now" hands the server to its
+ *   detached updater (POST /api/update); this component then covers the page,
+ *   polls /api/health through the restart, and reloads the SAME tab the
+ *   moment a server with the new version answers. No git, no npm, no manual
+ *   restart. "Later" snoozes for this page load only, so the prompt greets
+ *   the next launch again.
+ * - a newer SKILLS bundle: informational. New runs pick it up automatically;
+ *   "Got it" acknowledges the version so the card stays quiet until the next
+ *   release.
+ * - a newer bundle behind a deployment pin: informational (developers pin).
+ *
+ * Update checks are pull-based on the server (git release tags, half-hourly;
+ * registry index, per health request); this component only polls /api/health.
+ */
+import { useEffect, useRef, useState } from "react";
+import type { HealthResponse } from "@brainstorm-agentic/protocol";
+import { errorMessage, getHealth, postUpdateApp } from "../api";
+
+/** Last bundle version this browser has acknowledged as "seen". */
+const BUNDLE_ACK_KEY = "brain-acked-bundle-version";
+
+function ackedBundleVersion(): string | null {
+  try {
+    return localStorage.getItem(BUNDLE_ACK_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function ackBundleVersion(version: string): void {
+  try {
+    localStorage.setItem(BUNDLE_ACK_KEY, version);
+  } catch {
+    // Storage unavailable; the notice simply reappears next visit.
+  }
+}
+
+type UpdatePhase =
+  | { readonly kind: "idle" }
+  | {
+      readonly kind: "updating";
+      readonly from: string;
+      readonly to: string;
+      readonly logFile?: string;
+    }
+  | {
+      readonly kind: "failed";
+      readonly to: string;
+      readonly message: string;
+      readonly logFile?: string;
+    };
+
+/** How long the restart may take before the overlay reports failure. */
+const UPDATE_DEADLINE_MS = 6 * 60_000;
+
+export function UpdateToast() {
+  const [health, setHealth] = useState<HealthResponse | null>(null);
+  const [ackedVersion, setAckedVersion] = useState<string | null>(
+    ackedBundleVersion,
+  );
+  const [phase, setPhase] = useState<UpdatePhase>({ kind: "idle" });
+  /** "Later" pressed for this app version — this page load only. */
+  const [snoozedAppVersion, setSnoozedAppVersion] = useState<string | null>(
+    null,
+  );
+  const phaseRef = useRef(phase);
+  phaseRef.current = phase;
+
+  useEffect(() => {
+    let live = true;
+    const poll = () => {
+      if (phaseRef.current.kind === "updating") return;
+      getHealth()
+        .then((response) => {
+          if (live) setHealth(response);
+        })
+        .catch(() => undefined);
+    };
+    poll();
+    const timer = window.setInterval(poll, 60_000);
+    return () => {
+      live = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  // First visit establishes the baseline silently: "updated" only means
+  // "newer than what this browser saw before", never "newer than nothing".
+  useEffect(() => {
+    const latest = health?.contentRegistry.latest;
+    if (latest && ackedVersion === null) {
+      ackBundleVersion(latest);
+      setAckedVersion(latest);
+    }
+  }, [health, ackedVersion]);
+
+  // Through the restart: poll fast; a server answering with a DIFFERENT
+  // version means the update landed — reload this tab into it. The old
+  // version answering after a observed downtime means the updater rolled
+  // back; surface that with the log location instead of reloading.
+  useEffect(() => {
+    if (phase.kind !== "updating") return;
+    const startedAt = Date.now();
+    let sawDown = false;
+    const timer = window.setInterval(() => {
+      getHealth()
+        .then((response) => {
+          if (response.version !== phase.from) {
+            window.location.reload();
+            return;
+          }
+          if (sawDown) {
+            setPhase({
+              kind: "failed",
+              to: phase.to,
+              message:
+                "the server came back on the previous version — the updater rolled back",
+              ...(phase.logFile ? { logFile: phase.logFile } : {}),
+            });
+            return;
+          }
+          if (Date.now() - startedAt > UPDATE_DEADLINE_MS) {
+            setPhase({
+              kind: "failed",
+              to: phase.to,
+              message: "the server never restarted into the new version",
+              ...(phase.logFile ? { logFile: phase.logFile } : {}),
+            });
+          }
+        })
+        .catch(() => {
+          sawDown = true;
+          if (Date.now() - startedAt > UPDATE_DEADLINE_MS) {
+            setPhase({
+              kind: "failed",
+              to: phase.to,
+              message: "the server did not come back",
+              ...(phase.logFile ? { logFile: phase.logFile } : {}),
+            });
+          }
+        });
+    }, 2_000);
+    return () => window.clearInterval(timer);
+  }, [phase]);
+
+  const startUpdate = async (): Promise<void> => {
+    if (!health?.appUpdate) return;
+    const from = health.version;
+    const to = health.appUpdate.version;
+    try {
+      const response = await postUpdateApp();
+      setPhase({ kind: "updating", from, to, logFile: response.logFile });
+    } catch (error) {
+      setPhase({ kind: "failed", to, message: errorMessage(error) });
+    }
+  };
+
+  if (phase.kind === "updating") {
+    return (
+      <div className="update-overlay" role="alert" aria-busy="true">
+        <div className="update-overlay-card">
+          <span className="update-spinner" aria-hidden="true" />
+          <h3>Updating to v{phase.to}…</h3>
+          <p>
+            The app is reinstalling and restarting itself; this tab reloads
+            automatically when it is back. Active runs keep going and are
+            adopted by the new server.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  const registry = health?.contentRegistry;
+  const bundleBehind =
+    registry !== undefined &&
+    registry.latest !== undefined &&
+    registry.pinnedVersion !== undefined &&
+    registry.latest !== registry.pinnedVersion;
+  const skillsUpdated =
+    registry !== undefined &&
+    registry.latest !== undefined &&
+    registry.pinnedVersion === undefined &&
+    ackedVersion !== null &&
+    registry.latest !== ackedVersion;
+  const appUpdate =
+    health?.appUpdate !== undefined &&
+    health.appUpdate.version !== snoozedAppVersion
+      ? health.appUpdate
+      : undefined;
+
+  if (
+    phase.kind === "idle" &&
+    !appUpdate &&
+    !skillsUpdated &&
+    !bundleBehind
+  ) {
+    return null;
+  }
+
+  return (
+    <div className="update-toast-stack" role="status">
+      {phase.kind === "failed" && (
+        <div className="update-toast update-toast-error">
+          <strong>Update to v{phase.to} failed</strong>
+          <p>
+            {phase.message}
+            {phase.logFile ? (
+              <>
+                {" "}
+                — details in <code>{phase.logFile}</code>
+              </>
+            ) : null}
+          </p>
+          <div className="update-toast-actions">
+            <button
+              type="button"
+              className="btn btn-small"
+              onClick={() => setPhase({ kind: "idle" })}
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
+      {appUpdate && health && (
+        <div className="update-toast update-toast-actionable">
+          <strong>
+            Brainstorm v{appUpdate.version} is available
+          </strong>
+          <p>
+            {appUpdate.notes ? <>{appUpdate.notes} </> : null}
+            You are running v{health.version}. Updating restarts the app and
+            reloads this tab by itself; active runs keep going.
+          </p>
+          <div className="update-toast-actions">
+            <button
+              type="button"
+              className="btn btn-small btn-primary"
+              onClick={() => void startUpdate()}
+            >
+              Update now
+            </button>
+            <button
+              type="button"
+              className="btn btn-small"
+              onClick={() => setSnoozedAppVersion(appUpdate.version)}
+            >
+              Later
+            </button>
+          </div>
+        </div>
+      )}
+      {skillsUpdated && registry && (
+        <div className="update-toast">
+          <strong>
+            Brain skills updated: {registry.bundle ?? "brainstorm"} v
+            {registry.latest}
+          </strong>
+          <p>
+            {registry.latestNotes ? <>{registry.latestNotes} </> : null}
+            New pipelines use it automatically; nothing to do.
+          </p>
+          <div className="update-toast-actions">
+            <button
+              type="button"
+              className="btn btn-small"
+              onClick={() => {
+                ackBundleVersion(registry.latest!);
+                setAckedVersion(registry.latest!);
+              }}
+            >
+              Got it
+            </button>
+          </div>
+        </div>
+      )}
+      {bundleBehind && registry && (
+        <div className="update-toast">
+          <strong>Bundle v{registry.latest} is published</strong>
+          <p>
+            Runs are pinned to v{registry.pinnedVersion} by the deployment.
+            {registry.latestNotes ? <> {registry.latestNotes}</> : null}
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}

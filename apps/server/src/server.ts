@@ -12,7 +12,7 @@ import {
   type ServerResponse,
 } from "node:http";
 import { homedir } from "node:os";
-import { delimiter, extname, resolve } from "node:path";
+import { delimiter, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -39,8 +39,18 @@ import {
   type ReadinessProbes,
 } from "./readiness.js";
 import { aggregateToolUsage } from "./tool-usage.js";
-import { checkAppUpdate } from "./self-update.js";
+import {
+  applyAppUpdate as applyAppUpdateDefault,
+  checkAppUpdate,
+  type AppUpdate,
+  type ApplyAppUpdateOptions,
+  type StartedAppUpdate,
+} from "./self-update.js";
 import { RouteCatalog, loadModelCatalog } from "./route-catalog.js";
+import {
+  CapabilityCatalog,
+  LOCKED_CAPABILITY_IDS,
+} from "./capability-catalog.js";
 import {
   ServerFileBrowser,
   ServerFileError,
@@ -52,7 +62,7 @@ import {
   type ClaudeAgentConnectionValidator,
 } from "./settings.js";
 
-const VERSION = "0.1.0";
+const VERSION = "0.2.0";
 const SNAPSHOT_THROTTLE_MS = 500;
 const HEARTBEAT_MS = 15_000;
 const POLL_MS = 2_000;
@@ -161,6 +171,17 @@ export interface StartBrainServerOptions {
   ) => Promise<void>;
   /** Check git release tags for a newer app version (real deployments only). */
   readonly selfUpdateCheck?: boolean;
+  /** Test seam: how a newer release is detected. Default: git tag scan. */
+  readonly appUpdateProbe?: (currentVersion: string) => Promise<AppUpdate | undefined>;
+  /** Test seam: how an update is applied. Default: detached updater script. */
+  readonly applyAppUpdate?: (options: ApplyAppUpdateOptions) => Promise<StartedAppUpdate>;
+  /**
+   * Test seam: how the server hands itself over to the updater after
+   * responding. Default sends SIGTERM to this process, which the launcher
+   * turns into a graceful close; the detached updater waits for the process
+   * to die before touching the tree.
+   */
+  readonly exitForUpdate?: () => void;
   /** Per-check probe overrides (test seam / special deployments). */
   readonly readinessProbes?: Partial<ReadinessProbes>;
   /** LLM fix-advice provider; null disables it (built-in hints only). */
@@ -491,19 +512,23 @@ export async function startBrainServer(
   let appUpdate: Awaited<ReturnType<typeof checkAppUpdate>>;
   let appUpdateTimer: NodeJS.Timeout | undefined;
   if (options.selfUpdateCheck === true) {
+    const probe = options.appUpdateProbe ?? checkAppUpdate;
     const runCheck = (): void => {
-      void checkAppUpdate(VERSION).then((found) => {
+      void probe(VERSION).then((found) => {
         appUpdate = found;
       });
     };
     runCheck();
-    appUpdateTimer = setInterval(runCheck, 24 * 60 * 60 * 1000);
+    // Half-hourly, so a release published while someone watches a run pops
+    // the update toast within the session, not tomorrow.
+    appUpdateTimer = setInterval(runCheck, 30 * 60 * 1000);
     appUpdateTimer.unref();
   }
 
   const jobStreams = new Set<SseConnection>();
   const detailStreams = new Map<string, Set<SseConnection>>();
   const routeCatalog = new RouteCatalog();
+  const capabilityCatalog = new CapabilityCatalog();
   let manager!: JobManager;
   let readiness!: ReadinessService;
   const broadcastJobs = (): void => {
@@ -640,6 +665,52 @@ export async function startBrainServer(
           ...(appUpdate && settings.updateCheck !== "off" ? { appUpdate } : {}),
         };
         sendJson(res, 200, health);
+        return;
+      }
+      if (req.method === "POST" && path === "/api/update") {
+        // One-click self-update: hand over to a detached updater and exit.
+        // Active jobs are their own detached processes over workspace files;
+        // they survive the restart and the relaunched server adopts them.
+        if (options.selfUpdateCheck !== true) {
+          throw new HttpError(409, "self-update is disabled on this deployment");
+        }
+        if (!appUpdate) {
+          throw new HttpError(
+            409,
+            "no newer release is known; the server checks for releases every 30 minutes",
+          );
+        }
+        const target = appUpdate.version;
+        let started: StartedAppUpdate;
+        try {
+          started = await (options.applyAppUpdate ?? applyAppUpdateDefault)({
+            targetVersion: target,
+            stateDir: join(options.workspace, "self-update"),
+            relaunch: {
+              command: process.execPath,
+              args: process.argv.slice(1),
+              cwd: process.cwd(),
+            },
+            pid: process.pid,
+          });
+        } catch (error) {
+          throw new HttpError(
+            409,
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+        sendJson(res, 200, {
+          updatingTo: target,
+          logFile: started.logFile,
+        });
+        // Let the response flush, then shut down; the updater is waiting for
+        // this process to exit before it touches the checkout.
+        const exitForUpdate =
+          options.exitForUpdate ??
+          ((): void => {
+            process.kill(process.pid, "SIGTERM");
+          });
+        setTimeout(exitForUpdate, 500).unref();
         return;
       }
       if (req.method === "GET" && path === "/api/attachments/roots") {
@@ -785,6 +856,16 @@ export async function startBrainServer(
         sendJson(res, 200, response);
         return;
       }
+      if (req.method === "GET" && path === "/api/capabilities") {
+        const settings = manager.settings.get();
+        const snapshot = await capabilityCatalog.options(
+          settings.contentRegistry.url,
+          settings.contentRegistry.bundle,
+          settings.contentRegistry.version,
+        );
+        sendJson(res, 200, snapshot);
+        return;
+      }
       if (req.method === "PUT" && path === "/api/settings/models-by-route") {
         try {
           const settings = manager.settings.putModelsByRoute(
@@ -809,15 +890,59 @@ export async function startBrainServer(
         if (typeof body.topic !== "string" || body.topic.trim().length === 0) {
           throw new HttpError(400, "topic must be a non-empty string");
         }
+        const rawOverrides = body.capabilityOverrides;
+        if (
+          rawOverrides !== undefined &&
+          (typeof rawOverrides !== "object" ||
+            rawOverrides === null ||
+            Array.isArray(rawOverrides) ||
+            !Object.entries(rawOverrides).every(
+              ([id, enabled]) =>
+                /^[a-z][a-z0-9-]*$/.test(id) && typeof enabled === "boolean",
+            ))
+        ) {
+          throw new HttpError(
+            400,
+            "capabilityOverrides must map capability ids to booleans",
+          );
+        }
+        // Locked capabilities are runtime infrastructure; overrides for them
+        // are dropped rather than rejected so older/newer UIs stay compatible.
+        const capabilityOverrides = Object.fromEntries(
+          Object.entries(
+            (rawOverrides as Record<string, boolean> | undefined) ?? {},
+          ).filter(([id]) => !LOCKED_CAPABILITY_IDS.has(id)),
+        );
+        const disabledForRun = new Set(
+          Object.entries(capabilityOverrides)
+            .filter(([, enabled]) => enabled === false)
+            .map(([id]) => id),
+        );
         // The submission gate: while a required environment check is RED the
         // pipeline must not start. The webapp holds the prompt and shows the
         // waiting card; checks still running do not block (their failures
         // surface as ordinary job errors, exactly as before readiness existed).
         {
           const report = readiness.report();
-          const failing = report.checks.filter(
-            (check) => check.required && check.state === "failed",
-          );
+          const failing = report.checks
+            .filter((check) => check.required && check.state === "failed")
+            .filter((check) => {
+              if (check.id !== "capabilities" || disabledForRun.size === 0) {
+                return true;
+              }
+              // The capabilities probe fails on ANY unsatisfiable capability.
+              // When every unsatisfied capability is one this run explicitly
+              // disabled, the failure cannot degrade this job — let it pass.
+              const unsatisfied = [
+                ...(check.detail ?? "").matchAll(
+                  /^([a-z][a-z0-9-]*) \/ \S+ -> unavailable$/gm,
+                ),
+              ].map((match) => match[1]!);
+              return !(
+                unsatisfied.length > 0 &&
+                unsatisfied.every((id) => disabledForRun.has(id))
+              );
+            });
           if (failing.length > 0) {
             sendJson(res, 409, {
               message:
@@ -849,7 +974,11 @@ export async function startBrainServer(
           const references = fileBrowser.canonicalizeReferences(
             request.attachments ?? [],
           );
-          jobId = await manager.submit(request.topic, references);
+          jobId = await manager.submit(
+            request.topic,
+            references,
+            capabilityOverrides,
+          );
         } catch (error) {
           throw new HttpError(
             error instanceof ServerFileError ? error.status : 400,

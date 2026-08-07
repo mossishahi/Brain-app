@@ -280,7 +280,7 @@ export function defaultReadinessProbes(
         { capabilityId: "code-execution", operations: ["code.execute"], whenUnavailable: "" },
         {
           capabilityId: "attachment-access",
-          operations: ["attachment.list", "attachment.read"],
+          operations: ["attachment.list", "attachment.read", "attachment.search"],
           whenUnavailable: "",
         },
         {

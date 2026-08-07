@@ -30,11 +30,12 @@ describe("insideRoots", () => {
 });
 
 describe("attachmentTools", () => {
-  it("creates two tools", () => {
+  it("creates three tools", () => {
     const tools = attachmentTools(["/tmp"]);
-    assert.equal(tools.length, 2);
+    assert.equal(tools.length, 3);
     assert.equal(tools[0]!.definition.name, "attachment_list");
     assert.equal(tools[1]!.definition.name, "attachment_read");
+    assert.equal(tools[2]!.definition.name, "attachment_search");
   });
 
   it("attachment_list walks the root directory", async () => {
@@ -67,13 +68,91 @@ describe("attachmentTools", () => {
     const result = await tools[1]!.execute({ path: "/etc/passwd" }, { runId: "r1" });
     assert.equal(result.isError, true);
   });
+
+  it("attachment_list returns a nested tree when shape is tree", async () => {
+    const root = mkdtempSync(join(tmpdir(), "host-tools-test-"));
+    writeFileSync(join(root, "a.txt"), "hello");
+    mkdirSync(join(root, "sub"));
+    writeFileSync(join(root, "sub", "b.txt"), "world");
+
+    const tools = attachmentTools([root]);
+    const result = await tools[0]!.execute({ shape: "tree" }, { runId: "r1" });
+    const roots = (result.output as { roots: Record<string, Record<string, unknown>> }).roots;
+    const tree = Object.values(roots)[0]!;
+    assert.equal(tree["a.txt"], 5);
+    assert.deepEqual(tree["sub"], { "b.txt": 5 });
+  });
+
+  it("attachment_search returns matching lines with path and line number", async () => {
+    const root = mkdtempSync(join(tmpdir(), "host-tools-test-"));
+    writeFileSync(join(root, "a.py"), "import torch\nclass Encoder:\n    pass\n");
+    mkdirSync(join(root, "sub"));
+    writeFileSync(join(root, "sub", "b.py"), "# encoder utilities\nENCODER = 1\n");
+    writeFileSync(join(root, "img.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]));
+
+    const tools = attachmentTools([root]);
+    const result = await tools[2]!.execute({ query: "encoder" }, { runId: "r1" });
+    assert.equal(result.isError, undefined);
+    const output = result.output as {
+      matches: { path: string; line: number; text: string }[];
+      files: { path: string; matches: number }[];
+      totalMatches: number;
+      filesSearched: number;
+    };
+    assert.equal(output.totalMatches, 3);
+    assert.equal(output.filesSearched, 2);
+    assert.ok(
+      output.matches.some((m) => m.path.endsWith("a.py") && m.line === 2 && /Encoder/.test(m.text)),
+    );
+    assert.ok(output.matches.some((m) => m.path.endsWith("b.py") && m.line === 1));
+    assert.equal(output.files.length, 2);
+  });
+
+  it("attachment_search respects case sensitivity, regex, and filesOnly", async () => {
+    const root = mkdtempSync(join(tmpdir(), "host-tools-test-"));
+    writeFileSync(join(root, "a.txt"), "Alpha\nalpha\nbeta-42\n");
+
+    const tools = attachmentTools([root]);
+    const caseSensitive = await tools[2]!.execute(
+      { query: "Alpha", caseSensitive: true },
+      { runId: "r1" },
+    );
+    assert.equal((caseSensitive.output as { totalMatches: number }).totalMatches, 1);
+
+    const viaRegex = await tools[2]!.execute(
+      { query: "beta-\\d+", regex: true },
+      { runId: "r1" },
+    );
+    assert.equal((viaRegex.output as { totalMatches: number }).totalMatches, 1);
+
+    const filesOnly = await tools[2]!.execute(
+      { query: "alpha", filesOnly: true },
+      { runId: "r1" },
+    );
+    const output = filesOnly.output as {
+      matches?: unknown;
+      files: { path: string; matches: number }[];
+    };
+    assert.equal(output.matches, undefined);
+    assert.equal(output.files[0]!.matches, 2);
+  });
+
+  it("attachment_search refuses an empty query and a broken regex", async () => {
+    const root = mkdtempSync(join(tmpdir(), "host-tools-test-"));
+    const tools = attachmentTools([root]);
+    const empty = await tools[2]!.execute({}, { runId: "r1" });
+    assert.equal(empty.isError, true);
+    const broken = await tools[2]!.execute({ query: "([", regex: true }, { runId: "r1" });
+    assert.equal(broken.isError, true);
+  });
 });
 
 describe("manifests", () => {
   it("ATTACHMENT_MANIFESTS has correct operations", () => {
-    assert.equal(ATTACHMENT_MANIFESTS.length, 2);
+    assert.equal(ATTACHMENT_MANIFESTS.length, 3);
     assert.deepEqual(ATTACHMENT_MANIFESTS[0]!.operations, ["attachment.list"]);
     assert.deepEqual(ATTACHMENT_MANIFESTS[1]!.operations, ["attachment.read"]);
+    assert.deepEqual(ATTACHMENT_MANIFESTS[2]!.operations, ["attachment.search"]);
   });
 
   it("ALL_HOST_TOOL_MANIFESTS includes all tools", () => {
@@ -112,7 +191,8 @@ describe("executableHostToolIds", () => {
     const ids = executableHostToolIds({ attachmentRoots: ["/tmp"] });
     assert.ok(ids.has("attachment_list"));
     assert.ok(ids.has("attachment_read"));
-    assert.equal(ids.size, 2);
+    assert.ok(ids.has("attachment_search"));
+    assert.equal(ids.size, 3);
   });
 
   it("returns empty when no roots", () => {

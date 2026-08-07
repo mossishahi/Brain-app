@@ -30,12 +30,14 @@ import {
 
 import {
   buildOrchestrationCommand,
+  buildUpdaterScript,
   defaultServerSettings,
   JobManager,
   renderSlurmTemplate,
   SettingsStore,
   shellQuote,
   startBrainServer,
+  type ApplyAppUpdateOptions,
   type RunningBrainServer,
   type StartBrainServerOptions,
 } from "../src/index.js";
@@ -146,12 +148,14 @@ async function submit(
   server: RunningBrainServer,
   topic: string,
   attachments?: readonly string[],
+  capabilityOverrides?: Readonly<Record<string, boolean>>,
 ): Promise<string> {
   const response = await requestJson<{ jobId: string }>(server, "/api/jobs", {
     method: "POST",
     body: JSON.stringify({
       topic,
       ...(attachments ? { attachments } : {}),
+      ...(capabilityOverrides ? { capabilityOverrides } : {}),
     }),
   });
   assert.equal(response.status, 200);
@@ -744,6 +748,210 @@ test("Claude Agent settings populate setup-token environment without leaking dev
     assert.equal(env.BRAINSTORM_AGENTIC_AGENT_THINKING, "disabled");
     assert.equal(env.BRAINSTORM_AGENTIC_AGENT_FALLBACK_MODEL, "haiku");
   } finally {
+    await removeWorkspace(workspace);
+  }
+});
+
+test("the updater script checks out the tag, rebuilds, relaunches, and can roll back", () => {
+  const script = buildUpdaterScript({
+    repoRoot: "/opt/brain app",
+    targetVersion: "0.9.0",
+    relaunch: {
+      command: "/usr/local/bin/node",
+      args: ["dist/apps/server/src/main.js", "launch", "--port", "8787"],
+      cwd: "/opt/brain app",
+    },
+    pid: 4242,
+  });
+  assert.ok(script.includes("kill -0 4242"), "waits for the server to exit");
+  assert.ok(script.includes("git fetch --tags"), "fetches release tags");
+  assert.ok(script.includes("'app/v0.9.0'"), "checks out the release tag");
+  assert.ok(script.includes("npm ci --no-audit --no-fund"), "reinstalls");
+  assert.ok(script.includes("npm run build"), "rebuilds");
+  assert.ok(
+    script.includes(
+      "nohup '/usr/local/bin/node' 'dist/apps/server/src/main.js' 'launch' '--port' '8787'",
+    ),
+    "relaunches with the exact original command line",
+  );
+  assert.ok(script.includes("cd '/opt/brain app'"), "quotes the repo path");
+  assert.ok(script.includes("rollback()"), "carries the rollback path");
+});
+
+test("POST /api/update hands over to the updater; without a known release it refuses", async () => {
+  const workspace = tempRoot();
+  const applied: ApplyAppUpdateOptions[] = [];
+  let exits = 0;
+  const server = await startTestBrainServer({
+    workspace,
+    port: 0,
+    selfUpdateCheck: true,
+    appUpdateProbe: async () => ({ version: "9.9.9", notes: "test release" }),
+    applyAppUpdate: async (options) => {
+      applied.push(options);
+      return {
+        logFile: join(workspace, "self-update", "update-test.log"),
+        scriptFile: join(workspace, "self-update", "update-test.sh"),
+      };
+    },
+    exitForUpdate: () => {
+      exits += 1;
+    },
+  });
+  try {
+    // The probe result lands asynchronously right after startup.
+    const deadline = Date.now() + 5_000;
+    let health: { appUpdate?: { version: string } } = {};
+    while (Date.now() < deadline) {
+      health = (
+        await requestJson<{ appUpdate?: { version: string } }>(
+          server,
+          "/api/health",
+        )
+      ).value;
+      if (health.appUpdate) break;
+      await new Promise((resolveSleep) => setTimeout(resolveSleep, 50));
+    }
+    assert.equal(health.appUpdate?.version, "9.9.9");
+
+    const response = await requestJson<{
+      updatingTo: string;
+      logFile: string;
+    }>(server, "/api/update", { method: "POST", body: "{}" });
+    assert.equal(response.status, 200);
+    assert.equal(response.value.updatingTo, "9.9.9");
+    assert.ok(response.value.logFile.endsWith("update-test.log"));
+    assert.equal(applied.length, 1);
+    assert.equal(applied[0]!.targetVersion, "9.9.9");
+    assert.equal(applied[0]!.stateDir, join(workspace, "self-update"));
+    assert.ok(applied[0]!.relaunch.args.length > 0);
+    // The handover fires shortly after the response has flushed.
+    await new Promise((resolveSleep) => setTimeout(resolveSleep, 700));
+    assert.equal(exits, 1);
+  } finally {
+    await server.close();
+    await removeWorkspace(workspace);
+  }
+
+  // A server with no known newer release refuses rather than guessing.
+  const quietWorkspace = tempRoot();
+  const quiet = await startTestBrainServer({
+    workspace: quietWorkspace,
+    port: 0,
+    selfUpdateCheck: true,
+    appUpdateProbe: async () => undefined,
+    applyAppUpdate: async () => {
+      throw new Error("must not be called");
+    },
+    exitForUpdate: () => {
+      throw new Error("must not exit");
+    },
+  });
+  try {
+    const refused = await requestJson<{ message?: string }>(
+      quiet,
+      "/api/update",
+      { method: "POST", body: "{}" },
+    );
+    assert.equal(refused.status, 409);
+  } finally {
+    await quiet.close();
+    await removeWorkspace(quietWorkspace);
+  }
+});
+
+test("per-run capability disables reach the execution environment for every provider", async () => {
+  const workspace = tempRoot();
+  try {
+    const store = new SettingsStore(workspace, {
+      validateAnthropic: async () => undefined,
+    });
+    const settings = {
+      ...store.get(),
+      capabilityOverrides: { "web-search": false, "code-execution": true },
+    };
+    // The offline provider early-returns before most env assembly; the
+    // capability disables must be emitted regardless.
+    const offlineEnv = store.executionEnvironment(
+      {},
+      { ...settings, llm: { provider: "offline" } },
+    );
+    assert.equal(
+      offlineEnv.BRAINSTORM_AGENTIC_DISABLED_CAPABILITIES,
+      "web-search",
+    );
+    const untouched = store.executionEnvironment(
+      {},
+      { ...store.get(), llm: { provider: "offline" } },
+    );
+    assert.equal(
+      untouched.BRAINSTORM_AGENTIC_DISABLED_CAPABILITIES,
+      undefined,
+    );
+  } finally {
+    await removeWorkspace(workspace);
+  }
+});
+
+test("submitted capability overrides are snapshotted, validated, and enumerable", async () => {
+  const workspace = tempRoot();
+  const server = await startTestBrainServer({ workspace, port: 0 });
+  try {
+    await putSettings(server, {
+      runner: "local",
+      panelConfirmation: "auto",
+      llm: { provider: "offline" },
+    });
+    // Malformed maps are rejected before any job is created.
+    const malformed = await requestJson<{ message?: string }>(
+      server,
+      "/api/jobs",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          topic: "Reject bad overrides",
+          capabilityOverrides: { "web-search": "off" },
+        }),
+      },
+    );
+    assert.equal(malformed.status, 400);
+
+    const jobId = await submit(
+      server,
+      "Run without web search",
+      undefined,
+      // taxonomy-access is locked infrastructure: the override is dropped.
+      { "web-search": false, "taxonomy-access": false },
+    );
+    const stored = JSON.parse(
+      readFileSync(
+        join(workspace, "workspace", "jobs", jobId, "job.json"),
+        "utf8",
+      ),
+    ) as {
+      executionSettings?: { capabilityOverrides?: Record<string, boolean> };
+    };
+    assert.deepEqual(stored.executionSettings?.capabilityOverrides, {
+      "web-search": false,
+    });
+
+    // The composer's toggle list: capability catalog with lock flags.
+    const options = await requestJson<{
+      capabilities: readonly {
+        id: string;
+        locked: boolean;
+        operations: readonly string[];
+      }[];
+    }>(server, "/api/capabilities");
+    assert.equal(options.status, 200);
+    const byId = new Map(
+      options.value.capabilities.map((entry) => [entry.id, entry]),
+    );
+    assert.ok(byId.size >= 4);
+    assert.equal(byId.get("taxonomy-access")?.locked, true);
+    assert.equal(byId.get("web-search")?.locked, false);
+  } finally {
+    await server.close();
     await removeWorkspace(workspace);
   }
 });

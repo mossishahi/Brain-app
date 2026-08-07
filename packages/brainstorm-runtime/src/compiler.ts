@@ -100,6 +100,8 @@ export interface CompileContentWorkflowOptions {
   readonly hostTools?: readonly HostToolManifest[];
   /** User-enabled host tool IDs for the capability broker. */
   readonly enabledHostToolIds?: ReadonlySet<string>;
+  /** Capability ids the user disabled for THIS run (per-submission override). */
+  readonly disabledCapabilityIds?: ReadonlySet<string>;
   /** Resolves role/technique files on first execution; defaults to bundle.skills. */
   readonly skillResolver?: SkillResolver;
 }
@@ -961,6 +963,7 @@ class ContentCompiler {
   private readonly providerOffers: readonly ProviderNativeOffer[];
   private readonly hostTools: readonly HostToolManifest[];
   private readonly enabledHostToolIds: ReadonlySet<string>;
+  private readonly disabledCapabilityIds: ReadonlySet<string>;
   private readonly skillResolver: SkillResolver;
   /**
    * The read-only `bundle.*` reference roots: the content projections every
@@ -982,6 +985,7 @@ class ContentCompiler {
     this.providerOffers = options.providerOffers ?? [];
     this.hostTools = options.hostTools ?? [];
     this.enabledHostToolIds = options.enabledHostToolIds ?? new Set();
+    this.disabledCapabilityIds = options.disabledCapabilityIds ?? new Set();
     this.skillResolver =
       options.skillResolver ?? new BundleSkillResolver(this.bundle);
     this.gateMode = options.humanGateMode ?? "manual";
@@ -1347,22 +1351,17 @@ class ContentCompiler {
         taskJsonSchema = removeSchemaProperties(taskJsonSchema, stepwise.removed);
       }
       const prompt = compileSkillPrompt(role, techniques, bindings);
-      const capabilityTools = prompt.capabilities.flatMap((capability) => {
-        const definition = this.bundle.capabilities.capabilities[capability];
-        if (!definition) throw new WorkflowConfigError(`unknown capability "${capability}"`);
-        return this.capabilityTools.resolve({
-          capability,
-          contract: definition.contract,
-          skill: node.skill,
-        });
-      });
+      for (const capability of prompt.capabilities) {
+        if (!this.bundle.capabilities.capabilities[capability]) {
+          throw new WorkflowConfigError(`unknown capability "${capability}"`);
+        }
+      }
       const resolved = await this.routeResolver.resolve({
         logicalRoute: node.route,
         traits: routeDefinition.traits,
         skill: node.skill,
         capabilities: prompt.capabilities,
       });
-      const tools = unique([...capabilityTools, ...(resolved.tools ?? [])]);
 
       // Resolve the capability plan via the broker
       const requiredCapabilities: CapabilityDeclaration[] = prompt.capabilities.map((capId) => {
@@ -1378,8 +1377,33 @@ class ContentCompiler {
         providerOffers: this.providerOffers,
         hostTools: this.hostTools,
         enabledHostToolIds: this.enabledHostToolIds,
+        disabledCapabilityIds: this.disabledCapabilityIds,
       };
       const capabilityPlan: ResolvedCapabilityPlan = resolveCapabilityPlan(brokerInput);
+      // The tool list follows the PLAN: an operation that resolved to a host
+      // tool contributes that tool; a disabled or unavailable capability
+      // contributes nothing, so the model is never offered a tool the system
+      // prompt just told it it does not have. The legacy static resolver only
+      // contributes names the plan did not already produce (deployments that
+      // configure extra capability tools outside the broker).
+      const planHostTools = capabilityPlan.operations
+        .filter((operation) => operation.source === "host")
+        .flatMap((operation) => operation.toolNames);
+      const disabledOrUnavailable = new Set(
+        capabilityPlan.operations
+          .filter((operation) => operation.source === "unavailable")
+          .map((operation) => operation.capabilityId),
+      );
+      const legacyTools = prompt.capabilities
+        .filter((capability) => !disabledOrUnavailable.has(capability))
+        .flatMap((capability) =>
+          this.capabilityTools.resolve({
+            capability,
+            contract: this.bundle.capabilities.capabilities[capability]!.contract,
+            skill: node.skill,
+          }),
+        );
+      const tools = unique([...planHostTools, ...legacyTools, ...(resolved.tools ?? [])]);
       // Load-bearing capabilities fail LOUD, before any model call: a task
       // whose skill marks a capability required must never run degraded —
       // a forced answer without the capability poisons every downstream
@@ -1397,12 +1421,20 @@ class ContentCompiler {
           ),
         );
         if (missing.length > 0) {
+          const disabledByUser = missing.filter((capabilityId) =>
+            this.disabledCapabilityIds.has(capabilityId),
+          );
           throw new BrainstormRuntimeError(
             `node "${node.id}" (skill "${node.skill}") requires ${missing
               .map((capabilityId) => `"${capabilityId}"`)
-              .join(", ")} but the capability resolved unavailable on this deployment — ` +
-              "enable the backing host tools in the server settings (or run on a backend " +
-              "that provides them); this task refuses to run degraded",
+              .join(", ")} but the capability resolved unavailable — ` +
+              (disabledByUser.length > 0
+                ? `${disabledByUser
+                    .map((capabilityId) => `"${capabilityId}"`)
+                    .join(", ")} was disabled for this run; re-enable it and resubmit`
+                : "enable the backing host tools in the server settings (or run on a backend " +
+                  "that provides them)") +
+              "; this task refuses to run degraded",
             "REQUIRED_CAPABILITY_UNAVAILABLE",
           );
         }

@@ -149,6 +149,33 @@ describe("resolveCapabilityPlan", () => {
     assert.ok(!plan.unavailableInstructions.includes("[attachment-access]"));
   });
 
+  it("a run-disabled capability resolves unavailable past provider offers and host tools", () => {
+    const providerOffer: ProviderNativeOffer = {
+      operationId: "web.search",
+      nativeKey: "web_search",
+    };
+    const input: BrokerInput = {
+      requiredCapabilities: [webSearch, attachmentAccess],
+      providerOffers: [providerOffer],
+      hostTools: [hostAttachmentList, hostAttachmentRead, hostWebFetch],
+      enabledHostToolIds: new Set(["attachment_list", "attachment_read", "web_fetch"]),
+      disabledCapabilityIds: new Set(["web-search"]),
+    };
+    const plan = resolveCapabilityPlan(input);
+
+    const webOps = plan.operations.filter((o) => o.capabilityId === "web-search");
+    assert.ok(webOps.every((o) => o.source === "unavailable"));
+    assert.equal(plan.providerNativeKeys.length, 0);
+    assert.ok(!plan.hostToolDefinitions.some((d) => d.name === "web_fetch"));
+    assert.ok(plan.unavailableInstructions.includes("[web-search]"));
+    assert.ok(plan.unavailableInstructions.includes("disabled this capability for this run"));
+
+    // The untouched capability still resolves normally.
+    const attachOps = plan.operations.filter((o) => o.capabilityId === "attachment-access");
+    assert.ok(attachOps.every((o) => o.source === "host"));
+    assert.ok(!plan.unavailableInstructions.includes("[attachment-access]"));
+  });
+
   it("does not duplicate host tool definitions for shared operations", () => {
     const multiOpTool: HostToolManifest = {
       toolId: "multi_tool",

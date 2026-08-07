@@ -1,10 +1,15 @@
 /**
  * Provider-neutral attachment tools satisfying the `attachment-access` capability.
  *
- * - `attachment_list` returns the inventory under the job's attachment store.
+ * - `attachment_list` returns the inventory under the job's attachment store,
+ *   flat or as a nested tree.
  * - `attachment_read` returns one file: text as text, images/PDFs as
  *   provider-neutral rich blocks (base64), and an honest refusal for media
  *   this transport cannot carry.
+ * - `attachment_search` greps every attached text file for a literal or
+ *   regex query and returns structured matches (path, line number, line) —
+ *   the deterministic replacement for reading files one by one to locate
+ *   something.
  *
  * Every path is resolved against the ingested attachment roots and rejected
  * when it escapes them.
@@ -43,6 +48,13 @@ const IMAGE_MEDIA_TYPES: Readonly<Record<string, string>> = {
 const MAX_TEXT_CHARS = 48_000;
 /** Provider-typical image cap (~5 MB raw); base64 inflates by 4/3. */
 const MAX_IMAGE_BYTES = Math.floor((5 * 1024 * 1024 * 3) / 4);
+/** Files above this size are skipped by attachment_search (reported, not silent). */
+const MAX_SEARCH_FILE_BYTES = 5 * 1024 * 1024;
+/** Default / hard cap on matching lines returned by attachment_search. */
+const DEFAULT_SEARCH_RESULTS = 100;
+const MAX_SEARCH_RESULTS = 500;
+/** A matched line longer than this is trimmed around the first match. */
+const MAX_MATCH_LINE_CHARS = 300;
 
 export function insideRoots(roots: readonly string[], path: string): boolean {
   const target = resolve(path);
@@ -57,8 +69,40 @@ function looksBinary(buffer: Buffer): boolean {
   return window.includes(0);
 }
 
+/** Depth-first walk of the attachment roots, in stable name order. */
+function walkRoots(
+  roots: readonly string[],
+  visit: (path: string, bytes: number) => void,
+): void {
+  const walk = (dir: string): void => {
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) walk(path);
+      else if (entry.isFile()) visit(path, statSync(path).size);
+    }
+  };
+  for (const root of roots) walk(root);
+}
+
+/** True when the file is searchable text (known extension or non-binary sniff). */
+function isSearchableText(path: string, buffer: Buffer): boolean {
+  return TEXT_EXTENSIONS.has(extname(path).toLowerCase()) || !looksBinary(buffer);
+}
+
 function ok(output: JsonValue) {
   return { output };
+}
+
+function record(value: unknown): Record<string, JsonValue> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, JsonValue>)
+    : {};
 }
 
 function refusal(message: string) {
@@ -73,7 +117,8 @@ const ATTACHMENT_LIST_DEFINITION = {
   name: "attachment_list",
   description:
     "List the files of the submission's ingested attachments (path and size in bytes). " +
-    "Optionally filter by a path prefix.",
+    "Optionally filter by a path prefix, and choose the response shape: a flat list " +
+    "(default) or a nested directory tree for a compact overview of large stores.",
   inputSchema: {
     type: "object",
     properties: {
@@ -81,7 +126,56 @@ const ATTACHMENT_LIST_DEFINITION = {
         type: "string",
         description: "Only return files whose path starts with this prefix.",
       },
+      shape: {
+        type: "string",
+        enum: ["flat", "tree"],
+        description:
+          'Response shape. "flat" (default) returns {files: [{path, bytes}]}; "tree" returns ' +
+          "a nested object per root where directories are objects and files map to byte sizes.",
+      },
     },
+    additionalProperties: false,
+  },
+} as const;
+
+const ATTACHMENT_SEARCH_DEFINITION = {
+  name: "attachment_search",
+  description:
+    "Search every attached text file for a word, phrase, or regular expression in one call. " +
+    "Returns structured matches — file path, 1-based line number, and the matching line — " +
+    "so use this instead of reading files one by one (or running shell loops) to locate " +
+    "where something is mentioned. Binary files are skipped.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      query: {
+        type: "string",
+        description: "The text to search for. Treated as a literal unless `regex` is true.",
+      },
+      regex: {
+        type: "boolean",
+        description: "Interpret `query` as an ECMAScript regular expression. Default false.",
+      },
+      caseSensitive: {
+        type: "boolean",
+        description: "Match case exactly. Default false (case-insensitive).",
+      },
+      prefix: {
+        type: "string",
+        description: "Only search files whose path starts with this prefix.",
+      },
+      filesOnly: {
+        type: "boolean",
+        description:
+          "Return only {path, matches} per file instead of individual lines — cheapest " +
+          "way to find which files mention the query. Default false.",
+      },
+      maxResults: {
+        type: "number",
+        description: `Cap on returned matching lines (default ${DEFAULT_SEARCH_RESULTS}, max ${MAX_SEARCH_RESULTS}).`,
+      },
+    },
+    required: ["query"],
     additionalProperties: false,
   },
 } as const;
@@ -127,9 +221,19 @@ export const ATTACHMENT_READ_MANIFEST: HostToolManifest = {
   definition: ATTACHMENT_READ_DEFINITION,
 };
 
+export const ATTACHMENT_SEARCH_MANIFEST: HostToolManifest = {
+  toolId: "attachment_search",
+  displayName: "Attachment Search",
+  operations: ["attachment.search"],
+  risk: "low",
+  defaultEnabled: true,
+  definition: ATTACHMENT_SEARCH_DEFINITION,
+};
+
 export const ATTACHMENT_MANIFESTS: readonly HostToolManifest[] = [
   ATTACHMENT_LIST_MANIFEST,
   ATTACHMENT_READ_MANIFEST,
+  ATTACHMENT_SEARCH_MANIFEST,
 ];
 
 // ---------------------------------------------------------------------------
@@ -144,30 +248,128 @@ export function attachmentTools(roots: readonly string[]): readonly Tool[] {
   const listTool: Tool = {
     definition: ATTACHMENT_LIST_DEFINITION,
     async execute(input) {
-      const prefix =
-        typeof input === "object" && input !== null && !Array.isArray(input) &&
-        typeof (input as { prefix?: JsonValue }).prefix === "string"
-          ? ((input as { prefix: string }).prefix)
-          : undefined;
+      const args = record(input);
+      const prefix = typeof args.prefix === "string" ? args.prefix : undefined;
+      const shape = args.shape === "tree" ? "tree" : "flat";
       const files: { path: string; bytes: number }[] = [];
-      const walk = (dir: string): void => {
-        let entries;
+      walkRoots(roots, (path, bytes) => {
+        if (prefix !== undefined && !path.startsWith(prefix)) return;
+        files.push({ path, bytes });
+      });
+      if (shape === "flat") return ok({ files: files as unknown as JsonValue });
+      // Tree shape: one nested object per root; directories are objects,
+      // files map to their byte size. Compact for large stores.
+      const trees: Record<string, JsonValue> = {};
+      for (const root of roots) {
+        const resolvedRoot = resolve(root);
+        const tree: Record<string, JsonValue> = {};
+        for (const file of files) {
+          const rel = relative(resolvedRoot, resolve(file.path));
+          if (rel.startsWith("..") || isAbsolute(rel)) continue;
+          const segments = rel.split(/[\\/]/);
+          let node = tree;
+          for (const segment of segments.slice(0, -1)) {
+            const child = node[segment];
+            if (typeof child === "object" && child !== null && !Array.isArray(child)) {
+              node = child as Record<string, JsonValue>;
+            } else {
+              const created: Record<string, JsonValue> = {};
+              node[segment] = created;
+              node = created;
+            }
+          }
+          node[segments[segments.length - 1]!] = file.bytes;
+        }
+        if (Object.keys(tree).length > 0) trees[resolvedRoot] = tree;
+      }
+      return ok({ roots: trees });
+    },
+  };
+
+  const searchTool: Tool = {
+    definition: ATTACHMENT_SEARCH_DEFINITION,
+    async execute(input) {
+      const args = record(input);
+      const query = typeof args.query === "string" ? args.query : "";
+      if (query.length === 0) {
+        return refusal("attachment_search requires a non-empty string `query`.");
+      }
+      const caseSensitive = args.caseSensitive === true;
+      const filesOnly = args.filesOnly === true;
+      const prefix = typeof args.prefix === "string" ? args.prefix : undefined;
+      const maxResults = Math.min(
+        MAX_SEARCH_RESULTS,
+        typeof args.maxResults === "number" && Number.isFinite(args.maxResults) && args.maxResults >= 1
+          ? Math.floor(args.maxResults)
+          : DEFAULT_SEARCH_RESULTS,
+      );
+      let pattern: RegExp;
+      try {
+        pattern =
+          args.regex === true
+            ? new RegExp(query, caseSensitive ? "" : "i")
+            : new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), caseSensitive ? "" : "i");
+      } catch (error) {
+        return refusal(
+          `Invalid regular expression: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+
+      const matches: { path: string; line: number; text: string }[] = [];
+      const perFile = new Map<string, number>();
+      let totalMatches = 0;
+      let filesSearched = 0;
+      const skippedLargeFiles: string[] = [];
+      walkRoots(roots, (path, bytes) => {
+        if (prefix !== undefined && !path.startsWith(prefix)) return;
+        if (bytes > MAX_SEARCH_FILE_BYTES) {
+          skippedLargeFiles.push(path);
+          return;
+        }
+        let buffer: Buffer;
         try {
-          entries = readdirSync(dir, { withFileTypes: true });
+          buffer = readFileSync(path);
         } catch {
           return;
         }
-        for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-          const path = join(dir, entry.name);
-          if (entry.isDirectory()) walk(path);
-          else if (entry.isFile()) {
-            if (prefix !== undefined && !path.startsWith(prefix)) continue;
-            files.push({ path, bytes: statSync(path).size });
+        if (!isSearchableText(path, buffer)) return;
+        filesSearched += 1;
+        const lines = buffer.toString("utf8").split(/\r?\n/);
+        for (let index = 0; index < lines.length; index += 1) {
+          const line = lines[index]!;
+          if (!pattern.test(line)) continue;
+          totalMatches += 1;
+          perFile.set(path, (perFile.get(path) ?? 0) + 1);
+          if (!filesOnly && matches.length < maxResults) {
+            const at = line.search(pattern);
+            const start = line.length <= MAX_MATCH_LINE_CHARS
+              ? 0
+              : Math.max(0, Math.min(at - 80, line.length - MAX_MATCH_LINE_CHARS));
+            const text =
+              line.length <= MAX_MATCH_LINE_CHARS
+                ? line
+                : `${start > 0 ? "…" : ""}${line.slice(start, start + MAX_MATCH_LINE_CHARS)}…`;
+            matches.push({ path, line: index + 1, text });
           }
         }
-      };
-      for (const root of roots) walk(root);
-      return ok({ files: files as unknown as JsonValue });
+      });
+      return ok({
+        ...(filesOnly
+          ? {}
+          : {
+              matches: matches as unknown as JsonValue,
+              truncated: totalMatches > matches.length,
+            }),
+        files: [...perFile.entries()].map(([path, count]) => ({
+          path,
+          matches: count,
+        })) as unknown as JsonValue,
+        totalMatches,
+        filesSearched,
+        ...(skippedLargeFiles.length > 0
+          ? { skippedLargeFiles: skippedLargeFiles as unknown as JsonValue }
+          : {}),
+      });
     },
   };
 
@@ -249,7 +451,11 @@ export function attachmentTools(roots: readonly string[]): readonly Tool[] {
     },
   };
 
-  return [listTool, readTool];
+  return [listTool, readTool, searchTool];
 }
 
-export const ATTACHMENT_TOOL_NAMES = ["attachment_list", "attachment_read"] as const;
+export const ATTACHMENT_TOOL_NAMES = [
+  "attachment_list",
+  "attachment_read",
+  "attachment_search",
+] as const;
