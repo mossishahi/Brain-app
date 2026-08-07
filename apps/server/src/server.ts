@@ -62,7 +62,7 @@ import {
   type ClaudeAgentConnectionValidator,
 } from "./settings.js";
 
-const VERSION = "0.2.1";
+const VERSION = "0.2.2";
 const SNAPSHOT_THROTTLE_MS = 500;
 const HEARTBEAT_MS = 15_000;
 const POLL_MS = 2_000;
@@ -1318,6 +1318,10 @@ export async function startBrainServer(
   // required environment check re-verifies for the status icons.
   void manager.resumeInterruptedJobs().finally(broadcast);
   readiness.refresh();
+  // Failed required checks re-probe themselves on a per-check cooldown, so
+  // one transient failure at launch cannot hold the submission gate red
+  // until a human finds the recheck button.
+  readiness.startAutoRecheck();
 
   return {
     port,

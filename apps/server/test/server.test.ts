@@ -31,8 +31,11 @@ import {
 import {
   buildOrchestrationCommand,
   buildUpdaterScript,
+  defaultReadinessProbes,
   defaultServerSettings,
   JobManager,
+  ReadinessProbeError,
+  ReadinessService,
   renderSlurmTemplate,
   SettingsStore,
   shellQuote,
@@ -752,19 +755,90 @@ test("Claude Agent settings populate setup-token environment without leaking dev
   }
 });
 
-test("proxy environment variables route the global fetch dispatcher", async () => {
-  const { configureProxyFromEnvironment } = await import("../src/proxy.js");
-  const { EnvHttpProxyAgent, getGlobalDispatcher, setGlobalDispatcher } =
+test("outbound HTTP matches curl: proxy env honored, happy-eyeballs when direct", async () => {
+  const { configureOutboundHttp } = await import("../src/proxy.js");
+  const { Agent, EnvHttpProxyAgent, getGlobalDispatcher, setGlobalDispatcher } =
     await import("undici");
   const before = getGlobalDispatcher();
   try {
-    assert.equal(configureProxyFromEnvironment({}), undefined);
-    assert.equal(getGlobalDispatcher(), before);
+    // Direct: a dual-stack host with unrouted IPv6 must not hang the first
+    // connect — family auto-selection gives curl's fallback behavior.
+    assert.equal(configureOutboundHttp({}), "direct (IPv4/IPv6 auto-selection)");
+    assert.ok(getGlobalDispatcher() instanceof Agent);
+    assert.ok(!(getGlobalDispatcher() instanceof EnvHttpProxyAgent));
+    // Proxied: the environment proxy carries every in-process request.
     const url = "http://proxy.cluster.local:3128";
-    assert.equal(configureProxyFromEnvironment({ https_proxy: url }), url);
+    assert.equal(configureOutboundHttp({ https_proxy: url }), `proxy ${url}`);
     assert.ok(getGlobalDispatcher() instanceof EnvHttpProxyAgent);
   } finally {
     setGlobalDispatcher(before);
+  }
+});
+
+test("failed required readiness checks re-probe on their cooldown; passing checks stay untouched", async () => {
+  const workspace = tempRoot();
+  try {
+    let clock = 1_000_000;
+    let internetAttempts = 0;
+    const store = new SettingsStore(workspace, {
+      validateAnthropic: async () => undefined,
+    });
+    const readiness = new ReadinessService({
+      workspace,
+      settings: store,
+      contentRegistry: { running: true },
+      probes: defaultReadinessProbes({
+        validateAnthropic: async () => undefined,
+        validateClaudeAgent: async () => undefined,
+      }),
+      now: () => clock,
+      probeOverrides: {
+        internet: async () => {
+          internetAttempts += 1;
+          if (internetAttempts === 1) {
+            throw new ReadinessProbeError("first attempt fails (transient)");
+          }
+          return { message: "outbound HTTPS works" };
+        },
+        llm: async () => ({ message: "stubbed" }),
+        capabilities: async () => ({ message: "stubbed" }),
+        code: async () => ({ message: "stubbed" }),
+        slurm: async () => ({ message: "stubbed" }),
+      },
+    });
+    try {
+      readiness.refresh();
+      const settled = async (): Promise<void> => {
+        const deadline = Date.now() + 5_000;
+        while (Date.now() < deadline) {
+          const states = readiness
+            .report()
+            .checks.map((check) => check.state);
+          if (!states.includes("checking")) return;
+          await new Promise((resolveSleep) => setTimeout(resolveSleep, 25));
+        }
+      };
+      await settled();
+      const internet = () =>
+        readiness.report().checks.find((check) => check.id === "internet")!;
+      assert.equal(internet().state, "failed");
+
+      // Within the cooldown nothing is due; past it, only the failed check.
+      clock += 60_000;
+      assert.deepEqual(readiness.autoRecheckDue(), []);
+      clock += 5 * 60_000;
+      assert.deepEqual(readiness.autoRecheckDue(), ["internet"]);
+
+      readiness.refresh(readiness.autoRecheckDue());
+      await settled();
+      assert.equal(internet().state, "ok");
+      assert.equal(internetAttempts, 2);
+      assert.deepEqual(readiness.autoRecheckDue(), []);
+    } finally {
+      readiness.close();
+    }
+  } finally {
+    await removeWorkspace(workspace);
   }
 });
 

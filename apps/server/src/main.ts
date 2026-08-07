@@ -8,7 +8,7 @@ import {
 } from "node:child_process";
 
 import type { ContentRegistryRuntimeStatus } from "./model.js";
-import { configureProxyFromEnvironment } from "./proxy.js";
+import { configureOutboundHttp } from "./proxy.js";
 import { startBrainServer } from "./server.js";
 import { ContentRegistryClient } from "@brainstorm-agentic/registry-client";
 import { DEFAULT_CONTENT_REGISTRY_URL } from "./settings.js";
@@ -200,10 +200,7 @@ async function main(): Promise<void> {
     process.exitCode = 2;
     return;
   }
-  const proxy = configureProxyFromEnvironment();
-  if (proxy) {
-    console.log(`[launch] outbound HTTP routed through proxy ${proxy}`);
-  }
+  console.log(`[launch] outbound HTTP: ${configureOutboundHttp()}`);
 
   const host = stringFlag(args, "ip") ?? "127.0.0.1";
   const port = portFlag(args, "port", 8787);

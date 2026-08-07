@@ -521,6 +521,23 @@ const RUNNABLE_CHECK_IDS: readonly RunnableReadinessCheckId[] = [
   "slurm",
 ];
 
+/**
+ * A FAILED check re-probes itself after this long. Required checks gate
+ * submissions, so a transient failure at launch (a network blip, an
+ * unrouted-IPv6 first attempt) must never wedge the gate red until a human
+ * finds the recheck button. Cheap local/network probes retry fast; probes
+ * that cost money (llm — a real model call) or cluster resources (slurm —
+ * a probe job) retry sparingly. Passing checks are never re-run
+ * automatically — only user action or a settings change touches them.
+ */
+const FAILED_RECHECK_COOLDOWN_MS: Record<RunnableReadinessCheckId, number> = {
+  llm: 30 * 60_000,
+  capabilities: 10 * 60_000,
+  internet: 5 * 60_000,
+  code: 10 * 60_000,
+  slurm: 30 * 60_000,
+};
+
 export interface ReadinessServiceOptions {
   readonly workspace: string;
   readonly settings: SettingsStore;
@@ -537,6 +554,7 @@ export interface ReadinessServiceOptions {
 export class ReadinessService {
   private readonly checks = new Map<RunnableReadinessCheckId, MutableCheck>();
   private readonly inFlight = new Set<RunnableReadinessCheckId>();
+  private autoRecheckTimer: NodeJS.Timeout | undefined;
   private readonly probes: ReadinessProbes;
   private readonly controller = new AbortController();
   private readonly env: NodeJS.ProcessEnv;
@@ -639,6 +657,38 @@ export class ReadinessService {
       ready: checks.every((check) => !check.required || check.state === "ok"),
       updatedAt: this.now(),
     };
+  }
+
+  /**
+   * The failed checks whose recheck cooldown has elapsed — what the
+   * auto-recheck loop re-probes on its next scan. Exposed for tests.
+   */
+  autoRecheckDue(): readonly RunnableReadinessCheckId[] {
+    const settings = this.settings();
+    return RUNNABLE_CHECK_IDS.filter((id) => {
+      const check = this.checks.get(id)!;
+      return (
+        check.state === "failed" &&
+        readinessCheckRequired(id, settings) &&
+        !this.inFlight.has(id) &&
+        this.now() - (check.finishedAt ?? 0) >= FAILED_RECHECK_COOLDOWN_MS[id]
+      );
+    });
+  }
+
+  /**
+   * Heals wedged failures: scans periodically and re-probes failed required
+   * checks past their per-check cooldown. onChange (the SSE broadcast)
+   * fires through the normal refresh path, so the dashboard icon recovers
+   * without anyone pressing recheck.
+   */
+  startAutoRecheck(scanMs = 60_000): void {
+    if (this.autoRecheckTimer) return;
+    this.autoRecheckTimer = setInterval(() => {
+      const due = this.autoRecheckDue();
+      if (due.length > 0) this.refresh(due);
+    }, scanMs);
+    this.autoRecheckTimer.unref();
   }
 
   /**
@@ -759,6 +809,8 @@ export class ReadinessService {
   }
 
   close(): void {
+    if (this.autoRecheckTimer) clearInterval(this.autoRecheckTimer);
+    this.autoRecheckTimer = undefined;
     this.controller.abort();
   }
 }
