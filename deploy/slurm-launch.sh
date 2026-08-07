@@ -28,7 +28,9 @@
 #SBATCH --qos=cpu_normal
 #SBATCH --mem=16G
 #SBATCH --cpus-per-task=8
-#SBATCH --time=2-00:00:00
+# Set --time to your QOS ceiling (query it: sacctmgr show qos <qos> format=Name,MaxWall).
+# Override per submission without editing: sbatch --time=... deploy/slurm-launch.sh
+#SBATCH --time=12:00:00
 #SBATCH --signal=B:TERM@120
 #SBATCH --dependency=singleton
 #SBATCH --nice=10000
