@@ -63,6 +63,34 @@ type UpdatePhase =
  */
 const UPDATE_DEADLINE_MS = 15 * 60_000;
 
+/**
+ * Written just before the tab reloads itself into the new version; the
+ * reloaded page reads it back (sessionStorage: per-tab, survives exactly the
+ * one reload) and confirms the finished update with a check mark until the
+ * user clicks anywhere on the page.
+ */
+const UPDATE_SUCCESS_KEY = "brain-update-success";
+
+function takeUpdateSuccess(): { readonly to?: string } | null {
+  try {
+    const raw = sessionStorage.getItem(UPDATE_SUCCESS_KEY);
+    if (raw === null) return null;
+    sessionStorage.removeItem(UPDATE_SUCCESS_KEY);
+    return JSON.parse(raw) as { readonly to?: string };
+  } catch {
+    return null;
+  }
+}
+
+function markUpdateSuccess(to: string): void {
+  try {
+    sessionStorage.setItem(UPDATE_SUCCESS_KEY, JSON.stringify({ to }));
+  } catch {
+    // Storage unavailable: the update still lands, only the confirmation
+    // card is skipped.
+  }
+}
+
 export function UpdateToast() {
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [ackedVersion, setAckedVersion] = useState<string | null>(
@@ -73,8 +101,21 @@ export function UpdateToast() {
   const [snoozedAppVersion, setSnoozedAppVersion] = useState<string | null>(
     null,
   );
+  /** Just landed from a self-update reload: confirm it until any click. */
+  const [updateSuccess, setUpdateSuccess] = useState<{
+    readonly to?: string;
+  } | null>(takeUpdateSuccess);
   const phaseRef = useRef(phase);
   phaseRef.current = phase;
+
+  // "Click on the main page and it disappears": any click anywhere dismisses
+  // the success confirmation.
+  useEffect(() => {
+    if (updateSuccess === null) return;
+    const dismiss = (): void => setUpdateSuccess(null);
+    document.addEventListener("click", dismiss);
+    return () => document.removeEventListener("click", dismiss);
+  }, [updateSuccess]);
 
   useEffect(() => {
     let live = true;
@@ -121,6 +162,7 @@ export function UpdateToast() {
       getHealth()
         .then((response) => {
           if (response.version !== phase.from) {
+            markUpdateSuccess(response.version);
             window.location.reload();
             return;
           }
@@ -206,6 +248,7 @@ export function UpdateToast() {
 
   if (
     phase.kind === "idle" &&
+    updateSuccess === null &&
     !appUpdate &&
     !skillsUpdated &&
     !bundleBehind
@@ -215,6 +258,20 @@ export function UpdateToast() {
 
   return (
     <div className="update-toast-stack" role="status">
+      {updateSuccess !== null && (
+        <div className="update-toast update-toast-success">
+          <strong>
+            <span className="update-success-check" aria-hidden="true">
+              ✓
+            </span>
+            Update complete
+          </strong>
+          <p>
+            Now running v{health?.version ?? updateSuccess.to ?? "the new version"}.
+            Click anywhere to dismiss.
+          </p>
+        </div>
+      )}
       {phase.kind === "failed" && (
         <div className="update-toast update-toast-error">
           <strong>Update to v{phase.to} failed</strong>

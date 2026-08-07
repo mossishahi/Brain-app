@@ -595,6 +595,25 @@ input[type="radio"] {
   border-color: var(--bad);
 }
 
+.update-toast-success {
+  border-color: var(--ok);
+}
+
+.update-success-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--ok);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  vertical-align: -3px;
+}
+
 .update-toast-actions {
   display: flex;
   gap: 8px;
