@@ -62,7 +62,7 @@ import {
   type ClaudeAgentConnectionValidator,
 } from "./settings.js";
 
-const VERSION = "0.2.5";
+const VERSION = "0.2.6";
 const SNAPSHOT_THROTTLE_MS = 500;
 const HEARTBEAT_MS = 15_000;
 const POLL_MS = 2_000;
@@ -173,6 +173,8 @@ export interface StartBrainServerOptions {
   readonly selfUpdateCheck?: boolean;
   /** Test seam: how a newer release is detected. Default: git tag scan. */
   readonly appUpdateProbe?: (currentVersion: string) => Promise<AppUpdate | undefined>;
+  /** Minimum time between on-demand release probes. Default 30s (test seam). */
+  readonly appUpdateThrottleMs?: number;
   /** Test seam: how an update is applied. Default: detached updater script. */
   readonly applyAppUpdate?: (options: ApplyAppUpdateOptions) => Promise<StartedAppUpdate>;
   /**
@@ -511,17 +513,36 @@ export async function startBrainServer(
 
   let appUpdate: Awaited<ReturnType<typeof checkAppUpdate>>;
   let appUpdateTimer: NodeJS.Timeout | undefined;
-  if (options.selfUpdateCheck === true) {
+  let appUpdateProbedAt = 0;
+  let appUpdateInFlight: Promise<AppUpdate | undefined> | undefined;
+  /** A fresh probe involves a git fetch; several tabs opening at once must
+   *  share one, and rapid re-triggers within the window reuse the cache. */
+  const APP_UPDATE_PROBE_THROTTLE_MS = options.appUpdateThrottleMs ?? 30_000;
+  const probeAppUpdate = async (): Promise<AppUpdate | undefined> => {
+    if (options.selfUpdateCheck !== true) return undefined;
+    if (appUpdateInFlight) return appUpdateInFlight;
+    if (Date.now() - appUpdateProbedAt < APP_UPDATE_PROBE_THROTTLE_MS) {
+      return appUpdate;
+    }
     const probe = options.appUpdateProbe ?? checkAppUpdate;
-    const runCheck = (): void => {
-      void probe(VERSION).then((found) => {
+    appUpdateInFlight = probe(VERSION)
+      .then((found) => {
         appUpdate = found;
+        appUpdateProbedAt = Date.now();
+        return found;
+      })
+      .catch(() => appUpdate)
+      .finally(() => {
+        appUpdateInFlight = undefined;
       });
-    };
-    runCheck();
-    // Half-hourly, so a release published while someone watches a run pops
-    // the update toast within the session, not tomorrow.
-    appUpdateTimer = setInterval(runCheck, 30 * 60 * 1000);
+    return appUpdateInFlight;
+  };
+  if (options.selfUpdateCheck === true) {
+    void probeAppUpdate();
+    // Half-hourly as the floor; opening the dashboard and submitting a run
+    // each trigger a fresh (throttled) check so "the beginning of a
+    // pipeline session" always sees the latest release, not the last tick.
+    appUpdateTimer = setInterval(() => void probeAppUpdate(), 30 * 60 * 1000);
     appUpdateTimer.unref();
   }
 
@@ -667,6 +688,18 @@ export async function startBrainServer(
         sendJson(res, 200, health);
         return;
       }
+      if (req.method === "POST" && path === "/api/update-check") {
+        // "The beginning of a pipeline session": the dashboard calls this on
+        // load so a just-published release surfaces immediately instead of
+        // on the next half-hourly tick. Throttled server-side; when
+        // self-update is disabled it simply reports the running version.
+        const found = await probeAppUpdate();
+        sendJson(res, 200, {
+          version: VERSION,
+          ...(found ? { appUpdate: found } : {}),
+        });
+        return;
+      }
       if (req.method === "POST" && path === "/api/update") {
         // One-click self-update: hand over to a detached updater and exit.
         // Active jobs are their own detached processes over workspace files;
@@ -674,13 +707,10 @@ export async function startBrainServer(
         if (options.selfUpdateCheck !== true) {
           throw new HttpError(409, "self-update is disabled on this deployment");
         }
-        // The half-hourly cache may lag a release pushed minutes ago, and
-        // the user expressed intent NOW: re-probe so the button always
-        // targets the freshest tag (the cached value is the fallback).
-        appUpdate =
-          (await (options.appUpdateProbe ?? checkAppUpdate)(VERSION).catch(
-            () => undefined,
-          )) ?? appUpdate;
+        // The cache may lag a release pushed minutes ago, and the user
+        // expressed intent NOW: re-probe so the button always targets the
+        // freshest tag (the cached value is the fallback).
+        appUpdate = (await probeAppUpdate()) ?? appUpdate;
         if (!appUpdate) {
           throw new HttpError(
             409,
@@ -986,6 +1016,10 @@ export async function startBrainServer(
             references,
             capabilityOverrides,
           );
+          // Launching a pipeline is the other "beginning": refresh release
+          // knowledge in the background so the toast is current while the
+          // run executes. Never blocks or fails the submission.
+          void probeAppUpdate();
         } catch (error) {
           throw new HttpError(
             error instanceof ServerFileError ? error.status : 400,

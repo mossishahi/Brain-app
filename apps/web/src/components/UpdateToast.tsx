@@ -19,7 +19,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import type { HealthResponse } from "@brainstorm-agentic/protocol";
-import { errorMessage, getHealth, postUpdateApp } from "../api";
+import { errorMessage, getHealth, postUpdateApp, postUpdateCheck } from "../api";
 
 /** Last bundle version this browser has acknowledged as "seen". */
 const BUNDLE_ACK_KEY = "brain-acked-bundle-version";
@@ -86,7 +86,12 @@ export function UpdateToast() {
         })
         .catch(() => undefined);
     };
-    poll();
+    // Opening the dashboard is the beginning of a pipeline session: ask the
+    // server for a FRESH release check first (throttled server-side), then
+    // fall into the regular health polling that renders the result.
+    postUpdateCheck()
+      .catch(() => undefined)
+      .finally(poll);
     const timer = window.setInterval(poll, 60_000);
     return () => {
       live = false;

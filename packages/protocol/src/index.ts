@@ -1510,6 +1510,22 @@ export interface UpdateAppResponse {
 }
 
 /**
+ * Response of POST /api/update-check: a fresh (server-side throttled) look at
+ * the release tags. The dashboard calls it when it loads — the "beginning of
+ * a pipeline session" — so a just-published release surfaces immediately
+ * rather than on the next half-hourly background tick.
+ */
+export interface UpdateCheckResponse {
+  /** The running app version. */
+  readonly version: string;
+  /** A newer release, when one exists. */
+  readonly appUpdate?: {
+    readonly version: string;
+    readonly notes?: string;
+  };
+}
+
+/**
  * Server-sent events. `jobs` and `readiness` stream on /api/stream; `job` on
  * /api/jobs/:id/stream.
  */
@@ -1542,6 +1558,7 @@ export interface ToolUsageReport {
 /**
  * REST surface (all JSON):
  *   GET  /api/health                          -> HealthResponse
+ *   POST /api/update-check                    -> UpdateCheckResponse (re-probes release tags now, throttled; called by the dashboard on load and after run submission)
  *   POST /api/update                          -> UpdateAppResponse   (starts the detached self-updater and exits; 409 when no release is known, self-update is disabled, or the checkout is dirty)
  *   GET  /api/settings                        -> ServerSettings
  *   PUT  /api/settings                        -> ServerSettings (body: ServerSettingsUpdate; Anthropic credentials are connection-tested before any save)

@@ -933,6 +933,71 @@ test("under SLURM the updater stashes, checks out the release, and hands rebuild
   );
 });
 
+test("POST /api/update-check re-probes on demand and throttles rapid retriggers", async () => {
+  const workspace = tempRoot();
+  let probes = 0;
+  const server = await startTestBrainServer({
+    workspace,
+    port: 0,
+    selfUpdateCheck: true,
+    appUpdateThrottleMs: 1_500,
+    appUpdateProbe: async () => {
+      probes += 1;
+      // The release appears only after startup's initial check.
+      return probes >= 2 ? { version: "9.9.9", notes: "fresh" } : undefined;
+    },
+    applyAppUpdate: async () => {
+      throw new Error("must not be called");
+    },
+    exitForUpdate: () => {
+      throw new Error("must not exit");
+    },
+  });
+  try {
+    // Startup check ran once and found nothing.
+    const deadline = Date.now() + 5_000;
+    while (probes < 1 && Date.now() < deadline) {
+      await new Promise((resolveSleep) => setTimeout(resolveSleep, 25));
+    }
+    // Let the startup check's throttle window elapse — a check that JUST ran
+    // is legitimately fresh and on-demand triggers reuse it by design.
+    await new Promise((resolveSleep) => setTimeout(resolveSleep, 1_600));
+    const before = await requestJson<{ appUpdate?: unknown }>(
+      server,
+      "/api/health",
+    );
+    assert.equal(before.value.appUpdate, undefined);
+
+    // Opening the dashboard re-probes NOW and surfaces the new release.
+    const checked = await requestJson<{
+      version: string;
+      appUpdate?: { version: string };
+    }>(server, "/api/update-check", { method: "POST", body: "{}" });
+    assert.equal(checked.status, 200);
+    assert.equal(checked.value.appUpdate?.version, "9.9.9");
+    assert.equal(probes, 2);
+
+    // A second tab arriving right after reuses the fresh result.
+    const again = await requestJson<{ appUpdate?: { version: string } }>(
+      server,
+      "/api/update-check",
+      { method: "POST", body: "{}" },
+    );
+    assert.equal(again.value.appUpdate?.version, "9.9.9");
+    assert.equal(probes, 2, "throttled: no extra probe within the window");
+
+    // And the regular health payload now carries it too.
+    const after = await requestJson<{ appUpdate?: { version: string } }>(
+      server,
+      "/api/health",
+    );
+    assert.equal(after.value.appUpdate?.version, "9.9.9");
+  } finally {
+    await server.close();
+    await removeWorkspace(workspace);
+  }
+});
+
 test("POST /api/update hands over to the updater; without a known release it refuses", async () => {
   const workspace = tempRoot();
   const applied: ApplyAppUpdateOptions[] = [];

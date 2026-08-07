@@ -31,6 +31,7 @@ import type {
   ToolUsageReport,
   TrashJobResponse,
   UpdateAppResponse,
+  UpdateCheckResponse,
   ValidateAttachmentsResponse,
 } from "@brainstorm-agentic/protocol";
 
@@ -155,6 +156,9 @@ export const getCapabilityOptions = (): Promise<CapabilityOptionsResponse> =>
   request("/capabilities");
 
 /** Starts the one-click self-update; the server exits right after answering. */
+export const postUpdateCheck = (): Promise<UpdateCheckResponse> =>
+  request("/update-check", jsonInit("POST", {}));
+
 export const postUpdateApp = (): Promise<UpdateAppResponse> =>
   request("/update", jsonInit("POST", {}));
 
