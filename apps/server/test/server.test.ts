@@ -752,6 +752,22 @@ test("Claude Agent settings populate setup-token environment without leaking dev
   }
 });
 
+test("proxy environment variables route the global fetch dispatcher", async () => {
+  const { configureProxyFromEnvironment } = await import("../src/proxy.js");
+  const { EnvHttpProxyAgent, getGlobalDispatcher, setGlobalDispatcher } =
+    await import("undici");
+  const before = getGlobalDispatcher();
+  try {
+    assert.equal(configureProxyFromEnvironment({}), undefined);
+    assert.equal(getGlobalDispatcher(), before);
+    const url = "http://proxy.cluster.local:3128";
+    assert.equal(configureProxyFromEnvironment({ https_proxy: url }), url);
+    assert.ok(getGlobalDispatcher() instanceof EnvHttpProxyAgent);
+  } finally {
+    setGlobalDispatcher(before);
+  }
+});
+
 test("the updater script checks out the tag, rebuilds, relaunches, and can roll back", () => {
   const script = buildUpdaterScript({
     repoRoot: "/opt/brain app",

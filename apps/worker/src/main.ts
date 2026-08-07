@@ -41,6 +41,7 @@ import {
 } from "@brainstorm-agentic/host-tools";
 
 import { defaultSessionRoot, loadDotEnv } from "./env.js";
+import { configureProxyFromEnvironment } from "./proxy.js";
 import { FsArtifactStore, FsCheckpointStore } from "./fs-stores.js";
 import {
   deriveRunSummary,
@@ -550,6 +551,10 @@ function parseGateJsonFlag(raw: string): { gateKey: string; response: JsonValue 
 
 async function main(): Promise<void> {
   loadDotEnv(process.cwd());
+  const proxy = configureProxyFromEnvironment();
+  if (proxy) {
+    console.error(`[worker] outbound HTTP routed through proxy ${proxy}`);
+  }
   const args = parseArgs(process.argv.slice(2));
   const sessionRoot = stringFlag(args, "session-root") ?? defaultSessionRoot();
   const offline = args.flags.get("offline") === true;

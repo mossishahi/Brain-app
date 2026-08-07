@@ -483,7 +483,7 @@ function staticAdvice(id: ReadinessCheckId, settings: ServerSettings): string {
         ? "Run `claude setup-token` in any terminal where Claude Code is signed in, copy the printed token, then open Settings → Model connection and paste it. The token stays on this server."
         : "Create an API key at https://console.anthropic.com (API Keys), then open Settings → Model connection, paste it, and Save. It is verified with one small request and stored only on this server.";
     case "internet":
-      return "This host cannot reach the public internet over HTTPS. On HPC clusters compute nodes are often offline: launch the server on a node with outbound access, or export https_proxy/HTTPS_PROXY (your cluster's proxy) in the launch script before `brain launch`.";
+      return "This host cannot reach the public internet over HTTPS. Note this check tests api.anthropic.com with the app's own HTTP stack — curl reaching google.com does not prove it. On HPC clusters compute nodes are often offline: launch the server on a node with outbound access, or export https_proxy/HTTPS_PROXY (your cluster's proxy) before `brain launch` — the app routes its own requests through it (NO_PROXY honored).";
     case "code":
       return "The scratch workspace could not run a script. Check that the workspace path is on writable storage, that the filesystem is not mounted noexec, and that TMPDIR points somewhere writable.";
     case "capabilities":
