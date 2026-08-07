@@ -1,5 +1,6 @@
 export {
   ClaudeAgentExecutor,
+  salvageJsonText,
   validateClaudeSetupToken,
   type ClaudeAgentExecutorConfig,
   type ClaudeAgentOutputValidator,

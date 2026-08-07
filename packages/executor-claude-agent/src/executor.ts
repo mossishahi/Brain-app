@@ -1083,6 +1083,41 @@ function usageFromResult(value: unknown): TokenUsage {
   };
 }
 
+/**
+ * Best-effort extraction of one JSON value from a model's final TEXT message
+ * (the raw-JSON fallback path when native structured output is exhausted).
+ * Models under that instruction still occasionally wrap the object in prose
+ * or a Markdown fence; each candidate below is strictly parsed and
+ * JSON-safety-checked, so salvage can never invent structure — it only finds
+ * the object that is already there. Returns undefined when nothing parses.
+ */
+export function salvageJsonText(text: string): JsonValue | undefined {
+  const candidates: string[] = [];
+  const trimmed = text.trim();
+  candidates.push(trimmed);
+  // A fenced block anywhere in the message, not only as the entire message.
+  const fence = /```(?:json)?\s*([\s\S]*?)```/i.exec(trimmed);
+  if (fence?.[1]) candidates.push(fence[1].trim());
+  // The outermost braced/bracketed span (prose before/after the object).
+  for (const [open, close] of [
+    ["{", "}"],
+    ["[", "]"],
+  ] as const) {
+    const start = trimmed.indexOf(open);
+    const end = trimmed.lastIndexOf(close);
+    if (start >= 0 && end > start) candidates.push(trimmed.slice(start, end + 1));
+  }
+  for (const candidate of candidates) {
+    try {
+      const parsed: unknown = JSON.parse(candidate);
+      if (isJsonValue(parsed)) return parsed;
+    } catch {
+      // Try the next candidate shape.
+    }
+  }
+  return undefined;
+}
+
 function parseResultOutput(result: UnknownRecord, task: AgentTask): JsonValue {
   const candidate = result.structured_output;
   if (candidate !== undefined) {
@@ -1093,17 +1128,11 @@ function parseResultOutput(result: UnknownRecord, task: AgentTask): JsonValue {
   }
   const text = typeof result.result === "string" ? result.result : "";
   if (task.outputSchema !== undefined) {
-    try {
-      const trimmed = text.trim();
-      const fenced = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(trimmed);
-      const parsed: unknown = JSON.parse(fenced?.[1] ?? trimmed);
-      if (!isJsonValue(parsed)) throw new Error("output is not JSON-safe");
-      return parsed;
-    } catch (error) {
-      throw new Error("Claude Agent SDK did not return valid structured JSON", {
-        cause: error,
-      });
+    const salvaged = salvageJsonText(text);
+    if (salvaged === undefined) {
+      throw new Error("Claude Agent SDK did not return valid structured JSON");
     }
+    return salvaged;
   }
   return text;
 }
@@ -1761,6 +1790,29 @@ export class ClaudeAgentExecutor implements AgentExecutor {
             kind: "validation",
             message:
               "Native structured output exhausted; retrying with validated raw JSON",
+          });
+          continue;
+        }
+        // The final message carried no structured output and no salvageable
+        // JSON: a per-attempt output failure, not infrastructure. Spend a
+        // validation attempt on a fresh session with corrective feedback
+        // instead of sinking the task — and with it a stage that may have
+        // been running for twenty minutes across a whole panel.
+        if (
+          task.outputSchema &&
+          /did not return valid structured JSON/.test(message) &&
+          attempt < attempts
+        ) {
+          nativeStructuredOutput = false;
+          validationIssues = [
+            "The previous session's final message was not parseable JSON.",
+            "Respond with ONLY the complete raw JSON object — no prose before or after, no Markdown fences, every string (especially LaTeX and code) properly escaped.",
+          ];
+          rejectedOutput = undefined;
+          progress(context, {
+            kind: "validation",
+            message:
+              "Final message was not parseable JSON; retrying in a fresh session",
           });
           continue;
         }

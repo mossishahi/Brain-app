@@ -15,6 +15,7 @@ import type { AgentTask } from "@brainstorm-agentic/core";
 
 import {
   ClaudeAgentExecutor,
+  salvageJsonText,
   validateClaudeSetupToken,
   type ClaudeAgentQueryFn,
   type ClaudeAgentQueryInput,
@@ -328,6 +329,80 @@ test("Bash commands are scoped: reads outside the roots are denied, workspace/sy
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("salvageJsonText finds the JSON that is really there and never invents one", () => {
+  assert.deepEqual(salvageJsonText('{"a": 1}'), { a: 1 });
+  assert.deepEqual(
+    salvageJsonText('Here is the result:\n```json\n{"a": 1}\n```\nHope this helps!'),
+    { a: 1 },
+    "a fenced block anywhere in the message",
+  );
+  assert.deepEqual(
+    salvageJsonText('Sure! The final answer follows. {"a": {"b": [1, 2]}} Done.'),
+    { a: { b: [1, 2] } },
+    "the outermost braced span with prose around it",
+  );
+  assert.deepEqual(
+    salvageJsonText('{"eq": "E = mc^2 \\\\(\\\\alpha\\\\)"}'),
+    { eq: "E = mc^2 \\(\\alpha\\)" },
+    "escaped LaTeX survives",
+  );
+  assert.equal(salvageJsonText("no json here at all"), undefined);
+  assert.equal(
+    salvageJsonText('{"broken": "unterminated'),
+    undefined,
+    "malformed JSON is rejected, not repaired",
+  );
+});
+
+test("an unparseable final message costs one attempt, not the task: the retry succeeds", async () => {
+  const captured: ClaudeAgentQueryInput[] = [];
+  let calls = 0;
+  const sequencedQuery: ClaudeAgentQueryFn = (input) => ({
+    async *[Symbol.asyncIterator]() {
+      captured.push(input);
+      calls += 1;
+      yield calls === 1
+        ? {
+            // No structured_output and hopeless text: parse fails.
+            type: "result",
+            subtype: "success",
+            is_error: false,
+            result: "I could not fit the answer into the tool, sorry.",
+            session_id: "session-bad",
+            num_turns: 3,
+            usage: { input_tokens: 5, output_tokens: 2 },
+          }
+        : {
+            // The fresh session answers with prose-wrapped JSON — salvaged.
+            type: "result",
+            subtype: "success",
+            is_error: false,
+            result: 'Here it is:\n```json\n{"answer": "recovered"}\n```',
+            session_id: "session-good",
+            num_turns: 2,
+            usage: { input_tokens: 5, output_tokens: 2 },
+          };
+    },
+  });
+  const executor = new ClaudeAgentExecutor({
+    token: "setup-token-secret",
+    queryFn: sequencedQuery,
+  });
+  const result = await executor.execute(structuredTask, {
+    runId: "run-salvage-retry",
+    nodePath: "root/brain",
+  });
+  assert.equal(result.status, "ok");
+  assert.deepEqual(result.status === "ok" ? result.output : null, {
+    answer: "recovered",
+  });
+  assert.equal(calls, 2, "one retry in a fresh session");
+  assert.ok(
+    captured[1]!.prompt.includes("not parseable JSON"),
+    "the retry carries corrective feedback",
+  );
 });
 
 test("attachment-capable tasks get the deterministic attachment MCP tools", async () => {
