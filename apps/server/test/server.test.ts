@@ -776,6 +776,12 @@ test("the updater script checks out the tag, rebuilds, relaunches, and can roll 
   );
   assert.ok(script.includes("cd '/opt/brain app'"), "quotes the repo path");
   assert.ok(script.includes("rollback()"), "carries the rollback path");
+  // The script must PARSE: an updater that dies on a syntax error after the
+  // server exited leaves no app running at all. bash -n is the same gate
+  // applyAppUpdate runs before letting the server exit.
+  const scriptPath = join(tempRoot(), "updater.sh");
+  writeFileSync(scriptPath, script);
+  execFileSync("bash", ["-n", scriptPath]);
 });
 
 test("POST /api/update hands over to the updater; without a known release it refuses", async () => {

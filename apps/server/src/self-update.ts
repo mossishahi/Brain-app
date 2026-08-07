@@ -159,12 +159,12 @@ previous=$(git rev-parse HEAD)
 echo "[updater] previous checkout: $previous"
 rollback() {
   echo "[updater] update failed; rolling back to $previous"
-  git checkout --quiet "$previous" \\
-    && npm ci --no-audit --no-fund \\
-    && npm run build \\
-    && ${relaunch} \\
-    && echo "[updater] previous version relaunched" \\
-    || echo "[updater] ROLLBACK FAILED — relaunch manually with: npm ci && npm run build && npm run launch"
+  if git checkout --quiet "$previous" && npm ci --no-audit --no-fund && npm run build; then
+    ${relaunch}
+    echo "[updater] previous version relaunched"
+  else
+    echo "[updater] ROLLBACK FAILED — relaunch manually with: npm ci && npm run build && npm run launch"
+  fi
   exit 1
 }
 echo "[updater] fetching release tags"
@@ -215,6 +215,18 @@ export async function applyAppUpdate(
     }),
     { mode: 0o700 },
   );
+  // Syntax-check the generated script BEFORE the server commits to exiting:
+  // an updater that dies parsing would otherwise leave no server running at
+  // all — the one outcome this whole mechanism must never produce.
+  try {
+    await run("bash", ["-n", scriptFile], { timeout: 10_000 });
+  } catch (error) {
+    throw new Error(
+      `the generated updater script failed its syntax check; not updating (${
+        error instanceof Error ? error.message : String(error)
+      })`,
+    );
+  }
   const log = openSync(logFile, "a");
   const child = spawn("bash", [scriptFile], {
     detached: true,
