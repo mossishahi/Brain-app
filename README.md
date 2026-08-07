@@ -66,9 +66,12 @@ click hands the server to a detached updater that checks out the release,
 reinstalls, rebuilds, and relaunches on the same port — the browser tab
 reloads itself into the new version, and active runs (detached worker
 processes over workspace files) keep going and are adopted by the new server.
-A failed update rolls back to the previous checkout and relaunches it; every
-step is logged under `<workspace>/self-update/`. Skills-bundle updates need no
-action at all: new runs resolve the latest published bundle automatically.
+A failed update rolls back to the previous checkout and relaunches it; local
+modifications (e.g. a package-lock rewritten by a bootstrap `npm install`)
+are set aside recoverably with `git stash`, never destroyed and never a
+reason to fail; every step is logged under `<workspace>/self-update/`.
+Skills-bundle updates need no action at all: new runs resolve the latest
+published bundle automatically.
 
 ### Developer-only registry overrides
 

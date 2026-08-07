@@ -62,7 +62,7 @@ import {
   type ClaudeAgentConnectionValidator,
 } from "./settings.js";
 
-const VERSION = "0.2.2";
+const VERSION = "0.2.3";
 const SNAPSHOT_THROTTLE_MS = 500;
 const HEARTBEAT_MS = 15_000;
 const POLL_MS = 2_000;
@@ -674,6 +674,13 @@ export async function startBrainServer(
         if (options.selfUpdateCheck !== true) {
           throw new HttpError(409, "self-update is disabled on this deployment");
         }
+        // The half-hourly cache may lag a release pushed minutes ago, and
+        // the user expressed intent NOW: re-probe so the button always
+        // targets the freshest tag (the cached value is the fallback).
+        appUpdate =
+          (await (options.appUpdateProbe ?? checkAppUpdate)(VERSION).catch(
+            () => undefined,
+          )) ?? appUpdate;
         if (!appUpdate) {
           throw new HttpError(
             409,

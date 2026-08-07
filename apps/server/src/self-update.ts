@@ -123,9 +123,12 @@ function shq(value: string): string {
 /**
  * The self-contained updater. It runs detached from the dying server:
  * 1. wait for the server process to exit (the tree must be quiet);
- * 2. fetch tags and check out the release tag;
- * 3. `npm ci` + `npm run build`;
- * 4. relaunch the server with its original command line — or, when any step
+ * 2. set aside any local modifications with `git stash` (recoverable —
+ *    bootstrap installs routinely carry an npm-rewritten package-lock, and
+ *    an update must neither destroy changes nor fail over them);
+ * 3. fetch tags and check out the release tag;
+ * 4. `npm ci` + `npm run build`;
+ * 5. relaunch the server with its original command line — or, when any step
  *    fails, roll back to the previous checkout, rebuild, and relaunch THAT,
  *    so a broken update never leaves the user without a running app.
  * Everything is logged to one file the dashboard can point at.
@@ -167,6 +170,11 @@ rollback() {
   fi
   exit 1
 }
+if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+  echo "[updater] local modifications detected; setting them aside recoverably (git stash list to inspect)"
+  git -c user.name=brainstorm-updater -c user.email=updater@localhost \\
+    stash push --quiet -m ${shq(`brainstorm self-update to ${tag}`)} || rollback
+fi
 echo "[updater] fetching release tags"
 git fetch --tags --quiet || echo "[updater] tag fetch failed; using locally known tags"
 git rev-parse -q --verify ${shq(`refs/tags/${tag}`)} >/dev/null || { echo "[updater] tag ${tag} not found"; rollback; }
@@ -185,8 +193,9 @@ echo "[updater] done — now running ${tag}"
 /**
  * Start the detached updater and return where it logs. The caller (the HTTP
  * handler) responds to the browser and then shuts the server down; the
- * updater takes over from there. Refuses when the tree has local
- * modifications — an update must never destroy work it cannot restore.
+ * updater takes over from there. Local modifications never block the update
+ * and are never destroyed: the updater sets them aside with `git stash`
+ * (bootstrap installs routinely carry an npm-rewritten package-lock).
  */
 export async function applyAppUpdate(
   options: ApplyAppUpdateOptions,
@@ -194,12 +203,6 @@ export async function applyAppUpdate(
   const repoRoot = await appRepoRoot();
   if (!repoRoot) {
     throw new Error("the app is not running from a git checkout; update it the way it was installed");
-  }
-  const dirty = await git(repoRoot, ["status", "--porcelain", "--untracked-files=no"]);
-  if (dirty !== "") {
-    throw new Error(
-      "the app checkout has local modifications; commit or stash them before updating",
-    );
   }
   mkdirSync(options.stateDir, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
