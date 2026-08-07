@@ -1186,6 +1186,11 @@ function shellPathCandidates(
     // `../…` hops resolve against the task workspace (the shell's cwd).
     out.push(isAbsolute(token) ? resolve(token) : resolve(taskRoot, token));
   }
+  // Bare `~` / `$HOME` with no path after it (`ls $HOME`) is still a read of
+  // the home directory; the path pattern above requires a slash, so catch
+  // the standalone tokens separately.
+  const bareHome = /(?:^|[\s"'`=(:;,|&<>])(~|\$HOME|\$\{HOME\})(?=$|[\s"'`;:,|&<>)])/g;
+  if (bareHome.test(command)) out.push(homedir());
   return out;
 }
 
