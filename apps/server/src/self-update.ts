@@ -162,6 +162,12 @@ previous=$(git rev-parse HEAD)
 echo "[updater] previous checkout: $previous"
 rollback() {
   echo "[updater] update failed; rolling back to $previous"
+  if [ -n "\${SLURM_JOB_ID:-}" ]; then
+    git checkout --quiet "$previous" \\
+      && echo "[updater] previous checkout restored; the launch wrapper relaunches it" \\
+      || echo "[updater] ROLLBACK FAILED — restore manually: git checkout $previous"
+    exit 1
+  fi
   if git checkout --quiet "$previous" && npm ci --no-audit --no-fund && npm run build; then
     ${relaunch}
     echo "[updater] previous version relaunched"
@@ -180,6 +186,15 @@ git fetch --tags --quiet || echo "[updater] tag fetch failed; using locally know
 git rev-parse -q --verify ${shq(`refs/tags/${tag}`)} >/dev/null || { echo "[updater] tag ${tag} not found"; rollback; }
 echo "[updater] checking out ${tag}"
 git checkout --quiet ${shq(tag)} || rollback
+if [ -n "\${SLURM_JOB_ID:-}" ]; then
+  # Inside a SLURM allocation the job ends (and this process dies) with the
+  # batch script, and relaunching here would race the wrapper's loop. The
+  # launch wrapper owns rebuild + relaunch: it waits for this script to
+  # exit, sees the new checkout, builds it, and starts the server again.
+  echo "[updater] SLURM job \${SLURM_JOB_ID}: ${tag} checked out — handing rebuild and relaunch to the launch wrapper"
+  echo "[updater] done — waiting wrapper will rebuild ${tag}"
+  exit 0
+fi
 echo "[updater] installing dependencies"
 npm ci --no-audit --no-fund || rollback
 echo "[updater] building"

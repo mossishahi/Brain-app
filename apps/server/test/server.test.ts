@@ -878,6 +878,61 @@ test("the updater script checks out the tag, rebuilds, relaunches, and can roll 
   execFileSync("bash", ["-n", scriptPath]);
 });
 
+test("under SLURM the updater stashes, checks out the release, and hands rebuild/relaunch to the wrapper", () => {
+  const root = tempRoot();
+  const repo = join(root, "repo");
+  mkdirSync(repo, { recursive: true });
+  const git = (...args: string[]): string =>
+    execFileSync(
+      "git",
+      ["-C", repo, "-c", "user.name=test", "-c", "user.email=test@local", ...args],
+      { encoding: "utf8" },
+    ).trim();
+  git("init", "--quiet");
+  writeFileSync(join(repo, "f.txt"), "one\n");
+  git("add", "f.txt");
+  git("commit", "--quiet", "-m", "one");
+  const oldRev = git("rev-parse", "HEAD");
+  writeFileSync(join(repo, "f.txt"), "two\n");
+  git("commit", "--quiet", "-am", "two");
+  git("tag", "-a", "app/v9.9.9", "-m", "release");
+  git("checkout", "--quiet", oldRev);
+  // A bootstrap-style local modification that must survive, not block.
+  writeFileSync(join(repo, "f.txt"), "local dirt\n");
+
+  // A pid that is already dead, so the wait loop returns immediately.
+  const dead = execFileSync("bash", ["-c", "true & echo $!"], { encoding: "utf8" }).trim();
+  const relaunchMarker = join(root, "relaunched");
+  const script = buildUpdaterScript({
+    repoRoot: repo,
+    targetVersion: "9.9.9",
+    relaunch: { command: "touch", args: [relaunchMarker], cwd: root },
+    pid: Number(dead),
+  });
+  const scriptPath = join(root, "updater.sh");
+  writeFileSync(scriptPath, script);
+  const log = execFileSync("bash", [scriptPath], {
+    encoding: "utf8",
+    env: { ...process.env, SLURM_JOB_ID: "12345" },
+  });
+
+  assert.equal(
+    git("rev-parse", "HEAD"),
+    git("rev-parse", "app/v9.9.9^{commit}"),
+    "the release tag is checked out",
+  );
+  assert.ok(
+    git("stash", "list").includes("brainstorm self-update"),
+    "the local modification is preserved in the stash",
+  );
+  assert.ok(log.includes("handing rebuild and relaunch to the launch wrapper"));
+  assert.equal(
+    existsSync(relaunchMarker),
+    false,
+    "the updater must NOT relaunch inside a SLURM allocation",
+  );
+});
+
 test("POST /api/update hands over to the updater; without a known release it refuses", async () => {
   const workspace = tempRoot();
   const applied: ApplyAppUpdateOptions[] = [];

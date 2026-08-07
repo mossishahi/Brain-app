@@ -55,8 +55,13 @@ type UpdatePhase =
       readonly logFile?: string;
     };
 
-/** How long the restart may take before the overlay reports failure. */
-const UPDATE_DEADLINE_MS = 6 * 60_000;
+/**
+ * How long the restart may take before the overlay reports failure. Generous
+ * because `npm ci` + build on cluster filesystems (NFS/Lustre home dirs) can
+ * take a long while, and under SLURM the launch wrapper rebuilds after the
+ * updater's checkout.
+ */
+const UPDATE_DEADLINE_MS = 15 * 60_000;
 
 export function UpdateToast() {
   const [health, setHealth] = useState<HealthResponse | null>(null);

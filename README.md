@@ -73,6 +73,19 @@ reason to fail; every step is logged under `<workspace>/self-update/`.
 Skills-bundle updates need no action at all: new runs resolve the latest
 published bundle automatically.
 
+## Running under SLURM
+
+Use [`deploy/slurm-launch.sh`](deploy/slurm-launch.sh) (submit it from the
+repository root). A detached relauncher would die with the job's cgroup, so
+under SLURM the in-app updater only stashes + checks out the new release and
+hands rebuild + relaunch to the wrapper's loop — one-click updates work
+exactly like on a workstation, including the tab reloading itself. The
+wrapper follows the release-tag channel (never `main`), builds with `npm ci`
+(never `npm install` — it rewrites the lockfile and dirties the checkout),
+requests an early TERM before walltime for a clean shutdown, and uses
+`--dependency=singleton` so two instances never fight over the port.
+Resubmitting after walltime adopts all jobs and state from the workspace.
+
 ### Developer-only registry overrides
 
 The registry endpoint is deliberately NOT a user setting (the webapp shows it read-only and the
