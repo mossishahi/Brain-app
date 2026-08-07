@@ -8,3 +8,6 @@ apps/*/dist/
 .brainstorm-agentic/
 coverage/
 *.log
+
+# SLURM wrapper job logs (logs/ itself is git-kept)
+/logs/*.log

@@ -22,8 +22,10 @@
 #   never fight over the port.
 #
 #SBATCH --job-name=brain
-#SBATCH --output=slurm_brain_%j.log
-#SBATCH --error=slurm_brain_%j.log
+# Logs land in the repo's git-kept logs/ dir (relative to the submit dir);
+# the wrapper prunes entries older than 30 days on each start.
+#SBATCH --output=logs/slurm_brain_%j.log
+#SBATCH --error=logs/slurm_brain_%j.log
 #SBATCH --partition=cpu_p
 #SBATCH --qos=cpu_normal
 #SBATCH --mem=16G
@@ -55,6 +57,8 @@ if [ ! -x "$NODE_DIR/bin/node" ]; then
 fi
 export PATH="$NODE_DIR/bin${EXTRA_PATH:+:$EXTRA_PATH}:$PATH"
 cd "$APP" || { echo "[wrapper] no app at $APP"; exit 1; }
+# Keep the log directory bounded; the active job's own log is always newer.
+mkdir -p logs && find logs -name 'slurm_brain_*.log' -mtime +30 -delete 2>/dev/null
 
 # Follow the release channel: newest app/v* tag, never a branch. Local
 # modifications (a lockfile rewritten by an old `npm install`, a stray edit)
