@@ -1130,7 +1130,22 @@ function parseResultOutput(result: UnknownRecord, task: AgentTask): JsonValue {
   if (task.outputSchema !== undefined) {
     const salvaged = salvageJsonText(text);
     if (salvaged === undefined) {
-      throw new Error("Claude Agent SDK did not return valid structured JSON");
+      // Keep the evidence: whether this was sloppy formatting, broken
+      // escaping, or a message cut off at the output-token cap is exactly
+      // what the error consumer needs to know — and by then the session is
+      // gone. An unterminated JSON string in a long message is the
+      // signature of truncation, which no retry can fix.
+      const head = text.slice(0, 400).replace(/\s+/g, " ");
+      const tail = text.length > 700 ? text.slice(-200).replace(/\s+/g, " ") : "";
+      const truncated =
+        /[{["]/.test(text) && text.length > 8_000 && !/[}\]"]\s*$/.test(text.trim());
+      throw new Error(
+        `Claude Agent SDK did not return valid structured JSON (final message: ${text.length} chars` +
+          (truncated
+            ? "; it ends mid-value, which points at the output-token cap rather than formatting"
+            : "") +
+          `). Head: ${head}${tail ? ` … Tail: ${tail}` : ""}`,
+      );
     }
     return salvaged;
   }
@@ -1800,7 +1815,9 @@ export class ClaudeAgentExecutor implements AgentExecutor {
         // been running for twenty minutes across a whole panel.
         if (
           task.outputSchema &&
-          /did not return valid structured JSON/.test(message) &&
+          /did not return valid structured JSON|returned a non-JSON structured output/.test(
+            message,
+          ) &&
           attempt < attempts
         ) {
           nativeStructuredOutput = false;

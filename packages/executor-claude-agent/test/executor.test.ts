@@ -405,6 +405,38 @@ test("an unparseable final message costs one attempt, not the task: the retry su
   );
 });
 
+test("a terminally unparseable message reports its evidence: length, head, and truncation hint", async () => {
+  const longUnterminated =
+    '{"idea": "' + "a very long LaTeX-heavy body ".repeat(400); // > 8k chars, ends mid-string
+  const executor = new ClaudeAgentExecutor({
+    token: "setup-token-secret",
+    maxValidationAttempts: 1,
+    queryFn: (input) => ({
+      async *[Symbol.asyncIterator]() {
+        void input;
+        yield {
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          result: longUnterminated,
+          session_id: "session-truncated",
+          num_turns: 2,
+          usage: { input_tokens: 5, output_tokens: 2 },
+        };
+      },
+    }),
+  });
+  const result = await executor.execute(structuredTask, {
+    runId: "run-truncated",
+    nodePath: "root/brain",
+  });
+  assert.equal(result.status, "error");
+  const message = result.status === "error" ? result.error.message : "";
+  assert.ok(message.includes(`${longUnterminated.length} chars`), "reports the length");
+  assert.ok(message.includes("output-token cap"), "flags likely truncation");
+  assert.ok(message.includes('{"idea":'), "carries the head of the evidence");
+});
+
 test("attachment-capable tasks get the deterministic attachment MCP tools", async () => {
   const captured: ClaudeAgentQueryInput[] = [];
   const root = mkdtempSync(join(tmpdir(), "claude-agent-attachments-"));
