@@ -791,6 +791,15 @@ export class SettingsStore {
         openRouterKeyConfigured:
           this.getOpenRouterApiKey() !== undefined,
       },
+      // The ingest destination is deployment-owned like the registry origin
+      // it derives from, so it is recomputed on every read: a settings file
+      // written before telemetry existed (or one whose update dropped the
+      // URL) can never strand the diagnostics button on "no destination".
+      // Only the enabled flag is the user's.
+      telemetry: {
+        enabled: settings.telemetry?.enabled ?? true,
+        ingestUrl: ingestUrlFor(this.deploymentRegistryUrl),
+      },
     };
   }
 

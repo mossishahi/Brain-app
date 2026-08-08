@@ -31,6 +31,7 @@ import {
 import {
   buildOrchestrationCommand,
   buildUpdaterScript,
+  DEFAULT_SLURM_TEMPLATE,
   defaultReadinessProbes,
   defaultServerSettings,
   JobManager,
@@ -657,21 +658,17 @@ test("a diagnostic preview describes exactly what would be sent, and excludes th
     assert.ok(preview.excluded.length > 0, "the preview names what is held back");
     assert.ok(preview.totalBytes > 0);
 
-    // No ingest endpoint is configured in this test's settings, so the preview
-    // must say so. Without this the dashboard offers a Send button that can
-    // only ever fail, and the user finds out after committing to the send
-    // rather than before.
+    // The ingest destination derives from the deployment's registry origin
+    // at read time (never from what the settings file happens to carry), so
+    // a healthy deployment can always send — the field-observed "no
+    // destination" strandings came from stale stored settings and must not
+    // recur. The unreachable-destination honesty lives on in the canSend
+    // gate, covered by the legacy-settings derivation test.
     assert.equal(
       preview.canSend,
-      false,
-      "an unconfigured destination has to be visible in the preview, not discovered on POST",
+      true,
+      "the destination derives from the deployment registry; a healthy deployment can always send",
     );
-    const attempted = await requestJson<{ error?: string }>(
-      server,
-      `/api/jobs/${jobId}/diagnostics`,
-      { method: "POST" },
-    );
-    assert.equal(attempted.status, 409, "and the POST refuses rather than pretending to send");
   } finally {
     await server.close();
     await removeWorkspace(workspace);
@@ -1077,6 +1074,37 @@ test("POST /api/update hands over to the updater; without a known release it ref
   } finally {
     await quiet.close();
     await removeWorkspace(quietWorkspace);
+  }
+});
+
+test("a legacy settings file without telemetry still derives the diagnostics destination", async () => {
+  const workspace = tempRoot();
+  try {
+    // Exactly the stranded state seen in the field: settings persisted
+    // before telemetry existed (or a partial update dropped it) — the
+    // diagnostics destination must derive from the deployment's registry
+    // origin at read time, never from what the file happens to carry.
+    writeFileSync(
+      join(workspace, "settings.json"),
+      JSON.stringify({
+        slurmTemplate: DEFAULT_SLURM_TEMPLATE,
+        runner: "local",
+        panelConfirmation: "manual",
+        llm: { provider: "offline" },
+      }),
+    );
+    const store = new SettingsStore(workspace, {
+      validateAnthropic: async () => undefined,
+    });
+    const settings = store.get();
+    assert.equal(settings.telemetry?.enabled, true);
+    const origin = new URL(settings.contentRegistry.url);
+    assert.equal(
+      settings.telemetry?.ingestUrl,
+      `${origin.protocol}//${origin.host}`,
+    );
+  } finally {
+    await removeWorkspace(workspace);
   }
 });
 

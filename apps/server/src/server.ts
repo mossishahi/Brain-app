@@ -62,7 +62,7 @@ import {
   type ClaudeAgentConnectionValidator,
 } from "./settings.js";
 
-const VERSION = "0.2.9";
+const VERSION = "0.2.10";
 const SNAPSHOT_THROTTLE_MS = 500;
 const HEARTBEAT_MS = 15_000;
 const POLL_MS = 2_000;
@@ -1154,7 +1154,9 @@ export async function startBrainServer(
         const jobId = decodeURIComponent(diagPreviewMatch[1]!);
         const job = (await manager.list()).find((entry) => entry.jobId === jobId);
         if (!job) throw new HttpError(404, `job "${jobId}" was not found`);
-        const configured = manager.settings.get().telemetry?.ingestUrl !== undefined;
+        // Truthy, not defined: a derived-but-empty URL (no registry) is
+        // still "nowhere to send".
+        const configured = !!manager.settings.get().telemetry?.ingestUrl;
         sendJson(res, 200, buildDiagnostic(manager.jobsDir, job, configured).preview);
         return;
       }
