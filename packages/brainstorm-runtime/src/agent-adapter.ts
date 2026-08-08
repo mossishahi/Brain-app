@@ -221,6 +221,88 @@ function requestedSectionIssue(
  * OutputValidator compatible with ToolLoopAgentExecutor. It resolves the
  * JSON Schema title back to the authoritative content Zod schema.
  */
+/**
+ * Signatures of probe/filler text — an agent fighting the output schema
+ * sometimes degenerates into submitting minimal test payloads to see what
+ * the validator accepts ("Test minimal reason string for schema debug
+ * purpose only length check now.", "abc"). Those satisfy the SHAPE, so
+ * without this check they are recorded as real verdicts and silently poison
+ * the review. Every pattern here is unambiguous filler; ordinary scientific
+ * prose (which legitimately contains words like "test") never matches.
+ */
+const PLACEHOLDER_PHRASES: readonly RegExp[] = [
+  /\bplaceholder\b/i,
+  /\blorem ipsum\b/i,
+  /\bschema debug\b/i,
+  /\blength check (?:now|only)\b/i,
+  /\btest minimal\b/i,
+  /\bminimal (?:test|reason|suggestion) string\b/i,
+  /\bstring length (?:twenty|thirty|forty|fifty|\d+)\b/i,
+  /\bjust (?:a test|to fill)\b/i,
+  /\bdummy (?:text|value|content)\b/i,
+  /\bfiller text\b/i,
+];
+
+/** Exact throwaway field values (whole trimmed value, case-insensitive). */
+const PLACEHOLDER_VALUES: ReadonlySet<string> = new Set([
+  "abc",
+  "abc abc",
+  "ok",
+  "test",
+  "todo",
+  "tbd",
+  "n/a",
+  "na",
+  "xxx",
+  "foo",
+  "bar",
+  "baz",
+  "lorem",
+  "asdf",
+  "dummy",
+  "placeholder",
+  "...",
+]);
+
+/**
+ * Scans every string in a shape-valid artifact for probe/filler content.
+ * Returned issues flow into the executors' validation-retry loop, so the
+ * agent gets a fresh session with the exact field named — and a persistent
+ * offender fails LOUD instead of being recorded.
+ */
+export function placeholderContentIssues(
+  value: unknown,
+  path = "artifact",
+): string[] {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (PLACEHOLDER_VALUES.has(trimmed.toLowerCase())) {
+      return [
+        `${path}: "${trimmed}" is placeholder text, not content — the submission is recorded verbatim as your answer; write the real value`,
+      ];
+    }
+    const phrase = PLACEHOLDER_PHRASES.find((pattern) => pattern.test(trimmed));
+    if (phrase) {
+      const snippet = trimmed.length > 80 ? `${trimmed.slice(0, 80)}…` : trimmed;
+      return [
+        `${path}: "${snippet}" reads as schema-probing filler — never test the output tool; submit only your real, final content`,
+      ];
+    }
+    return [];
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap((entry, index) =>
+      placeholderContentIssues(entry, `${path}[${index}]`),
+    );
+  }
+  if (typeof value === "object" && value !== null) {
+    return Object.entries(value).flatMap(([key, entry]) =>
+      placeholderContentIssues(entry, `${path}.${key}`),
+    );
+  }
+  return [];
+}
+
 export class ContentArtifactOutputValidator {
   validate(value: unknown, schema: unknown): ContentValidationResult {
     const schemaName =
@@ -296,6 +378,13 @@ export class ContentArtifactOutputValidator {
     }
     if (!jsonValue(parsed.data)) {
       return { success: false, issues: ["validated artifact is not JSON-safe"] };
+    }
+    // Shape-valid is not enough: probe/filler submissions satisfy the schema
+    // by construction, and once recorded they poison the review as real
+    // verdicts. Reject them here so the retry loop demands real content.
+    const placeholderIssues = placeholderContentIssues(parsed.data);
+    if (placeholderIssues.length > 0) {
+      return { success: false, issues: placeholderIssues };
     }
     return { success: true, value: parsed.data };
   }
