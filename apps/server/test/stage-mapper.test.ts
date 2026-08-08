@@ -539,3 +539,91 @@ test("a mismatched or malformed type body yields no idea view instead of wrong c
   assert.ok(member);
   assert.equal(member.idea, undefined);
 });
+
+test("the activity cap evicts plain progress ticks before capability rows", () => {
+  const workspace = mkdtempSync(join(tmpdir(), "stage-mapper-test-"));
+  try {
+    const sessionDir = join(workspace, "session");
+    const jobDir = join(workspace, "job");
+    mkdirSync(join(sessionDir, "artifacts"), { recursive: true });
+    mkdirSync(jobDir, { recursive: true });
+    writeFileSync(
+      join(sessionDir, "checkpoint.json"),
+      JSON.stringify({
+        runId: "job-1",
+        workflowId: "brainstorm",
+        status: "completed",
+        input: {},
+        journal: [],
+        pendingGates: [],
+        seq: 1,
+        updatedAt: Date.now(),
+      }),
+    );
+    writeFileSync(join(sessionDir, "artifacts", "index.json"), JSON.stringify({ refs: [] }));
+
+    // Ten early tool calls, then a long tail of icon-less heartbeats — the
+    // review-phase shape that used to flush every capability row out of the
+    // 200-entry window by the time the run finished.
+    const path = "brainstorm-root/review-members/member[0]";
+    const lines: string[] = [];
+    let seq = 0;
+    for (let i = 0; i < 10; i += 1) {
+      seq += 1;
+      lines.push(
+        JSON.stringify({
+          type: "agent:progress",
+          seq,
+          at: seq,
+          path,
+          progress: { kind: "tool", message: `read attachment ${i}`, toolName: "Read" },
+        }),
+      );
+    }
+    for (let i = 0; i < 400; i += 1) {
+      seq += 1;
+      lines.push(
+        JSON.stringify({
+          type: "agent:progress",
+          seq,
+          at: seq,
+          path,
+          progress: { kind: "model", message: "thinking", elapsedMs: 1000 },
+        }),
+      );
+    }
+    writeFileSync(join(jobDir, "events.jsonl"), lines.join("\n") + "\n");
+
+    const record: JobRecord = {
+      jobId: "job-1",
+      topic: "topic",
+      status: "completed",
+      runner: "local",
+      createdAt: 1,
+      updatedAt: 2,
+    };
+    const detail = buildJobDetail({
+      record,
+      status: "completed",
+      sessionDir,
+      jobDir,
+      settings,
+    });
+    const review = detail.stages.find((candidate) => candidate.id === "review-members");
+    assert.ok(review);
+    const activity = review.activity ?? [];
+    assert.equal(activity.length, 200, "the cap still bounds the feed");
+    const withCapability = activity.filter((entry) => entry.capability !== undefined);
+    assert.equal(
+      withCapability.length,
+      10,
+      "every capability row outlives the heartbeat flood",
+    );
+    // Chronology holds: survivors stay in event order, ending at the newest tick.
+    const ids = activity.map((entry) => Number(entry.id));
+    assert.deepEqual([...ids].sort((a, b) => a - b), ids);
+    assert.equal(ids[ids.length - 1], 410);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});

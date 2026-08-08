@@ -198,7 +198,17 @@ export function ActivityFeed({
   /** Current time for the quiet-period ticker; omit to disable it. */
   now?: number;
 }) {
-  const visible = entries.slice(-20);
+  // Render the full server-provided window (capped server-side): trimming to
+  // a client tail dropped the capability rows once a run's closing heartbeats
+  // outnumbered them. The list scrolls; keep it pinned to the newest entry
+  // unless the reader has scrolled back through the history.
+  const visible = entries;
+  const listRef = useRef<HTMLOListElement>(null);
+  const pinnedRef = useRef(true);
+  useLayoutEffect(() => {
+    const list = listRef.current;
+    if (list && pinnedRef.current) list.scrollTop = list.scrollHeight;
+  }, [entries.length]);
   if (visible.length === 0) return null;
   const lastAt = visible[visible.length - 1]!.at;
   const quietMs = active && now !== undefined ? now - lastAt : 0;
@@ -208,7 +218,15 @@ export function ActivityFeed({
         <span>Activity</span>
         <span className="dim">{entries.length} events</span>
       </div>
-      <ol className="activity-list">
+      <ol
+        className="activity-list"
+        ref={listRef}
+        onScroll={(event) => {
+          const list = event.currentTarget;
+          pinnedRef.current =
+            list.scrollHeight - list.scrollTop - list.clientHeight < 40;
+        }}
+      >
         {visible.map((entry) => (
           <li key={entry.id} className={`activity-entry activity-${entry.kind}`}>
             <time dateTime={new Date(entry.at).toISOString()}>

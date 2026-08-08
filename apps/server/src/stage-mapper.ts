@@ -374,7 +374,27 @@ function timings(events: readonly RunEvent[]): Map<StageId, StageTiming> {
         });
       }
       if (timing.activity.length > 200) {
-        timing.activity.splice(0, timing.activity.length - 200);
+        // Trim to the cap, but evict icon-less progress ticks FIRST: the
+        // capability rows (file reads, searches, commands) are the feed's
+        // audit trail, and a busy review otherwise flushes them out with
+        // heartbeats — observed as "the capability icons disappear by the
+        // time the run finishes". Capability rows only yield when they
+        // alone exceed the cap.
+        const capability = timing.activity.filter(
+          (entry) => entry.capability !== undefined,
+        );
+        const keptCapability = capability.slice(-200);
+        const budget = 200 - keptCapability.length;
+        const keptPlain =
+          budget > 0
+            ? timing.activity
+                .filter((entry) => entry.capability === undefined)
+                .slice(-budget)
+            : [];
+        const kept = [...keptCapability, ...keptPlain].sort(
+          (a, b) => Number(a.id) - Number(b.id),
+        );
+        timing.activity.splice(0, timing.activity.length, ...kept);
       }
       continue;
     }

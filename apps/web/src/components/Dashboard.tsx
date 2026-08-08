@@ -45,7 +45,6 @@ import {
 import { DecomposeBody } from "./panels/DecomposePanel";
 import { SelectPanelBody } from "./panels/SelectPanelPanel";
 import { GateCard, GateDecided } from "./panels/ConfirmPanelPanel";
-import { ToolUsagePanel } from "./panels/ToolUsagePanel";
 import { FirstPassBody } from "./panels/FirstPassPanel";
 import { ReviewBody } from "./panels/ReviewPanel";
 import { BridgeAuditBody } from "./panels/BridgeAuditPanel";
@@ -659,50 +658,6 @@ export function Dashboard({
           </div>
         );
       })()}
-      <ToolUsageSection
-        jobId={jobId}
-        updatedAt={job.updatedAt}
-        active={job.status === "running"}
-      />
     </div>
-  );
-}
-
-/** Collapsible capability & tool usage section below the pipeline stages. */
-function ToolUsageSection({
-  jobId,
-  updatedAt,
-  active,
-}: {
-  jobId: string;
-  updatedAt: number;
-  active: boolean;
-}) {
-  const [expanded, setExpanded] = useState(false);
-  return (
-    <section className="stage">
-      <header
-        className={`stage-head${expanded ? "" : " stage-head-collapsed"}`}
-        onClick={(event) => {
-          if ((event.target as HTMLElement).closest("button, a")) return;
-          setExpanded((prev) => !prev);
-        }}
-      >
-        <button
-          type="button"
-          className="stage-toggle"
-          aria-expanded={expanded}
-          aria-controls="stage-body-tool-usage"
-          aria-label={`${expanded ? "collapse" : "expand"} tool usage panel`}
-          onClick={() => setExpanded((prev) => !prev)}
-        >
-          <ChevronIcon />
-        </button>
-        <span className="stage-title">Capability & tool usage</span>
-      </header>
-      <div id="stage-body-tool-usage">
-        {expanded && <ToolUsagePanel jobId={jobId} updatedAt={updatedAt} active={active} />}
-      </div>
-    </section>
   );
 }

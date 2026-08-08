@@ -2416,13 +2416,32 @@ details.drawer-section[open] > summary::before {
 }
 
 .activity-entry {
-  display: grid;
-  grid-template-columns: 72px 8px minmax(0, 1fr) auto;
+  /* Flex, not a fixed-column grid: a row carries a variable tail (turn,
+     elapsed, capability icon) and a fifth child in a four-column grid
+     wrapped onto its own line. */
+  display: flex;
   align-items: center;
   gap: 8px;
   min-height: 28px;
   padding: 4px 10px;
   font-size: 12px;
+}
+
+.activity-entry > time {
+  flex: 0 0 72px;
+}
+
+.activity-entry > .activity-marker {
+  flex: 0 0 8px;
+}
+
+.activity-entry > .activity-message {
+  flex: 1 1 auto;
+}
+
+.activity-entry > .activity-meta,
+.activity-entry > .activity-caps {
+  flex: 0 0 auto;
 }
 
 .activity-entry time,
