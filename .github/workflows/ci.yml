@@ -47,11 +47,11 @@ jobs:
         working-directory: app
         run: npm ci
 
-      - name: Build
-        working-directory: app
-        run: npm run build
-
-      - name: Test
+      # No separate build step: every workspace's `test` script already
+      # builds itself (`npm run build && node --test …`) and the root test
+      # chain runs them in dependency order — a standalone build pass would
+      # compile the whole tree a second time and add minutes for nothing.
+      - name: Build and test
         working-directory: app
         run: npm test
 
