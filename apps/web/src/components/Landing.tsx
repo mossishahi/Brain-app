@@ -243,35 +243,26 @@ function JobCard({ job }: { readonly job: JobSummary }) {
       )}
       {expanded && (
         <div className="job-expand">
-          <div className="job-expand-panel">
-            <div className="job-expand-head">
-              <span>Prompt</span>
-              <button
-                type="button"
-                className="ghost-btn"
-                aria-label="copy the prompt"
-                onClick={() => void copyPrompt()}
-              >
-                {copied ? <span className="small">copied</span> : <CopyIcon />}
-              </button>
-            </div>
+          <div className="job-prompt-box">
             <div className="job-prompt-text">{job.topic}</div>
+            <button
+              type="button"
+              className="ghost-btn job-prompt-copy"
+              aria-label="copy the prompt"
+              onClick={() => void copyPrompt()}
+            >
+              {copied ? <span className="small">copied</span> : <CopyIcon />}
+            </button>
           </div>
-          <div className="job-expand-panel">
-            <div className="job-expand-head">
-              <span>Flow</span>
-              <span className="dim small">live · click a stage to open it</span>
-            </div>
-            {/* The SAME pipeline visual as the run page — one language for
-                the flow everywhere. Clicking a node opens its stage page. */}
-            <PipelineGraph
-              stages={expandStages(detail)}
-              selected={currentStage(expandStages(detail))}
-              onSelect={(id) => {
-                window.location.hash = `#/jobs/${encodeURIComponent(job.jobId)}/stage/${id}`;
-              }}
-            />
-          </div>
+          {/* The SAME pipeline visual as the run page — one language for
+              the flow everywhere. Clicking a node opens its stage page. */}
+          <PipelineGraph
+            stages={expandStages(detail)}
+            selected={currentStage(expandStages(detail))}
+            onSelect={(id) => {
+              window.location.hash = `#/jobs/${encodeURIComponent(job.jobId)}/stage/${id}`;
+            }}
+          />
         </div>
       )}
     </li>
