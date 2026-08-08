@@ -702,9 +702,21 @@ select:disabled {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 10px 12px 0;
-  border-top: 1px solid var(--border);
-  margin-top: 8px;
+  padding: 0 12px;
+  /* The unroll reads as the card opening: the content drops in and unfolds. */
+  animation: job-expand-open 0.22s ease;
+  transform-origin: top center;
+}
+
+@keyframes job-expand-open {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scaleY(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scaleY(1);
+  }
 }
 
 /* The embedded pipeline graph scrolls inside the card on narrow screens. */
@@ -713,14 +725,11 @@ select:disabled {
   margin-top: 0;
 }
 
-/* In the card the graph renders compact and centered: a fixed 700px canvas
-   (the run page's fills the row at 100%) shrinks every stage rectangle, and
-   the auto margins center the strip under the prompt box. */
+/* In the card the graph spans exactly the prompt box's width; the viewBox
+   keeps the aspect ratio, so it scales as a whole instead of stretching. */
 .job-expand .graph {
-  width: 700px;
+  width: 100%;
   min-width: 0;
-  max-width: 100%;
-  margin: 0 auto;
 }
 
 .job-prompt-box {
@@ -1941,10 +1950,20 @@ button.server-file-name {
 }
 
 /* The card's own overflow clips the default outline into stray accent lines;
-   a keyboard focus reads as a row tint instead. */
+   a keyboard focus reads as a row tint instead. Plain :focus is silenced too —
+   some engines outline a clicked button, which drew a line under the title. */
+.job-card-main:focus {
+  outline: none;
+}
+
 .job-card-main:focus-visible {
   outline: none;
   background: color-mix(in srgb, var(--text) 6%, transparent);
+}
+
+/* Open card: the row hands over to the content — no dead band under the title. */
+.job-card-main.job-expand-open {
+  min-height: 44px;
 }
 
 .job-topic {
