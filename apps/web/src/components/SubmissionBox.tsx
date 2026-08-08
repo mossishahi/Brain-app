@@ -436,6 +436,29 @@ export function SubmissionBox({
   const [registryVersionLine, setRegistryVersionLine] = useState<string | undefined>();
   const ref = useRef<HTMLTextAreaElement>(null);
   const pastedRef = useRef(false);
+  const capabilityPickerRef = useRef<HTMLDivElement | null>(null);
+  const modelPickerRef = useRef<HTMLDivElement | null>(null);
+
+  // Light-dismiss for the composer popovers, same contract as the attachment
+  // fan: a pointer press anywhere outside a popover (and its trigger) closes
+  // it, so stale menus never linger over the page.
+  useEffect(() => {
+    if (!capabilityMenuOpen && !modelMenuOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (
+        capabilityMenuOpen &&
+        !capabilityPickerRef.current?.contains(target)
+      ) {
+        setCapabilityMenuOpen(false);
+      }
+      if (modelMenuOpen && !modelPickerRef.current?.contains(target)) {
+        setModelMenuOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [capabilityMenuOpen, modelMenuOpen]);
 
   useLayoutEffect(() => {
     const element = ref.current;
@@ -727,6 +750,8 @@ export function SubmissionBox({
       setModelMenuOpen(false);
       return;
     }
+    // The two composer popovers share the same corner; only one at a time.
+    setCapabilityMenuOpen(false);
     setModelMenuOpen(true);
     setModelError(null);
     try {
@@ -743,6 +768,7 @@ export function SubmissionBox({
       setCapabilityMenuOpen(false);
       return;
     }
+    setModelMenuOpen(false);
     setCapabilityMenuOpen(true);
     setCapabilityError(null);
     try {
@@ -922,7 +948,10 @@ export function SubmissionBox({
               )}
             </div>
             <div className="composer-footer-right">
-              <div className="model-picker capability-picker">
+              <div
+                className="model-picker capability-picker"
+                ref={capabilityPickerRef}
+              >
                 <button
                   type="button"
                   className="composer-model"
@@ -1019,7 +1048,7 @@ export function SubmissionBox({
                   </div>
                 )}
               </div>
-              <div className="model-picker">
+              <div className="model-picker" ref={modelPickerRef}>
                 <button
                   type="button"
                   className="composer-model"

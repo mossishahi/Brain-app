@@ -529,6 +529,41 @@ input[type="radio"] {
   accent-color: var(--accent);
 }
 
+/*
+ * Selects drop the UA widget chrome for the app's own tokens. The chevron is
+ * an inline SVG in a mid gray (#888) that reads on both themes — a CSS
+ * variable cannot vary the stroke inside a data URL, but it can carry the
+ * whole image, so rules that set the `background` shorthand (which clears
+ * background-image) can restore it without repeating the URL.
+ */
+:root {
+  --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888888' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+}
+
+select {
+  appearance: none;
+  background-color: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 30px 6px 10px;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  background-image: var(--select-chevron);
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+}
+
+select:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--text) 30%, var(--border));
+}
+
+select:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
 .clamp {
   display: -webkit-box;
   -webkit-box-orient: vertical;
@@ -1445,6 +1480,15 @@ input[type="radio"] {
   font-size: 12px;
 }
 
+/* The toolbar's shared rule sets the `background` shorthand and a uniform
+   padding; restore the chevron and its gutter on top of them. */
+.server-picker-toolbar select {
+  padding-right: 26px;
+  background-image: var(--select-chevron);
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+}
+
 .server-path-form {
   display: flex;
   gap: 6px;
@@ -2083,6 +2127,15 @@ details.drawer-section[open] > summary::before {
   padding: 8px 10px;
   font: inherit;
   width: 100%;
+}
+
+/* The drawer's shared rule sets the `background` shorthand and a uniform
+   padding; restore the chevron and its gutter on top of them. */
+.drawer select {
+  padding-right: 30px;
+  background-image: var(--select-chevron);
+  background-repeat: no-repeat;
+  background-position: right 10px center;
 }
 
 .field-grid-two {
@@ -3497,7 +3550,8 @@ details.drawer-section[open] > summary::before {
   padding: 12px;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 10px;
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--text) 12%, transparent);
   z-index: 40;
   display: flex;
   flex-direction: column;
