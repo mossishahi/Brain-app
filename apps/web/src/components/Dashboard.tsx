@@ -236,15 +236,24 @@ export function Dashboard({
 
   // Stages render as side-by-side PAGES; the pipeline graph above is the
   // navigation spine (auto-following the active stage until the user pins
-  // one). Track the previous page index so the slide animation knows which
-  // direction the transition travels.
+  // one). The slide direction is decided ONCE per page turn and stays
+  // pinned to that selection: recomputing it per render flipped the
+  // animation class back to "forward" on the next clock tick after a
+  // backward turn, and changing an animation class on a mounted element
+  // restarts the animation — the page visibly loaded twice.
   const selectedIndex = Math.max(0, STAGE_IDS.indexOf(selected));
-  const previousIndexRef = useRef(selectedIndex);
-  const slideDirection =
-    selectedIndex >= previousIndexRef.current ? "forward" : "backward";
-  useEffect(() => {
-    previousIndexRef.current = selectedIndex;
-  }, [selectedIndex]);
+  const transitionRef = useRef<{
+    index: number;
+    direction: "forward" | "backward";
+  }>({ index: selectedIndex, direction: "forward" });
+  if (transitionRef.current.index !== selectedIndex) {
+    transitionRef.current = {
+      index: selectedIndex,
+      direction:
+        selectedIndex > transitionRef.current.index ? "forward" : "backward",
+    };
+  }
+  const slideDirection = transitionRef.current.direction;
 
   const toggleStage = useCallback((id: StageId) => {
     setCollapsed((prev) => {
