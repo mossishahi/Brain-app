@@ -6,7 +6,7 @@ import type {
   ServerSettings,
   ServerSettingsUpdate,
 } from "@brainstorm-agentic/protocol";
-import { errorMessage, getHealth, getSettings, putSettings } from "../api";
+import { errorMessage, getHealth, getSettings, postUpdateCheck, putSettings } from "../api";
 import { TrashIcon, XIcon } from "./Icons";
 
 type Provider = "anthropic" | "claude-agent" | "offline";
@@ -16,6 +16,31 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [checkingUpdates, setCheckingUpdates] = useState(false);
+  const [updateStatus, setUpdateStatus] = useState<string | null>(null);
+
+  /**
+   * The manual path for anyone who pressed "Later" on the notification: a
+   * fresh server-side release probe; when something newer exists the
+   * lower-left card reappears (its snooze is cleared via the window event).
+   */
+  const checkForUpdates = async (): Promise<void> => {
+    setCheckingUpdates(true);
+    setUpdateStatus(null);
+    try {
+      const result = await postUpdateCheck();
+      window.dispatchEvent(new Event("brain-check-updates"));
+      setUpdateStatus(
+        result.appUpdate
+          ? "Update available — use the notification at the lower left to install it."
+          : `You are on the latest version (v${result.version}).`,
+      );
+    } catch (error) {
+      setUpdateStatus(errorMessage(error));
+    } finally {
+      setCheckingUpdates(false);
+    }
+  };
 
   const [runner, setRunner] = useState<RunnerKind>("slurm");
   const [template, setTemplate] = useState("");
@@ -287,10 +312,27 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
       >
         <div className="drawer-head">
           <h2>Settings</h2>
-          <button type="button" className="ghost-btn" aria-label="close settings" onClick={onClose}>
-            <XIcon />
-          </button>
+          <div className="drawer-head-actions">
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={saving || !loaded}
+              onClick={() => void save()}
+            >
+              {saving
+                ? provider === "anthropic"
+                  ? "Testing connection…"
+                  : "Saving…"
+                : "Save"}
+            </button>
+            <button type="button" className="ghost-btn" aria-label="close settings" onClick={onClose}>
+              <XIcon />
+            </button>
+          </div>
         </div>
+
+        {saveError && <p className="error-text">{saveError}</p>}
+        {connectionMessage && <p className="success-text">{connectionMessage}</p>}
 
         {loadError ? (
           <p className="error-text">{loadError}</p>
@@ -298,8 +340,33 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
           <p className="dim small">loading…</p>
         ) : (
           <>
-            <section className="drawer-section">
-              <h3>Execution</h3>
+            <section className="drawer-section drawer-updates">
+              <div className="inline-actions">
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={checkingUpdates}
+                  onClick={() => void checkForUpdates()}
+                >
+                  {checkingUpdates ? "Checking…" : "Check for updates"}
+                </button>
+                <div className="field" style={{ margin: 0 }}>
+                  <select
+                    id="settings-update-check"
+                    aria-label="automatic update checks"
+                    value={updateCheck}
+                    onChange={(e) => setUpdateCheck(e.target.value as "off" | "notify")}
+                  >
+                    <option value="notify">notify automatically</option>
+                    <option value="off">manual checks only</option>
+                  </select>
+                </div>
+              </div>
+              {updateStatus && <span className="field-note">{updateStatus}</span>}
+            </section>
+
+            <details className="drawer-section">
+              <summary>Execution</summary>
               <div className="field">
                 <label className="field-label" htmlFor="settings-runner">
                   Runner
@@ -332,10 +399,10 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                   Put <code>{SLURM_COMMAND_TAG}</code> where the orchestration command must run.
                 </span>
               </div>
-            </section>
+            </details>
 
-            <section className="drawer-section">
-              <h3>Brain Registry</h3>
+            <details className="drawer-section">
+              <summary>Brain Registry</summary>
               <div className="registry-info">
                 <div className="registry-info-row">
                   <span className="registry-info-label">Endpoint</span>
@@ -379,23 +446,10 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                 new pipeline automatically fetches the latest published skills
                 and records the exact version it used.
               </span>
-              <div className="field">
-                <label className="field-label" htmlFor="settings-update-check">
-                  App update check
-                </label>
-                <select
-                  id="settings-update-check"
-                  value={updateCheck}
-                  onChange={(e) => setUpdateCheck(e.target.value as "off" | "notify")}
-                >
-                  <option value="notify">notify when a release tag appears</option>
-                  <option value="off">off</option>
-                </select>
-              </div>
-            </section>
+            </details>
 
-            <section className="drawer-section">
-              <h3>Model connection</h3>
+            <details className="drawer-section" open>
+              <summary>Model connection</summary>
               <div className="field">
                 <label className="field-label" htmlFor="settings-provider">
                   Provider
@@ -634,10 +688,10 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                   </div>
                 </>
               )}
-            </section>
+            </details>
 
-            <section className="drawer-section">
-              <h3>Panel confirmation</h3>
+            <details className="drawer-section">
+              <summary>Panel confirmation</summary>
               <label className="radio-row">
                 <input
                   type="radio"
@@ -656,10 +710,10 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                 />
                 Approve automatically
               </label>
-            </section>
+            </details>
 
-            <section className="drawer-section">
-              <h3>Host tools</h3>
+            <details className="drawer-section">
+              <summary>Capabilities &amp; host tools</summary>
               <span className="field-note" style={{ marginBottom: "0.5rem", display: "block" }}>
                 Tools that run on your machine. Uncheck to disable a capability for all pipeline roles.
               </span>
@@ -707,10 +761,11 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                 Code execution (host scratch workspace; providers with native
                 execution keep using it)
               </label>
-            </section>
+            </details>
 
-            <section className="drawer-section">
-              <h3>Interrupted jobs</h3>
+            <details className="drawer-section">
+              <summary>Recovery</summary>
+              <h3 className="drawer-subhead">Interrupted jobs</h3>
               <label className="radio-row">
                 <input
                   type="checkbox"
@@ -726,10 +781,7 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                 stopped. Auto-resume pauses after repeated attempts without
                 progress; the job card then offers a manual resume.
               </span>
-            </section>
-
-            <section className="drawer-section">
-              <h3>Credit recovery</h3>
+              <h3 className="drawer-subhead">Credit recovery</h3>
               <label className="radio-row">
                 <input
                   type="checkbox"
@@ -787,10 +839,10 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                   verified before saving and never returned to the browser.
                 </span>
               </div>
-            </section>
+            </details>
 
-            <section className="drawer-section">
-              <h3>Trash</h3>
+            <details className="drawer-section">
+              <summary>Trash</summary>
               <a
                 className="btn drawer-trash-link"
                 href="#/trash"
@@ -803,27 +855,7 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                 Stopped jobs moved to trash leave the job list but stay
                 readable.
               </span>
-            </section>
-
-            {saveError && <p className="error-text">{saveError}</p>}
-            {connectionMessage && (
-              <p className="success-text">{connectionMessage}</p>
-            )}
-
-            <div className="drawer-footer">
-              <button
-                type="button"
-                className="btn btn-primary"
-                disabled={saving}
-                onClick={() => void save()}
-              >
-                {saving
-                  ? provider === "anthropic"
-                    ? "Testing connection…"
-                    : "Saving…"
-                  : "Save"}
-              </button>
-            </div>
+            </details>
           </>
         )}
       </div>

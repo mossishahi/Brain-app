@@ -203,14 +203,38 @@ export function UpdateToast() {
   const startUpdate = async (): Promise<void> => {
     if (!health?.appUpdate) return;
     const from = health.version;
-    const to = health.appUpdate.version;
     try {
+      // The server re-probes the release tags at click time and answers
+      // with the TRUE target — always the latest release, regardless of
+      // what the (possibly older) cached check knew.
       const response = await postUpdateApp();
-      setPhase({ kind: "updating", from, to, logFile: response.logFile });
+      setPhase({
+        kind: "updating",
+        from,
+        to: response.updatingTo,
+        logFile: response.logFile,
+      });
     } catch (error) {
-      setPhase({ kind: "failed", to, message: errorMessage(error) });
+      setPhase({
+        kind: "failed",
+        to: "the latest release",
+        message: errorMessage(error),
+      });
     }
   };
+
+  // The Settings drawer's "Check for updates" button lands here: clear any
+  // "Later" snooze and refresh immediately so the card reappears.
+  useEffect(() => {
+    const onCheck = (): void => {
+      setSnoozedAppVersion(null);
+      getHealth()
+        .then((response) => setHealth(response))
+        .catch(() => undefined);
+    };
+    window.addEventListener("brain-check-updates", onCheck);
+    return () => window.removeEventListener("brain-check-updates", onCheck);
+  }, []);
 
   if (phase.kind === "updating") {
     return (
@@ -274,7 +298,7 @@ export function UpdateToast() {
       )}
       {phase.kind === "failed" && (
         <div className="update-toast update-toast-error">
-          <strong>Update to v{phase.to} failed</strong>
+          <strong>Update failed</strong>
           <p>
             {phase.message}
             {phase.logFile ? (
@@ -297,13 +321,10 @@ export function UpdateToast() {
       )}
       {appUpdate && health && (
         <div className="update-toast update-toast-actionable">
-          <strong>
-            Brainstorm v{appUpdate.version} is available
-          </strong>
+          <strong>Update available</strong>
           <p>
-            {appUpdate.notes ? <>{appUpdate.notes} </> : null}
-            You are running v{health.version}. Updating restarts the app and
-            reloads this tab by itself; active runs keep going.
+            Installs the latest release and reloads this tab by itself;
+            active runs keep going.
           </p>
           <div className="update-toast-actions">
             <button

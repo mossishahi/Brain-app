@@ -6,7 +6,7 @@ import { Landing } from "./components/Landing";
 import { SettingsDrawer } from "./components/SettingsDrawer";
 import { TrashView } from "./components/TrashView";
 import { UpdateToast } from "./components/UpdateToast";
-import { GearIcon, MoonIcon, SunIcon } from "./components/Icons";
+import { BackIcon, GearIcon, MoonIcon, SunIcon } from "./components/Icons";
 
 type Route =
   | { view: "landing" }
@@ -72,24 +72,44 @@ export function App() {
       <div className="ambient" aria-hidden="true" />
       <div className="app-foreground">
         {/* A real header bar (in flow, sticky) so the controls never overlay
-            page text, however narrow the viewport gets. */}
+            page text. Transparent, so the ambient design runs through it:
+            navigation on the left (back + wordmark), controls on the right. */}
         <header className="app-header">
-          <button
-            type="button"
-            className="ghost-btn"
-            aria-label={theme === "dark" ? "switch to light theme" : "switch to dark theme"}
-            onClick={toggleTheme}
-          >
-            {theme === "dark" ? <SunIcon /> : <MoonIcon />}
-          </button>
-          <button
-            type="button"
-            className="ghost-btn"
-            aria-label="open settings"
-            onClick={() => setSettingsOpen(true)}
-          >
-            <GearIcon />
-          </button>
+          <div className="app-header-side">
+            {route.view !== "landing" && (
+              <button
+                type="button"
+                className="ghost-btn"
+                aria-label="back to the job list"
+                onClick={() => {
+                  window.location.hash = "#/";
+                }}
+              >
+                <BackIcon />
+              </button>
+            )}
+            <a className="app-brand" href="#/">
+              Brainstorm
+            </a>
+          </div>
+          <div className="app-header-side">
+            <button
+              type="button"
+              className="ghost-btn"
+              aria-label={theme === "dark" ? "switch to light theme" : "switch to dark theme"}
+              onClick={toggleTheme}
+            >
+              {theme === "dark" ? <SunIcon /> : <MoonIcon />}
+            </button>
+            <button
+              type="button"
+              className="ghost-btn"
+              aria-label="open settings"
+              onClick={() => setSettingsOpen(true)}
+            >
+              <GearIcon />
+            </button>
+          </div>
         </header>
         <div
           className="route-view"

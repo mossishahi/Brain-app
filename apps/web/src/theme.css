@@ -494,12 +494,34 @@ textarea,
   height: var(--app-header-h);
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: space-between;
   gap: 8px;
   padding: 0 16px;
-  background: color-mix(in srgb, var(--bg) 78%, transparent);
-  -webkit-backdrop-filter: blur(10px);
-  backdrop-filter: blur(10px);
+  /* Transparent so the ambient design runs through it; a soft fade keeps
+     scrolled content readable under the controls without drawing a bar. */
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--bg) 85%, transparent),
+    transparent
+  );
+}
+
+.app-header-side {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.app-brand {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  text-decoration: none;
+}
+
+.app-brand:hover {
+  color: var(--text);
 }
 
 input[type="checkbox"],
@@ -1735,6 +1757,12 @@ button.server-file-name {
   font-weight: 600;
 }
 
+.drawer-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .drawer-section {
   display: flex;
   flex-direction: column;
@@ -1744,6 +1772,55 @@ button.server-file-name {
 .drawer-section > h3 {
   font-size: 13px;
   font-weight: 600;
+}
+
+/* Collapsible concept sections: the summary reads like the old headings,
+   with a chevron that follows the open state. */
+details.drawer-section {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+details.drawer-section > summary {
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  user-select: none;
+}
+
+details.drawer-section > summary::-webkit-details-marker {
+  display: none;
+}
+
+details.drawer-section > summary::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-right: 1.5px solid var(--text-dim);
+  border-bottom: 1.5px solid var(--text-dim);
+  transform: rotate(-45deg);
+  transition: transform 0.15s ease;
+}
+
+details.drawer-section[open] > summary::before {
+  transform: rotate(45deg);
+}
+
+.drawer-subhead {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  margin-top: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.drawer-updates {
+  padding-bottom: 4px;
 }
 
 .field {
