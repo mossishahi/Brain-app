@@ -7,6 +7,8 @@ import type {
   ReadinessCheckId,
   ReadinessReport,
   ServerSettings,
+  StageId,
+  StageView,
 } from "@brainstorm-agentic/protocol";
 import {
   cacheJobs,
@@ -28,9 +30,10 @@ import {
   trashJob,
   useServerEvents,
 } from "../api";
-import { jobDot, jobStatusLine, stageDot, STAGE_TITLES } from "../format";
+import { jobDot, jobStatusLine } from "../format";
 import { Dot } from "./common";
-import { ChevronIcon, CopyIcon, ResumeIcon, TrashIcon, XIcon } from "./Icons";
+import { ChevronIcon, CopyIcon, ForwardIcon, ResumeIcon, TrashIcon, XIcon } from "./Icons";
+import { PipelineGraph } from "./PipelineGraph";
 import {
   ProviderOnboarding,
   onboardingDismissed,
@@ -130,9 +133,11 @@ function JobCard({ job }: { readonly job: JobSummary }) {
 
   return (
     <li className="job-card">
-      <a
-        className="job-card-main"
-        href={`#/jobs/${encodeURIComponent(job.jobId)}`}
+      <button
+        type="button"
+        className={`job-card-main${expanded ? " job-expand-open" : ""}`}
+        aria-expanded={expanded}
+        onClick={() => setExpanded((prev) => !prev)}
         onMouseEnter={() => prefetchJobDetail(job.jobId)}
         onFocus={() => prefetchJobDetail(job.jobId)}
       >
@@ -141,16 +146,20 @@ function JobCard({ job }: { readonly job: JobSummary }) {
           <Dot state={jobDot(job.status)} />
           <span>{jobStatusLine(job)}</span>
         </span>
-      </a>
-      <button
-        type="button"
-        className={`ghost-btn job-expand-toggle${expanded ? " job-expand-open" : ""}`}
-        aria-expanded={expanded}
-        aria-label={`${expanded ? "collapse" : "expand"} run details: ${job.topic}`}
-        onClick={() => setExpanded((prev) => !prev)}
-      >
-        <ChevronIcon />
+        <span className="job-expand-toggle" aria-hidden="true">
+          <ChevronIcon />
+        </span>
       </button>
+      <a
+        className="ghost-btn"
+        href={`#/jobs/${encodeURIComponent(job.jobId)}`}
+        aria-label={`open this run: ${job.topic}`}
+        data-tooltip="open this run"
+        onMouseEnter={() => prefetchJobDetail(job.jobId)}
+        onFocus={() => prefetchJobDetail(job.jobId)}
+      >
+        <ForwardIcon size={16} />
+      </a>
       {confirming !== null ? (
         <div className="cancel-zone">
           <span className="cancel-question">
@@ -251,31 +260,42 @@ function JobCard({ job }: { readonly job: JobSummary }) {
           <div className="job-expand-panel">
             <div className="job-expand-head">
               <span>Flow</span>
-              <span className="dim small">live · click a step to open it</span>
+              <span className="dim small">live · click a stage to open it</span>
             </div>
-            <ol className="job-flow">
-              {STAGE_IDS.map((id) => {
-                const stage = detail?.stages.find((entry) => entry.id === id);
-                const status = stage?.status ?? "pending";
-                return (
-                  <li key={id}>
-                    <a
-                      className="job-flow-step"
-                      href={`#/jobs/${encodeURIComponent(job.jobId)}/stage/${id}`}
-                    >
-                      <Dot state={stageDot(status)} />
-                      <span className="job-flow-title">{STAGE_TITLES[id]}</span>
-                      <span className="dim small">{status}</span>
-                    </a>
-                  </li>
-                );
-              })}
-            </ol>
+            {/* The SAME pipeline visual as the run page — one language for
+                the flow everywhere. Clicking a node opens its stage page. */}
+            <PipelineGraph
+              stages={expandStages(detail)}
+              selected={currentStage(expandStages(detail))}
+              onSelect={(id) => {
+                window.location.hash = `#/jobs/${encodeURIComponent(job.jobId)}/stage/${id}`;
+              }}
+            />
           </div>
         </div>
       )}
     </li>
   );
+}
+
+/** The detail's stages as the map shape PipelineGraph consumes. */
+function expandStages(
+  detail: JobDetail | null,
+): ReadonlyMap<StageId, StageView> {
+  return new Map((detail?.stages ?? []).map((stage) => [stage.id, stage]));
+}
+
+/** The stage the run is "at": first live/failed, else last completed. */
+function currentStage(stages: ReadonlyMap<StageId, StageView>): StageId {
+  const live = STAGE_IDS.find((id) => {
+    const status = stages.get(id)?.status;
+    return status === "active" || status === "suspended" || status === "failed";
+  });
+  if (live) return live;
+  const done = [...STAGE_IDS]
+    .reverse()
+    .find((id) => stages.get(id)?.status === "completed");
+  return done ?? STAGE_IDS[0]!;
 }
 
 // Update notices (app releases, skills bundles) live in <UpdateToast/>,

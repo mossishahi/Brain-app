@@ -631,29 +631,20 @@ input[type="radio"] {
 /*
  * Unrolled job cards on the landing: the prompt beside the live step flow.
  */
-.job-expand-toggle svg {
-  transform: rotate(90deg);
-  transition: transform 0.15s ease;
-}
-
-.job-expand-open svg {
-  transform: rotate(-90deg);
-}
-
 .job-expand {
   flex-basis: 100%;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 10px;
-  padding-top: 10px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 10px 12px 0;
   border-top: 1px solid var(--border);
   margin-top: 8px;
 }
 
-@media (max-width: 720px) {
-  .job-expand {
-    grid-template-columns: 1fr;
-  }
+/* The embedded pipeline graph scrolls inside the card on narrow screens. */
+.job-expand .graph-wrap {
+  overflow-x: auto;
 }
 
 .job-expand-panel {
@@ -683,40 +674,6 @@ input[type="radio"] {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: color-mix(in srgb, var(--surface) 60%, transparent);
-}
-
-.job-flow {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  max-height: 200px;
-  overflow-y: auto;
-}
-
-.job-flow-step {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 8px;
-  border-radius: 6px;
-  font-size: 13px;
-  color: var(--text);
-  text-decoration: none;
-}
-
-.job-flow-step:hover {
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-}
-
-.job-flow-title {
-  flex: 1;
-  min-width: 0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 /*
@@ -1882,13 +1839,44 @@ button.server-file-name {
 .job-card-main {
   flex: 1;
   min-width: 0;
-  height: 100%;
+  min-height: 64px;
   display: flex;
   flex-direction: column;
   justify-content: center;
   gap: 2px;
   padding: 0 12px;
   color: inherit;
+  /* A button now (the row click unrolls the card): strip chrome. */
+  background: none;
+  border: 0;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  position: relative;
+}
+
+/* Fold-state hint at the row's right edge: down when folded, up when open. */
+.job-card-main .job-expand-toggle {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  translate: 0 -50%;
+  color: var(--text-dim);
+  display: inline-flex;
+}
+
+.job-card-main .job-expand-toggle svg {
+  transform: rotate(90deg);
+  transition: transform 0.15s ease;
+}
+
+.job-card-main.job-expand-open .job-expand-toggle svg {
+  transform: rotate(-90deg);
+}
+
+.job-card-main .job-topic,
+.job-card-main .job-status-line {
+  padding-right: 26px;
 }
 
 .job-topic {
