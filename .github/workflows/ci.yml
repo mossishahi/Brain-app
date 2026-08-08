@@ -47,13 +47,52 @@ jobs:
         working-directory: app
         run: npm ci
 
-      # No separate build step: every workspace's `test` script already
-      # builds itself (`npm run build && node --test …`) and the root test
-      # chain runs them in dependency order — a standalone build pass would
-      # compile the whole tree a second time and add minutes for nothing.
-      - name: Build and test
+      # The store must exist BEFORE the parallel test lanes: several suites
+      # materialize it lazily, and while re-scans are atomic (staging +
+      # rename), two lanes extracting the same missing version concurrently
+      # would collide. Materialized here, the lanes' own invocations find
+      # nothing to extract and only re-verify.
+      - name: Materialize the registry store once
+        run: node brain/scripts/materialize-store.mjs --quiet
+
+      - name: Build
         working-directory: app
-        run: npm test
+        run: npm run build
+
+      # Wall time is dominated by two long integration suites — server
+      # (real servers, full offline pipelines) and worker (end-to-end runs).
+      # They run as background lanes while the fast package suites run in
+      # the foreground, so the step ends at the slowest lane instead of the
+      # sum. Lanes reuse the dist from the Build step (node --test directly;
+      # the workspace `test` scripts would rebuild), and the web workspace
+      # needs no lane — its test IS its build, already done above. Lane
+      # output prints when the lane finishes.
+      - name: Test (server and worker lanes run alongside the rest)
+        working-directory: app
+        shell: bash
+        run: |
+          set -uo pipefail
+          (cd apps/server && node --test dist/test/*.test.js) > server-tests.log 2>&1 &
+          SERVER_PID=$!
+          (cd apps/worker && node --test dist/test/*.test.js) > worker-tests.log 2>&1 &
+          WORKER_PID=$!
+          FAST_RC=0
+          for dir in packages/core packages/protocol packages/credit-recovery \
+                     packages/content packages/telemetry packages/registry-client \
+                     packages/agent-runtime packages/host-tools \
+                     packages/provider-anthropic packages/executor-claude-agent \
+                     packages/brainstorm-runtime; do
+            echo "=== $dir"
+            (cd "$dir" && node --test dist/test/*.test.js) || FAST_RC=1
+          done
+          WORKER_RC=0; SERVER_RC=0
+          wait "$WORKER_PID" || WORKER_RC=1
+          echo "=== apps/worker (exit $WORKER_RC)"
+          cat worker-tests.log
+          wait "$SERVER_PID" || SERVER_RC=1
+          echo "=== apps/server (exit $SERVER_RC)"
+          cat server-tests.log
+          exit $(( FAST_RC + WORKER_RC + SERVER_RC == 0 ? 0 : 1 ))
 
   # Guards that two modules holding the same knowledge have not drifted apart.
   # These are cheap and they fail loudly, which is the point: the alternative is
