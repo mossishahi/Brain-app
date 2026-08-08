@@ -701,7 +701,7 @@ select:disabled {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 4px;
   padding: 10px 12px 0;
   border-top: 1px solid var(--border);
   margin-top: 8px;
@@ -710,6 +710,17 @@ select:disabled {
 /* The embedded pipeline graph scrolls inside the card on narrow screens. */
 .job-expand .graph-wrap {
   overflow-x: auto;
+  margin-top: 0;
+}
+
+/* In the card the graph renders compact and centered: a fixed 700px canvas
+   (the run page's fills the row at 100%) shrinks every stage rectangle, and
+   the auto margins center the strip under the prompt box. */
+.job-expand .graph {
+  width: 700px;
+  min-width: 0;
+  max-width: 100%;
+  margin: 0 auto;
 }
 
 .job-prompt-box {
@@ -1916,9 +1927,8 @@ button.server-file-name {
   min-width: 0;
   min-height: 64px;
   display: flex;
-  flex-direction: column;
-  justify-content: center;
-  gap: 2px;
+  align-items: center;
+  gap: 10px;
   padding: 0 12px;
   color: inherit;
   /* A button now (the row click unrolls the card): strip chrome. */
@@ -1930,37 +1940,23 @@ button.server-file-name {
   position: relative;
 }
 
-/* Fold-state hint at the row's right edge: down when folded, up when open. */
-.job-card-main .job-expand-toggle {
-  position: absolute;
-  right: 10px;
-  top: 50%;
-  translate: 0 -50%;
-  color: var(--text-dim);
-  display: inline-flex;
-}
-
-.job-card-main .job-expand-toggle svg {
-  transform: rotate(90deg);
-  transition: transform 0.15s ease;
-}
-
-.job-card-main.job-expand-open .job-expand-toggle svg {
-  transform: rotate(-90deg);
-}
-
-.job-card-main .job-topic,
-.job-card-main .job-status-line {
-  padding-right: 26px;
+/* The card's own overflow clips the default outline into stray accent lines;
+   a keyboard focus reads as a row tint instead. */
+.job-card-main:focus-visible {
+  outline: none;
+  background: color-mix(in srgb, var(--text) 6%, transparent);
 }
 
 .job-topic {
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  max-width: 56ch;
 }
 
 .job-status-line {
+  flex: none;
   display: flex;
   align-items: center;
   gap: 6px;

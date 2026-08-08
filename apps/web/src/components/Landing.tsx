@@ -32,7 +32,7 @@ import {
 } from "../api";
 import { jobDot, jobStatusLine } from "../format";
 import { Dot } from "./common";
-import { ChevronIcon, CopyIcon, ForwardIcon, ResumeIcon, TrashIcon, XIcon } from "./Icons";
+import { CopyIcon, ForwardIcon, ResumeIcon, TrashIcon, XIcon } from "./Icons";
 import { PipelineGraph } from "./PipelineGraph";
 import {
   ProviderOnboarding,
@@ -141,14 +141,11 @@ function JobCard({ job }: { readonly job: JobSummary }) {
         onMouseEnter={() => prefetchJobDetail(job.jobId)}
         onFocus={() => prefetchJobDetail(job.jobId)}
       >
-        <span className="job-topic">{job.topic}</span>
         <span className="job-status-line">
           <Dot state={jobDot(job.status)} />
           <span>{jobStatusLine(job)}</span>
         </span>
-        <span className="job-expand-toggle" aria-hidden="true">
-          <ChevronIcon />
-        </span>
+        <span className="job-topic">{job.topic}</span>
       </button>
       <a
         className="ghost-btn"
