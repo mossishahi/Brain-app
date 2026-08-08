@@ -5,6 +5,8 @@ import {
   mkdirSync,
   openSync,
   readdirSync,
+  readFileSync,
+  statSync,
 } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,6 +17,7 @@ import {
 } from "node:child_process";
 
 import type { WorkflowCheckpoint } from "@brainstorm-agentic/core";
+import { MIN_SUPPORTED_WORKFLOW_VERSION } from "@brainstorm-agentic/content";
 import {
   isCreditLimitMessage,
   resolveCreditReset,
@@ -116,6 +119,54 @@ function sleep(ms: number): Promise<void> {
 /** The requested transition needs the job stopped first (HTTP 409). */
 export class JobConflictError extends Error {}
 
+function semverBelow(candidate: string, threshold: string): boolean {
+  const [a, b] = [candidate.split(".").map(Number), threshold.split(".").map(Number)];
+  for (let index = 0; index < 3; index += 1) {
+    if ((a[index] ?? 0) !== (b[index] ?? 0)) return (a[index] ?? 0) < (b[index] ?? 0);
+  }
+  return false;
+}
+
+/**
+ * The last worker:fatal report in an events log at/after sinceMs — the only
+ * trace a worker leaves when it dies before its first checkpoint write
+ * (content validation, a retired pin, an unreachable registry). Reads only
+ * the tail; the events log of a long run can be large.
+ */
+export function lastWorkerFatalEvent(
+  eventsPath: string,
+  sinceMs: number,
+): string | undefined {
+  try {
+    const raw = readFileSync(eventsPath, "utf8");
+    const tail = raw.length > 65_536 ? raw.slice(-65_536) : raw;
+    const lines = tail.split("\n");
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      const line = lines[index]!.trim();
+      if (!line.includes('"worker:fatal"')) continue;
+      try {
+        const event = JSON.parse(line) as {
+          type?: string;
+          at?: number;
+          message?: string;
+        };
+        if (
+          event.type === "worker:fatal" &&
+          typeof event.message === "string" &&
+          (event.at ?? 0) >= sinceMs
+        ) {
+          return event.message;
+        }
+      } catch {
+        // A partially-written tail line; keep scanning.
+      }
+    }
+  } catch {
+    // No events log yet — the worker died before creating it.
+  }
+  return undefined;
+}
+
 export class JobManager {
   readonly settings: SettingsStore;
   readonly jobsDir: string;
@@ -182,6 +233,46 @@ export class JobManager {
 
   sessionDir(jobId: string): string {
     return join(this.sessionsDir, jobId);
+  }
+
+  /** When the run's checkpoint was last written; 0 when it does not exist. */
+  private checkpointMtime(jobId: string): number {
+    try {
+      return statSync(join(this.sessionDir(jobId), "checkpoint.json")).mtimeMs;
+    } catch {
+      return 0;
+    }
+  }
+
+  /** The skills version this run pinned at submission, when recorded. */
+  private pinnedContentVersion(jobId: string): string | undefined {
+    try {
+      const pin = readJsonCached<{ version?: unknown }>(
+        join(this.jobDir(jobId), "content", "content-pin.json"),
+      );
+      return typeof pin?.version === "string" ? pin.version : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * A resume replays the run against its PINNED bundle; a pin the current
+   * app has retired would only die at worker startup — minutes later, in a
+   * log nobody reads. Refuse at the button instead, with the reason on the
+   * job card.
+   */
+  private assertPinResumable(jobId: string): void {
+    const version = this.pinnedContentVersion(jobId);
+    if (
+      version !== undefined &&
+      semverBelow(version, MIN_SUPPORTED_WORKFLOW_VERSION)
+    ) {
+      throw new JobConflictError(
+        `this run is pinned to skills v${version}, which this app no longer executes ` +
+          `(minimum v${MIN_SUPPORTED_WORKFLOW_VERSION}) — submit the prompt as a new run to use the current skills`,
+      );
+    }
   }
 
   private write(record: JobRecord): void {
@@ -523,6 +614,44 @@ export class JobManager {
     }
     if (record.status === "failed" && !this.checkpointStatus(record.jobId)) return "failed";
     const checkpoint = this.checkpointStatus(record.jobId);
+    // A pending resubmission makes a terminal checkpoint verdict STALE
+    // unless the resumed worker itself wrote it (checkpoint mtime after the
+    // resubmission — e.g. a fast run that completed before this tick). For
+    // a stale verdict: hold "queued" while the submission is alive (or
+    // inside the startup grace) so the retry is VISIBLE; once the
+    // submission is gone, surface the worker's own fatal report — the only
+    // trace of a pre-checkpoint death — and fall through to the (still
+    // stale, still true) checkpoint verdict.
+    if (record.autoResumePending && checkpoint !== "running") {
+      const submittedAt = record.autoResumePending.submittedAt;
+      if (this.checkpointMtime(record.jobId) >= submittedAt) {
+        // The resumed run reached its own terminal state; trust it below.
+        delete record.autoResumePending;
+        record.updatedAt = this.now();
+        this.write(record);
+      } else {
+        const alive =
+          record.runner === "local"
+            ? this.localAlive(record.pid)
+            : await this.slurmAlive(record.slurmJobId);
+        if (alive || this.now() - submittedAt < 30_000) {
+          if (record.status !== "queued") {
+            record.status = "queued";
+            record.updatedAt = this.now();
+            this.write(record);
+          }
+          return "queued";
+        }
+        delete record.autoResumePending;
+        const fatal = lastWorkerFatalEvent(
+          join(this.jobDir(record.jobId), "events.jsonl"),
+          submittedAt,
+        );
+        if (fatal !== undefined) record.error = fatal;
+        record.updatedAt = this.now();
+        this.write(record);
+      }
+    }
     if (
       checkpoint === "completed" ||
       checkpoint === "failed" ||
@@ -862,6 +991,7 @@ export class JobManager {
         `job "${jobId}" failed before its first checkpoint; submit it again as a new job`,
       );
     }
+    this.assertPinResumable(jobId);
     if (record.autoResumePending) {
       const alive =
         record.runner === "local"
@@ -953,6 +1083,7 @@ export class JobManager {
         `job "${jobId}" is not interrupted (status "${status}")`,
       );
     }
+    this.assertPinResumable(jobId);
     this.autoResuming.add(jobId);
     try {
       await this.submitInterruptedResume(record, { resetAttempts: true });

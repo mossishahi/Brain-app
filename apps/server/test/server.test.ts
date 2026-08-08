@@ -1077,6 +1077,46 @@ test("POST /api/update hands over to the updater; without a known release it ref
   }
 });
 
+test("retrying a run pinned to a retired skills version refuses at the button with the reason", async () => {
+  // The field failure: retry submitted a doomed worker that died at content
+  // validation minutes later, visible only in raw logs. The refusal must
+  // happen at the click, naming the pin and the way forward.
+  const workspace = tempRoot();
+  try {
+    const jobId = "bsa_test_retired_pin";
+    const jobDir = join(workspace, "workspace", "jobs", jobId);
+    mkdirSync(join(jobDir, "content"), { recursive: true });
+    mkdirSync(join(workspace, "workspace", "sessions", jobId), { recursive: true });
+    writeFileSync(
+      join(jobDir, "job.json"),
+      JSON.stringify({
+        jobId,
+        topic: "an old run pinned to retired skills",
+        status: "failed",
+        runner: "local",
+        createdAt: 1,
+        updatedAt: 1,
+        submissionCount: 1,
+      }),
+    );
+    writeFileSync(
+      join(jobDir, "content", "content-pin.json"),
+      JSON.stringify({ bundle: "brainstorm", version: "0.14.0", registryUrl: "https://registry.test" }),
+    );
+    writeFileSync(
+      join(workspace, "workspace", "sessions", jobId, "checkpoint.json"),
+      JSON.stringify({ status: "failed", workflowId: "brainstorm" }),
+    );
+    const manager = new JobManager({ workspace });
+    await assert.rejects(
+      manager.retryFailed(jobId),
+      /pinned to skills v0\.14\.0.*no longer executes.*new run/,
+    );
+  } finally {
+    await removeWorkspace(workspace);
+  }
+});
+
 test("a legacy settings file without telemetry still derives the diagnostics destination", async () => {
   const workspace = tempRoot();
   try {

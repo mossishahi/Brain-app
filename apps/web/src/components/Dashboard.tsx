@@ -426,6 +426,14 @@ export function Dashboard({ jobId }: { jobId: string }) {
 
   return (
     <div className="dash">
+      {/* The run's state at a glance, always: amber shimmer while waiting
+          for the queue, steady green while running, red when it failed —
+          so a retry is VISIBLE the moment the server accepts it. */}
+      <div
+        className={`job-state-strip job-state-strip-${job.status}`}
+        role="status"
+        aria-label={`job status: ${job.status}`}
+      />
       <header className="dash-header">
         <a href="#/" className="ghost-btn" aria-label="back to all jobs">
           <BackIcon />

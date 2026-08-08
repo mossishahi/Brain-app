@@ -750,7 +750,34 @@ async function main(): Promise<void> {
   console.log("  brainstorm-agentic list");
 }
 
+/**
+ * A worker that dies before its first checkpoint write (content validation,
+ * a missing or retired pin, an unreachable registry) leaves NO trace the
+ * dashboard can show — the job card silently keeps its previous state. Leave
+ * one: a worker:fatal line in the events log, which the server folds into
+ * the job's error when it notices the submission died.
+ */
+function appendFatalEvent(error: unknown): void {
+  try {
+    const eventsFile = stringFlag(parseArgs(process.argv.slice(2)), "events-file");
+    if (!eventsFile) return;
+    mkdirSync(dirname(eventsFile), { recursive: true });
+    appendFileSync(
+      eventsFile,
+      `${JSON.stringify({
+        type: "worker:fatal",
+        at: Date.now(),
+        message: error instanceof Error ? error.message : String(error),
+      })}\n`,
+      "utf8",
+    );
+  } catch {
+    // Reporting must never mask the real failure.
+  }
+}
+
 main().catch((error: unknown) => {
   console.error(error instanceof Error ? error.message : String(error));
+  appendFatalEvent(error);
   process.exitCode = 1;
 });

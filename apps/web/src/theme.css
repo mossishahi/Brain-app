@@ -574,6 +574,62 @@ input[type="radio"] {
  * every view), and a full-page overlay while the self-update restarts the
  * server and this tab waits to reload itself.
  */
+/*
+ * The dashboard's job-state strip: a thin always-visible line whose color IS
+ * the run's status. Amber with a moving shimmer while waiting for the queue
+ * (a retry becomes visible the instant the server accepts it), steady green
+ * while running, red on failure.
+ */
+.job-state-strip {
+  height: 3px;
+  border-radius: 2px;
+  margin-bottom: 10px;
+  background: var(--border);
+}
+
+.job-state-strip-queued,
+.job-state-strip-suspended,
+.job-state-strip-credit-blocked {
+  background: repeating-linear-gradient(
+    90deg,
+    var(--warn) 0 24px,
+    color-mix(in srgb, var(--warn) 35%, transparent) 24px 48px
+  );
+  background-size: 200% 100%;
+  animation: strip-march 1.2s linear infinite;
+}
+
+.job-state-strip-running {
+  background: var(--ok);
+}
+
+.job-state-strip-completed {
+  background: color-mix(in srgb, var(--ok) 55%, transparent);
+}
+
+.job-state-strip-failed,
+.job-state-strip-orphaned {
+  background: var(--bad);
+}
+
+.job-state-strip-cancelled {
+  background: var(--border);
+}
+
+@keyframes strip-march {
+  to {
+    background-position: -96px 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .job-state-strip-queued,
+  .job-state-strip-suspended,
+  .job-state-strip-credit-blocked {
+    animation: none;
+  }
+}
+
 .update-toast-stack {
   position: fixed;
   left: 16px;
