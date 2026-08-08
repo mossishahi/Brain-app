@@ -238,7 +238,13 @@ function JobCard({ job }: { readonly job: JobSummary }) {
           </div>
         )
       )}
-      {expanded && (
+      {/* Always mounted so the unroll is a genuine height transition (the
+          grid-rows accordion pattern); `inert` keeps the folded content out
+          of the tab order and the accessibility tree. */}
+      <div
+        className={`job-expand-shell${expanded ? " job-expand-shell-open" : ""}`}
+        inert={!expanded}
+      >
         <div className="job-expand">
           <div className="job-prompt-box">
             <div className="job-prompt-text">{job.topic}</div>
@@ -261,7 +267,7 @@ function JobCard({ job }: { readonly job: JobSummary }) {
             }}
           />
         </div>
-      )}
+      </div>
     </li>
   );
 }

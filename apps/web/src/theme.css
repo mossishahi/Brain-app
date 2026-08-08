@@ -696,27 +696,40 @@ select:disabled {
 /*
  * Unrolled job cards on the landing: the prompt beside the live step flow.
  */
-.job-expand {
+/* The standard grid-rows accordion: the shell interpolates 0fr -> 1fr, so
+   the card's height genuinely rolls open and shut — no jump-cuts. */
+.job-expand-shell {
   flex-basis: 100%;
   min-width: 0;
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition:
+    grid-template-rows 0.28s ease,
+    opacity 0.22s ease;
+}
+
+.job-expand-shell-open {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+
+.job-expand {
+  min-width: 0;
+  overflow: hidden;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 4px;
   padding: 0 12px;
-  /* The unroll reads as the card opening: the content drops in and unfolds. */
-  animation: job-expand-open 0.22s ease;
-  transform-origin: top center;
 }
 
-@keyframes job-expand-open {
-  from {
-    opacity: 0;
-    transform: translateY(-6px) scaleY(0.97);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0) scaleY(1);
-  }
+/* Bottom breathing room as CONTENT, not padding: padding would hold the
+   folded shell 10px tall, since 0fr only collapses the content box. */
+.job-expand::after {
+  content: "";
+  flex: none;
+  height: 10px;
 }
 
 /* The embedded pipeline graph scrolls inside the card on narrow screens. */
@@ -1921,10 +1934,6 @@ button.server-file-name {
   overflow: hidden;
   padding-right: 8px;
   padding-bottom: 0;
-}
-
-.job-card:has(.job-expand) {
-  padding-bottom: 10px;
 }
 
 .job-card:hover {
