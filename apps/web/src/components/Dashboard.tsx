@@ -176,13 +176,25 @@ function DashboardSkeleton() {
   );
 }
 
-export function Dashboard({ jobId }: { jobId: string }) {
+export function Dashboard({
+  jobId,
+  initialStage,
+}: {
+  jobId: string;
+  /** Deep-linked stage page (#/jobs/<id>/stage/<stageId>), when given. */
+  initialStage?: string;
+}) {
   // Start from the cached/prefetched snapshot so navigation paints instantly.
   const [job, setJob] = useState<JobDetail | null>(
     () => cachedJobDetail(jobId) ?? null,
   );
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [pinned, setPinned] = useState<StageId | null>(null);
+  const [pinned, setPinned] = useState<StageId | null>(() =>
+    initialStage !== undefined &&
+    (STAGE_IDS as readonly string[]).includes(initialStage)
+      ? (initialStage as StageId)
+      : null,
+  );
   // Stages fold by id; the set starts empty so every panel opens expanded.
   const [collapsed, setCollapsed] = useState<ReadonlySet<StageId>>(() => new Set());
   const [confirmCancelResume, setConfirmCancelResume] = useState(false);
@@ -222,22 +234,17 @@ export function Dashboard({ jobId }: { jobId: string }) {
     job?.status === "completed" || job?.status === "failed" || job?.status === "cancelled";
   const now = useNow(jobLoaded && !terminal);
 
-  const scrollToStage = useCallback((id: StageId) => {
-    stageRefs.current.get(id)?.scrollIntoView({
-      behavior: prefersReducedMotion() ? "auto" : "smooth",
-      block: "start",
-    });
-  }, []);
-
-  // Auto-follow the active stage until the user clicks a node.
+  // Stages render as side-by-side PAGES; the pipeline graph above is the
+  // navigation spine (auto-following the active stage until the user pins
+  // one). Track the previous page index so the slide animation knows which
+  // direction the transition travels.
+  const selectedIndex = Math.max(0, STAGE_IDS.indexOf(selected));
+  const previousIndexRef = useRef(selectedIndex);
+  const slideDirection =
+    selectedIndex >= previousIndexRef.current ? "forward" : "backward";
   useEffect(() => {
-    if (!jobLoaded || pinned !== null) return;
-    if (!followedOnce.current) {
-      followedOnce.current = true;
-      return;
-    }
-    scrollToStage(activeStage);
-  }, [activeStage, pinned, jobLoaded, scrollToStage]);
+    previousIndexRef.current = selectedIndex;
+  }, [selectedIndex]);
 
   const toggleStage = useCallback((id: StageId) => {
     setCollapsed((prev) => {
@@ -248,20 +255,17 @@ export function Dashboard({ jobId }: { jobId: string }) {
     });
   }, []);
 
-  const onSelectStage = useCallback(
-    (id: StageId) => {
-      setPinned(id);
-      // Selecting a node in the pipeline graph expands its panel first.
-      setCollapsed((prev) => {
-        if (!prev.has(id)) return prev;
-        const next = new Set(prev);
-        next.delete(id);
-        return next;
-      });
-      scrollToStage(id);
-    },
-    [scrollToStage],
-  );
+  const onSelectStage = useCallback((id: StageId) => {
+    setPinned(id);
+    // Selecting a node in the pipeline graph turns its page — and lands it
+    // unfolded, whatever its previous fold state was.
+    setCollapsed((prev) => {
+      if (!prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+  }, []);
 
   const onGateAnswer = useCallback(
     async (req: GateAnswerRequest) => {
@@ -568,43 +572,69 @@ export function Dashboard({ jobId }: { jobId: string }) {
         onSelect={onSelectStage}
       />
 
-      <div className="stage-list">
-        {STAGE_IDS.map((id) => {
-          const stage = stageMap.get(id);
-          return (
-            <StageFrame
-              key={id}
-              id={id}
-              title={STAGE_TITLES[id]}
-              status={stage?.status ?? "pending"}
-              startedAt={stage?.startedAt}
-              finishedAt={stage?.finishedAt}
-              fallbackEnd={fallbackEnd}
-              now={now}
-              error={stage?.error}
-              activity={stage?.activity}
-              selected={selected === id}
-              expanded={!collapsed.has(id)}
-              onToggle={() => toggleStage(id)}
-              refCb={(el) => {
-                stageRefs.current.set(id, el);
-              }}
-              actions={
-                id === "synthesize-proposal" && proposalStage?.proposal ? (
-                  <ProposalActions proposal={proposalStage.proposal} />
-                ) : undefined
-              }
+      {(() => {
+        const stage = stageMap.get(selected);
+        return (
+          <div className="stage-pager">
+            <div
+              key={selected}
+              className={`stage-page stage-page-${slideDirection}`}
             >
-              {renderBody(id)}
-            </StageFrame>
-          );
-        })}
-        <ToolUsageSection
-          jobId={jobId}
-          updatedAt={job.updatedAt}
-          active={job.status === "running"}
-        />
-      </div>
+              <StageFrame
+                id={selected}
+                title={STAGE_TITLES[selected]}
+                status={stage?.status ?? "pending"}
+                startedAt={stage?.startedAt}
+                finishedAt={stage?.finishedAt}
+                fallbackEnd={fallbackEnd}
+                now={now}
+                error={stage?.error}
+                activity={stage?.activity}
+                selected={false}
+                expanded={!collapsed.has(selected)}
+                onToggle={() => toggleStage(selected)}
+                refCb={() => undefined}
+                actions={
+                  selected === "synthesize-proposal" && proposalStage?.proposal ? (
+                    <ProposalActions proposal={proposalStage.proposal} />
+                  ) : undefined
+                }
+              >
+                {renderBody(selected)}
+              </StageFrame>
+            </div>
+            <div className="stage-pager-nav">
+              <button
+                type="button"
+                className="btn btn-small"
+                disabled={selectedIndex === 0}
+                onClick={() => onSelectStage(STAGE_IDS[selectedIndex - 1]!)}
+              >
+                ← {selectedIndex > 0 ? STAGE_TITLES[STAGE_IDS[selectedIndex - 1]!] : ""}
+              </button>
+              <span className="dim small">
+                {selectedIndex + 1} / {STAGE_IDS.length}
+              </span>
+              <button
+                type="button"
+                className="btn btn-small"
+                disabled={selectedIndex === STAGE_IDS.length - 1}
+                onClick={() => onSelectStage(STAGE_IDS[selectedIndex + 1]!)}
+              >
+                {selectedIndex < STAGE_IDS.length - 1
+                  ? STAGE_TITLES[STAGE_IDS[selectedIndex + 1]!]
+                  : ""}{" "}
+                →
+              </button>
+            </div>
+          </div>
+        );
+      })()}
+      <ToolUsageSection
+        jobId={jobId}
+        updatedAt={job.updatedAt}
+        active={job.status === "running"}
+      />
     </div>
   );
 }

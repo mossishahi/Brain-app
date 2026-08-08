@@ -1,6 +1,8 @@
 /** View 1 — prompt entry plus live job cards. */
 import { useCallback, useEffect, useState } from "react";
+import { STAGE_IDS } from "@brainstorm-agentic/protocol";
 import type {
+  JobDetail,
   JobSummary,
   ReadinessCheckId,
   ReadinessReport,
@@ -8,11 +10,13 @@ import type {
 } from "@brainstorm-agentic/protocol";
 import {
   cacheJobs,
+  cachedJobDetail,
   cachedJobs,
   cancelJob,
   diagnoseReadiness,
   blockedReadiness,
   errorMessage,
+  getJob,
   getJobs,
   getReadiness,
   getSettings,
@@ -24,9 +28,9 @@ import {
   trashJob,
   useServerEvents,
 } from "../api";
-import { jobDot, jobStatusLine } from "../format";
+import { jobDot, jobStatusLine, stageDot, STAGE_TITLES } from "../format";
 import { Dot } from "./common";
-import { ResumeIcon, TrashIcon, XIcon } from "./Icons";
+import { ChevronIcon, CopyIcon, ResumeIcon, TrashIcon, XIcon } from "./Icons";
 import {
   ProviderOnboarding,
   onboardingDismissed,
@@ -38,6 +42,51 @@ function JobCard({ job }: { readonly job: JobSummary }) {
   const [confirming, setConfirming] = useState<"cancel" | "trash" | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [resuming, setResuming] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const [detail, setDetail] = useState<JobDetail | null>(
+    () => cachedJobDetail(job.jobId) ?? null,
+  );
+  const [copied, setCopied] = useState(false);
+
+  // While unrolled, keep the flow live: refresh immediately and then poll
+  // lightly for runs that are still moving (SSE keeps the summary current;
+  // per-stage states need the detail).
+  useEffect(() => {
+    if (!expanded) return;
+    let live = true;
+    const load = (): void => {
+      getJob(job.jobId)
+        .then((fresh) => {
+          if (live) setDetail(fresh);
+        })
+        .catch(() => undefined);
+    };
+    load();
+    const terminal =
+      job.status === "completed" ||
+      job.status === "failed" ||
+      job.status === "cancelled";
+    if (terminal) {
+      return () => {
+        live = false;
+      };
+    }
+    const timer = window.setInterval(load, 5_000);
+    return () => {
+      live = false;
+      window.clearInterval(timer);
+    };
+  }, [expanded, job.jobId, job.status]);
+
+  const copyPrompt = async (): Promise<void> => {
+    try {
+      await navigator.clipboard.writeText(job.topic);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1_500);
+    } catch {
+      // Clipboard unavailable (non-secure context); the text stays selectable.
+    }
+  };
   const cancellable =
     job.status === "queued" ||
     job.status === "running" ||
@@ -93,6 +142,15 @@ function JobCard({ job }: { readonly job: JobSummary }) {
           <span>{jobStatusLine(job)}</span>
         </span>
       </a>
+      <button
+        type="button"
+        className={`ghost-btn job-expand-toggle${expanded ? " job-expand-open" : ""}`}
+        aria-expanded={expanded}
+        aria-label={`${expanded ? "collapse" : "expand"} run details: ${job.topic}`}
+        onClick={() => setExpanded((prev) => !prev)}
+      >
+        <ChevronIcon />
+      </button>
       {confirming !== null ? (
         <div className="cancel-zone">
           <span className="cancel-question">
@@ -173,6 +231,48 @@ function JobCard({ job }: { readonly job: JobSummary }) {
             )}
           </div>
         )
+      )}
+      {expanded && (
+        <div className="job-expand">
+          <div className="job-expand-panel">
+            <div className="job-expand-head">
+              <span>Prompt</span>
+              <button
+                type="button"
+                className="ghost-btn"
+                aria-label="copy the prompt"
+                onClick={() => void copyPrompt()}
+              >
+                {copied ? <span className="small">copied</span> : <CopyIcon />}
+              </button>
+            </div>
+            <div className="job-prompt-text">{job.topic}</div>
+          </div>
+          <div className="job-expand-panel">
+            <div className="job-expand-head">
+              <span>Flow</span>
+              <span className="dim small">live · click a step to open it</span>
+            </div>
+            <ol className="job-flow">
+              {STAGE_IDS.map((id) => {
+                const stage = detail?.stages.find((entry) => entry.id === id);
+                const status = stage?.status ?? "pending";
+                return (
+                  <li key={id}>
+                    <a
+                      className="job-flow-step"
+                      href={`#/jobs/${encodeURIComponent(job.jobId)}/stage/${id}`}
+                    >
+                      <Dot state={stageDot(status)} />
+                      <span className="job-flow-title">{STAGE_TITLES[id]}</span>
+                      <span className="dim small">{status}</span>
+                    </a>
+                  </li>
+                );
+              })}
+            </ol>
+          </div>
+        </div>
       )}
     </li>
   );

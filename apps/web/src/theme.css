@@ -575,6 +575,151 @@ input[type="radio"] {
  * server and this tab waits to reload itself.
  */
 /*
+ * Stage pager: stages are PAGES turned by the pipeline graph above them (and
+ * the prev/next footer). One page is mounted at a time; changing it slides
+ * the new page in from the travel direction.
+ */
+.stage-pager {
+  overflow: hidden;
+}
+
+.stage-page {
+  animation: page-forward 0.3s ease;
+}
+
+.stage-page-backward {
+  animation-name: page-backward;
+}
+
+@keyframes page-forward {
+  from {
+    opacity: 0.2;
+    transform: translateX(36px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes page-backward {
+  from {
+    opacity: 0.2;
+    transform: translateX(-36px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stage-page,
+  .stage-page-backward {
+    animation: none;
+  }
+}
+
+.stage-pager-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 10px 0;
+}
+
+/*
+ * Unrolled job cards on the landing: the prompt beside the live step flow.
+ */
+.job-expand-toggle svg {
+  transform: rotate(90deg);
+  transition: transform 0.15s ease;
+}
+
+.job-expand-open svg {
+  transform: rotate(-90deg);
+}
+
+.job-expand {
+  flex-basis: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  margin-top: 8px;
+}
+
+@media (max-width: 720px) {
+  .job-expand {
+    grid-template-columns: 1fr;
+  }
+}
+
+.job-expand-panel {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.job-expand-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+
+.job-prompt-text {
+  max-height: 200px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--surface) 60%, transparent);
+}
+
+.job-flow {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.job-flow-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.job-flow-step:hover {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.job-flow-title {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/*
  * The dashboard's job-state strip: a thin always-visible line whose color IS
  * the run's status. Amber with a moving shimmer while waiting for the queue
  * (a retry becomes visible the instant the server accepts it), steady green
@@ -1713,14 +1858,21 @@ button.server-file-name {
 }
 
 .job-card {
-  height: 64px;
+  /* min-height (not height): the card grows when its details unroll. */
+  min-height: 64px;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   overflow: hidden;
   padding-right: 8px;
+  padding-bottom: 0;
+}
+
+.job-card:has(.job-expand) {
+  padding-bottom: 10px;
 }
 
 .job-card:hover {

@@ -10,14 +10,20 @@ import { BackIcon, GearIcon, MoonIcon, SunIcon } from "./components/Icons";
 
 type Route =
   | { view: "landing" }
-  | { view: "job"; jobId: string }
+  | { view: "job"; jobId: string; stage?: string }
   | { view: "trash" };
 
 function parseRoute(): Route {
   const hash = window.location.hash;
   if (/^#\/trash(?:[/?#]|$)/.test(hash)) return { view: "trash" };
-  const match = /^#\/jobs\/([^/?#]+)/.exec(hash);
-  if (match) return { view: "job", jobId: decodeURIComponent(match[1]) };
+  const match = /^#\/jobs\/([^/?#]+)(?:\/stage\/([^/?#]+))?/.exec(hash);
+  if (match) {
+    return {
+      view: "job",
+      jobId: decodeURIComponent(match[1]),
+      ...(match[2] ? { stage: decodeURIComponent(match[2]) } : {}),
+    };
+  }
   return { view: "landing" };
 }
 
@@ -116,7 +122,7 @@ export function App() {
           key={route.view === "job" ? `job:${route.jobId}` : route.view}
         >
           {route.view === "job" ? (
-            <Dashboard jobId={route.jobId} />
+            <Dashboard jobId={route.jobId} initialStage={route.stage} />
           ) : route.view === "trash" ? (
             <TrashView />
           ) : (
