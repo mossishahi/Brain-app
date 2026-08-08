@@ -34,7 +34,7 @@ import {
   STAGE_TITLES,
 } from "../format";
 import { ActivityFeed, Dot, SkeletonLines } from "./common";
-import { BackIcon, ChevronIcon } from "./Icons";
+import { BackIcon, ChevronIcon, ForwardIcon } from "./Icons";
 import { PipelineGraph } from "./PipelineGraph";
 import { SendDiagnostics } from "./SendDiagnostics";
 import {
@@ -565,12 +565,32 @@ export function Dashboard({
         </div>
       )}
 
-      <PipelineGraph
-        stages={stageMap}
-        selected={selected}
-        cursor={reviewStage?.status === "active" ? job.progress?.review : undefined}
-        onSelect={onSelectStage}
-      />
+      <div className="graph-nav-row">
+        <button
+          type="button"
+          className="ghost-btn graph-nav"
+          aria-label="previous stage"
+          disabled={selectedIndex === 0}
+          onClick={() => onSelectStage(STAGE_IDS[selectedIndex - 1]!)}
+        >
+          <BackIcon size={16} />
+        </button>
+        <PipelineGraph
+          stages={stageMap}
+          selected={selected}
+          cursor={reviewStage?.status === "active" ? job.progress?.review : undefined}
+          onSelect={onSelectStage}
+        />
+        <button
+          type="button"
+          className="ghost-btn graph-nav"
+          aria-label="next stage"
+          disabled={selectedIndex === STAGE_IDS.length - 1}
+          onClick={() => onSelectStage(STAGE_IDS[selectedIndex + 1]!)}
+        >
+          <ForwardIcon size={16} />
+        </button>
+      </div>
 
       {(() => {
         const stage = stageMap.get(selected);

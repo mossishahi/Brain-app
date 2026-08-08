@@ -575,6 +575,36 @@ input[type="radio"] {
  * server and this tab waits to reload itself.
  */
 /*
+ * The pipeline spine row: breathing room at both sides, with light
+ * previous/next stage controls flanking the graph.
+ */
+.graph-nav-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 16px;
+}
+
+.graph-nav-row > .graph-wrap {
+  flex: 1;
+  min-width: 0;
+}
+
+.graph-nav {
+  flex: 0 0 auto;
+  opacity: 0.55;
+}
+
+.graph-nav:hover:not(:disabled) {
+  opacity: 1;
+}
+
+.graph-nav:disabled {
+  opacity: 0.2;
+  cursor: default;
+}
+
+/*
  * Stage pager: stages are PAGES turned by the pipeline graph above them (and
  * the prev/next footer). One page is mounted at a time; changing it slides
  * the new page in from the travel direction.
