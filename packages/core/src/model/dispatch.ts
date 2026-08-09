@@ -106,6 +106,9 @@ export class RateCoordinator implements RequestCoordinator {
           ? () => {
               this.#waiters = this.#waiters.filter((entry) => entry !== waiter);
               reject(abortError(signal.reason));
+              // The queue may have just emptied; the timer's hold on the
+              // process must follow the waiters.
+              this.#applyTimerReferencing();
             }
           : undefined,
       };
@@ -143,8 +146,20 @@ export class RateCoordinator implements RequestCoordinator {
       this.#timer = undefined;
       this.#drain();
     }, wait);
-    // A pending queue must never hold the process open on its own.
-    this.#timer.unref?.();
+    this.#applyTimerReferencing();
+  }
+
+  /**
+   * The timer's hold on the process follows the waiters: pending acquires
+   * are real work whose promises MUST settle, so their wake-up timer keeps
+   * the event loop alive — an unref'd timer here let a process with nothing
+   * else to do exit mid-wait, stranding the waiters' promises. A block with
+   * an empty queue holds nothing: it only matters if someone asks.
+   */
+  #applyTimerReferencing(): void {
+    if (this.#timer === undefined) return;
+    if (this.#waiters.length > 0) this.#timer.ref?.();
+    else this.#timer.unref?.();
   }
 
   #drain(): void {
