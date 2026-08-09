@@ -119,3 +119,55 @@ test("store fetches one exact file, verifies it, deduplicates, and writes nothin
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("registry rate limits are waited out, not fatal", async (t) => {
+  await t.test("a 429 retries after the declared window and then succeeds", async () => {
+    const { withRegistryRateLimitRetry } = await import("../src/index.js");
+    const sleeps: number[] = [];
+    let calls = 0;
+    const value = await withRegistryRateLimitRetry(
+      async () => {
+        calls += 1;
+        if (calls === 1) {
+          throw new Error("Error POSTing to endpoint (HTTP 429): rate limit exceeded");
+        }
+        return "pinned";
+      },
+      { waitMs: 5, sleep: async (ms) => { sleeps.push(ms); } },
+    );
+    assert.equal(value, "pinned");
+    assert.deepEqual(sleeps, [5]);
+  });
+
+  await t.test("a non-rate-limit failure is rethrown immediately", async () => {
+    const { withRegistryRateLimitRetry } = await import("../src/index.js");
+    let calls = 0;
+    await assert.rejects(
+      withRegistryRateLimitRetry(
+        async () => {
+          calls += 1;
+          throw new Error("manifest does not list \"skills/roles/ghost.md\"");
+        },
+        { sleep: async () => {} },
+      ),
+      /does not list/,
+    );
+    assert.equal(calls, 1);
+  });
+
+  await t.test("the retry budget is bounded", async () => {
+    const { withRegistryRateLimitRetry } = await import("../src/index.js");
+    let calls = 0;
+    await assert.rejects(
+      withRegistryRateLimitRetry(
+        async () => {
+          calls += 1;
+          throw new Error("rate limit exceeded");
+        },
+        { retries: 2, waitMs: 1, sleep: async () => {} },
+      ),
+      /rate limit/,
+    );
+    assert.equal(calls, 3);
+  });
+});

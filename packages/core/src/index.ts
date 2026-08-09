@@ -17,6 +17,7 @@ export * from "./model/tools.js";
 export * from "./model/request.js";
 export * from "./model/response.js";
 export * from "./model/provider.js";
+export * from "./model/dispatch.js";
 
 // Agent, skill, and tool contracts
 export * from "./agent/contracts.js";

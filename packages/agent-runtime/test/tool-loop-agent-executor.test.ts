@@ -627,3 +627,103 @@ test("a stepwise task that skips submissions gets corrective feedback, then fail
   // One corrective feedback round-trip happened before failing closed.
   assert.equal(provider.requests.length, 2);
 });
+
+test("rate limits get their own retry budget and honor the declared retry-after", async () => {
+  const delays: number[] = [];
+  const provider = new FakeProvider((_request, call) => {
+    if (call <= 3) {
+      throw Object.assign(new Error("429 rate_limit_error"), {
+        category: "rate_limit",
+        status: 429,
+        retryAfterMs: 5_000,
+        transient: true,
+      });
+    }
+    return response([{ type: "text", text: "recovered" }]);
+  });
+  const executor = new ToolLoopAgentExecutor({
+    provider,
+    tools: new ToolRegistry(),
+    modelRouteResolver: new FixedModelRouteResolver({ modelId: "fake-model" }),
+    retry: {
+      // Zero generic retries proves the rate-limit budget is its own lane.
+      maxTransientRetries: 0,
+      initialDelayMs: 7,
+      sleep: async (delay) => {
+        delays.push(delay);
+      },
+    },
+  });
+
+  const result = await executor.execute(
+    task({ taskId: "rate-limit-task", input: "Answer." }),
+    context,
+  );
+  assert.equal(result.status, "ok");
+  assert.equal(provider.requests.length, 4);
+  assert.deepEqual(
+    delays,
+    [5_000, 5_000, 5_000],
+    "each wait honors the provider-declared retry-after",
+  );
+});
+
+test("a declared retry-after never exceeds one budget window", async () => {
+  const delays: number[] = [];
+  const provider = new FakeProvider((_request, call) => {
+    if (call === 1) {
+      throw Object.assign(new Error("429 rate_limit_error"), {
+        category: "rate_limit",
+        status: 429,
+        retryAfterMs: 500_000,
+        transient: true,
+      });
+    }
+    return response([{ type: "text", text: "recovered" }]);
+  });
+  const executor = new ToolLoopAgentExecutor({
+    provider,
+    tools: new ToolRegistry(),
+    modelRouteResolver: new FixedModelRouteResolver({ modelId: "fake-model" }),
+    retry: {
+      maxTransientRetries: 0,
+      sleep: async (delay) => {
+        delays.push(delay);
+      },
+    },
+  });
+
+  const result = await executor.execute(
+    task({ taskId: "capped-wait-task", input: "Answer." }),
+    context,
+  );
+  assert.equal(result.status, "ok");
+  assert.deepEqual(delays, [60_000]);
+});
+
+test("the rate-limit budget is bounded: a wall that never lifts still fails", async () => {
+  const provider = new FakeProvider(() => {
+    throw Object.assign(new Error("429 rate_limit_error"), {
+      category: "rate_limit",
+      status: 429,
+      transient: true,
+    });
+  });
+  const executor = new ToolLoopAgentExecutor({
+    provider,
+    tools: new ToolRegistry(),
+    modelRouteResolver: new FixedModelRouteResolver({ modelId: "fake-model" }),
+    retry: {
+      maxTransientRetries: 0,
+      maxRateLimitRetries: 2,
+      sleep: async () => {},
+    },
+  });
+
+  const result = await executor.execute(
+    task({ taskId: "exhausted-task", input: "Answer." }),
+    context,
+  );
+  assert.equal(result.status, "error");
+  assert.equal(provider.requests.length, 3, "initial call plus the bounded retries");
+});

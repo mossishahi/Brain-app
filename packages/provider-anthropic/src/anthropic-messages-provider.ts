@@ -3,6 +3,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import type {
   CallOptions,
   ContentBlock,
+  DispatchPriority,
   DocumentBlock,
   ImageBlock,
   JsonObject,
@@ -13,6 +14,8 @@ import type {
   ModelProvider,
   ModelRequest,
   ModelResponse,
+  RateObservation,
+  RequestCoordinator,
   ResponseFormat,
   StopReason,
   SystemPrompt,
@@ -94,6 +97,14 @@ export interface AnthropicMessagesProviderConfig {
    * both paths are validated against the documented API rules.
    */
   readonly thinking?: AnthropicThinkingConfig;
+  /**
+   * The request coordinator this provider reports to and is paced by: every
+   * wire call acquires a dispatch slot first, every response's rate-limit
+   * headers are fed back as the provider's own timing declaration, and a 429
+   * blocks the whole queue until the declared reset. Omitted, the provider
+   * sends immediately (single-call uses: validation, readiness, advice).
+   */
+  readonly coordinator?: RequestCoordinator;
   /** Official-SDK boundary injection for deterministic tests. */
   readonly client?: AnthropicMessagesClient;
 }
@@ -146,6 +157,7 @@ function throwIfAborted(signal?: AbortSignal): void {
       false,
       undefined,
       "ABORT_ERR",
+      undefined,
       undefined,
       { cause: signal.reason },
     );
@@ -654,6 +666,47 @@ function responseMetadata(raw: WireRecord): JsonObject {
   return { anthropic };
 }
 
+interface HeaderReader {
+  get(name: string): string | null;
+}
+
+/** The budgets one response's rate-limit headers declare, as an observation. */
+function rateObservationFrom(headers: HeaderReader): RateObservation {
+  const integer = (name: string): number | undefined => {
+    const raw = headers.get(name);
+    if (raw === null || raw === "") return undefined;
+    const value = Number(raw);
+    return Number.isFinite(value) ? value : undefined;
+  };
+  const time = (name: string): number | undefined => {
+    const raw = headers.get(name);
+    if (raw === null || raw === "") return undefined;
+    const at = Date.parse(raw);
+    return Number.isNaN(at) ? undefined : at;
+  };
+  const requestsRemaining = integer("anthropic-ratelimit-requests-remaining");
+  const requestsResetAt = time("anthropic-ratelimit-requests-reset");
+  const inputTokensRemaining = integer("anthropic-ratelimit-input-tokens-remaining");
+  const inputTokensResetAt = time("anthropic-ratelimit-input-tokens-reset");
+  const outputTokensRemaining = integer("anthropic-ratelimit-output-tokens-remaining");
+  const outputTokensResetAt = time("anthropic-ratelimit-output-tokens-reset");
+  return {
+    ...(requestsRemaining !== undefined ? { requestsRemaining } : {}),
+    ...(requestsResetAt !== undefined ? { requestsResetAt } : {}),
+    ...(inputTokensRemaining !== undefined ? { inputTokensRemaining } : {}),
+    ...(inputTokensResetAt !== undefined ? { inputTokensResetAt } : {}),
+    ...(outputTokensRemaining !== undefined ? { outputTokensRemaining } : {}),
+    ...(outputTokensResetAt !== undefined ? { outputTokensResetAt } : {}),
+  };
+}
+
+/**
+ * Fallback queue block for a 429 that names no retry-after. Anthropic's
+ * budgets replenish within a rolling minute; half a window keeps the queue
+ * from probing the wall without over-waiting.
+ */
+const DEFAULT_RATE_LIMIT_BLOCK_MS = 30_000;
+
 export class AnthropicMessagesProvider implements ModelProvider {
   public readonly providerId = "anthropic";
 
@@ -665,6 +718,7 @@ export class AnthropicMessagesProvider implements ModelProvider {
   readonly #providerOptions: WireRecord;
   readonly #thinking: WireRecord | undefined;
   readonly #nativeTools: Readonly<Record<string, WireRecord>>;
+  readonly #coordinator: RequestCoordinator | undefined;
 
   public constructor(config: AnthropicMessagesProviderConfig) {
     if (config.model.trim() === "") {
@@ -684,6 +738,7 @@ export class AnthropicMessagesProvider implements ModelProvider {
       ...(config.capabilities ?? {}),
     };
     this.#providerOptions = { ...(config.providerOptions ?? {}) };
+    this.#coordinator = config.coordinator;
     this.#nativeTools = { ...DEFAULT_NATIVE_TOOLS, ...(config.nativeTools ?? {}) };
     this.#thinking =
       config.thinking !== undefined
@@ -849,14 +904,20 @@ export class AnthropicMessagesProvider implements ModelProvider {
       const requestMessages: WireMessage[] = [...messages];
       const collectedContent: unknown[] = [];
       const usages: TokenUsage[] = [];
+      // The dispatch priority rides the request metadata (set by the host's
+      // task adapter); a round's single gating call outranks comment floods.
+      const priority: DispatchPriority =
+        request.metadata?.dispatchPriority === "high" ? "high" : "normal";
       let raw: WireRecord;
       let continuations = 0;
       for (;;) {
+        // Every wire call — pause_turn continuations included — takes a
+        // dispatch slot, so a blocked queue holds ALL traffic.
+        if (this.#coordinator !== undefined) {
+          await this.#coordinator.acquire(priority, signal);
+        }
         params.messages = requestMessages;
-        const rawResponse = await this.#client.messages.create(
-          params,
-          signal === undefined ? undefined : { signal },
-        );
+        const rawResponse = await this.#createObservingHeaders(params, signal);
         throwIfAborted(signal);
         raw = asWireRecord(rawResponse);
         const contentArray = Array.isArray(raw.content) ? raw.content : [];
@@ -923,7 +984,47 @@ export class AnthropicMessagesProvider implements ModelProvider {
         },
       };
     } catch (error) {
-      throw classifyAnthropicError(error, signal);
+      const classified = classifyAnthropicError(error, signal);
+      // One task's 429 informs the whole queue: everyone waits out the
+      // provider-declared reset instead of each request discovering the
+      // same wall with its own round trip.
+      if (this.#coordinator !== undefined && classified.category === "rate_limit") {
+        this.#coordinator.block(
+          Date.now() + (classified.retryAfterMs ?? DEFAULT_RATE_LIMIT_BLOCK_MS),
+          "anthropic rate limit",
+        );
+      }
+      throw classified;
     }
+  }
+
+  /**
+   * One wire call, reading the response's rate-limit headers when the SDK
+   * exposes them (`withResponse`); those headers are the provider's own
+   * timing declaration and feed the coordinator. Test fakes returning plain
+   * promises simply contribute no observation.
+   */
+  async #createObservingHeaders(
+    params: WireRecord,
+    signal: AbortSignal | undefined,
+  ): Promise<unknown> {
+    const pending = this.#client.messages.create(
+      params,
+      signal === undefined ? undefined : { signal },
+    ) as Promise<unknown> & {
+      withResponse?: () => Promise<{
+        data: unknown;
+        response?: { headers?: HeaderReader };
+      }>;
+    };
+    if (this.#coordinator === undefined || typeof pending.withResponse !== "function") {
+      return await pending;
+    }
+    const { data, response } = await pending.withResponse();
+    const headers = response?.headers;
+    if (headers !== undefined && typeof headers.get === "function") {
+      this.#coordinator.observe(rateObservationFrom(headers));
+    }
+    return data;
   }
 }

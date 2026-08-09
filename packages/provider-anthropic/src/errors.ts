@@ -19,6 +19,12 @@ export class AnthropicProviderError extends Error {
     public readonly status?: number,
     public readonly code?: string,
     public readonly requestId?: string,
+    /**
+     * The wait the provider itself declared (a rate-limit response's
+     * retry-after), in milliseconds. Retry layers sleep at least this long
+     * instead of probing the wall with their own backoff guesses.
+     */
+    public readonly retryAfterMs?: number,
     options?: ErrorOptions,
   ) {
     super(message, options);
@@ -54,6 +60,35 @@ function numericProperty(
     }
   }
   return undefined;
+}
+
+/**
+ * One header's value, whatever shape the SDK handed us: a fetch Headers
+ * instance (get()) or a plain record (either case).
+ */
+function headerValue(headers: unknown, name: string): string | undefined {
+  if (headers !== null && typeof headers === "object") {
+    const getter = (headers as { get?: (key: string) => unknown }).get;
+    if (typeof getter === "function") {
+      const found = getter.call(headers, name);
+      return typeof found === "string" ? found : undefined;
+    }
+    const record = headers as Record<string, unknown>;
+    const found = record[name] ?? record[name.toLowerCase()] ?? record[name.toUpperCase()];
+    return typeof found === "string" ? found : undefined;
+  }
+  return undefined;
+}
+
+/** retry-after as milliseconds: delta seconds, or an HTTP date. */
+function retryAfterMsFrom(headers: unknown): number | undefined {
+  const raw = headerValue(headers, "retry-after");
+  if (raw === undefined) return undefined;
+  if (/^\d+$/.test(raw.trim())) return Number(raw.trim()) * 1000;
+  const at = Date.parse(raw);
+  if (Number.isNaN(at)) return undefined;
+  const wait = at - Date.now();
+  return wait > 0 ? wait : undefined;
 }
 
 function classifyStatus(status: number | undefined): {
@@ -100,6 +135,7 @@ export function classifyAnthropicError(
   const status = numericProperty(value, "status", "statusCode");
   const code = stringProperty(value, "code", "errorCode");
   const headers = asRecord(value.headers);
+  const retryAfterMs = retryAfterMsFrom(value.headers);
   const requestId =
     stringProperty(value, "requestId", "request_id") ??
     stringProperty(headers, "request-id", "x-request-id");
@@ -121,6 +157,7 @@ export function classifyAnthropicError(
       status,
       code,
       requestId,
+      undefined,
       { cause: error },
     );
   }
@@ -134,6 +171,7 @@ export function classifyAnthropicError(
       status,
       code,
       requestId,
+      retryAfterMs,
       { cause: error },
     );
   }
@@ -150,6 +188,7 @@ export function classifyAnthropicError(
       status,
       code,
       requestId,
+      undefined,
       { cause: error },
     );
   }
@@ -166,6 +205,7 @@ export function classifyAnthropicError(
       status,
       code,
       requestId,
+      undefined,
       { cause: error },
     );
   }
@@ -177,6 +217,7 @@ export function classifyAnthropicError(
     status,
     code,
     requestId,
+    undefined,
     { cause: error },
   );
 }

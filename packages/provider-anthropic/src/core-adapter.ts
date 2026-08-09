@@ -5,6 +5,7 @@
 export type {
   CallOptions,
   ContentBlock,
+  DispatchPriority,
   DocumentBlock,
   ImageBlock,
   JsonObject,
@@ -15,6 +16,8 @@ export type {
   ModelProvider,
   ModelRequest,
   ModelResponse,
+  RateObservation,
+  RequestCoordinator,
   ResponseFormat,
   StopReason,
   SystemPrompt,

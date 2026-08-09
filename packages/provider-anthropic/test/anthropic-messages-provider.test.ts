@@ -797,3 +797,165 @@ test("pause_turn responses continue automatically and concatenate the full turn"
     .join("");
   assert.equal(visibleText, "done", "the caller sees one concatenated turn");
 });
+
+// ---------------------------------------------------------------------------
+// Request coordinator integration
+// ---------------------------------------------------------------------------
+
+interface RecordedCoordinator {
+  readonly acquired: string[];
+  readonly observed: Record<string, unknown>[];
+  readonly blocked: { untilMs: number; reason: string }[];
+  acquire(priority?: string, signal?: AbortSignal): Promise<void>;
+  observe(observation: Record<string, unknown>): void;
+  block(untilMs: number, reason: string): void;
+}
+
+function recordedCoordinator(): RecordedCoordinator {
+  const acquired: string[] = [];
+  const observed: Record<string, unknown>[] = [];
+  const blocked: { untilMs: number; reason: string }[] = [];
+  return {
+    acquired,
+    observed,
+    blocked,
+    async acquire(priority = "normal") {
+      acquired.push(priority);
+    },
+    observe(observation) {
+      observed.push(observation);
+    },
+    block(untilMs, reason) {
+      blocked.push({ untilMs, reason });
+    },
+  };
+}
+
+const WIRE_RESPONSE = {
+  id: "msg_paced",
+  model: "claude-response",
+  content: [{ type: "text", text: "ok" }],
+  stop_reason: "end_turn",
+  stop_sequence: null,
+  usage: { input_tokens: 3, output_tokens: 1 },
+};
+
+test("every wire call takes a dispatch slot and feeds the declared budgets back", async () => {
+  const resetAt = new Date(Date.now() + 45_000).toISOString();
+  const headers: Record<string, string> = {
+    "anthropic-ratelimit-requests-remaining": "998",
+    "anthropic-ratelimit-requests-reset": resetAt,
+    "anthropic-ratelimit-input-tokens-remaining": "1900000",
+    "anthropic-ratelimit-input-tokens-reset": resetAt,
+    "anthropic-ratelimit-output-tokens-remaining": "395000",
+    "anthropic-ratelimit-output-tokens-reset": resetAt,
+  };
+  const client = {
+    messages: {
+      create(): Promise<unknown> {
+        const pending = Promise.resolve(WIRE_RESPONSE) as Promise<unknown> & {
+          withResponse?: () => Promise<unknown>;
+        };
+        pending.withResponse = async () => ({
+          data: WIRE_RESPONSE,
+          response: {
+            headers: { get: (name: string) => headers[name] ?? null },
+          },
+        });
+        return pending;
+      },
+    },
+  };
+  const coordinator = recordedCoordinator();
+  const provider = new AnthropicMessagesProvider({
+    apiKey: "not-used-by-mock",
+    model: "claude-default",
+    coordinator,
+    client,
+  });
+
+  const response = await provider.complete({
+    modelId: "claude-request",
+    messages: [{ role: "user", content: [{ type: "text", text: "Go." }] }],
+    metadata: { dispatchPriority: "high" },
+  });
+  assert.equal(response.stopReason, "end_turn");
+  assert.deepEqual(coordinator.acquired, ["high"], "one slot per wire call, priority honored");
+  assert.equal(coordinator.observed.length, 1);
+  const observation = coordinator.observed[0]!;
+  assert.equal(observation.requestsRemaining, 998);
+  assert.equal(observation.inputTokensRemaining, 1_900_000);
+  assert.equal(observation.outputTokensRemaining, 395_000);
+  assert.equal(observation.requestsResetAt, Date.parse(resetAt));
+});
+
+test("a fake client without withResponse still completes, with no observation", async () => {
+  const client = {
+    messages: {
+      async create(): Promise<unknown> {
+        return WIRE_RESPONSE;
+      },
+    },
+  };
+  const coordinator = recordedCoordinator();
+  const provider = new AnthropicMessagesProvider({
+    apiKey: "not-used-by-mock",
+    model: "claude-default",
+    coordinator,
+    client,
+  });
+  const response = await provider.complete({
+    modelId: "claude-request",
+    messages: [{ role: "user", content: [{ type: "text", text: "Go." }] }],
+  });
+  assert.equal(response.stopReason, "end_turn");
+  assert.deepEqual(coordinator.acquired, ["normal"]);
+  assert.deepEqual(coordinator.observed, []);
+});
+
+test("a 429 blocks the shared queue for the declared retry-after and rides the error", async () => {
+  const client = {
+    messages: {
+      async create(): Promise<unknown> {
+        throw Object.assign(new Error("429 rate_limit_error"), {
+          status: 429,
+          headers: { "retry-after": "7" },
+        });
+      },
+    },
+  };
+  const coordinator = recordedCoordinator();
+  const provider = new AnthropicMessagesProvider({
+    apiKey: "not-used-by-mock",
+    model: "claude-default",
+    coordinator,
+    client,
+  });
+  const before = Date.now();
+  await assert.rejects(
+    provider.complete({
+      modelId: "claude-request",
+      messages: [{ role: "user", content: [{ type: "text", text: "Go." }] }],
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof AnthropicProviderError);
+      assert.equal(error.category, "rate_limit");
+      assert.equal(error.retryAfterMs, 7_000);
+      return true;
+    },
+  );
+  assert.equal(coordinator.blocked.length, 1);
+  const block = coordinator.blocked[0]!;
+  assert.ok(block.untilMs >= before + 7_000 && block.untilMs <= Date.now() + 7_500);
+  assert.match(block.reason, /rate limit/);
+});
+
+test("classify reads retry-after through a fetch Headers-style getter too", () => {
+  const classified = classifyAnthropicError({
+    message: "rate limited",
+    status: 429,
+    headers: { get: (name: string) => (name === "retry-after" ? "12" : null) },
+  });
+  assert.equal(classified.category, "rate_limit");
+  assert.equal(classified.retryAfterMs, 12_000);
+});

@@ -222,6 +222,50 @@ function resourceUri(path: string): string {
   return `brain://file/${safeRegistryPath(path).split("/").map(encodeURIComponent).join("/")}`;
 }
 
+/**
+ * Registry rate-limit handling. The registry answers 429 with a
+ * retry-after of one minute when a client exceeds its per-minute budget;
+ * the MCP transport surfaces that as an error message carrying the status,
+ * not the header, so the wait uses the server's documented window. Without
+ * this, one busy minute on a shared host failed the version pin — and with
+ * it the whole run — instead of costing a bounded wait.
+ */
+const RATE_LIMIT_RETRIES = 2;
+const RATE_LIMIT_WAIT_MS = 60_000;
+
+function isRateLimitError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /\b429\b|rate limit/i.test(message);
+}
+
+export interface RegistryRateLimitRetryOptions {
+  /** Retries after the first failure. Default 2. */
+  readonly retries?: number;
+  /** Wait before each retry. Default 60s (the registry's window). */
+  readonly waitMs?: number;
+  /** Test seam. */
+  readonly sleep?: (ms: number) => Promise<void>;
+}
+
+export async function withRegistryRateLimitRetry<T>(
+  operation: () => Promise<T>,
+  options: RegistryRateLimitRetryOptions = {},
+): Promise<T> {
+  const retries = options.retries ?? RATE_LIMIT_RETRIES;
+  const waitMs = options.waitMs ?? RATE_LIMIT_WAIT_MS;
+  const sleep =
+    options.sleep ??
+    ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (attempt >= retries || !isRateLimitError(error)) throw error;
+      await sleep(waitMs);
+    }
+  }
+}
+
 function textFromResource(value: unknown, path: string): string {
   const result = value as {
     contents?: Array<{ text?: unknown; blob?: unknown }>;
@@ -239,13 +283,18 @@ export class ContentRegistryClient {
     version: "0.1.0",
   });
   private readonly transport: StreamableHTTPClientTransport;
+  private readonly rateLimitRetry: RegistryRateLimitRetryOptions;
   private connected = false;
   private connecting: Promise<void> | undefined;
 
-  constructor(readonly url: string) {
+  constructor(
+    readonly url: string,
+    options: { readonly rateLimitRetry?: RegistryRateLimitRetryOptions } = {},
+  ) {
     this.transport = new StreamableHTTPClientTransport(
       new URL(normalizeContentRegistryUrl(url)),
     );
+    this.rateLimitRetry = options.rateLimitRetry ?? {};
   }
 
   /**
@@ -273,13 +322,18 @@ export class ContentRegistryClient {
   }
 
   async readText(path: string): Promise<string> {
-    await this.connect();
     const safe = safeRegistryPath(path);
     try {
-      return textFromResource(
-        await this.client.readResource({ uri: resourceUri(safe) }),
-        safe,
-      );
+      // A 429'd read (or connect) retries after the registry's declared
+      // window; a failed connect attempt clears itself, so the retried
+      // operation reconnects cleanly.
+      return await withRegistryRateLimitRetry(async () => {
+        await this.connect();
+        return textFromResource(
+          await this.client.readResource({ uri: resourceUri(safe) }),
+          safe,
+        );
+      }, this.rateLimitRetry);
     } catch (error) {
       throw new Error(
         `failed to read Brain Registry resource "${safe}": ` +
@@ -327,8 +381,10 @@ export class ContentRegistryClient {
    * server's message.
    */
   async callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
-    await this.connect();
-    const result = (await this.client.callTool({ name, arguments: args })) as {
+    const result = (await withRegistryRateLimitRetry(async () => {
+      await this.connect();
+      return this.client.callTool({ name, arguments: args });
+    }, this.rateLimitRetry)) as {
       content?: Array<{ type?: string; text?: string }>;
       isError?: boolean;
     };

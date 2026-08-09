@@ -4,6 +4,7 @@
  */
 import {
   ToolLoopAgentExecutor,
+  type AgentTaskModelAdapter,
   type ModelRoute,
   type ModelRouteResolver,
 } from "@brainstorm-agentic/agent-runtime";
@@ -23,6 +24,7 @@ import {
   CreditBlockedError,
   InMemoryToolRegistry,
   isCreditBlocked,
+  RateCoordinator,
   type AgentExecutionContext,
   type AgentExecutor,
   type AgentResult,
@@ -31,6 +33,8 @@ import {
   type CheckpointStore,
   type JsonObject,
   type JsonValue,
+  type ModelRequest,
+  type ModelResponse,
   type ProviderNativeOffer,
   type RunEventListener,
   type TaxonomyAccess,
@@ -132,6 +136,48 @@ class TaskDescribedRouteResolver implements ModelRouteResolver {
   }
 }
 
+/** Task kinds whose single call gates a whole review round. */
+const HIGH_PRIORITY_TASK_KINDS: ReadonlySet<string> = new Set([
+  "brainstorm.judge",
+  "brainstorm.redeveloper",
+]);
+
+/**
+ * Stamps each turn's dispatch priority into the request metadata, so the
+ * provider-level request coordinator releases a round's gating call (the
+ * judge's, the redeveloper's — one per seat, and the whole round waits on
+ * it) ahead of other seats' comment floods when a rate-limit block lifts.
+ */
+export class DispatchPriorityTaskAdapter implements AgentTaskModelAdapter {
+  constructor(private readonly inner: AgentTaskModelAdapter) {}
+
+  createRequest(
+    task: AgentTask,
+    context: AgentExecutionContext,
+    route: ModelRoute,
+  ): ModelRequest {
+    const request = this.inner.createRequest(task, context, route);
+    return {
+      ...request,
+      metadata: {
+        ...(request.metadata ?? {}),
+        dispatchPriority: HIGH_PRIORITY_TASK_KINDS.has(task.kind)
+          ? "high"
+          : "normal",
+      },
+    };
+  }
+
+  responseToOutput(
+    response: ModelResponse,
+    task: AgentTask,
+    context: AgentExecutionContext,
+    route: ModelRoute,
+  ): JsonValue {
+    return this.inner.responseToOutput(response, task, context, route);
+  }
+}
+
 export function buildAgentExecutor(
   config: ProviderConfig,
   attachmentRoots: readonly string[] = [],
@@ -187,8 +233,14 @@ export function buildAgentExecutor(
       "Anthropic wiring needs a model id: set BRAINSTORM_AGENTIC_MODEL (or per-route models) in the environment.",
     );
   }
+  // ONE request coordinator for the whole run: every task's every model
+  // turn takes a dispatch slot from it, every response's rate-limit headers
+  // feed it, and one 429 pauses all dispatch until the declared reset —
+  // the provider's own timing declarations pace the run, never a user knob.
+  const coordinator = new RateCoordinator();
   const provider = new AnthropicMessagesProvider({
     model: defaultModel,
+    coordinator,
     ...(config.apiKey !== undefined ? { apiKey: config.apiKey } : {}),
     ...(config.baseURL !== undefined ? { baseURL: config.baseURL } : {}),
     ...(config.maxOutputTokens !== undefined ? { maxTokens: config.maxOutputTokens } : {}),
@@ -211,7 +263,7 @@ export function buildAgentExecutor(
     provider,
     tools: registry,
     modelRouteResolver: new TaskDescribedRouteResolver(defaultModel),
-    taskAdapter: new BrainstormAgentTaskAdapter(),
+    taskAdapter: new DispatchPriorityTaskAdapter(new BrainstormAgentTaskAdapter()),
     outputValidator: new ContentArtifactOutputValidator(),
   });
 }

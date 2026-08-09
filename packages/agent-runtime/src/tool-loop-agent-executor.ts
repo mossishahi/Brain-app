@@ -60,6 +60,13 @@ export interface OutputValidator<T extends JsonValue = JsonValue> {
 
 export interface RetryPolicy {
   readonly maxTransientRetries?: number;
+  /**
+   * Separate, larger budget for rate-limit rejections (429s): a token
+   * window lasts up to a minute, so waiting it out is deferred work, not a
+   * failure. Each wait honors the provider's declared retry-after when the
+   * error carries one (`retryAfterMs`).
+   */
+  readonly maxRateLimitRetries?: number;
   readonly maxValidationRetries?: number;
   readonly initialDelayMs?: number;
   readonly maxDelayMs?: number;
@@ -100,6 +107,9 @@ interface NormalizedValidation<T extends JsonValue> {
 const DEFAULT_MAX_TURNS = 8;
 const DEFAULT_MAX_TOOL_CALLS = 32;
 const DEFAULT_TRANSIENT_RETRIES = 2;
+const DEFAULT_RATE_LIMIT_RETRIES = 8;
+/** A rate-limit wait never exceeds one full budget window. */
+const RATE_LIMIT_MAX_DELAY_MS = 60_000;
 const DEFAULT_VALIDATION_RETRIES = 1;
 const DEFAULT_INITIAL_DELAY_MS = 100;
 const DEFAULT_MAX_DELAY_MS = 2_000;
@@ -441,6 +451,7 @@ export class ToolLoopAgentExecutor<
   readonly #parallelToolCalls: boolean;
   readonly #parallelSafety: (tool: Tool) => boolean;
   readonly #maxTransientRetries: number;
+  readonly #maxRateLimitRetries: number;
   readonly #maxValidationRetries: number;
   readonly #initialDelayMs: number;
   readonly #maxDelayMs: number;
@@ -469,6 +480,10 @@ export class ToolLoopAgentExecutor<
     this.#maxTransientRetries = nonNegativeInteger(
       options.retry?.maxTransientRetries,
       DEFAULT_TRANSIENT_RETRIES,
+    );
+    this.#maxRateLimitRetries = nonNegativeInteger(
+      options.retry?.maxRateLimitRetries,
+      DEFAULT_RATE_LIMIT_RETRIES,
     );
     this.#maxValidationRetries = nonNegativeInteger(
       options.retry?.maxValidationRetries,
@@ -838,6 +853,7 @@ export class ToolLoopAgentExecutor<
     turn: number,
   ): Promise<ModelResponse> {
     let retries = 0;
+    let rateLimitRetries = 0;
     for (;;) {
       throwIfAborted(context.signal);
       try {
@@ -850,6 +866,44 @@ export class ToolLoopAgentExecutor<
         }
         if (context.signal?.aborted) {
           throw new AgentCancelledError(context.signal.reason ?? error);
+        }
+        // Rate limits are deferred capacity, not flakiness: they get their
+        // own larger budget, and each wait honors the provider's declared
+        // retry-after (never exceeding one full budget window).
+        const value = errorProperties(error);
+        const rateLimited =
+          value.category === "rate_limit" ||
+          value.status === 429 ||
+          value.statusCode === 429;
+        if (rateLimited) {
+          if (rateLimitRetries >= this.#maxRateLimitRetries) {
+            throw error;
+          }
+          const declared =
+            typeof value.retryAfterMs === "number" &&
+            Number.isFinite(value.retryAfterMs) &&
+            value.retryAfterMs > 0
+              ? value.retryAfterMs
+              : 0;
+          const backoff = Math.min(
+            this.#maxDelayMs,
+            this.#initialDelayMs * this.#backoffMultiplier ** rateLimitRetries,
+          );
+          const delay = Math.min(
+            RATE_LIMIT_MAX_DELAY_MS,
+            Math.max(declared, backoff),
+          );
+          rateLimitRetries += 1;
+          context.reportProgress?.({
+            kind: "retry",
+            turn,
+            message:
+              `Rate limited: retry ${rateLimitRetries}/${this.#maxRateLimitRetries} ` +
+              `in ${Math.max(1, Math.round(delay / 1000))}s`,
+          });
+          await this.#sleep(delay, context.signal);
+          throwIfAborted(context.signal);
+          continue;
         }
         if (
           retries >= this.#maxTransientRetries ||
