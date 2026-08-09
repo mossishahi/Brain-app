@@ -645,6 +645,120 @@ test("the activity cap evicts plain progress ticks before capability rows", () =
   }
 });
 
+test("the woven interdisciplinary seat surfaces in every panel view (latest panel artifact wins)", () => {
+  const workspace = mkdtempSync(join(tmpdir(), "stage-mapper-test-"));
+  try {
+    const sessionDir = join(workspace, "session");
+    const jobDir = join(workspace, "job");
+    mkdirSync(join(sessionDir, "artifacts"), { recursive: true });
+    mkdirSync(jobDir, { recursive: true });
+    writeFileSync(
+      join(sessionDir, "checkpoint.json"),
+      JSON.stringify({
+        runId: "job-1",
+        workflowId: "brainstorm",
+        status: "completed",
+        input: {},
+        journal: [],
+        pendingGates: [],
+        seq: 1,
+        updatedAt: Date.now(),
+      }),
+    );
+    // The runtime persists the panel TWICE under one path: panel.select's
+    // seating first, then panel.weave's replacement carrying the woven
+    // interdisciplinary seat. The views must read the latter.
+    writeFileSync(
+      join(sessionDir, "artifacts", "index.json"),
+      JSON.stringify({
+        refs: [
+          { id: "a-panel-selected", metadata: { schema: "panel", path: "panel" } },
+          { id: "a-panel-woven", metadata: { schema: "panel", path: "panel" } },
+          { id: "a-idea", metadata: { schema: "brainIdea", path: "ideas.member-3" } },
+        ],
+      }),
+    );
+    const seated = [
+      { id: "member-1", department: "Physics", umbrella: "Quantum Optics", subfields: [] },
+      { id: "member-2", department: "Biology", umbrella: "Systems Biology", subfields: [] },
+    ];
+    const woven = {
+      id: "member-3",
+      department: "Interdisciplinary Research",
+      umbrella: "the interdisciplinary space between Quantum Optics and Systems Biology",
+      subfields: [],
+    };
+    writeFileSync(
+      join(sessionDir, "artifacts", "a-panel-selected"),
+      JSON.stringify({ members: seated }),
+    );
+    writeFileSync(
+      join(sessionDir, "artifacts", "a-panel-woven"),
+      JSON.stringify({ members: [...seated, woven] }),
+    );
+    writeFileSync(
+      join(sessionDir, "artifacts", "a-idea"),
+      JSON.stringify({
+        output: {
+          type: "research idea",
+          paper: {
+            abstract: [paragraph, paragraph, paragraph],
+            introduction: [paragraph, paragraph, paragraph],
+            method: [paragraph, paragraph, paragraph],
+            discussion: [paragraph, paragraph, paragraph],
+            conclusion: [paragraph],
+          },
+        },
+        cot: ["Step one.", "Step two.", "Step three."],
+      }),
+    );
+
+    const record: JobRecord = {
+      jobId: "job-1",
+      topic: "topic",
+      status: "completed",
+      runner: "local",
+      createdAt: 1,
+      updatedAt: 2,
+    };
+    const detail = buildJobDetail({
+      record,
+      status: "completed",
+      sessionDir,
+      jobDir,
+      settings,
+    });
+
+    const select = detail.stages.find((candidate) => candidate.id === "select-panel");
+    assert.ok(select && select.id === "select-panel");
+    assert.ok(select.panel, "the seating view is present");
+    assert.deepEqual(
+      select.panel.map((member) => member.id),
+      ["member-1", "member-2", "member-3"],
+      "the seating view carries the woven seat",
+    );
+
+    const firstPassStage = detail.stages.find((candidate) => candidate.id === "first-pass");
+    assert.ok(firstPassStage && firstPassStage.id === "first-pass");
+    const wovenFirstPass = firstPassStage.members.find(
+      (member) => member.memberId === "member-3",
+    );
+    assert.ok(wovenFirstPass, "the woven seat has a first-pass card");
+    assert.equal(wovenFirstPass.status, "completed");
+    assert.ok(wovenFirstPass.idea?.paper, "its idea maps to a view");
+
+    const review = detail.stages.find((candidate) => candidate.id === "review-members");
+    assert.ok(review && review.id === "review-members");
+    assert.deepEqual(
+      review.members.map((member) => member.memberId),
+      ["member-1", "member-2", "member-3"],
+      "the review matrix carries the woven seat",
+    );
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("live per-seat progress is derived from parallel fan-out event paths", () => {
   const workspace = mkdtempSync(join(tmpdir(), "stage-mapper-test-"));
   try {

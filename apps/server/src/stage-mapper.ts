@@ -1947,8 +1947,19 @@ export function buildJobDetail(input: MapperInput): JobDetail {
   const expertsOutput = experts(expertsArtifact) ?? experts(expertsJournal);
   const groundingOutput =
     grounding(expertsArtifact) ?? grounding(expertsJournal);
+  // LATEST panel artifact, never the first: panel.select persists the seated
+  // panel and panel.weave REPLACES it with the version carrying the woven
+  // interdisciplinary seat — the panel the confirmation gate showed and the
+  // fan-outs executed. Reading the first artifact dropped the woven seat
+  // from every panel view. The journal fallback prefers the weave result for
+  // the same reason.
   let selectedPanel = panelMembers(
-    artifact(artifacts, "panel") ??
+    artifactLatest(artifacts, "panel") ??
+      journalStateField(
+        entries,
+        (key) => key.endsWith("/weave-panel::result"),
+        "panel",
+      ) ??
       journalStateField(
         entries,
         (key) => key.endsWith("/select-panel::result"),
