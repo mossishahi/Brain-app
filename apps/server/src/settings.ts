@@ -8,8 +8,10 @@ import {
 import { AnthropicMessagesProvider } from "@brainstorm-agentic/provider-anthropic";
 import { ContentRegistryClient } from "@brainstorm-agentic/registry-client";
 import {
+  GPU_COMMAND_TAG,
   SLURM_COMMAND_TAG,
   type ClaudeAgentSettings,
+  type GpuRunSettings,
   type LlmSettings,
   type ServerSettings,
   type ServerSettingsUpdate,
@@ -158,6 +160,8 @@ export function defaultServerSettings(
       ],
     },
     slurmTemplate: DEFAULT_SLURM_TEMPLATE,
+    // GPU runs are OFF until the deployment owner completes the template.
+    gpu: { template: "", timeLimitMinutes: 60 },
   };
 }
 
@@ -181,6 +185,7 @@ function optionalNonEmptyString(
 
 function validateCommonSettings(value: unknown): {
   readonly slurmTemplate: string;
+  readonly gpu?: GpuRunSettings;
   readonly runner: "slurm" | "local";
   readonly panelConfirmation: "manual" | "auto";
   readonly llm: Record<string, unknown>;
@@ -196,6 +201,7 @@ function validateCommonSettings(value: unknown): {
   if (typeof template !== "string" || !template.includes(SLURM_COMMAND_TAG)) {
     throw new Error(`slurmTemplate must contain ${SLURM_COMMAND_TAG}`);
   }
+  const gpu = input.gpu !== undefined ? validateGpuSettings(input.gpu) : undefined;
   if (input.runner !== "slurm" && input.runner !== "local") {
     throw new Error('runner must be "slurm" or "local"');
   }
@@ -253,6 +259,7 @@ function validateCommonSettings(value: unknown): {
   }
   return {
     slurmTemplate: template,
+    ...(gpu !== undefined ? { gpu } : {}),
     runner: input.runner,
     panelConfirmation: input.panelConfirmation,
     llm,
@@ -263,6 +270,37 @@ function validateCommonSettings(value: unknown): {
     hostTools,
     ...(updateCheck !== undefined ? { updateCheck } : {}),
   };
+}
+
+/** One GPU job's runtime ceiling can be at most a day. */
+const MAX_GPU_TIME_LIMIT_MINUTES = 1_440;
+
+/**
+ * The GPU section is valid when EITHER the template is empty (GPU runs off;
+ * the limit is kept for when the user completes the template later) OR the
+ * template carries the agent-command tag.
+ */
+function validateGpuSettings(value: unknown): GpuRunSettings {
+  const input = object(value, "gpu");
+  const template = input.template;
+  if (typeof template !== "string") {
+    throw new Error("gpu.template must be a string");
+  }
+  if (template.trim() !== "" && !template.includes(GPU_COMMAND_TAG)) {
+    throw new Error(`gpu.template must contain ${GPU_COMMAND_TAG} (or be empty to switch GPU runs off)`);
+  }
+  const limit = input.timeLimitMinutes ?? 60;
+  if (
+    typeof limit !== "number" ||
+    !Number.isInteger(limit) ||
+    limit < 1 ||
+    limit > MAX_GPU_TIME_LIMIT_MINUTES
+  ) {
+    throw new Error(
+      `gpu.timeLimitMinutes must be an integer between 1 and ${MAX_GPU_TIME_LIMIT_MINUTES}`,
+    );
+  }
+  return { template, timeLimitMinutes: limit };
 }
 
 function validateInterruptedRecovery(
@@ -476,6 +514,7 @@ function validateStoredSettings(value: unknown): StoredServerSettings {
   const hostTools = validateHostTools(common.hostTools);
   return {
     slurmTemplate: common.slurmTemplate,
+    ...(common.gpu !== undefined ? { gpu: common.gpu } : {}),
     runner: common.runner,
     panelConfirmation: common.panelConfirmation,
     contentRegistry,
@@ -584,6 +623,7 @@ function validateSettingsUpdate(value: unknown): ValidatedUpdate {
   return {
     settings: {
       slurmTemplate: common.slurmTemplate,
+      ...(common.gpu !== undefined ? { gpu: common.gpu } : {}),
       runner: common.runner,
       panelConfirmation: common.panelConfirmation,
       ...(common.updateCheck !== undefined ? { updateCheck: common.updateCheck } : {}),
@@ -896,6 +936,14 @@ export class SettingsStore {
     if (settings.hostTools?.enabledToolIds) {
       env.BRAINSTORM_AGENTIC_HOST_TOOLS = settings.hostTools.enabledToolIds.join(",");
     }
+    // GPU run setup travels to the worker only when it is actually
+    // configured; the worker gates the tool on this AND the enabled ids.
+    if (settings.gpu !== undefined && settings.gpu.template.trim() !== "") {
+      env.BRAINSTORM_AGENTIC_GPU_RUN = JSON.stringify({
+        template: settings.gpu.template,
+        timeLimitMinutes: settings.gpu.timeLimitMinutes,
+      });
+    }
     for (const [route, model] of Object.entries(
       settings.llm.modelsByRoute ?? {},
     )) {
@@ -991,12 +1039,15 @@ export class SettingsStore {
     const storedRegistry = validateStoredSettings(
       readJsonFile<unknown>(this.path),
     ).contentRegistry;
+    const carriedGpu = update.settings.gpu ?? currentSettings.gpu;
     atomicWriteJson(this.path, {
       ...update.settings,
       contentRegistry: { ...storedRegistry, url: this.deploymentRegistryUrl },
       interruptedRecovery:
         update.settings.interruptedRecovery ??
         currentSettings.interruptedRecovery ?? { autoResume: true },
+      // An update that omitted the GPU section keeps the stored setup.
+      ...(carriedGpu !== undefined ? { gpu: carriedGpu } : {}),
     });
     const previousCredentials =
       readJsonFile<StoredCredentials>(this.credentialsPath) ?? {};

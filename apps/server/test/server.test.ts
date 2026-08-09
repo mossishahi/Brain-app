@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import {
+  GPU_COMMAND_TAG,
   SLURM_COMMAND_TAG,
   type JobDetail,
   type JobSummary,
@@ -579,6 +580,70 @@ test("verified settings populate orchestration environment without exposing the 
       env.BRAINSTORM_AGENTIC_MODEL_WRITING,
       "claude-writer",
     );
+  } finally {
+    await removeWorkspace(workspace);
+  }
+});
+
+test("GPU run settings validate the tag, persist across updates, and reach the worker environment", async () => {
+  const workspace = tempRoot();
+  try {
+    const store = new SettingsStore(workspace, {
+      validateAnthropic: async () => undefined,
+    });
+    // Off by default: empty template, sane ceiling, no env var emitted.
+    assert.deepEqual(store.get().gpu, { template: "", timeLimitMinutes: 60 });
+
+    const offlineLlm = { provider: "offline" as const, agentSdk: store.get().llm.agentSdk };
+    // A non-empty template must carry the agent-command tag.
+    await assert.rejects(
+      store.put({
+        ...store.get(),
+        llm: offlineLlm,
+        gpu: { template: "#!/bin/bash\ntrue\n", timeLimitMinutes: 30 },
+      }),
+      /AGENT_COMMAND/,
+    );
+    // The ceiling is bounded.
+    await assert.rejects(
+      store.put({
+        ...store.get(),
+        llm: offlineLlm,
+        gpu: { template: "", timeLimitMinutes: 0 },
+      }),
+      /timeLimitMinutes/,
+    );
+
+    // A completed template persists and travels to the worker as one JSON var.
+    const template = `#!/bin/bash\n#SBATCH --gres=gpu:1\n${GPU_COMMAND_TAG}\n`;
+    await store.put({
+      ...store.get(),
+      llm: { provider: "anthropic", model: "claude-x", apiKey: "key" },
+      gpu: { template, timeLimitMinutes: 90 },
+    });
+    assert.deepEqual(store.get().gpu, { template, timeLimitMinutes: 90 });
+    const env = store.executionEnvironment({}, store.get());
+    assert.deepEqual(JSON.parse(env.BRAINSTORM_AGENTIC_GPU_RUN!), {
+      template,
+      timeLimitMinutes: 90,
+    });
+
+    // An update that omits the GPU section keeps the stored setup.
+    const { gpu: _omitted, ...withoutGpu } = store.get();
+    await store.put({
+      ...withoutGpu,
+      llm: { provider: "anthropic", model: "claude-x" },
+    });
+    assert.deepEqual(store.get().gpu, { template, timeLimitMinutes: 90 });
+
+    // Emptying the template switches GPU runs off; the env var disappears.
+    await store.put({
+      ...store.get(),
+      llm: { provider: "anthropic", model: "claude-x" },
+      gpu: { template: "", timeLimitMinutes: 90 },
+    });
+    const off = store.executionEnvironment({}, store.get());
+    assert.equal(off.BRAINSTORM_AGENTIC_GPU_RUN, undefined);
   } finally {
     await removeWorkspace(workspace);
   }

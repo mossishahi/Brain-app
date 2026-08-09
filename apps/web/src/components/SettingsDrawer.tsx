@@ -1,6 +1,10 @@
 /** The settings drawer behind the gear icon: Execution, Model, Confirmation. */
 import { useEffect, useRef, useState } from "react";
-import { SLURM_COMMAND_TAG } from "@brainstorm-agentic/protocol";
+import {
+  GPU_COMMAND_TAG,
+  GPU_TEMPLATE_EXAMPLE,
+  SLURM_COMMAND_TAG,
+} from "@brainstorm-agentic/protocol";
 import type {
   RunnerKind,
   ServerSettings,
@@ -44,6 +48,8 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
 
   const [runner, setRunner] = useState<RunnerKind>("slurm");
   const [template, setTemplate] = useState("");
+  const [gpuTemplate, setGpuTemplate] = useState("");
+  const [gpuTimeLimit, setGpuTimeLimit] = useState("60");
   const [updateCheck, setUpdateCheck] = useState<"off" | "notify">("notify");
   /** Deployment-owned registry facts, shown read-only (never editable). */
   const [registryInfo, setRegistryInfo] = useState<{
@@ -90,6 +96,8 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
         setLoaded(s);
         setRunner(s.runner);
         setTemplate(s.slurmTemplate);
+        setGpuTemplate(s.gpu?.template ?? "");
+        setGpuTimeLimit(String(s.gpu?.timeLimitMinutes ?? 60));
         setProvider(s.llm.provider);
         setModel(s.llm.model ?? "");
         setBaseUrl(s.llm.baseUrl ?? "");
@@ -207,10 +215,30 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
       if (openRouterModel.trim() === "") {
         throw new Error("OpenRouter model must not be empty.");
       }
+      const gpuConfigured = gpuTemplate.trim() !== "";
+      if (gpuConfigured && !gpuTemplate.includes(GPU_COMMAND_TAG)) {
+        throw new Error(
+          `The GPU template must contain ${GPU_COMMAND_TAG} (or be empty to switch GPU runs off).`,
+        );
+      }
+      const parsedGpuTimeLimit = Number.parseInt(gpuTimeLimit, 10);
+      if (!Number.isInteger(parsedGpuTimeLimit) || parsedGpuTimeLimit < 1 || parsedGpuTimeLimit > 1440) {
+        throw new Error("GPU time limit must be between 1 and 1440 minutes.");
+      }
+      // Configuring the template IS the setup: the gpu_run host tool follows
+      // it into (or out of) the enabled set, visibly, so one panel is the
+      // whole flow instead of a second hidden checkbox hunt.
+      const toolIds = gpuConfigured
+        ? enabledHostTools.includes("gpu_run")
+          ? enabledHostTools
+          : [...enabledHostTools, "gpu_run"]
+        : enabledHostTools.filter((id) => id !== "gpu_run");
+      if (toolIds !== enabledHostTools) setEnabledHostTools(toolIds);
       // contentRegistry is deployment-owned and deliberately not sent: the
       // server ignores it on PUT anyway.
       const update: ServerSettingsUpdate = {
         slurmTemplate: template,
+        gpu: { template: gpuTemplate, timeLimitMinutes: parsedGpuTimeLimit },
         runner,
         updateCheck,
         llm: {
@@ -272,7 +300,7 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
           autoResume: resumeInterrupted,
         },
         hostTools: {
-          enabledToolIds: enabledHostTools,
+          enabledToolIds: toolIds,
         },
       };
       const saved = await putSettings(update);
@@ -397,6 +425,51 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                 />
                 <span className="field-note">
                   Put <code>{SLURM_COMMAND_TAG}</code> where the orchestration command must run.
+                </span>
+              </div>
+            </details>
+
+            <details className="drawer-section">
+              <summary>
+                GPU runs{gpuTemplate.trim() !== "" ? " · on" : " · off"}
+              </summary>
+              <div className="field">
+                <label className="field-label" htmlFor="settings-gpu-template">
+                  GPU job template
+                </label>
+                <textarea
+                  id="settings-gpu-template"
+                  className="mono"
+                  rows={11}
+                  value={gpuTemplate}
+                  onChange={(e) => setGpuTemplate(e.target.value)}
+                  placeholder={GPU_TEMPLATE_EXAMPLE}
+                  spellCheck={false}
+                />
+                <span className="field-note">
+                  Complete your cluster&apos;s GPU submission script (partition, GPUs,
+                  environment setup) and put <code>{GPU_COMMAND_TAG}</code> where the
+                  agent&apos;s script must run. The script an agent submits is spliced in
+                  verbatim and its job log is returned to that agent unaltered; a failed
+                  job goes back to the submitting agent as a bug report it can debug and
+                  resubmit. Leave empty to keep GPU runs off. Only roles whose skills
+                  declare the gpu-execution capability can submit.
+                </span>
+              </div>
+              <div className="field">
+                <label className="field-label" htmlFor="settings-gpu-time-limit">
+                  Time limit per job (minutes)
+                </label>
+                <input
+                  id="settings-gpu-time-limit"
+                  type="number"
+                  min={1}
+                  max={1440}
+                  value={gpuTimeLimit}
+                  onChange={(e) => setGpuTimeLimit(e.target.value)}
+                />
+                <span className="field-note">
+                  Hard ceiling enforced at submission; an agent may request less, never more.
                 </span>
               </div>
             </details>

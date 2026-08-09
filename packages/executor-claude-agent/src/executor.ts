@@ -39,8 +39,11 @@ import {
 } from "@brainstorm-agentic/credit-recovery";
 import {
   attachmentTools,
+  gpuRunTools,
   ATTACHMENT_LIST_MANIFEST,
   ATTACHMENT_SEARCH_MANIFEST,
+  GPU_RUN_MANIFEST,
+  type GpuRunConfig,
 } from "@brainstorm-agentic/host-tools";
 
 type UnknownRecord = Record<string, unknown>;
@@ -75,6 +78,13 @@ export interface ClaudeAgentExecutorConfig {
    * it the placer is toolless and cannot satisfy taxonomy-access.
    */
   readonly taxonomy?: TaxonomyAccess;
+  /**
+   * GPU run setup (deployment-owner template plus time ceiling). The Agent
+   * SDK has no built-in cluster submission, so when this is set the gpu_run
+   * tool is delivered as an in-process MCP tool to any task whose skill
+   * declares the `gpu-execution` capability.
+   */
+  readonly gpuRun?: GpuRunConfig;
   readonly maxTurns?: number;
   readonly maxBudgetUsd?: number;
   readonly effort?: "low" | "medium" | "high" | "xhigh" | "max";
@@ -507,6 +517,76 @@ function attachmentsServer(
   });
 }
 
+/** In-process MCP server name carrying the GPU submission tool. */
+const GPU_SERVER = "gpu";
+
+/** Full Claude Code tool name for the in-process GPU MCP server. */
+function gpuSdkToolNames(): readonly string[] {
+  return [`mcp__${GPU_SERVER}__gpu_run`];
+}
+
+/** True when the task's skill declared the gpu-execution capability. */
+function taskUsesGpu(task: AgentTask): boolean {
+  return taskUsesCapability(task, "gpu-execution");
+}
+
+/**
+ * In-process MCP server exposing the gpu_run host tool: the agent's script
+ * is spliced verbatim into the deployment owner's submission template and
+ * the job's log comes back exactly as the script printed it. Failures carry
+ * the bug-report-to-the-submitter contract (debug, fix, resubmit), which
+ * the host tool itself formats — this bridge only transports it.
+ */
+function gpuServer(
+  config: GpuRunConfig,
+): ReturnType<typeof createSdkMcpServer> {
+  const [tool] = gpuRunTools(config);
+  return createSdkMcpServer({
+    name: GPU_SERVER,
+    version: "1.0.0",
+    tools: [
+      sdkTool(
+        "gpu_run",
+        GPU_RUN_MANIFEST.definition.description ?? "",
+        {
+          script: z.string().min(1),
+          time_limit_minutes: z.number().int().min(1).optional(),
+          job_name: z.string().optional(),
+        },
+        async (args) => {
+          try {
+            const result = await tool!.execute(args as JsonValue, {
+              runId: "claude-agent-sdk",
+            });
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text:
+                    typeof result.output === "string"
+                      ? result.output
+                      : JSON.stringify(result.output),
+                },
+              ],
+              ...(result.isError === true ? { isError: true as const } : {}),
+            };
+          } catch (error) {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: error instanceof Error ? error.message : String(error),
+                },
+              ],
+              isError: true as const,
+            };
+          }
+        },
+      ),
+    ],
+  });
+}
+
 function record(value: unknown): UnknownRecord {
   return typeof value === "object" && value !== null
     ? (value as UnknownRecord)
@@ -741,6 +821,12 @@ function toolMessage(name: string, input: unknown): string {
         ? `Searching the attachments — ${query}`
         : "Searching the attachments";
     }
+    case `mcp__${GPU_SERVER}__gpu_run`: {
+      const jobName = shortText(args.job_name);
+      return jobName
+        ? `Running a GPU job — ${jobName}`
+        : "Running a GPU job";
+    }
     case STRUCTURED_OUTPUT_TOOL:
       return "Submitting the structured output";
     default:
@@ -757,6 +843,7 @@ const TOOL_END_LABELS: Readonly<Record<string, string>> = {
   Bash: "Verification command",
   [`mcp__${ATTACHMENTS_SERVER}__attachment_list`]: "Attachment inventory",
   [`mcp__${ATTACHMENTS_SERVER}__attachment_search`]: "Attachment search",
+  [`mcp__${GPU_SERVER}__gpu_run`]: "GPU job",
   [STRUCTURED_OUTPUT_TOOL]: "Structured output",
 };
 
@@ -1355,6 +1442,7 @@ function queryOptions(
   const wantsAttachments =
     (config.attachmentRoots?.length ?? 0) > 0 &&
     taskUsesCapability(task, "attachment-access");
+  const wantsGpu = config.gpuRun !== undefined && taskUsesGpu(task);
   const tools = [
     ...builtinTools,
     ...(capture.stepwise !== undefined
@@ -1362,6 +1450,7 @@ function queryOptions(
       : []),
     ...(wantsTaxonomy ? taxonomySdkToolNames() : []),
     ...(wantsAttachments ? attachmentsSdkToolNames() : []),
+    ...(wantsGpu ? gpuSdkToolNames() : []),
   ];
   const disallowedTools = KNOWN_BUILTIN_TOOLS.filter(
     (name) => !tools.includes(name),
@@ -1404,6 +1493,7 @@ function queryOptions(
     ...(wantsAttachments
       ? { [ATTACHMENTS_SERVER]: attachmentsServer(config.attachmentRoots!) }
       : {}),
+    ...(wantsGpu ? { [GPU_SERVER]: gpuServer(config.gpuRun!) } : {}),
   };
   if (Object.keys(mcpServers).length > 0) {
     options.mcpServers = mcpServers;

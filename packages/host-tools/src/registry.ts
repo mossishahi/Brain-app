@@ -17,6 +17,12 @@ import {
   codeExecutionTools,
   type CodeRuntimeEnvironment,
 } from "./code-execution.js";
+import {
+  GPU_RUN_MANIFESTS,
+  GPU_RUN_TOOL_NAMES,
+  gpuRunTools,
+  type GpuRunConfig,
+} from "./gpu-run.js";
 import { TAXONOMY_MANIFESTS, TAXONOMY_TOOL_NAMES, taxonomyTools } from "./taxonomy-tools.js";
 import type { TaxonomyAccess } from "@brainstorm-agentic/core";
 
@@ -33,6 +39,7 @@ export const ALL_HOST_TOOL_MANIFESTS: readonly HostToolManifest[] = [
   ...ATTACHMENT_MANIFESTS,
   ...WEB_SEARCH_MANIFESTS,
   ...CODE_EXECUTION_MANIFESTS,
+  ...GPU_RUN_MANIFESTS,
   ...TAXONOMY_MANIFESTS,
 ];
 
@@ -47,6 +54,8 @@ export interface HostToolRegistryConfig {
   readonly taxonomy?: TaxonomyAccess;
   /** Prepared code scratch workspace. Required for the code_execute tool. */
   readonly codeEnvironment?: CodeRuntimeEnvironment;
+  /** GPU submission config (user-completed template). Required for gpu_run. */
+  readonly gpuRun?: GpuRunConfig;
   /** User-enabled tool IDs. Only these are registered on the runtime registry. */
   readonly enabledToolIds: ReadonlySet<string>;
 }
@@ -93,6 +102,16 @@ export function createHostToolRegistry(
     }
   }
 
+  // GPU runs: only register when the deployment configured a template.
+  if (config.gpuRun) {
+    for (const tool of gpuRunTools(config.gpuRun)) {
+      if (config.enabledToolIds.has(tool.definition.name)) {
+        registry.register(tool);
+        registeredNames.push(tool.definition.name);
+      }
+    }
+  }
+
   // Web fetch needs no backing configuration (outbound reachability is the
   // readiness check's concern); web_search still waits on its first backend.
   for (const tool of webFetchTools()) {
@@ -113,6 +132,7 @@ export function executableHostToolIds(config: {
   attachmentRoots?: readonly string[];
   taxonomy?: TaxonomyAccess;
   codeEnvironment?: CodeRuntimeEnvironment;
+  gpuRun?: GpuRunConfig;
 }): ReadonlySet<string> {
   const ids = new Set<string>();
   if (config.attachmentRoots && config.attachmentRoots.length > 0) {
@@ -127,6 +147,12 @@ export function executableHostToolIds(config: {
   }
   if (config.codeEnvironment) {
     for (const name of CODE_EXECUTION_TOOL_NAMES) {
+      ids.add(name);
+    }
+  }
+  // gpu_run exists only after the deployment owner completes the template.
+  if (config.gpuRun) {
+    for (const name of GPU_RUN_TOOL_NAMES) {
       ids.add(name);
     }
   }
@@ -153,10 +179,12 @@ export function availableHostToolManifests(config: {
   if (config.taxonomy) {
     available.push(...TAXONOMY_MANIFESTS);
   }
-  // Web search and code execution manifests are always listed (for the
-  // settings UI); code execution is executable only when a prepared
-  // workspace backs it (see executableHostToolIds).
+  // Web search, code execution, and GPU run manifests are always listed
+  // (for the settings UI); code execution is executable only when a
+  // prepared workspace backs it, gpu_run only when the deployment owner
+  // completed the GPU template (see executableHostToolIds).
   available.push(...WEB_SEARCH_MANIFESTS);
   available.push(...CODE_EXECUTION_MANIFESTS);
+  available.push(...GPU_RUN_MANIFESTS);
   return available;
 }

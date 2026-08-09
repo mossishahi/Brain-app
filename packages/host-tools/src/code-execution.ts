@@ -49,8 +49,10 @@ const MAX_TIMEOUT_MS = 30_000;
 /**
  * Environment a sandboxed script sees: a small allow-list. Credentials,
  * provider settings, and scheduler variables never cross into user code.
+ * Shared with gpu_run, whose sbatch submission environment (exported into
+ * the job by the scheduler) must uphold the same rule.
  */
-function scrubbedEnvironment(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+export function scrubbedEnvironment(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const keep = ["PATH", "HOME", "LANG", "LC_ALL", "TZ", "TMPDIR", "TERM"];
   const env: NodeJS.ProcessEnv = {};
   for (const name of keep) {
@@ -327,6 +329,20 @@ export function codeExecutionTools(
           timeoutMs,
           ...(context.signal ? { signal: context.signal } : {}),
         });
+        // The debug-and-relaunch contract, same as gpu_run's: a failure is
+        // returned to the submitter to debug, with standing permission to
+        // rerun the fixed script.
+        const failed = result.exitCode !== 0 || result.timedOut;
+        const debug = result.timedOut
+          ? `The script exceeded its ${timeoutMs} ms budget and was killed. This result is ` +
+            "a bug report addressed to you, the submitter: make the script faster or raise " +
+            "timeout_ms (bounded), then rerun this tool with the corrected script — reruns " +
+            "are safe, every call gets a fresh scratch directory."
+          : "The script exited non-zero. This result is a bug report addressed to you, the " +
+            "submitter: debug it from stderr/stdout above, fix your script, and rerun this " +
+            "tool with the corrected version — reruns are safe, every call gets a fresh " +
+            "scratch directory. If the failure is environmental (a missing interpreter or " +
+            "library), report that in your output instead of retrying blindly.";
         return {
           output: {
             exitCode: result.exitCode,
@@ -335,6 +351,7 @@ export function codeExecutionTools(
             durationMs: result.durationMs,
             truncated: result.truncated,
             timedOut: result.timedOut,
+            ...(failed ? { debug } : {}),
           },
           // A non-zero exit is a legitimate result the model must read
           // (failed assertion, raised exception); only a timeout is flagged.

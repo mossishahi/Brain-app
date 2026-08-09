@@ -200,6 +200,26 @@ describe("executableHostToolIds", () => {
     const ids = executableHostToolIds({});
     assert.deepEqual([...ids], ["web_fetch"]);
   });
+
+  it("includes gpu_run only when the deployment completed a template", () => {
+    const gpuRun = {
+      template: "#!/bin/bash\n{{AGENT_COMMAND}}\n",
+      timeLimitMinutes: 30,
+      jobsRoot: "/tmp/gpu-jobs",
+    };
+    assert.ok(executableHostToolIds({ gpuRun }).has("gpu_run"));
+    assert.ok(!executableHostToolIds({}).has("gpu_run"));
+
+    const withConfig = createHostToolRegistry({
+      gpuRun,
+      enabledToolIds: new Set(["gpu_run"]),
+    });
+    assert.deepEqual(withConfig.registeredToolNames, ["gpu_run"]);
+    const withoutConfig = createHostToolRegistry({
+      enabledToolIds: new Set(["gpu_run"]),
+    });
+    assert.equal(withoutConfig.registeredToolNames.length, 0);
+  });
 });
 
 describe("availableHostToolManifests", () => {
@@ -243,10 +263,14 @@ describe("code execution", () => {
       },
       { runId: "r1" },
     );
-    const output = result.output as { exitCode: number; stderr: string };
+    const output = result.output as { exitCode: number; stderr: string; debug: string };
     assert.equal(result.isError, undefined);
     assert.equal(output.exitCode, 3);
     assert.match(output.stderr, /assertion failed/);
+    // The debug-and-relaunch contract: a failure is addressed back to the
+    // submitter with standing permission to rerun the fixed script.
+    assert.match(output.debug, /bug report addressed to you, the submitter/i);
+    assert.match(output.debug, /rerun this tool/i);
   });
 
   it("refuses python honestly when no interpreter exists", async () => {

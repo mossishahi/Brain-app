@@ -38,6 +38,7 @@ import type {
 import {
   prepareCodeWorkspace,
   type CodeRuntimeEnvironment,
+  type GpuRunConfig,
 } from "@brainstorm-agentic/host-tools";
 
 import { defaultSessionRoot, loadDotEnv } from "./env.js";
@@ -133,6 +134,52 @@ async function prepareRunCodeEnvironment(
   } catch (error) {
     console.error(
       `[code] scratch workspace unavailable: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return undefined;
+  }
+}
+
+/**
+ * GPU run setup from the server (BRAINSTORM_AGENTIC_GPU_RUN carries the
+ * user-completed template and the deployment's time ceiling). Jobs live
+ * under the run's own directory, next to code-env and artifacts. Absent,
+ * malformed, or capability-disabled setup resolves to undefined — the
+ * broker then reports gpu-execution unavailable instead of failing the run.
+ */
+function gpuRunForRun(
+  sessionRoot: string,
+  runId: string,
+  offline: boolean,
+): GpuRunConfig | undefined {
+  if (offline) return undefined;
+  const raw = process.env.BRAINSTORM_AGENTIC_GPU_RUN;
+  if (!raw) return undefined;
+  const disabledCapabilities = new Set(
+    (process.env.BRAINSTORM_AGENTIC_DISABLED_CAPABILITIES ?? "")
+      .split(",")
+      .map((id) => id.trim())
+      .filter(Boolean),
+  );
+  if (disabledCapabilities.has("gpu-execution")) return undefined;
+  try {
+    const parsed = JSON.parse(raw) as { template?: unknown; timeLimitMinutes?: unknown };
+    if (typeof parsed.template !== "string" || parsed.template.trim() === "") {
+      return undefined;
+    }
+    const limit =
+      typeof parsed.timeLimitMinutes === "number" && Number.isInteger(parsed.timeLimitMinutes)
+        ? Math.max(1, parsed.timeLimitMinutes)
+        : 60;
+    return {
+      template: parsed.template,
+      timeLimitMinutes: limit,
+      jobsRoot: join(sessionRoot, runId, "gpu-jobs"),
+    };
+  } catch (error) {
+    console.error(
+      `[gpu] ignoring malformed BRAINSTORM_AGENTIC_GPU_RUN: ${
         error instanceof Error ? error.message : String(error)
       }`,
     );
@@ -615,6 +662,7 @@ async function main(): Promise<void> {
       runId,
       offline,
     );
+    const gpuRun = gpuRunForRun(sessionRoot, runId, offline);
     const runtime = buildRuntime({
       providerConfig: providerConfigFromEnv(process.env, offline),
       checkpoints: new FsCheckpointStore(sessionRoot),
@@ -623,6 +671,7 @@ async function main(): Promise<void> {
       ...(manifest ? { attachmentRoots: [manifest.baseDir] } : {}),
       ...(taxonomy ? { taxonomy } : {}),
       ...(codeEnvironment ? { codeEnvironment } : {}),
+      ...(gpuRun ? { gpuRun } : {}),
       bundle: lazy?.bundle ?? loadContent(contentDir!),
       ...(lazy ? { skillResolver: lazy.skillResolver } : {}),
       ...(onEvent !== undefined ? { onEvent } : {}),
@@ -699,6 +748,7 @@ async function main(): Promise<void> {
       runId,
       offline,
     );
+    const gpuRun = gpuRunForRun(sessionRoot, runId, offline);
     const runtime = buildRuntime({
       providerConfig: providerConfigFromEnv(process.env, offline),
       checkpoints: new FsCheckpointStore(sessionRoot),
@@ -706,6 +756,7 @@ async function main(): Promise<void> {
       autoApproveGates: resumeAutoApprove,
       ...(taxonomy ? { taxonomy } : {}),
       ...(codeEnvironment ? { codeEnvironment } : {}),
+      ...(gpuRun ? { gpuRun } : {}),
       bundle: lazy?.bundle ?? loadContent(contentDir!),
       ...(lazy ? { skillResolver: lazy.skillResolver } : {}),
       ...(onEvent !== undefined ? { onEvent } : {}),

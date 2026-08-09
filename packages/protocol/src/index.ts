@@ -824,6 +824,35 @@ export interface JobDetail extends JobSummary {
 /** The tag the user's SLURM template must contain; replaced by the orchestration command. */
 export const SLURM_COMMAND_TAG = "{{BRAIN_COMMAND}}";
 
+/** The tag the user's GPU template must contain; replaced by the agent's script. */
+export const GPU_COMMAND_TAG = "{{AGENT_COMMAND}}";
+
+/** Starter shown (never stored) while the GPU template is still empty. */
+export const GPU_TEMPLATE_EXAMPLE = `#!/usr/bin/env bash
+#SBATCH --job-name=brain-gpu
+#SBATCH --partition=gpu
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=32G
+
+set -euo pipefail
+# module load cuda  (site-specific setup goes here)
+${GPU_COMMAND_TAG}
+`;
+
+/**
+ * GPU run settings: the deployment-owner's submission template plus the
+ * wall-clock ceiling one agent job may request. An EMPTY template means GPU
+ * runs are not set up — the gpu_run host tool stays non-executable and the
+ * gpu-execution capability resolves unavailable.
+ */
+export interface GpuRunSettings {
+  /** SLURM submission template containing GPU_COMMAND_TAG, or "" (off). */
+  readonly template: string;
+  /** Ceiling in minutes for one job's runtime; agent requests are capped. */
+  readonly timeLimitMinutes: number;
+}
+
 export type ClaudeAgentEffort =
   | "low"
   | "medium"
@@ -866,6 +895,8 @@ export interface LlmSettings {
 
 export interface ServerSettings {
   readonly slurmTemplate: string;
+  /** GPU run setup; absent or an empty template keeps GPU runs off. */
+  readonly gpu?: GpuRunSettings;
   readonly runner: RunnerKind;
   readonly llm: LlmSettings;
   /** "manual": jobs pause at the panel gate for dashboard confirmation. */
@@ -1019,6 +1050,8 @@ export interface ModelsByRouteUpdate {
  */
 export interface ServerSettingsUpdate {
   readonly slurmTemplate: string;
+  /** Absent = keep the current GPU run setup. */
+  readonly gpu?: GpuRunSettings;
   readonly runner: RunnerKind;
   readonly panelConfirmation: "manual" | "auto";
   /** Anonymous usage reporting; omitted leaves the stored value unchanged. */

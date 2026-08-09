@@ -55,13 +55,16 @@ import {
 import {
   ALL_HOST_TOOL_MANIFESTS,
   ATTACHMENT_MANIFESTS,
+  GPU_RUN_MANIFESTS,
   TAXONOMY_MANIFESTS,
   TAXONOMY_TOOL_NAMES,
   codeExecutionTools,
   createHostToolRegistry,
+  gpuRunTools,
   taxonomyTools,
   webFetchTools,
   type CodeRuntimeEnvironment,
+  type GpuRunConfig,
 } from "@brainstorm-agentic/host-tools";
 import { OfflineBrainstormExecutor } from "./offline-executor.js";
 
@@ -121,6 +124,12 @@ export interface RuntimeWiringOptions {
    * providers without one.
    */
   readonly codeEnvironment?: CodeRuntimeEnvironment;
+  /**
+   * GPU run setup (the deployment owner's completed submission template).
+   * No provider offers gpu.run natively, so the gpu_run host tool is the
+   * only source; absent config resolves the capability unavailable.
+   */
+  readonly gpuRun?: GpuRunConfig;
   readonly bundle: ContentBundle;
   readonly skillResolver?: SkillResolver;
   readonly onEvent?: RunEventListener;
@@ -184,6 +193,7 @@ export function buildAgentExecutor(
   inputTypes?: LoadedInputTypes,
   taxonomy?: TaxonomyAccess,
   codeEnvironment?: CodeRuntimeEnvironment,
+  gpuRun?: GpuRunConfig,
 ): AgentExecutor {
   if (config.provider === "offline") {
     return new OfflineBrainstormExecutor({ ...(inputTypes ? { inputTypes } : {}) });
@@ -204,6 +214,9 @@ export function buildAgentExecutor(
       // read tools reach the placer only when we hand the executor the same
       // TaxonomyAccess the deterministic activities use.
       ...(taxonomy ? { taxonomy } : {}),
+      // Same for GPU runs: no SDK built-in submits cluster jobs, so the
+      // gpu_run tool is bridged in-process when the deployment set it up.
+      ...(gpuRun ? { gpuRun } : {}),
       outputValidator: new ContentArtifactOutputValidator(),
       maxValidationAttempts: 3,
       ...(model ? { model } : {}),
@@ -254,6 +267,9 @@ export function buildAgentExecutor(
   }
   if (codeEnvironment) {
     for (const tool of codeExecutionTools(codeEnvironment)) registry.register(tool);
+  }
+  if (gpuRun) {
+    for (const tool of gpuRunTools(gpuRun)) registry.register(tool);
   }
   // Registered unconditionally (it needs no backing store), but the model is
   // only offered it when the capability plan selects it — with a provider
@@ -457,6 +473,15 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
       enabledHostToolIds.delete(manifest.toolId);
     }
   }
+  // And for GPU runs: without a completed submission template there is
+  // nothing to submit through, so the broker must resolve gpu-execution
+  // unavailable (its whenUnavailable prose tells the agent GPU runs need
+  // deployment-owner setup) instead of offering a tool that can only refuse.
+  if (options.gpuRun === undefined) {
+    for (const manifest of GPU_RUN_MANIFESTS) {
+      enabledHostToolIds.delete(manifest.toolId);
+    }
+  }
 
   // Per-run capability disables from the submission. taxonomy-access is
   // deliberately exempt: it is runtime infrastructure (the placer hard-requires
@@ -486,6 +511,11 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
         options.bundle.catalogs.inputTypes,
         options.taxonomy,
         options.codeEnvironment,
+        // Registration follows config presence; EXPOSURE stays with the
+        // broker, which only offers gpu_run while it is in the enabled set.
+        options.gpuRun !== undefined && enabledHostToolIds.has(GPU_RUN_MANIFESTS[0]!.toolId)
+          ? options.gpuRun
+          : undefined,
       ),
       options.providerConfig.creditRecovery,
     ),

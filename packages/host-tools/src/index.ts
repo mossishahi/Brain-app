@@ -41,6 +41,17 @@ export {
   prepareCodeWorkspace,
   runProcess,
 } from "./code-execution.js";
+
+// GPU runs (agent script spliced into the deployment's submission template)
+export {
+  AGENT_COMMAND_TAG,
+  GPU_RUN_MANIFEST,
+  GPU_RUN_MANIFESTS,
+  GPU_RUN_TOOL_NAMES,
+  gpuRunTools,
+  renderGpuTemplate,
+} from "./gpu-run.js";
+export type { GpuRunConfig, RunSchedulerCommand } from "./gpu-run.js";
 export type {
   CodeRuntime,
   CodeRuntimeEnvironment,

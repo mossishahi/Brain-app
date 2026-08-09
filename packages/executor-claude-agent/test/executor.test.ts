@@ -462,6 +462,67 @@ test("attachment-capable tasks get the deterministic attachment MCP tools", asyn
   }
 });
 
+test("gpu-capable tasks get the gpu_run MCP tool; tasks and deployments without it do not", async () => {
+  const captured: ClaudeAgentQueryInput[] = [];
+  const gpuRun = {
+    template: "#!/bin/bash\n{{AGENT_COMMAND}}\n",
+    timeLimitMinutes: 30,
+    jobsRoot: join(tmpdir(), "claude-agent-gpu-jobs"),
+  };
+  const gpuTask: AgentTask = {
+    ...structuredTask,
+    capabilityPlan: {
+      operations: [
+        {
+          operationId: "gpu.run",
+          source: "host",
+          toolNames: ["gpu_run"],
+          capabilityId: "gpu-execution",
+        },
+      ],
+      hostToolDefinitions: [],
+      providerNativeKeys: [],
+      unavailableInstructions: "",
+    },
+  };
+  await new ClaudeAgentExecutor({
+    token: "setup-token-secret",
+    gpuRun,
+    queryFn: successQuery(captured),
+  }).execute(gpuTask, { runId: "run-gpu-mcp", nodePath: "root/brain" });
+  const options = captured[0]!.options;
+  assert.ok((options.tools as string[]).includes("mcp__gpu__gpu_run"));
+  assert.ok(
+    (options.mcpServers as Record<string, unknown>).gpu,
+    "the GPU MCP server is mounted",
+  );
+
+  // A task whose skill never declared gpu-execution stays without the tool
+  // even on a GPU-configured deployment.
+  const capturedPlain: ClaudeAgentQueryInput[] = [];
+  await new ClaudeAgentExecutor({
+    token: "setup-token-secret",
+    gpuRun,
+    queryFn: successQuery(capturedPlain),
+  }).execute(structuredTask, { runId: "run-gpu-none", nodePath: "root/brain" });
+  const plainOptions = capturedPlain[0]!.options;
+  assert.ok(!(plainOptions.tools as string[]).includes("mcp__gpu__gpu_run"));
+  assert.equal(
+    (plainOptions.mcpServers as Record<string, unknown> | undefined)?.gpu,
+    undefined,
+  );
+
+  // A gpu-declaring task on an UNCONFIGURED deployment gets nothing either.
+  const capturedUnconfigured: ClaudeAgentQueryInput[] = [];
+  await new ClaudeAgentExecutor({
+    token: "setup-token-secret",
+    queryFn: successQuery(capturedUnconfigured),
+  }).execute(gpuTask, { runId: "run-gpu-unconfigured", nodePath: "root/brain" });
+  assert.ok(
+    !(capturedUnconfigured[0]!.options.tools as string[]).includes("mcp__gpu__gpu_run"),
+  );
+});
+
 test("a per-run-disabled attachment capability removes builtin and MCP attachment tools", async () => {
   const captured: ClaudeAgentQueryInput[] = [];
   const root = mkdtempSync(join(tmpdir(), "claude-agent-attachments-"));
