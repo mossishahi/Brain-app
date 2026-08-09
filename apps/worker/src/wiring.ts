@@ -45,6 +45,10 @@ import { AnthropicMessagesProvider } from "@brainstorm-agentic/provider-anthropi
 
 import { attachmentTools, ATTACHMENT_TOOL_NAMES } from "./attachment-tools.js";
 import {
+  launchIntervalFor,
+  StaggeredLaunchAgentExecutor,
+} from "./launch-stagger.js";
+import {
   ALL_HOST_TOOL_MANIFESTS,
   ATTACHMENT_MANIFESTS,
   TAXONOMY_MANIFESTS,
@@ -84,6 +88,12 @@ export interface ProviderConfig {
   readonly enabledHostToolIds?: readonly string[];
   /** Capability ids the user disabled for THIS run (per-submission override). */
   readonly disabledCapabilities?: readonly string[];
+  /**
+   * Minimum ms between two agent-task launches (0 disables the stagger).
+   * Deployment tuning via BRAINSTORM_AGENTIC_AGENT_LAUNCH_INTERVAL_MS;
+   * defaults to 10s on network-backed providers and 0 offline.
+   */
+  readonly launchIntervalMs?: number;
 }
 
 export interface RuntimeWiringOptions {
@@ -411,20 +421,32 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
         ? CLAUDE_AGENT_ADAPTER.staticOffers
         : [];
 
-  return new BrainstormRuntime({
-    agentExecutor: new ThinkingArtifactAgentExecutor(
-      new CreditBlockDetectingAgentExecutor(
-        buildAgentExecutor(
-          options.providerConfig,
-          attachmentRoots,
-          options.bundle.catalogs.inputTypes,
-          options.taxonomy,
-          options.codeEnvironment,
-        ),
-        options.providerConfig.creditRecovery,
+  const executorStack = new ThinkingArtifactAgentExecutor(
+    new CreditBlockDetectingAgentExecutor(
+      buildAgentExecutor(
+        options.providerConfig,
+        attachmentRoots,
+        options.bundle.catalogs.inputTypes,
+        options.taxonomy,
+        options.codeEnvironment,
       ),
-      options.artifacts,
+      options.providerConfig.creditRecovery,
     ),
+    options.artifacts,
+  );
+  // Outermost by design: the stagger gates the moment a task ENTERS
+  // execution, so a parallel wave (first pass, a review round's
+  // commentors) launches one agent per interval instead of all at once.
+  const launchIntervalMs = launchIntervalFor(options.providerConfig);
+  const agentExecutor =
+    launchIntervalMs > 0
+      ? new StaggeredLaunchAgentExecutor(executorStack, {
+          intervalMs: launchIntervalMs,
+        })
+      : executorStack;
+
+  return new BrainstormRuntime({
+    agentExecutor,
     bundle: options.bundle,
     skillResolver: options.skillResolver,
     routeResolver: contentRouteResolver(options.providerConfig),
@@ -493,8 +515,27 @@ export function modelsByRouteFromEnv(env: NodeJS.ProcessEnv): Record<string, str
   return models;
 }
 
+/**
+ * Explicit launch-interval override, when the environment carries a valid
+ * one. Invalid or empty values are ignored (the provider default applies)
+ * rather than silently disabling the stagger: Number("") is 0, and an
+ * empty export must not mean "launch everything at once".
+ */
+function launchIntervalFromEnv(env: NodeJS.ProcessEnv): number | undefined {
+  const raw = env.BRAINSTORM_AGENTIC_AGENT_LAUNCH_INTERVAL_MS?.trim();
+  if (raw === undefined || raw === "") return undefined;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
 export function providerConfigFromEnv(env: NodeJS.ProcessEnv, offline: boolean): ProviderConfig {
-  if (offline) return { provider: "offline" };
+  const launchIntervalMs = launchIntervalFromEnv(env);
+  if (offline) {
+    return {
+      provider: "offline",
+      ...(launchIntervalMs !== undefined ? { launchIntervalMs } : {}),
+    };
+  }
   const selectedProvider =
     env.BRAINSTORM_AGENTIC_PROVIDER === "claude-agent"
       ? "claude-agent"
@@ -567,5 +608,6 @@ export function providerConfigFromEnv(env: NodeJS.ProcessEnv, offline: boolean):
             .filter(Boolean),
         }
       : {}),
+    ...(launchIntervalMs !== undefined ? { launchIntervalMs } : {}),
   };
 }

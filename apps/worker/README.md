@@ -17,6 +17,16 @@ SHA-256 verified and cached atomically; resume reuses cached resources and never
 versions. The worker also wires the model backend and host tools, executes the checkpoint-aware
 workflow, and writes canonical state.
 
+## Staggered agent launches
+
+Agent tasks START one at a time, spaced 10 seconds apart, so a parallel wave (the first-pass
+fan-out, a review round's commentors) ramps up gradually instead of hitting the provider and the
+node in one aligned burst (Anthropic 429s sharp usage jumps as "acceleration limits" even below
+the account's ceilings). Tasks still run fully in parallel — only their start moments are spaced,
+and a lone task between waves never waits. Offline runs skip the stagger entirely.
+`BRAINSTORM_AGENTIC_AGENT_LAUNCH_INTERVAL_MS` overrides the spacing for a deployment
+(`0` disables it); it is not a user setting.
+
 From the app root:
 
 ```bash
