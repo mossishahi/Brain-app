@@ -62,7 +62,7 @@ import {
   type ClaudeAgentConnectionValidator,
 } from "./settings.js";
 
-const VERSION = "0.2.17";
+const VERSION = "0.2.18";
 const SNAPSHOT_THROTTLE_MS = 500;
 const HEARTBEAT_MS = 15_000;
 const POLL_MS = 2_000;
