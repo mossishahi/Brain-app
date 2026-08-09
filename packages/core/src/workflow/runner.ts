@@ -222,13 +222,24 @@ interface ExecutionConfig {
   readonly now: () => number;
 }
 
+interface CheckpointExtras {
+  readonly pendingGates?: readonly PendingGate[];
+  readonly output?: JsonValue;
+  readonly error?: SerializedError;
+  readonly creditBlock?: CreditBlock;
+}
+
 /** Single run/resume attempt. Not reused across invocations. */
 class RunExecution {
   private readonly signal: AbortSignal;
   private eventSeq = 0;
   private checkpointSeq: number;
-  /** Serializes checkpoint writes issued by concurrent branches. */
-  private saveChain: Promise<void> = Promise.resolve();
+  /** The physical write currently in flight; always settles, never rejects. */
+  private saveWrite: Promise<void> | undefined;
+  /** The one flush queued behind it, shared by every coalesced requester. */
+  private saveFlush: Promise<void> | undefined;
+  /** The latest requested lifecycle state — what the next flush writes. */
+  private savePending: { status: RunStatus; extras: CheckpointExtras } | undefined;
 
   constructor(private readonly cfg: ExecutionConfig) {
     this.signal = cfg.signal ?? new AbortController().signal;
@@ -385,40 +396,62 @@ class RunExecution {
     for (const listener of this.cfg.listeners) listener(event);
   }
 
-  private saveCheckpoint(
-    status: RunStatus,
-    extras: {
-      readonly pendingGates?: readonly PendingGate[];
-      readonly output?: JsonValue;
-      readonly error?: SerializedError;
-      readonly creditBlock?: CreditBlock;
-    } = {},
-  ): Promise<void> {
-    const doSave = async (): Promise<void> => {
-      const checkpoint: WorkflowCheckpoint = {
-        runId: this.cfg.runId,
-        workflowId: this.cfg.definition.id,
-        ...(this.cfg.definition.version !== undefined ? { workflowVersion: this.cfg.definition.version } : {}),
-        status,
-        ...(this.cfg.input !== undefined ? { input: this.cfg.input } : {}),
-        journal: this.cfg.journal.toEntries(),
-        pendingGates: extras.pendingGates ?? [],
-        ...(extras.creditBlock !== undefined
-          ? { creditBlock: extras.creditBlock }
-          : {}),
-        ...(extras.output !== undefined ? { output: extras.output } : {}),
-        ...(extras.error !== undefined ? { error: extras.error } : {}),
-        seq: ++this.checkpointSeq,
-        updatedAt: this.cfg.now(),
-      };
-      await this.cfg.checkpoints.save(checkpoint);
-      this.emit({ type: "checkpoint:saved", status });
-    };
-    const save = this.saveChain.then(doSave);
-    this.saveChain = save.then(
-      () => undefined,
-      () => undefined,
+  /**
+   * Requests a checkpoint write. Writes COALESCE: at most one write is in
+   * flight and at most one flush is queued behind it, so a burst of requests
+   * (parallel branches each recording an effect) collapses into a single
+   * follow-up write instead of queueing one full-journal serialization per
+   * request on a shared filesystem. Latest request wins, with durability
+   * identical to writing every request in order: requests arrive in
+   * lifecycle order, the journal is re-read when the write is built, so the
+   * surviving write carries every coalesced requester's entries and at least
+   * as much state as each requester saw — and the previous regime's
+   * intermediate writes were overwritten by the last one anyway. A caller's
+   * promise settles only once the write carrying its request is durable.
+   */
+  private saveCheckpoint(status: RunStatus, extras: CheckpointExtras = {}): Promise<void> {
+    this.savePending = { status, extras };
+    this.saveFlush ??= this.flushCheckpoint();
+    return this.saveFlush;
+  }
+
+  private async flushCheckpoint(): Promise<void> {
+    // Also yields once when idle, so saveFlush is assigned before it clears.
+    await this.saveWrite;
+    const { status, extras } = this.savePending!;
+    this.savePending = undefined;
+    // Cleared before writing: requests landing mid-write queue the next flush.
+    this.saveFlush = undefined;
+    const write = this.writeCheckpoint(status, extras);
+    this.saveWrite = write.then(
+      () => {
+        this.saveWrite = undefined;
+      },
+      () => {
+        this.saveWrite = undefined;
+      },
     );
-    return save;
+    await write;
+  }
+
+  private async writeCheckpoint(status: RunStatus, extras: CheckpointExtras): Promise<void> {
+    const checkpoint: WorkflowCheckpoint = {
+      runId: this.cfg.runId,
+      workflowId: this.cfg.definition.id,
+      ...(this.cfg.definition.version !== undefined ? { workflowVersion: this.cfg.definition.version } : {}),
+      status,
+      ...(this.cfg.input !== undefined ? { input: this.cfg.input } : {}),
+      journal: this.cfg.journal.toEntries(),
+      pendingGates: extras.pendingGates ?? [],
+      ...(extras.creditBlock !== undefined
+        ? { creditBlock: extras.creditBlock }
+        : {}),
+      ...(extras.output !== undefined ? { output: extras.output } : {}),
+      ...(extras.error !== undefined ? { error: extras.error } : {}),
+      seq: ++this.checkpointSeq,
+      updatedAt: this.cfg.now(),
+    };
+    await this.cfg.checkpoints.save(checkpoint);
+    this.emit({ type: "checkpoint:saved", status });
   }
 }

@@ -170,4 +170,96 @@ test("registry rate limits are waited out, not fatal", async (t) => {
     );
     assert.equal(calls, 3);
   });
+
+  await t.test("the server-declared window paces the retry", async () => {
+    const { withRegistryRateLimitRetry } = await import("../src/index.js");
+    const sleeps: number[] = [];
+    let lookups = 0;
+    let calls = 0;
+    const value = await withRegistryRateLimitRetry(
+      async () => {
+        calls += 1;
+        if (calls === 1) throw new Error("HTTP 429");
+        return "pinned";
+      },
+      {
+        declaredWaitMs: async () => {
+          lookups += 1;
+          return 250;
+        },
+        sleep: async (ms) => {
+          sleeps.push(ms);
+        },
+      },
+    );
+    assert.equal(value, "pinned");
+    assert.deepEqual(sleeps, [250]);
+    assert.equal(lookups, 1, "the declaration is consulted only when a wait is due");
+  });
+
+  await t.test("an explicit waitMs overrides the declared window", async () => {
+    const { withRegistryRateLimitRetry } = await import("../src/index.js");
+    const sleeps: number[] = [];
+    let lookups = 0;
+    let calls = 0;
+    await withRegistryRateLimitRetry(
+      async () => {
+        calls += 1;
+        if (calls === 1) throw new Error("HTTP 429");
+        return "pinned";
+      },
+      {
+        waitMs: 7,
+        declaredWaitMs: async () => {
+          lookups += 1;
+          return 250;
+        },
+        sleep: async (ms) => {
+          sleeps.push(ms);
+        },
+      },
+    );
+    assert.deepEqual(sleeps, [7]);
+    assert.equal(lookups, 0);
+  });
+});
+
+test("declaredRegistryWindowMs reads /health and tolerates registries that declare nothing", async () => {
+  const { declaredRegistryWindowMs } = await import("../src/index.js");
+  const { createServer } = await import("node:http");
+
+  let body = JSON.stringify({ ok: true, rateLimit: { requestsPerMinute: 300, windowMs: 45_000 } });
+  let status = 200;
+  const server = createServer((req, res) => {
+    assert.equal(req.url, "/health");
+    res.writeHead(status, { "content-type": "application/json" });
+    res.end(body);
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as { port: number }).port;
+  const url = `http://127.0.0.1:${port}/mcp`;
+  try {
+    // A declaring registry: the window comes back as declared.
+    assert.equal(await declaredRegistryWindowMs(url), 45_000);
+
+    // An older registry without the field: undefined, caller falls back.
+    body = JSON.stringify({ ok: true, files: 12 });
+    assert.equal(await declaredRegistryWindowMs(url), undefined);
+
+    // A malformed declaration: undefined, never NaN or a negative wait.
+    body = JSON.stringify({ ok: true, rateLimit: { windowMs: "soon" } });
+    assert.equal(await declaredRegistryWindowMs(url), undefined);
+
+    // A failing health route: undefined.
+    status = 503;
+    assert.equal(await declaredRegistryWindowMs(url), undefined);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+
+  // An unreachable host: undefined, not a thrown error.
+  assert.equal(
+    await declaredRegistryWindowMs(`http://127.0.0.1:${port}/mcp`),
+    undefined,
+  );
 });

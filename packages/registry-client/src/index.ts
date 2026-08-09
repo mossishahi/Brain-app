@@ -223,15 +223,46 @@ function resourceUri(path: string): string {
 }
 
 /**
- * Registry rate-limit handling. The registry answers 429 with a
- * retry-after of one minute when a client exceeds its per-minute budget;
- * the MCP transport surfaces that as an error message carrying the status,
- * not the header, so the wait uses the server's documented window. Without
- * this, one busy minute on a shared host failed the version pin — and with
- * it the whole run — instead of costing a bounded wait.
+ * Registry rate-limit handling. The registry answers 429 when a client
+ * exceeds its per-minute budget; the MCP transport surfaces that as an
+ * error message carrying the status, not the retry-after header. Newer
+ * registries DECLARE their window in /health (a route exempt from the
+ * limit, so it stays readable while throttled) and the client waits that
+ * long; the documented one-minute window is the fallback for older
+ * registries. Without any of this, one busy minute on a shared host failed
+ * the version pin — and with it the whole run — instead of costing a
+ * bounded wait.
  */
 const RATE_LIMIT_RETRIES = 2;
 const RATE_LIMIT_WAIT_MS = 60_000;
+
+/**
+ * The rate-limit window a registry declares in /health, or undefined when
+ * it declares none (older server, unreachable host, malformed payload) —
+ * the caller then falls back to the documented default.
+ */
+export async function declaredRegistryWindowMs(
+  registryUrl: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<number | undefined> {
+  try {
+    const health = new URL(normalizeContentRegistryUrl(registryUrl));
+    health.pathname = health.pathname.replace(/\/mcp$/, "/health");
+    const response = await fetchImpl(health.toString(), {
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!response.ok) return undefined;
+    const body = (await response.json()) as {
+      rateLimit?: { windowMs?: unknown };
+    };
+    const windowMs = body.rateLimit?.windowMs;
+    return typeof windowMs === "number" && Number.isFinite(windowMs) && windowMs > 0
+      ? windowMs
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 function isRateLimitError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
@@ -241,8 +272,10 @@ function isRateLimitError(error: unknown): boolean {
 export interface RegistryRateLimitRetryOptions {
   /** Retries after the first failure. Default 2. */
   readonly retries?: number;
-  /** Wait before each retry. Default 60s (the registry's window). */
+  /** Explicit wait before each retry; overrides the declared window. */
   readonly waitMs?: number;
+  /** The server-declared window, consulted only after a 429. */
+  readonly declaredWaitMs?: () => Promise<number | undefined>;
   /** Test seam. */
   readonly sleep?: (ms: number) => Promise<void>;
 }
@@ -252,7 +285,6 @@ export async function withRegistryRateLimitRetry<T>(
   options: RegistryRateLimitRetryOptions = {},
 ): Promise<T> {
   const retries = options.retries ?? RATE_LIMIT_RETRIES;
-  const waitMs = options.waitMs ?? RATE_LIMIT_WAIT_MS;
   const sleep =
     options.sleep ??
     ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
@@ -261,6 +293,10 @@ export async function withRegistryRateLimitRetry<T>(
       return await operation();
     } catch (error) {
       if (attempt >= retries || !isRateLimitError(error)) throw error;
+      // Explicit override, then the server's declared window, then the
+      // documented default — resolved only when a wait is actually due.
+      const waitMs =
+        options.waitMs ?? (await options.declaredWaitMs?.()) ?? RATE_LIMIT_WAIT_MS;
       await sleep(waitMs);
     }
   }
@@ -286,6 +322,8 @@ export class ContentRegistryClient {
   private readonly rateLimitRetry: RegistryRateLimitRetryOptions;
   private connected = false;
   private connecting: Promise<void> | undefined;
+  /** The /health-declared window, looked up once and only after a 429. */
+  private declaredWindow: Promise<number | undefined> | undefined;
 
   constructor(
     readonly url: string,
@@ -294,7 +332,10 @@ export class ContentRegistryClient {
     this.transport = new StreamableHTTPClientTransport(
       new URL(normalizeContentRegistryUrl(url)),
     );
-    this.rateLimitRetry = options.rateLimitRetry ?? {};
+    this.rateLimitRetry = {
+      declaredWaitMs: () => (this.declaredWindow ??= declaredRegistryWindowMs(url)),
+      ...(options.rateLimitRetry ?? {}),
+    };
   }
 
   /**

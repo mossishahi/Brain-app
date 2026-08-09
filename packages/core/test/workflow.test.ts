@@ -4,8 +4,10 @@ import test from "node:test";
 import type {
   AgentExecutor,
   AgentTask,
+  CheckpointStore,
   JsonArray,
   JsonValue,
+  WorkflowCheckpoint,
   WorkflowNode,
 } from "../src/index.js";
 import {
@@ -219,6 +221,93 @@ test("unbounded parallel truly fans out (all branches start before any finishes)
   const result = await new WorkflowRunner({ functions }).run(definition);
   assert.equal(result.status, "completed");
   assert.deepEqual(result.status === "completed" && result.output, ["a", "b", "c"]);
+});
+
+test("checkpoint writes coalesce under parallel bursts, latest wins with the full journal", async () => {
+  // A store whose writes block until released: while one write is on its way
+  // to disk, a burst of branch saves must collapse into one follow-up write
+  // instead of queueing a full-journal serialization per branch.
+  const written: WorkflowCheckpoint[] = [];
+  const pendingWrites: Array<() => void> = [];
+  let gated = false;
+  let onWrite: (() => void) | undefined;
+  const checkpoints: CheckpointStore = {
+    async save(checkpoint) {
+      written.push(structuredClone(checkpoint));
+      onWrite?.();
+      if (gated) {
+        await new Promise<void>((release) => pendingWrites.push(release));
+      }
+    },
+    async load() {
+      return undefined;
+    },
+    async delete() {},
+  };
+
+  let startedBranches = 0;
+  let releaseBranches!: () => void;
+  const barrier = new Promise<void>((resolve) => {
+    releaseBranches = resolve;
+  });
+  const functions = new WorkflowFunctions().registerActivity("burst", async (input) => {
+    // The initial "running" write has already landed by the time branches
+    // run, so gating from here targets exactly the branch-save burst.
+    gated = true;
+    startedBranches += 1;
+    if (startedBranches === 3) releaseBranches();
+    await barrier; // all three branches record their effects together
+    return input ?? null;
+  });
+
+  const definition = workflow(
+    "coalesce",
+    parallel([
+      activity("burst", { id: "a", input: "a" }),
+      activity("burst", { id: "b", input: "b" }),
+      activity("burst", { id: "c", input: "c" }),
+    ]),
+  );
+
+  const secondWrite = new Promise<void>((resolve) => {
+    onWrite = () => {
+      if (written.length === 2) resolve();
+    };
+  });
+  const running = new WorkflowRunner({ functions, checkpoints }).run(definition);
+  await secondWrite; // the first branch save is now in flight — and blocked
+  // Let the remaining branches file their save requests against it.
+  for (let i = 0; i < 5; i += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  gated = false;
+  for (const release of pendingWrites.splice(0)) release();
+  const result = await running;
+
+  assert.equal(result.status, "completed");
+  assert.deepEqual(result.status === "completed" && result.output, ["a", "b", "c"]);
+
+  // Uncoalesced, this run writes 5 checkpoints: running, one per branch,
+  // completed. The burst behind the blocked write must collapse.
+  assert.ok(
+    written.length <= 4,
+    `expected the branch saves to coalesce, saw ${written.length} writes`,
+  );
+  // Durability equivalence: the last write is the terminal one and carries
+  // every branch's journal entry; sequence and journal only ever grow.
+  const last = written.at(-1)!;
+  assert.equal(last.status, "completed");
+  const values = last.journal.map((entry) => entry.value);
+  for (const value of ["a", "b", "c"]) {
+    assert.ok(values.includes(value), `journal on disk is missing branch "${value}"`);
+  }
+  for (let i = 1; i < written.length; i += 1) {
+    assert.ok(written[i]!.seq > written[i - 1]!.seq, "checkpoint seq stays monotonic");
+    assert.ok(
+      written[i]!.journal.length >= written[i - 1]!.journal.length,
+      "a later write never carries less journal than an earlier one",
+    );
+  }
 });
 
 test("agent nodes build tasks by name and route them through the AgentExecutor", async () => {
