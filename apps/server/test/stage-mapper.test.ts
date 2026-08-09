@@ -103,7 +103,14 @@ function memberIdea(stage: FirstPassStage) {
   return member.idea;
 }
 
-test("review view surfaces each member's final version; the first pass stays the original", () => {
+/**
+ * The review reconstruction, driven by the journal-key shape of one topology.
+ * A sequential walk paths a seat as review-members/member[i]; a parallel walk
+ * inserts the compiler's fan-out segment before the member. Both shapes stay
+ * live forever: old runs are pinned to sequential bundles, new bundles review
+ * the seats in parallel.
+ */
+function assertReviewReconstruction(memberPathPrefix: string): void {
   const workspace = mkdtempSync(join(tmpdir(), "stage-mapper-test-"));
   try {
     const sessionDir = join(workspace, "session");
@@ -142,8 +149,8 @@ test("review view surfaces each member's final version; the first pass stays the
     // every comment and revision from the dashboard while runs were fine.
     const commentEntry = {
       key:
-        "brainstorm-root/review-members/member[0]/cotStep[1]/" +
-        "review-round-loop/iter[0]/review-round-body/gather-comments/" +
+        memberPathPrefix +
+        "/cotStep[1]/review-round-loop/iter[0]/review-round-body/gather-comments/" +
         "gather-comments-fanout/commentor[0]/" +
         "dispatch-comment/else/comment-step-execute::result",
       kind: "agent",
@@ -161,8 +168,8 @@ test("review view surfaces each member's final version; the first pass stays the
     };
     const revisionEntry = {
       key:
-        "brainstorm-root/review-members/member[0]/cotStep[1]/" +
-        "review-round-loop/iter[0]/review-round-body/maybe-redevelop/then/" +
+        memberPathPrefix +
+        "/cotStep[1]/review-round-loop/iter[0]/review-round-body/maybe-redevelop/then/" +
         "redevelop-idea-execute::result",
       kind: "agent",
       value: {
@@ -283,6 +290,16 @@ test("review view surfaces each member's final version; the first pass stays the
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
+}
+
+test("review view surfaces each member's final version; the first pass stays the original", () => {
+  assertReviewReconstruction("brainstorm-root/review-members/member[0]");
+});
+
+test("a parallel review's fan-out paths reconstruct the same review view", () => {
+  assertReviewReconstruction(
+    "brainstorm-root/review-members/review-members-fanout/member[0]",
+  );
 });
 
 test("every submission type's first-pass output maps to its own view shape", () => {
@@ -623,6 +640,110 @@ test("the activity cap evicts plain progress ticks before capability rows", () =
     const ids = activity.map((entry) => Number(entry.id));
     assert.deepEqual([...ids].sort((a, b) => a - b), ids);
     assert.equal(ids[ids.length - 1], 410);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("live per-seat progress is derived from parallel fan-out event paths", () => {
+  const workspace = mkdtempSync(join(tmpdir(), "stage-mapper-test-"));
+  try {
+    const sessionDir = join(workspace, "session");
+    const jobDir = join(workspace, "job");
+    mkdirSync(join(sessionDir, "artifacts"), { recursive: true });
+    mkdirSync(jobDir, { recursive: true });
+    writeFileSync(
+      join(sessionDir, "checkpoint.json"),
+      JSON.stringify({
+        runId: "job-1",
+        workflowId: "brainstorm",
+        status: "running",
+        input: {},
+        journal: [],
+        pendingGates: [],
+        seq: 1,
+        updatedAt: Date.now(),
+      }),
+    );
+    writeFileSync(
+      join(sessionDir, "artifacts", "index.json"),
+      JSON.stringify({
+        refs: [
+          { id: "a-panel", metadata: { schema: "panel", path: "panel" } },
+          { id: "a-idea", metadata: { schema: "brainIdea", path: "ideas.member-1" } },
+        ],
+      }),
+    );
+    writeFileSync(
+      join(sessionDir, "artifacts", "a-panel"),
+      JSON.stringify({
+        members: [
+          { id: "member-1", department: "Physics", umbrella: "Quantum Optics", subfields: [] },
+          { id: "member-2", department: "Biology", umbrella: "Systems Biology", subfields: [] },
+        ],
+      }),
+    );
+    writeFileSync(
+      join(sessionDir, "artifacts", "a-idea"),
+      JSON.stringify({
+        output: {
+          type: "research idea",
+          paper: {
+            abstract: [paragraph, paragraph, paragraph],
+            introduction: [paragraph, paragraph, paragraph],
+            method: [paragraph, paragraph, paragraph],
+            discussion: [paragraph, paragraph, paragraph],
+            conclusion: [paragraph],
+          },
+        },
+        cot: ["Step one.", "Step two.", "Step three."],
+      }),
+    );
+
+    // The seat's walk is mid-flight: the stage node and one deep comment task
+    // have started and nothing has completed. Paths carry the parallel
+    // topology's fan-out segment.
+    const commentPath =
+      "brainstorm-root/review-members/review-members-fanout/member[0]/" +
+      "review-steps/cotStep[1]/review-round/review-round-loop/iter[0]/" +
+      "review-round-iteration/review-round-body/gather-comments/" +
+      "gather-comments-fanout/commentor[0]/dispatch-comment/else/comment-step";
+    const events = [
+      { type: "node:started", seq: 1, at: 1, path: "brainstorm-root/review-members", kind: "sequence" },
+      { type: "node:started", seq: 2, at: 2, path: commentPath, kind: "sequence" },
+    ];
+    writeFileSync(
+      join(jobDir, "events.jsonl"),
+      events.map((event) => JSON.stringify(event)).join("\n") + "\n",
+    );
+
+    const record: JobRecord = {
+      jobId: "job-1",
+      topic: "topic",
+      status: "running",
+      runner: "local",
+      createdAt: 1,
+      updatedAt: 2,
+    };
+    const detail = buildJobDetail({
+      record,
+      status: "running",
+      sessionDir,
+      jobDir,
+      settings,
+    });
+    const review = detail.stages.find((candidate) => candidate.id === "review-members");
+    assert.ok(review && review.id === "review-members");
+    const seat = review.members.find((member) => member.memberId === "member-1");
+    assert.ok(seat, "member-1 has a review view");
+    assert.deepEqual(seat.progress, {
+      step: 2,
+      stepCount: 3,
+      round: 1,
+      phase: "commenting",
+    });
+    const idle = review.members.find((member) => member.memberId === "member-2");
+    assert.equal(idle?.progress, undefined, "the seat without events carries no progress");
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }

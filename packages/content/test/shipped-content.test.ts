@@ -447,10 +447,20 @@ test("review nests member -> step -> bounded round, with commentors excluding th
 
   const members = findNode(root, "review-members") as ForEachNode;
   assert.equal(members.kind, "forEach");
-  assert.equal(members.mode, "sequential");
+  // Both published shapes are live history: bundles up to 0.16.0 review the
+  // seats sequentially, 0.17.0+ reviews them in parallel. Whatever the mode,
+  // the seat fan-out must stay bounded — parallel mode carries the panel's
+  // structural ceiling.
+  assert.ok(
+    members.mode === "sequential" ||
+      (members.mode === "parallel" && typeof members.maxConcurrency === "number"),
+    `review-members must be a bounded seat fan-out, got mode=${members.mode}`,
+  );
 
   const steps = findNode(root, "review-steps") as ForEachNode;
   assert.equal(steps.kind, "forEach");
+  // The walk itself must NEVER parallelize: each step's review depends on
+  // the chain state the previous steps left behind.
   assert.equal(steps.mode, "sequential");
   assert.equal(steps.items, "ideas[member.id].cot");
 

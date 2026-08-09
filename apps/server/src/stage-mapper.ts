@@ -448,7 +448,12 @@ function coordinates(path: string): Coordinates {
     return match ? Number(match[1]) : undefined;
   };
   return {
-    member: number(/review-members\/member\[(\d+)\]/),
+    // Both review topologies are addressed: a sequential walk paths seats as
+    // review-members/member[i], a parallel one inserts the compiler's fan-out
+    // segment (review-members/review-members-fanout/member[i]). Runs pinned
+    // to either bundle shape must keep reconstructing forever, so the union
+    // is exact — no looser pattern that could match paths this never meant.
+    member: number(/review-members(?:\/review-members-fanout)?\/member\[(\d+)\]/),
     step: number(/cotStep\[(\d+)\]/),
     round: number(/iter\[(\d+)\]/),
     commentor: number(/commentor\[(\d+)\]/),

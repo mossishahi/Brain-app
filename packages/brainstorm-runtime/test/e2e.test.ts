@@ -579,7 +579,7 @@ function runtime(
   });
 }
 
-test("Pass path executes member -> step -> round order and keeps C-O-T from chair", async () => {
+test("Pass path walks every seat in step order (seats in parallel) and keeps C-O-T from chair", async () => {
   const executor = new FakeBrainstormExecutor();
   const app = runtime(executor);
   const result = await app.run({
@@ -617,20 +617,29 @@ test("Pass path executes member -> step -> round order and keeps C-O-T from chai
       ],
     ],
   );
-  assert.deepEqual(executor.judgeOrder, [
-    "member-1:1:1",
-    "member-1:2:1",
-    "member-1:3:1",
-    "member-2:1:1",
-    "member-2:2:1",
-    "member-2:3:1",
-    "member-3:1:1",
-    "member-3:2:1",
-    "member-3:3:1",
-    "member-4:1:1",
-    "member-4:2:1",
-    "member-4:3:1",
-  ]);
+  // Seats review in PARALLEL, so the cross-seat interleaving of judgements
+  // is scheduling noise. What must hold: every seat's walk is judged at
+  // every step exactly once, and WITHIN a seat the walk stays in chain
+  // order (one round per step on the pass path).
+  const judgedPerMember = new Map<string, string[]>();
+  for (const entry of executor.judgeOrder) {
+    const memberId = entry.split(":")[0]!;
+    const walk = judgedPerMember.get(memberId) ?? [];
+    walk.push(entry);
+    judgedPerMember.set(memberId, walk);
+  }
+  assert.deepEqual(
+    [...judgedPerMember.keys()].sort(),
+    ["member-1", "member-2", "member-3", "member-4"],
+    "every seat's walk is judged, the woven seat included",
+  );
+  for (const [memberId, walk] of judgedPerMember) {
+    assert.deepEqual(
+      walk,
+      [1, 2, 3].map((step) => `${memberId}:${step}:1`),
+      `${memberId}'s walk stays in step order with one round per step`,
+    );
+  }
   // The interdisciplinary seat comments through its own roster-aware skill;
   // disciplinary seats never receive the roster.
   const bridgeComments = executor.tasks("interdisciplinary-commentor");
