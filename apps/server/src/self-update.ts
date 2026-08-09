@@ -107,12 +107,17 @@ export interface ApplyAppUpdateOptions {
   readonly relaunch: RelaunchCommand;
   /** The server process the updater must wait out. Defaults to process.pid. */
   readonly pid?: number;
+  /** Environment consulted for SLURM detection. Test seam. */
+  readonly env?: NodeJS.ProcessEnv;
+  /** Repository to update; defaults to the running app's checkout. Test seam. */
+  readonly repoRoot?: string;
 }
 
 export interface StartedAppUpdate {
   /** Where the updater logs every step (fetch, checkout, build, relaunch). */
   readonly logFile: string;
-  readonly scriptFile: string;
+  /** The detached updater script; absent on the in-process SLURM path. */
+  readonly scriptFile?: string;
 }
 
 /** POSIX single-quote escaping so paths and args survive the shell verbatim. */
@@ -206,16 +211,94 @@ echo "[updater] done — now running ${tag}"
 }
 
 /**
+ * Applies the checkout for a SLURM deployment, in-process, BEFORE the server
+ * exits. Nothing here relies on a detached process surviving the server:
+ * inside a SLURM job the updater's process dies with the job's cgroup the
+ * moment the server (the job's task) exits — observed in production as a
+ * two-line updater log, a dead dashboard, and an update that never landed.
+ * Ordering fixes it: stash, fetch, and check out the release while the
+ * server is still alive (dist/ is gitignored, so the running build is
+ * untouched), answer the browser, and only then exit; the launch wrapper's
+ * loop rebuilds the already-checked-out release and relaunches it. A
+ * failure restores the previous checkout and throws — the endpoint answers
+ * 409 and the server keeps running, which is strictly better than dying
+ * over a broken tree.
+ */
+async function applySlurmCheckout(
+  repoRoot: string,
+  targetVersion: string,
+  jobId: string,
+  logFile: string,
+): Promise<void> {
+  const tag = `app/v${targetVersion}`;
+  const lines: string[] = [];
+  const log = (line: string): void => {
+    lines.push(line);
+    writeFileSync(logFile, `${lines.join("\n")}\n`);
+  };
+  log(`[updater] target ${tag}`);
+  log(
+    `[updater] SLURM job ${jobId}: applying the checkout in-process before the server exits ` +
+      "(a detached updater would die with the job's cgroup)",
+  );
+  const previous = await git(repoRoot, ["rev-parse", "HEAD"]);
+  log(`[updater] previous checkout: ${previous}`);
+  const rollback = async (reason: string): Promise<never> => {
+    log(`[updater] ${reason}; restoring ${previous}`);
+    await git(repoRoot, ["checkout", "--quiet", previous]).catch(() => {
+      log(`[updater] ROLLBACK FAILED — restore manually: git checkout ${previous}`);
+    });
+    throw new Error(`${reason} — the server keeps running; details in ${logFile}`);
+  };
+  const dirty = await git(repoRoot, ["status", "--porcelain", "--untracked-files=no"]);
+  if (dirty !== "") {
+    log("[updater] local modifications detected; setting them aside recoverably (git stash list to inspect)");
+    await run(
+      "git",
+      [
+        "-C", repoRoot,
+        "-c", "user.name=brainstorm-updater",
+        "-c", "user.email=updater@localhost",
+        "stash", "push", "--quiet", "-m", `brainstorm self-update to ${tag}`,
+      ],
+      { encoding: "utf8", timeout: 30_000 },
+    ).catch(() => rollback("stashing local modifications failed"));
+  }
+  log("[updater] fetching release tags");
+  await run("git", ["-C", repoRoot, "fetch", "--tags", "--quiet"], {
+    encoding: "utf8",
+    timeout: 60_000,
+  }).catch(() => {
+    log("[updater] tag fetch failed; using locally known tags");
+  });
+  await git(repoRoot, ["rev-parse", "-q", "--verify", `refs/tags/${tag}`]).catch(() =>
+    rollback(`tag ${tag} not found`),
+  );
+  log(`[updater] checking out ${tag}`);
+  await git(repoRoot, ["checkout", "--quiet", tag]).catch(() =>
+    rollback(`checking out ${tag} failed`),
+  );
+  log(
+    `[updater] ${tag} checked out — the launch wrapper rebuilds and relaunches it after this server exits`,
+  );
+  log("[updater] done — the waiting wrapper builds the new checkout");
+}
+
+/**
  * Start the detached updater and return where it logs. The caller (the HTTP
  * handler) responds to the browser and then shuts the server down; the
  * updater takes over from there. Local modifications never block the update
  * and are never destroyed: the updater sets them aside with `git stash`
  * (bootstrap installs routinely carry an npm-rewritten package-lock).
+ *
+ * Under SLURM there is no detached updater at all: the checkout is applied
+ * in-process before the server exits (see applySlurmCheckout), and the
+ * launch wrapper's loop owns rebuild + relaunch.
  */
 export async function applyAppUpdate(
   options: ApplyAppUpdateOptions,
 ): Promise<StartedAppUpdate> {
-  const repoRoot = await appRepoRoot();
+  const repoRoot = options.repoRoot ?? (await appRepoRoot());
   if (!repoRoot) {
     throw new Error("the app is not running from a git checkout; update it the way it was installed");
   }
@@ -223,6 +306,11 @@ export async function applyAppUpdate(
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const scriptFile = join(options.stateDir, `update-${stamp}.sh`);
   const logFile = join(options.stateDir, `update-${stamp}.log`);
+  const jobId = (options.env ?? process.env).SLURM_JOB_ID;
+  if (jobId !== undefined && jobId !== "") {
+    await applySlurmCheckout(repoRoot, options.targetVersion, jobId, logFile);
+    return { logFile };
+  }
   writeFileSync(
     scriptFile,
     buildUpdaterScript({

@@ -77,6 +77,13 @@ const TELEMETRY_FLUSH_MS = 60_000;
 const CLOSE_DRAIN_GRACE_MS = 5_000;
 /** Interrupted-job scans hit squeue/sacct, so they poll far less often. */
 const INTERRUPTED_SCAN_MS = 30_000;
+/**
+ * How long a graceful post-update shutdown may take before the process is
+ * ended hard. The close path's own drains are bounded well below this; the
+ * fallback exists so a stray handle can never keep the OLD server running
+ * while an updater (or the SLURM wrapper) waits for it to exit.
+ */
+const FORCED_EXIT_AFTER_UPDATE_MS = 15_000;
 const ATTACHMENT_KINDS = new Set<AttachmentSelectionKind>([
   "file",
   "folder",
@@ -740,12 +747,19 @@ export async function startBrainServer(
           updatingTo: target,
           logFile: started.logFile,
         });
-        // Let the response flush, then shut down; the updater is waiting for
-        // this process to exit before it touches the checkout.
+        // Let the response flush, then shut down; the updater (or the SLURM
+        // wrapper, whose checkout was already applied in-process) is waiting
+        // for this process to exit before rebuild/relaunch.
         const exitForUpdate =
           options.exitForUpdate ??
           ((): void => {
             process.kill(process.pid, "SIGTERM");
+            // The graceful close must END the process: if any stray handle
+            // (a kept-alive socket, a wedged watcher) keeps the event loop
+            // alive past the bounded drains, exit hard — an old server that
+            // never exits stalls the update indefinitely. Unref'd, so a
+            // clean exit is never delayed by this timer.
+            setTimeout(() => process.exit(0), FORCED_EXIT_AFTER_UPDATE_MS).unref();
           });
         setTimeout(exitForUpdate, 500).unref();
         return;

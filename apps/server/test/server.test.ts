@@ -30,6 +30,7 @@ import {
 
 import {
   buildOrchestrationCommand,
+  applyAppUpdate,
   buildUpdaterScript,
   DEFAULT_SLURM_TEMPLATE,
   defaultReadinessProbes,
@@ -927,6 +928,86 @@ test("under SLURM the updater stashes, checks out the release, and hands rebuild
     existsSync(relaunchMarker),
     false,
     "the updater must NOT relaunch inside a SLURM allocation",
+  );
+});
+
+/** A throwaway git repo with an app/v9.9.9 release ahead of HEAD. */
+function updateFixtureRepo(root: string): {
+  repo: string;
+  git: (...args: string[]) => string;
+  previousRev: string;
+} {
+  const repo = join(root, "repo");
+  mkdirSync(repo, { recursive: true });
+  const git = (...args: string[]): string =>
+    execFileSync(
+      "git",
+      ["-C", repo, "-c", "user.name=test", "-c", "user.email=test@local", ...args],
+      { encoding: "utf8" },
+    ).trim();
+  git("init", "--quiet");
+  writeFileSync(join(repo, "f.txt"), "one\n");
+  git("add", "f.txt");
+  git("commit", "--quiet", "-m", "one");
+  const previousRev = git("rev-parse", "HEAD");
+  writeFileSync(join(repo, "f.txt"), "two\n");
+  git("commit", "--quiet", "-am", "two");
+  git("tag", "-a", "app/v9.9.9", "-m", "release");
+  git("checkout", "--quiet", previousRev);
+  return { repo, git, previousRev };
+}
+
+test("under SLURM the update applies the checkout IN-PROCESS, before the server exits", async () => {
+  // The production incident this pins down: a detached updater dies with
+  // the SLURM job's cgroup the moment the server exits — its log ended at
+  // "waiting for the server to exit" and no update ever landed. The SLURM
+  // path must therefore finish the checkout while the server still runs.
+  const root = tempRoot();
+  const { repo, git } = updateFixtureRepo(root);
+  // A bootstrap-style local modification that must survive, not block.
+  writeFileSync(join(repo, "f.txt"), "local dirt\n");
+
+  const started = await applyAppUpdate({
+    targetVersion: "9.9.9",
+    stateDir: join(root, "self-update"),
+    relaunch: { command: "node", args: ["main.js"], cwd: repo },
+    env: { SLURM_JOB_ID: "12345" },
+    repoRoot: repo,
+  });
+
+  assert.equal(
+    git("rev-parse", "HEAD"),
+    git("rev-parse", "app/v9.9.9^{commit}"),
+    "the release tag is checked out synchronously",
+  );
+  assert.ok(
+    git("stash", "list").includes("brainstorm self-update"),
+    "the local modification is preserved in the stash",
+  );
+  assert.equal(started.scriptFile, undefined, "no detached updater exists to die");
+  const log = readFileSync(started.logFile, "utf8");
+  assert.ok(log.includes("applying the checkout in-process"));
+  assert.ok(log.includes("checked out — the launch wrapper rebuilds"));
+});
+
+test("a SLURM update whose tag is missing restores the checkout and throws", async () => {
+  const root = tempRoot();
+  const { repo, git, previousRev } = updateFixtureRepo(root);
+
+  await assert.rejects(
+    applyAppUpdate({
+      targetVersion: "8.8.8",
+      stateDir: join(root, "self-update"),
+      relaunch: { command: "node", args: ["main.js"], cwd: repo },
+      env: { SLURM_JOB_ID: "12345" },
+      repoRoot: repo,
+    }),
+    /tag app\/v8\.8\.8 not found/,
+  );
+  assert.equal(
+    git("rev-parse", "HEAD"),
+    previousRev,
+    "the previous checkout still stands — the server keeps running on it",
   );
 });
 
