@@ -56,6 +56,7 @@ import {
   codeExecutionTools,
   createHostToolRegistry,
   taxonomyTools,
+  webFetchTools,
   type CodeRuntimeEnvironment,
 } from "@brainstorm-agentic/host-tools";
 import { OfflineBrainstormExecutor } from "./offline-executor.js";
@@ -202,6 +203,10 @@ export function buildAgentExecutor(
   if (codeEnvironment) {
     for (const tool of codeExecutionTools(codeEnvironment)) registry.register(tool);
   }
+  // Registered unconditionally (it needs no backing store), but the model is
+  // only offered it when the capability plan selects it — with a provider
+  // that offers native web tools, the broker prefers those.
+  for (const tool of webFetchTools()) registry.register(tool);
   return new ToolLoopAgentExecutor({
     provider,
     tools: registry,

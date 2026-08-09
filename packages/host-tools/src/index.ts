@@ -4,8 +4,8 @@
  * Provider-neutral host-side tools satisfying brainstorm capability contracts.
  * This package owns:
  * - Tool manifests (static metadata for the capability broker)
- * - Runtime tool implementations (attachment, taxonomy, code execution)
- * - Extension interfaces for future backends (web-search)
+ * - Runtime tool implementations (attachment, taxonomy, code execution, web fetch)
+ * - Extension interfaces for future backends (web search)
  * - A registry factory that creates tool registries from user settings
  */
 
@@ -20,13 +20,17 @@ export {
   ATTACHMENT_MANIFESTS,
 } from "./attachment-tools.js";
 
-// Web search (manifests and interfaces only)
+// Web tools (web_fetch fully implemented; web_search awaits its first backend)
 export {
   WEB_SEARCH_MANIFEST,
   WEB_FETCH_MANIFEST,
   WEB_SEARCH_MANIFESTS,
+  WEB_FETCH_TOOL_NAMES,
+  webFetchTools,
+  htmlToText,
+  isPublicAddress,
 } from "./web-search.js";
-export type { SearchHit, SearchBackend } from "./web-search.js";
+export type { SearchHit, SearchBackend, WebFetchOptions } from "./web-search.js";
 
 // Code execution (workspace preparation + executable tool)
 export {

@@ -20,7 +20,8 @@
     "test": "npm run build && node --test dist/test/*.test.js"
   },
   "dependencies": {
-    "@brainstorm-agentic/core": "0.1.0"
+    "@brainstorm-agentic/core": "0.1.0",
+    "undici": "^6.28.0"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",

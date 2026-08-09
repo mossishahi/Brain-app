@@ -6,7 +6,11 @@ import type { HostToolManifest, Tool } from "@brainstorm-agentic/core";
 import { InMemoryToolRegistry } from "@brainstorm-agentic/core";
 
 import { ATTACHMENT_MANIFESTS, attachmentTools, ATTACHMENT_TOOL_NAMES } from "./attachment-tools.js";
-import { WEB_SEARCH_MANIFESTS } from "./web-search.js";
+import {
+  WEB_FETCH_TOOL_NAMES,
+  WEB_SEARCH_MANIFESTS,
+  webFetchTools,
+} from "./web-search.js";
 import {
   CODE_EXECUTION_MANIFESTS,
   CODE_EXECUTION_TOOL_NAMES,
@@ -50,7 +54,7 @@ export interface HostToolRegistryConfig {
 /**
  * Creates a tool registry containing only the enabled, executable host tools.
  * Tools that are listed in manifests but have no runtime implementation
- * (web-search) are silently skipped.
+ * (web_search, until its first backend lands) are silently skipped.
  */
 export function createHostToolRegistry(
   config: HostToolRegistryConfig,
@@ -89,7 +93,14 @@ export function createHostToolRegistry(
     }
   }
 
-  // Future: register web-search tools here when a backend exists
+  // Web fetch needs no backing configuration (outbound reachability is the
+  // readiness check's concern); web_search still waits on its first backend.
+  for (const tool of webFetchTools()) {
+    if (config.enabledToolIds.has(tool.definition.name)) {
+      registry.register(tool);
+      registeredNames.push(tool.definition.name);
+    }
+  }
 
   return { registry, registeredToolNames: registeredNames };
 }
@@ -118,6 +129,10 @@ export function executableHostToolIds(config: {
     for (const name of CODE_EXECUTION_TOOL_NAMES) {
       ids.add(name);
     }
+  }
+  // web_fetch runs over ambient outbound HTTP; nothing to configure.
+  for (const name of WEB_FETCH_TOOL_NAMES) {
+    ids.add(name);
   }
   return ids;
 }

@@ -192,12 +192,13 @@ describe("executableHostToolIds", () => {
     assert.ok(ids.has("attachment_list"));
     assert.ok(ids.has("attachment_read"));
     assert.ok(ids.has("attachment_search"));
-    assert.equal(ids.size, 3);
+    assert.ok(ids.has("web_fetch"));
+    assert.equal(ids.size, 4);
   });
 
-  it("returns empty when no roots", () => {
+  it("returns only the config-free web_fetch when nothing is configured", () => {
     const ids = executableHostToolIds({});
-    assert.equal(ids.size, 0);
+    assert.deepEqual([...ids], ["web_fetch"]);
   });
 });
 
