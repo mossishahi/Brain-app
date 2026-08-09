@@ -207,6 +207,30 @@ const SLURM_POLL_MS = 3_000;
 /** Grace between "job left the queue" and judging the sentinel missing. */
 const SLURM_GONE_GRACE_MS = 15_000;
 
+/**
+ * One immediate retry for a probe attempt — the registry probe's doctrine,
+ * applied to the launch-time probes. The realistic first-attempt failures on
+ * a freshly started host all pass on the second try: cold DNS/proxy caches
+ * make the first outbound connection overrun its timeout, and the Claude
+ * CLI's first spawn reads a cold package cache off shared storage. Without
+ * the retry those show as hard failures on the dashboard's first paint and
+ * sit red for the whole recheck cooldown (5-30 minutes) unless a human
+ * clicks re-run. A genuinely broken connection fails both attempts and
+ * reports the second error. Config errors (missing key/model) are thrown
+ * before the attempt and never retried; an aborted probe never retries.
+ */
+async function attemptTwice<T>(
+  signal: AbortSignal,
+  attempt: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await attempt();
+  } catch (error) {
+    if (signal.aborted) throw error;
+    return await attempt();
+  }
+}
+
 /** SLURM job states that mean the probe is still on its way to running. */
 const SLURM_LIVE_STATES =
   /^(PENDING|CONFIGURING|RUNNING|COMPLETING|SUSPENDED|RESIZING)/i;
@@ -219,28 +243,35 @@ export function defaultReadinessProbes(
     llm: async (context) => {
       const llm = context.settings.llm;
       if (llm.provider === "anthropic") {
-        if (!context.credentials.anthropicApiKey || !llm.model) {
+        const apiKey = context.credentials.anthropicApiKey;
+        const model = llm.model;
+        if (!apiKey || !model) {
           throw new ReadinessProbeError(
             "Configure and verify the Anthropic API key and model in Settings",
           );
         }
-        await options.validateAnthropic({
-          apiKey: context.credentials.anthropicApiKey,
-          model: llm.model,
-          ...(llm.baseUrl !== undefined ? { baseUrl: llm.baseUrl } : {}),
-        });
+        await attemptTwice(context.signal, () =>
+          options.validateAnthropic({
+            apiKey,
+            model,
+            ...(llm.baseUrl !== undefined ? { baseUrl: llm.baseUrl } : {}),
+          }),
+        );
         return { message: `Anthropic API responds · ${llm.model}` };
       }
       if (llm.provider === "claude-agent") {
-        if (!context.credentials.claudeSetupToken) {
+        const token = context.credentials.claudeSetupToken;
+        if (!token) {
           throw new ReadinessProbeError(
             "Configure and verify the Claude setup token in Settings",
           );
         }
-        await options.validateClaudeAgent({
-          token: context.credentials.claudeSetupToken,
-          ...(llm.model !== undefined ? { model: llm.model } : {}),
-        });
+        await attemptTwice(context.signal, () =>
+          options.validateClaudeAgent({
+            token,
+            ...(llm.model !== undefined ? { model: llm.model } : {}),
+          }),
+        );
         return {
           message: `Claude Agent SDK responds${llm.model ? ` · ${llm.model}` : ""}`,
         };
@@ -332,9 +363,11 @@ export function defaultReadinessProbes(
       // most meaningful target: it is the connection the pipeline needs.
       const target = "https://api.anthropic.com/v1/models";
       try {
-        await fetchImpl(target, {
-          method: "GET",
-          signal: AbortSignal.any([context.signal, AbortSignal.timeout(8_000)]),
+        await attemptTwice(context.signal, async () => {
+          await fetchImpl(target, {
+            method: "GET",
+            signal: AbortSignal.any([context.signal, AbortSignal.timeout(8_000)]),
+          });
         });
         return { message: "outbound HTTPS works" };
       } catch (error) {

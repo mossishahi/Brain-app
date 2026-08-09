@@ -35,6 +35,7 @@ import {
   DEFAULT_SLURM_TEMPLATE,
   defaultReadinessProbes,
   defaultServerSettings,
+  type ReadinessProbeContext,
   JobManager,
   ReadinessProbeError,
   ReadinessService,
@@ -838,6 +839,93 @@ test("failed required readiness checks re-probe on their cooldown; passing check
   } finally {
     await removeWorkspace(workspace);
   }
+});
+
+test("llm and internet probes retry once, so a launch-time flicker never paints the dashboard red", async () => {
+  // A freshly started host loses its first attempts to cold caches: the
+  // first outbound connection overruns the fetch timeout, the Claude CLI's
+  // first spawn reads cold shared storage. Those must not surface as hard
+  // failures (which sit red for the whole 5-30 minute recheck cooldown) —
+  // the probes carry the registry probe's one-immediate-retry doctrine.
+  let anthropicCalls = 0;
+  let claudeCalls = 0;
+  let fetchCalls = 0;
+  const probes = defaultReadinessProbes({
+    validateAnthropic: async () => {
+      anthropicCalls += 1;
+      if (anthropicCalls === 1) throw new Error("first connect overran its timeout");
+    },
+    validateClaudeAgent: async () => {
+      claudeCalls += 1;
+      if (claudeCalls === 1) throw new Error("cold first spawn overran its timeout");
+    },
+    fetchImpl: (async () => {
+      fetchCalls += 1;
+      if (fetchCalls % 2 === 1) throw new Error("connect timed out");
+      return new Response("ok");
+    }) as typeof fetch,
+  });
+  const base = defaultServerSettings();
+  const context = (
+    llm: ServerSettings["llm"],
+    credentials: ReadinessProbeContext["credentials"],
+  ): ReadinessProbeContext => ({
+    settings: { ...base, llm },
+    env: {},
+    workspace: "/nonexistent-not-touched",
+    signal: new AbortController().signal,
+    credentials,
+    onProgress: () => undefined,
+  });
+
+  // Anthropic path: the first validation failure is retried, not surfaced.
+  const anthropic = await probes.llm(
+    context(
+      { ...base.llm, provider: "anthropic", model: "claude-test" },
+      { anthropicApiKey: "key" },
+    ),
+  );
+  assert.equal(anthropicCalls, 2);
+  assert.match(anthropic.message ?? "", /Anthropic API responds/);
+
+  // Claude Agent path: same doctrine.
+  const claude = await probes.llm(
+    context(
+      { ...base.llm, provider: "claude-agent" },
+      { claudeSetupToken: "token" },
+    ),
+  );
+  assert.equal(claudeCalls, 2);
+  assert.match(claude.message ?? "", /Claude Agent SDK responds/);
+
+  // Internet: first fetch dies, the immediate retry lands.
+  const internet = await probes.internet(
+    context({ ...base.llm, provider: "anthropic", model: "m" }, {}),
+  );
+  assert.equal(fetchCalls, 2);
+  assert.equal(internet.message, "outbound HTTPS works");
+
+  // Missing configuration is a real failure: no validator call, no retry.
+  await assert.rejects(
+    probes.llm(context({ ...base.llm, provider: "anthropic", model: undefined }, {})),
+    /Configure and verify the Anthropic API key/,
+  );
+  assert.equal(anthropicCalls, 2);
+
+  // A genuinely dead connection still fails — after both attempts errored.
+  const failing = defaultReadinessProbes({
+    validateAnthropic: async () => undefined,
+    validateClaudeAgent: async () => undefined,
+    fetchImpl: (async () => {
+      fetchCalls += 1;
+      throw new Error("network unreachable");
+    }) as typeof fetch,
+  });
+  await assert.rejects(
+    failing.internet(context({ ...base.llm, provider: "anthropic", model: "m" }, {})),
+    /no outbound HTTPS/,
+  );
+  assert.equal(fetchCalls, 4);
 });
 
 test("the updater script checks out the tag, rebuilds, relaunches, and can roll back", () => {
