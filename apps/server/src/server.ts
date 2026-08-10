@@ -62,7 +62,7 @@ import {
   type ClaudeAgentConnectionValidator,
 } from "./settings.js";
 
-const VERSION = "0.2.22";
+const VERSION = "0.2.23";
 const SNAPSHOT_THROTTLE_MS = 500;
 const HEARTBEAT_MS = 15_000;
 const POLL_MS = 2_000;
@@ -1171,7 +1171,11 @@ export async function startBrainServer(
         // Truthy, not defined: a derived-but-empty URL (no registry) is
         // still "nowhere to send".
         const configured = !!manager.settings.get().telemetry?.ingestUrl;
-        sendJson(res, 200, buildDiagnostic(manager.jobsDir, job, configured).preview);
+        sendJson(
+          res,
+          200,
+          buildDiagnostic(manager.jobsDir, manager.sessionsDir, job, configured).preview,
+        );
         return;
       }
       if (req.method === "POST" && diagPreviewMatch) {
@@ -1182,7 +1186,12 @@ export async function startBrainServer(
         if (!ingestUrl) {
           throw new HttpError(409, "no diagnostics endpoint is configured");
         }
-        const { report, preview } = buildDiagnostic(manager.jobsDir, job, true);
+        const { report, preview } = buildDiagnostic(
+          manager.jobsDir,
+          manager.sessionsDir,
+          job,
+          true,
+        );
         try {
           const response = await fetch(`${ingestUrl.replace(/\/+$/, "")}/v1/diagnostics`, {
             method: "POST",
@@ -1222,7 +1231,9 @@ export async function startBrainServer(
         const body = requestObject(await readJson(req));
         if (
           typeof body.gateKey !== "string" ||
-          (body.action !== "approve" && body.action !== "shrink") ||
+          (body.action !== "approve" &&
+            body.action !== "shrink" &&
+            body.action !== "revise") ||
           (body.members !== undefined &&
             (!Array.isArray(body.members) ||
               !body.members.every((member) => typeof member === "string"))) ||
@@ -1231,6 +1242,17 @@ export async function startBrainServer(
               !body.addedMembers.every(
                 (seat) =>
                   typeof seat === "object" && seat !== null && !Array.isArray(seat),
+              ))) ||
+          (body.type !== undefined && typeof body.type !== "string") ||
+          (body.requestedOutputs !== undefined &&
+            (!Array.isArray(body.requestedOutputs) ||
+              !body.requestedOutputs.every(
+                (entry) =>
+                  typeof entry === "object" &&
+                  entry !== null &&
+                  !Array.isArray(entry) &&
+                  typeof (entry as { title?: unknown }).title === "string" &&
+                  typeof (entry as { ask?: unknown }).ask === "string",
               )))
         ) {
           throw new HttpError(400, "invalid gate answer");
@@ -1324,7 +1346,7 @@ export async function startBrainServer(
   });
   const telemetryCollector = new TelemetryCollector(
     new TelemetrySpool(options.workspace),
-    manager.jobsDir,
+    manager.sessionsDir,
     () => {
       const current = manager.settings.get();
       return {

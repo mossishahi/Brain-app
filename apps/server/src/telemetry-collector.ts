@@ -49,7 +49,8 @@ export class TelemetryCollector {
 
   constructor(
     private readonly spool: TelemetrySpool,
-    private readonly jobsDir: string,
+    /** The sessions directory — checkpoints live at `<sessionsDir>/<jobId>/checkpoint.json`. */
+    private readonly sessionsDir: string,
     private readonly identity: () => CollectorIdentity,
   ) {}
 
@@ -95,7 +96,7 @@ export class TelemetryCollector {
     readonly stageId?: string;
     readonly nodePath?: string;
   } {
-    const checkpoint = join(this.jobsDir, job.jobId, "session", "checkpoint.json");
+    const checkpoint = join(this.sessionsDir, job.jobId, "checkpoint.json");
     try {
       if (existsSync(checkpoint)) {
         const parsed = JSON.parse(readFileSync(checkpoint, "utf8")) as {
@@ -141,6 +142,8 @@ const EVENT_TAIL_LINES = 400;
  */
 export function buildDiagnostic(
   jobsDir: string,
+  /** The sessions directory — checkpoints live at `<sessionsDir>/<jobId>/checkpoint.json`. */
+  sessionsDir: string,
   job: JobSummary,
   /**
    * Whether an endpoint is configured. Passed in rather than read here so the
@@ -150,7 +153,7 @@ export function buildDiagnostic(
 ): { readonly preview: DiagnosticPreview; readonly report: Record<string, unknown> } {
   const jobDir = join(jobsDir, job.jobId);
   const eventsPath = join(jobDir, "events.jsonl");
-  const checkpointPath = join(jobDir, "session", "checkpoint.json");
+  const checkpointPath = join(sessionsDir, job.jobId, "checkpoint.json");
 
   const events = tailLines(eventsPath, EVENT_TAIL_LINES);
   let checkpointShape: Record<string, unknown> | undefined;
