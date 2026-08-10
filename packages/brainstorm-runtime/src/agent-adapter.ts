@@ -269,12 +269,32 @@ const PLACEHOLDER_VALUES: ReadonlySet<string> = new Set([
  * Returned issues flow into the executors' validation-retry loop, so the
  * agent gets a fresh session with the exact field named — and a persistent
  * offender fails LOUD instead of being recorded.
+ *
+ * Fields whose schema constrains them to an enum are EXEMPT (via
+ * `exemptTemplates`, path templates with `[*]` for array indices): an enum
+ * member is the schema's own vocabulary, not filler. Without the exemption
+ * a legitimate answer like the profile-lookup outcome "ok" — or the file
+ * relation label "NA" — is indistinguishable from placeholder text, and a
+ * correct artifact can NEVER pass validation (observed in production: every
+ * pool whose scholars resolved profiles failed all retries on
+ * `scholars[*].profile: "ok"`).
  */
 export function placeholderContentIssues(
   value: unknown,
   path = "artifact",
+  exemptTemplates?: ReadonlySet<string>,
+): string[] {
+  return scanPlaceholders(value, path, path, exemptTemplates);
+}
+
+function scanPlaceholders(
+  value: unknown,
+  path: string,
+  template: string,
+  exempt: ReadonlySet<string> | undefined,
 ): string[] {
   if (typeof value === "string") {
+    if (exempt?.has(template)) return [];
     const trimmed = value.trim();
     if (PLACEHOLDER_VALUES.has(trimmed.toLowerCase())) {
       return [
@@ -292,15 +312,85 @@ export function placeholderContentIssues(
   }
   if (Array.isArray(value)) {
     return value.flatMap((entry, index) =>
-      placeholderContentIssues(entry, `${path}[${index}]`),
+      scanPlaceholders(entry, `${path}[${index}]`, `${template}[*]`, exempt),
     );
   }
   if (typeof value === "object" && value !== null) {
     return Object.entries(value).flatMap(([key, entry]) =>
-      placeholderContentIssues(entry, `${path}.${key}`),
+      scanPlaceholders(entry, `${path}.${key}`, `${template}.${key}`, exempt),
     );
   }
   return [];
+}
+
+/** Recursion ceiling for the schema walk; artifact schemas are far shallower. */
+const ENUM_WALK_MAX_DEPTH = 32;
+
+/**
+ * The path templates of every string-enum (or string-const) field a JSON
+ * schema declares, rooted at "artifact" to match the placeholder scan's
+ * paths, with `[*]` standing for any array index. These fields carry the
+ * schema's own closed vocabulary and are exempt from the placeholder scan.
+ */
+export function enumPathTemplates(schema: JsonObject): ReadonlySet<string> {
+  const out = new Set<string>();
+  collectEnumTemplates(schema, "artifact", schema, out, 0);
+  return out;
+}
+
+function collectEnumTemplates(
+  node: unknown,
+  template: string,
+  root: JsonObject,
+  out: Set<string>,
+  depth: number,
+): void {
+  if (depth > ENUM_WALK_MAX_DEPTH) return;
+  if (typeof node !== "object" || node === null || Array.isArray(node)) return;
+  const record = node as JsonObject;
+  // Defensive $ref resolution (the artifact converter inlines reused
+  // schemas today, but a "#/$defs/…" pointer must not silently drop a leg).
+  const ref = record.$ref;
+  if (typeof ref === "string" && ref.startsWith("#/$defs/")) {
+    const defs = root.$defs;
+    if (typeof defs === "object" && defs !== null && !Array.isArray(defs)) {
+      collectEnumTemplates(
+        (defs as JsonObject)[ref.slice("#/$defs/".length)],
+        template,
+        root,
+        out,
+        depth + 1,
+      );
+    }
+    return;
+  }
+  if (
+    (Array.isArray(record.enum) && record.enum.some((entry) => typeof entry === "string")) ||
+    typeof record.const === "string"
+  ) {
+    out.add(template);
+  }
+  for (const key of ["anyOf", "oneOf", "allOf"] as const) {
+    const branches = record[key];
+    if (Array.isArray(branches)) {
+      for (const branch of branches) {
+        collectEnumTemplates(branch, template, root, out, depth + 1);
+      }
+    }
+  }
+  const properties = record.properties;
+  if (typeof properties === "object" && properties !== null && !Array.isArray(properties)) {
+    for (const [key, child] of Object.entries(properties)) {
+      collectEnumTemplates(child, `${template}.${key}`, root, out, depth + 1);
+    }
+  }
+  collectEnumTemplates(record.items, `${template}[*]`, root, out, depth + 1);
+  const prefixItems = record.prefixItems;
+  if (Array.isArray(prefixItems)) {
+    for (const item of prefixItems) {
+      collectEnumTemplates(item, `${template}[*]`, root, out, depth + 1);
+    }
+  }
 }
 
 export class ContentArtifactOutputValidator {
@@ -381,8 +471,14 @@ export class ContentArtifactOutputValidator {
     }
     // Shape-valid is not enough: probe/filler submissions satisfy the schema
     // by construction, and once recorded they poison the review as real
-    // verdicts. Reject them here so the retry loop demands real content.
-    const placeholderIssues = placeholderContentIssues(parsed.data);
+    // verdicts. Reject them here so the retry loop demands real content —
+    // exempting enum-constrained fields, whose members ("ok", "NA", …) are
+    // the schema's own vocabulary, never filler.
+    const placeholderIssues = placeholderContentIssues(
+      parsed.data,
+      "artifact",
+      schemaRecord ? enumPathTemplates(schemaRecord) : undefined,
+    );
     if (placeholderIssues.length > 0) {
       return { success: false, issues: placeholderIssues };
     }
