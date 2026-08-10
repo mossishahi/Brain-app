@@ -86,6 +86,11 @@ export class RateCoordinator implements RequestCoordinator {
     return this.#blockedUntil > this.#now() ? this.#blockedUntil : 0;
   }
 
+  /** Why dispatch is paused ("" when it is not); for observability. */
+  get blockReason(): string {
+    return this.#blockedUntil > this.#now() ? this.#blockReason : "";
+  }
+
   acquire(
     priority: DispatchPriority = "normal",
     signal?: AbortSignal,

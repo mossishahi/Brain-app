@@ -102,6 +102,38 @@ test("a concurrent wave launches one agent per interval, in arrival order", asyn
   ]);
 });
 
+test("the backlog cap bounds a large parallel wave's tail", async () => {
+  // The parallel review fans out ~150 near-simultaneous tasks; uncapped 10s
+  // spacing made the tail wait 20+ minutes (observed in production as agents
+  // "waiting for 5 minutes"). Past the cap, launches proceed together and
+  // the request coordinator paces the actual wire traffic.
+  const clock = new VirtualClock();
+  const { executor, launches } = recording(clock);
+  const staggered = new StaggeredLaunchAgentExecutor(executor, {
+    intervalMs: 10_000,
+    maxBacklogMs: 120_000,
+    now: clock.now,
+    sleep: clock.sleep,
+  });
+
+  const wave = Promise.all(
+    Array.from({ length: 40 }, (_, index) =>
+      staggered.execute(task(`member-${index + 1}`), context),
+    ),
+  );
+  await clock.runAll();
+  await wave;
+
+  // The cold ramp is still smoothed: the first twelve launches space at 10s.
+  for (let index = 0; index < 12; index += 1) {
+    assert.equal(launches[index]!.at, index * 10_000);
+  }
+  // Everything past the cap launches AT the cap, never serialized beyond it.
+  const tail = launches.slice(12);
+  assert.equal(tail.length, 28);
+  assert.ok(tail.every((launch) => launch.at === 120_000));
+});
+
 test("a lone task after a quiet stretch launches immediately", async () => {
   const clock = new VirtualClock();
   const { executor, launches } = recording(clock);

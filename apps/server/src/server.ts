@@ -199,6 +199,14 @@ export interface StartBrainServerOptions {
   readonly slurmProbeTimeoutMs?: number;
   /** Unattended panel gates approve themselves after this. Default 30s. */
   readonly panelAutoApproveMs?: number;
+  /**
+   * Held-pilot submission channel (server-as-a-SLURM-job deployments where
+   * sbatch is denied from compute nodes): the pool directory maintained by
+   * deploy/lrz-queue-runway.sh. Unset submits via sbatch.
+   */
+  readonly pilotPoolDir?: string;
+  /** Post-start quiet window before unattended-gate countdowns arm. */
+  readonly gateAutoApproveGraceMs?: number;
 }
 
 export interface RunningBrainServer {
@@ -601,6 +609,12 @@ export async function startBrainServer(
     ...(options.panelAutoApproveMs !== undefined
       ? { panelAutoApproveMs: options.panelAutoApproveMs }
       : {}),
+    ...(options.pilotPoolDir !== undefined
+      ? { pilotPoolDir: options.pilotPoolDir }
+      : {}),
+    ...(options.gateAutoApproveGraceMs !== undefined
+      ? { gateAutoApproveGraceMs: options.gateAutoApproveGraceMs }
+      : {}),
     onChange: broadcast,
   });
   readiness = new ReadinessService({
@@ -613,6 +627,9 @@ export async function startBrainServer(
         options.validateClaudeAgent ?? validateClaudeAgentConnection,
       ...(options.slurmProbeTimeoutMs !== undefined
         ? { slurmProbeTimeoutMs: options.slurmProbeTimeoutMs }
+        : {}),
+      ...(options.pilotPoolDir !== undefined
+        ? { pilotPoolDir: options.pilotPoolDir }
         : {}),
     }),
     ...(options.readinessProbes ? { probeOverrides: options.readinessProbes } : {}),

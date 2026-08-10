@@ -20,6 +20,13 @@ export interface OrchestrationCommandOptions {
   readonly contentRegistryVersion?: string;
   /** Manifest of the job's ingested attachments (run mode only). */
   readonly attachmentsManifest?: string;
+  /**
+   * Owner-only credentials file the worker may read secrets from. Set on
+   * submission channels that cannot inject a scheduler environment (held
+   * pilots are queued long before the run exists, with --export=NONE). The
+   * PATH is not a secret; the file is 0600 on shared storage.
+   */
+  readonly credentialsFile?: string;
   readonly settings: ServerSettings;
   readonly gate?: {
     readonly gateKey: string;
@@ -134,7 +141,22 @@ export function buildOrchestrationCommand(
     }
   }
 
-  const command = [...modelEnvironment(options.settings), ...args].join(" ");
+  const credentialsEnv =
+    options.credentialsFile !== undefined && options.settings.llm.provider !== "offline"
+      ? [`BRAINSTORM_AGENTIC_CREDENTIALS_FILE=${shellQuote(options.credentialsFile)}`]
+      : [];
+  const command = [
+    ...credentialsEnv,
+    ...modelEnvironment(options.settings),
+    ...args,
+  ].join(" ");
+  if (options.credentialsFile !== undefined && options.settings.llm.provider !== "offline") {
+    return (
+      "# Credentials are read from the owner-only credentials file (held pilots\n" +
+      "# cannot receive a scheduler environment).\n" +
+      command
+    );
+  }
   if (options.settings.llm.provider === "anthropic") {
     return `# Verified ANTHROPIC_* credentials are injected into the scheduler environment by the brain server.\n${command}`;
   }

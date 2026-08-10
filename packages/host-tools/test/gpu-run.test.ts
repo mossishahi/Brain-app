@@ -79,6 +79,10 @@ function config(
     jobsRoot,
     runCommand: run,
     pollIntervalMs: 1,
+    // Zero cadences poll the scheduler every tick, preserving the scripted
+    // one-state-per-call semantics of fakeScheduler.
+    queuedPollIntervalMs: 0,
+    runningPollIntervalMs: 0,
     queueGoneGraceMs: 0,
     sleep: async () => {},
     ...overrides,
@@ -141,6 +145,44 @@ describe("gpu_run", () => {
       // The job name is sanitized; the time limit is the deployment ceiling.
       assert.ok(submit.args.includes("--job-name=probe-run--1"));
       assert.ok(submit.args.includes("--time=30"));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("polls the scheduler on its own slow cadence, never on every tick", async () => {
+    // Shared clusters ban seconds-scale squeue polling; the loop tick (5s,
+    // abort/deadline responsiveness) must not translate into scheduler calls.
+    const root = mkdtempSync(join(tmpdir(), "gpu-run-"));
+    try {
+      let clock = 0;
+      const scheduler = fakeScheduler({
+        jobId: "88",
+        queueStates: ["PENDING", "PENDING", "RUNNING"],
+        finalState: "COMPLETED",
+        writeLogOnLeave: (jobDir) => {
+          writeFileSync(join(jobDir, "job.log"), "done\n", "utf8");
+        },
+      });
+      const [tool] = gpuRunTools(
+        config(root, scheduler.run, {
+          pollIntervalMs: 5_000,
+          queuedPollIntervalMs: 60_000,
+          runningPollIntervalMs: 300_000,
+          queueGoneGraceMs: 0,
+          now: () => clock,
+          sleep: async (ms) => {
+            clock += ms;
+          },
+        }),
+      );
+      const result = await tool!.execute({ script: "python train.py" }, { runId: "rc" });
+      assert.equal((result.output as { state: string }).state, "COMPLETED");
+      const squeueCalls = scheduler.calls.filter((call) => call.command === "squeue").length;
+      // 240s of simulated wall clock = 48 loop ticks, but squeue fires only
+      // when the 60s queued cadence elapses: t=0, 60, 120, 180 (queue empty,
+      // gone-grace starts), 240 (grace exceeded, loop ends).
+      assert.equal(squeueCalls, 5);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

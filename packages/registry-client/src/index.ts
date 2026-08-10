@@ -276,6 +276,11 @@ export interface RegistryRateLimitRetryOptions {
   readonly waitMs?: number;
   /** The server-declared window, consulted only after a 429. */
   readonly declaredWaitMs?: () => Promise<number | undefined>;
+  /**
+   * Called before each wait so the minute-scale sleep is narrated (to the
+   * worker's log, an event stream, …) instead of passing as dead silence.
+   */
+  readonly onWait?: (waitMs: number, attempt: number, retries: number) => void;
   /** Test seam. */
   readonly sleep?: (ms: number) => Promise<void>;
 }
@@ -297,6 +302,7 @@ export async function withRegistryRateLimitRetry<T>(
       // documented default — resolved only when a wait is actually due.
       const waitMs =
         options.waitMs ?? (await options.declaredWaitMs?.()) ?? RATE_LIMIT_WAIT_MS;
+      options.onWait?.(waitMs, attempt + 1, retries);
       await sleep(waitMs);
     }
   }
@@ -334,6 +340,14 @@ export class ContentRegistryClient {
     );
     this.rateLimitRetry = {
       declaredWaitMs: () => (this.declaredWindow ??= declaredRegistryWindowMs(url)),
+      // A minute of dead silence mid-run reads as a hang; narrate the wait
+      // (worker stderr lands in the job log) unless the caller overrides.
+      onWait: (waitMs, attempt, retries) => {
+        console.error(
+          `[registry] rate limited; waiting ${Math.round(waitMs / 1000)}s before ` +
+            `retry ${attempt}/${retries}`,
+        );
+      },
       ...(options.rateLimitRetry ?? {}),
     };
   }

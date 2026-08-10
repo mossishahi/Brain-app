@@ -15,7 +15,14 @@
  * debugging its script and may resubmit a corrected version. The host never
  * edits or retries the script on the agent's behalf.
  */
-import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 
 import type {
@@ -46,7 +53,23 @@ const DEFAULT_MAX_QUEUE_WAIT_MS = 15 * 60_000;
 /** Grace between "job left the queue" and judging its final state. */
 const DEFAULT_QUEUE_GONE_GRACE_MS = 15_000;
 
+/**
+ * Loop TICK: how often the wait loop wakes to check abort, deadline, and
+ * the log file. Cheap local work only — never a scheduler call.
+ */
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
+
+/**
+ * Scheduler cadences, phase-dependent. Shared clusters treat seconds-scale
+ * squeue polling as abuse (LRZ policy recommends ~10-minute intervals and
+ * names high-frequency polling bannable), so squeue runs on its own clock,
+ * far slower than the tick: every minute while the job waits in the queue
+ * (start detection), every five once the job's log file exists (it is
+ * running; only completion remains to be noticed, and GPU jobs run for
+ * tens of minutes). A 1h job costs ~25 scheduler calls instead of ~720.
+ */
+const DEFAULT_QUEUED_SCHEDULER_POLL_MS = 60_000;
+const DEFAULT_RUNNING_SCHEDULER_POLL_MS = 300_000;
 
 /** Job states that mean the probe is still on its way through the queue. */
 const LIVE_STATES = /^(PENDING|CONFIGURING|RUNNING|COMPLETING|SUSPENDED|RESIZING)/i;
@@ -68,8 +91,12 @@ export interface GpuRunConfig {
   readonly env?: NodeJS.ProcessEnv;
   /** Test seam: scheduler command runner (sbatch/squeue/sacct/scancel). */
   readonly runCommand?: RunSchedulerCommand;
-  /** Test seam: queue poll interval. */
+  /** Test seam: loop tick (abort/deadline/log checks; no scheduler calls). */
   readonly pollIntervalMs?: number;
+  /** Scheduler cadence while the job waits in the queue. Default 60s. */
+  readonly queuedPollIntervalMs?: number;
+  /** Scheduler cadence once the job's log exists (it runs). Default 5 min. */
+  readonly runningPollIntervalMs?: number;
   /** Test seam: grace after the job leaves the queue. */
   readonly queueGoneGraceMs?: number;
   /** Test seam: how long the job may wait in the queue before running. */
@@ -247,6 +274,10 @@ export function gpuRunTools(config: GpuRunConfig): readonly Tool[] {
   const sleep = config.sleep ?? defaultSleep;
   const now = config.now ?? (() => Date.now());
   const pollIntervalMs = config.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+  const queuedPollIntervalMs =
+    config.queuedPollIntervalMs ?? DEFAULT_QUEUED_SCHEDULER_POLL_MS;
+  const runningPollIntervalMs =
+    config.runningPollIntervalMs ?? DEFAULT_RUNNING_SCHEDULER_POLL_MS;
   const queueGoneGraceMs = config.queueGoneGraceMs ?? DEFAULT_QUEUE_GONE_GRACE_MS;
   const maxQueueWaitMs = config.maxQueueWaitMs ?? DEFAULT_MAX_QUEUE_WAIT_MS;
   let jobSeq = 0;
@@ -344,6 +375,11 @@ export function gpuRunTools(config: GpuRunConfig): readonly Tool[] {
       const deadline = now() + maxQueueWaitMs + minutes * 60_000 + 60_000;
       const startedAt = now();
       let goneSince: number | undefined;
+      // The scheduler runs on its own, much slower clock than the loop
+      // tick: the tick stays responsive to aborts and the deadline, while
+      // squeue fires only when its phase cadence elapses (queued vs
+      // running, running detected by the log file's existence).
+      let lastSchedulerPollAt = Number.NEGATIVE_INFINITY;
       for (;;) {
         if (signal?.aborted) {
           await run("scancel", [...clusterArgs, jobId], {
@@ -377,24 +413,34 @@ export function gpuRunTools(config: GpuRunConfig): readonly Tool[] {
             isError: true,
           };
         }
-        const queueState = await run(
-          "squeue",
-          ["-h", "-j", jobId, "-o", "%T", ...clusterArgs],
-          {
-            cwd: jobDir,
-            timeoutMs: SCHEDULER_COMMAND_TIMEOUT_MS,
-            ...(signal ? { signal } : {}),
-          },
-        )
-          .then((result) => stripSlurmClusterBanners(result.stdout).trim() || undefined)
-          .catch(() => undefined);
-        if (queueState && LIVE_STATES.test(queueState)) {
-          goneSince = undefined;
-        } else {
-          // Left the queue (or squeue is unusable): give the shared
-          // filesystem a grace period to surface the log, then judge.
-          goneSince ??= now();
-          if (now() - goneSince > queueGoneGraceMs) break;
+        // Queued and just-left-the-queue phases poll faster (start and end
+        // detection); a running job (log file exists) needs the scheduler
+        // only to notice completion, so it polls slowest.
+        const schedulerCadence =
+          goneSince === undefined && existsSync(logPath)
+            ? runningPollIntervalMs
+            : queuedPollIntervalMs;
+        if (now() - lastSchedulerPollAt >= schedulerCadence) {
+          lastSchedulerPollAt = now();
+          const queueState = await run(
+            "squeue",
+            ["-h", "-j", jobId, "-o", "%T", ...clusterArgs],
+            {
+              cwd: jobDir,
+              timeoutMs: SCHEDULER_COMMAND_TIMEOUT_MS,
+              ...(signal ? { signal } : {}),
+            },
+          )
+            .then((result) => stripSlurmClusterBanners(result.stdout).trim() || undefined)
+            .catch(() => undefined);
+          if (queueState && LIVE_STATES.test(queueState)) {
+            goneSince = undefined;
+          } else {
+            // Left the queue (or squeue is unusable): give the shared
+            // filesystem a grace period to surface the log, then judge.
+            goneSince ??= now();
+            if (now() - goneSince > queueGoneGraceMs) break;
+          }
         }
         await sleep(pollIntervalMs, signal);
       }

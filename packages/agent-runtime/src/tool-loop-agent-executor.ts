@@ -92,6 +92,17 @@ export interface ToolLoopAgentExecutorOptions<
    */
   readonly isParallelSafe?: (tool: Tool) => boolean;
   readonly retry?: RetryPolicy;
+  /**
+   * Observability window onto the provider's request coordinator: when the
+   * shared dispatch queue is paused (one task's 429 pauses everyone), the
+   * executor narrates the wait as a status progress event instead of
+   * leaving the activity feed silent. Purely informational — the provider
+   * itself enforces the pause.
+   */
+  readonly dispatchGate?: {
+    readonly blockedUntil: number;
+    readonly blockReason: string;
+  };
 }
 
 interface ExecutionState {
@@ -450,6 +461,9 @@ export class ToolLoopAgentExecutor<
   readonly #maxToolCallsPerTurn: number;
   readonly #parallelToolCalls: boolean;
   readonly #parallelSafety: (tool: Tool) => boolean;
+  readonly #dispatchGate:
+    | { readonly blockedUntil: number; readonly blockReason: string }
+    | undefined;
   readonly #maxTransientRetries: number;
   readonly #maxRateLimitRetries: number;
   readonly #maxValidationRetries: number;
@@ -477,6 +491,7 @@ export class ToolLoopAgentExecutor<
       ((tool) =>
         options.tools instanceof ToolRegistry &&
         options.tools.isParallelSafe(tool.definition.name));
+    this.#dispatchGate = options.dispatchGate;
     this.#maxTransientRetries = nonNegativeInteger(
       options.retry?.maxTransientRetries,
       DEFAULT_TRANSIENT_RETRIES,
@@ -856,6 +871,23 @@ export class ToolLoopAgentExecutor<
     let rateLimitRetries = 0;
     for (;;) {
       throwIfAborted(context.signal);
+      // A paused dispatch queue holds this call inside provider.complete
+      // with no events of its own — narrate the wait so the activity feed
+      // explains the quiet instead of implying a long model turn.
+      const gate = this.#dispatchGate;
+      if (gate !== undefined) {
+        const pausedForMs = gate.blockedUntil - Date.now();
+        if (pausedForMs > 1_000) {
+          context.reportProgress?.({
+            kind: "status",
+            turn,
+            message:
+              `Dispatch paused (${gate.blockReason || "provider rate limit"}): ` +
+              `resuming in ~${Math.max(1, Math.round(pausedForMs / 1000))}s — one task's ` +
+              "rate-limit discovery pauses every pending request",
+          });
+        }
+      }
       try {
         return await this.#provider.complete(request, {
           signal: context.signal,

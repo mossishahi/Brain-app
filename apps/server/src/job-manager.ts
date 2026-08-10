@@ -6,6 +6,7 @@ import {
   openSync,
   readdirSync,
   readFileSync,
+  renameSync,
   statSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -45,6 +46,7 @@ import {
 import {
   buildOrchestrationCommand,
   renderSlurmTemplate,
+  shellQuote,
 } from "./command.js";
 import { atomicWriteFile, atomicWriteJson, readJsonFile } from "./files.js";
 import { readJsonCached, statStamp } from "./read-cache.js";
@@ -75,6 +77,37 @@ export interface JobManagerOptions {
    * countdown permanently. Default 30 seconds.
    */
   readonly panelAutoApproveMs?: number;
+  /**
+   * Window in which a SLURM job's own on-disk activity (checkpoint.json,
+   * events.jsonl mtimes) proves it alive WITHOUT a scheduler query. 0
+   * disables the shortcut (every liveness check consults the scheduler,
+   * subject to the probe cache). Default 10 minutes.
+   */
+  readonly slurmActivityFreshnessMs?: number;
+  /**
+   * How long one squeue/sacct liveness verdict stays cached for a SLURM
+   * job. Shared clusters treat seconds-scale scheduler polling as abuse
+   * (LRZ policy recommends ~10-minute intervals), and the workspace
+   * freshness shortcut answers the common case anyway. Default 10 minutes.
+   */
+  readonly slurmProbeTtlMs?: number;
+  /**
+   * Held-pilot submission channel, for deployments where the server itself
+   * runs as a SLURM job and sbatch is denied from compute nodes (probed on
+   * LRZ CoolMUC-4). The directory holds `available/<jobid>` markers written
+   * by deploy/lrz-queue-runway.sh when it pre-queues held pilot jobs from a
+   * login node; submitting a run claims a marker (atomic rename), writes
+   * the assignment into `spool/<jobid>.sh`, and `scontrol release`s the
+   * pilot — no sbatch at runtime. Unset (the default) submits via sbatch.
+   */
+  readonly pilotPoolDir?: string;
+  /**
+   * Quiet window after server start in which unattended-gate countdowns do
+   * NOT arm: a gate raised while the server was down (a shift handover, a
+   * restart) must not auto-approve before a human could possibly have seen
+   * it. Default 3 minutes; 0 disables the grace.
+   */
+  readonly gateAutoApproveGraceMs?: number;
 }
 
 interface CommandResult {
@@ -183,6 +216,14 @@ export class JobManager {
   private readonly now: () => number;
   private readonly onChange: () => void;
   private readonly panelAutoApproveMs: number;
+  private readonly slurmActivityFreshnessMs: number;
+  private readonly slurmProbeTtlMs: number;
+  private readonly workspace: string;
+  private readonly pilotPoolDir: string | undefined;
+  private readonly gateAutoApproveGraceMs: number;
+  /** Wall-clock construction time; anchors the gate-arming grace window. */
+  private readonly startedAt: number;
+  private static readonly DEFAULT_GATE_GRACE_MS = 180_000;
   private readonly autoResuming = new Set<string>();
   private readonly summaryCache = new Map<
     string,
@@ -212,6 +253,14 @@ export class JobManager {
     this.now = options.now ?? (() => Date.now());
     this.onChange = options.onChange ?? (() => undefined);
     this.panelAutoApproveMs = options.panelAutoApproveMs ?? 30_000;
+    this.slurmActivityFreshnessMs =
+      options.slurmActivityFreshnessMs ?? JobManager.DEFAULT_SLURM_ACTIVITY_FRESHNESS_MS;
+    this.slurmProbeTtlMs = options.slurmProbeTtlMs ?? JobManager.DEFAULT_SLURM_PROBE_TTL_MS;
+    this.workspace = options.workspace;
+    this.pilotPoolDir = options.pilotPoolDir;
+    this.gateAutoApproveGraceMs =
+      options.gateAutoApproveGraceMs ?? JobManager.DEFAULT_GATE_GRACE_MS;
+    this.startedAt = Date.now();
     mkdirSync(this.jobsDir, { recursive: true });
     mkdirSync(this.sessionsDir, { recursive: true });
     this.reload();
@@ -304,6 +353,12 @@ export class JobManager {
       workerPath: this.workerPath,
       mode,
       runId: record.jobId,
+      // Held pilots are queued with --export=NONE long before any run
+      // exists, so secrets cannot ride the scheduler environment; the
+      // worker reads them from the owner-only credentials file instead.
+      ...(this.pilotPoolDir !== undefined
+        ? { credentialsFile: join(this.workspace, "credentials.json") }
+        : {}),
       ...(mode === "run" ? { topic: record.topic } : {}),
       ...(mode === "run" && existsSync(this.manifestPath(record.jobId))
         ? { attachmentsManifest: this.manifestPath(record.jobId) }
@@ -347,6 +402,61 @@ export class JobManager {
     return path;
   }
 
+  /**
+   * Claims one pre-queued held pilot and releases it against this job's
+   * submit script. Claim = atomic rename of the pilot's `available/<jobid>`
+   * marker, so two concurrent submissions can never seize the same pilot.
+   * The pilot's own bootstrap (queued by deploy/lrz-queue-runway.sh) execs
+   * `spool/<jobid>.sh`, which cds into the job directory and runs the same
+   * rendered submit script an sbatch submission would have run.
+   */
+  private async submitViaPilot(record: JobRecord, script: string): Promise<void> {
+    const poolDir = this.pilotPoolDir!;
+    const availableDir = join(poolDir, "available");
+    const claimedDir = join(poolDir, "claimed");
+    const spoolDir = join(poolDir, "spool");
+    mkdirSync(claimedDir, { recursive: true });
+    mkdirSync(spoolDir, { recursive: true });
+    const markers = (() => {
+      try {
+        return readdirSync(availableDir)
+          .filter((name) => /^\d+$/.test(name))
+          .sort((a, b) => Number(a) - Number(b));
+      } catch {
+        return [] as string[];
+      }
+    })();
+    for (const id of markers) {
+      try {
+        renameSync(join(availableDir, id), join(claimedDir, id));
+      } catch {
+        continue; // another submission won the race, or the marker vanished
+      }
+      const cluster =
+        readFileSync(join(claimedDir, id), "utf8").trim() || undefined;
+      atomicWriteFile(
+        join(spoolDir, `${id}.sh`),
+        `#!/usr/bin/env bash\ncd ${shellQuote(this.jobDir(record.jobId))} || exit 1\nexec bash ${shellQuote(script)}\n`,
+        0o755,
+      );
+      // execute() rejects on a non-zero exit, so a refused release fails
+      // the submission with scontrol's own message.
+      await execute(
+        "scontrol",
+        [...slurmClusterArgs(cluster), "release", id],
+        { cwd: this.jobDir(record.jobId), env: this.env, timeout: 10_000 },
+      );
+      record.slurmJobId = id;
+      if (cluster !== undefined) record.slurmCluster = cluster;
+      else delete record.slurmCluster;
+      delete record.pid;
+      return;
+    }
+    throw new Error(
+      "no held pilot jobs are available — top up the pool from a login node with deploy/lrz-queue-runway.sh",
+    );
+  }
+
   private async submitScript(
     record: JobRecord,
     script: string,
@@ -354,6 +464,10 @@ export class JobManager {
   ): Promise<void> {
     const executionEnv = this.settings.executionEnvironment(this.env, settings);
     if (record.runner === "slurm") {
+      if (this.pilotPoolDir !== undefined) {
+        await this.submitViaPilot(record, script);
+        return;
+      }
       const result = await execute("sbatch", [script], {
         cwd: this.jobDir(record.jobId),
         env: executionEnv,
@@ -567,23 +681,57 @@ export class JobManager {
   }
 
   /**
-   * Scheduler probes are cached briefly: `detail()` runs on every request
-   * and SSE tick, and spawning squeue/sacct per call both lags the response
-   * and hammers the scheduler. A few seconds of staleness in "is the SLURM
-   * job alive" is invisible next to the poller cadence.
+   * SLURM liveness is answered from the workspace first and the scheduler
+   * last. The worker continuously writes checkpoint.json and events.jsonl
+   * to shared storage, so a fresh mtime proves the job alive more cheaply
+   * AND more recently than any squeue answer — and shared clusters treat
+   * seconds-scale squeue/sacct polling as abuse (LRZ policy names it
+   * bannable and recommends ~10-minute intervals). The scheduler is
+   * consulted only when the files go quiet (long model turn, queued job,
+   * dead worker), and that verdict is cached for slurmProbeTtlMs. The cost
+   * is orphan-detection latency of up to the freshness window — invisible
+   * next to the resubmission machinery's own pacing, and the price of
+   * staying welcome on the host cluster.
    */
-  private static readonly SLURM_ALIVE_TTL_MS = 5_000;
+  private static readonly DEFAULT_SLURM_ACTIVITY_FRESHNESS_MS = 600_000;
+  private static readonly DEFAULT_SLURM_PROBE_TTL_MS = 600_000;
   private readonly slurmAliveCache = new Map<
     string,
     { at: number; alive: Promise<boolean> }
   >();
 
+  /** Newest on-disk worker activity for a job, as a wall-clock timestamp. */
+  private workspaceActivityAt(jobId: string): number {
+    let latest = 0;
+    for (const path of [
+      join(this.sessionDir(jobId), "checkpoint.json"),
+      join(this.jobDir(jobId), "events.jsonl"),
+    ]) {
+      try {
+        const at = statSync(path).mtimeMs;
+        if (at > latest) latest = at;
+      } catch {
+        // An absent file simply contributes no freshness.
+      }
+    }
+    return latest;
+  }
+
   private slurmAlive(record: JobRecord): Promise<boolean> {
     const id = record.slurmJobId;
     if (!id) return Promise.resolve(false);
+    // Compared against the real clock, not this.now(): file mtimes are
+    // wall-clock stamps, and tests that inject a synthetic clock must not
+    // turn every freshly-written fixture into a live job.
+    if (
+      this.slurmActivityFreshnessMs > 0 &&
+      Date.now() - this.workspaceActivityAt(record.jobId) < this.slurmActivityFreshnessMs
+    ) {
+      return Promise.resolve(true);
+    }
     const key = `${record.slurmCluster ?? ""}:${id}`;
     const cached = this.slurmAliveCache.get(key);
-    if (cached && this.now() - cached.at < JobManager.SLURM_ALIVE_TTL_MS) {
+    if (cached && this.now() - cached.at < this.slurmProbeTtlMs) {
       return cached.alive;
     }
     const alive = this.probeSlurmAlive(id, record.slurmCluster);
@@ -1395,6 +1543,12 @@ export class JobManager {
       }
       const marker = record.gateAutoApprove;
       if (!marker || marker.gateKey !== gate.gateKey) {
+        // Handover grace: a gate observed right after server start may have
+        // been raised while no server was running (a shift handover, a
+        // restart) — arming the countdown immediately would auto-approve it
+        // before a human could possibly have seen it. Wall clock, not
+        // this.now(): the grace is about real elapsed operator time.
+        if (Date.now() - this.startedAt < this.gateAutoApproveGraceMs) continue;
         record.gateAutoApprove = {
           gateKey: gate.gateKey,
           deadlineAt: this.now() + this.panelAutoApproveMs,

@@ -727,3 +727,33 @@ test("the rate-limit budget is bounded: a wall that never lifts still fails", as
   assert.equal(result.status, "error");
   assert.equal(provider.requests.length, 3, "initial call plus the bounded retries");
 });
+
+test("a paused dispatch queue narrates itself instead of passing as a long model turn", async () => {
+  const provider = new FakeProvider(() =>
+    response([{ type: "text", text: "the answer" }], { inputTokens: 1, outputTokens: 1 }),
+  );
+  const executor = new ToolLoopAgentExecutor({
+    provider,
+    tools: new ToolRegistry(),
+    modelRouteResolver: new FixedModelRouteResolver({ modelId: "fake-model" }),
+    // The gate says the shared queue is blocked for another 30s; the
+    // provider fake resolves immediately, so only the narration matters.
+    dispatchGate: {
+      blockedUntil: Date.now() + 30_000,
+      blockReason: "anthropic rate limit",
+    },
+  });
+
+  const progress: string[] = [];
+  const result = await executor.execute(task({ taskId: "gate-task", input: "q" }), {
+    runId: "run-1",
+    nodePath: "root/gate",
+    reportProgress: (update) => progress.push(update.message),
+  });
+
+  assert.equal(result.status, "ok");
+  assert.ok(
+    progress.some((message) => message.includes("Dispatch paused (anthropic rate limit)")),
+    `the wait must be narrated, got: ${JSON.stringify(progress)}`,
+  );
+});

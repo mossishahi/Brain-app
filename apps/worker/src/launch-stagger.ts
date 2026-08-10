@@ -30,6 +30,17 @@ import { AgentCancelledError } from "@brainstorm-agentic/agent-runtime";
 /** Default spacing between agent launches: one launch every 10 seconds. */
 export const DEFAULT_LAUNCH_INTERVAL_MS = 10_000;
 
+/**
+ * Ceiling on how far ahead a launch slot may be reserved. The stagger's job
+ * is to soften the COLD ramp (acceleration limits, connection storms) — not
+ * to serialize a whole parallel wave: with the review fanning out ~150
+ * near-simultaneous tasks, an uncapped 10s spacing made the tail wait 20+
+ * minutes (observed in production as agents "waiting for 5 minutes"). Past
+ * the cap, launches proceed together and the request coordinator paces the
+ * actual wire traffic by the provider's own declared budgets.
+ */
+export const DEFAULT_MAX_BACKLOG_MS = 120_000;
+
 /** Waits below this stay silent; longer ones explain themselves in the feed. */
 const REPORT_WAIT_THRESHOLD_MS = 1_000;
 
@@ -54,6 +65,8 @@ function abortableSleep(delayMs: number, signal?: AbortSignal): Promise<void> {
 export interface StaggeredLaunchOptions {
   /** Minimum time between two agent launches. */
   readonly intervalMs: number;
+  /** Ceiling on the reservation backlog; 0 disables capping. Default 2 min. */
+  readonly maxBacklogMs?: number;
   /** Injectable clock (tests). */
   readonly now?: () => number;
   /** Injectable abortable sleep (tests). */
@@ -63,6 +76,7 @@ export interface StaggeredLaunchOptions {
 export class StaggeredLaunchAgentExecutor implements AgentExecutor {
   readonly #inner: AgentExecutor;
   readonly #intervalMs: number;
+  readonly #maxBacklogMs: number;
   readonly #now: () => number;
   readonly #sleep: (delayMs: number, signal?: AbortSignal) => Promise<void>;
   /** When the next launch slot opens, on this executor's clock. */
@@ -72,8 +86,13 @@ export class StaggeredLaunchAgentExecutor implements AgentExecutor {
     if (!Number.isFinite(options.intervalMs) || options.intervalMs < 0) {
       throw new Error("launch stagger intervalMs must be a non-negative number");
     }
+    const maxBacklogMs = options.maxBacklogMs ?? DEFAULT_MAX_BACKLOG_MS;
+    if (!Number.isFinite(maxBacklogMs) || maxBacklogMs < 0) {
+      throw new Error("launch stagger maxBacklogMs must be a non-negative number");
+    }
     this.#inner = inner;
     this.#intervalMs = options.intervalMs;
+    this.#maxBacklogMs = maxBacklogMs;
     this.#now = options.now ?? (() => Date.now());
     this.#sleep = options.sleep ?? abortableSleep;
   }
@@ -87,8 +106,15 @@ export class StaggeredLaunchAgentExecutor implements AgentExecutor {
     }
     // The slot is reserved synchronously: concurrent callers each advance
     // the shared cursor before any of them awaits, so a wave lines up on
-    // interval boundaries in arrival order.
-    const slotAt = Math.max(this.#now(), this.#nextSlotAt);
+    // interval boundaries in arrival order — but never beyond the backlog
+    // cap: the stagger softens the cold ramp, it does not serialize a whole
+    // parallel wave (the request coordinator paces the wire traffic).
+    const now = this.#now();
+    const cursor =
+      this.#maxBacklogMs > 0
+        ? Math.min(this.#nextSlotAt, now + this.#maxBacklogMs)
+        : this.#nextSlotAt;
+    const slotAt = Math.max(now, cursor);
     this.#nextSlotAt = slotAt + this.#intervalMs;
     const wait = slotAt - this.#now();
     if (wait > 0) {

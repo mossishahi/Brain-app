@@ -125,6 +125,7 @@ test("registry rate limits are waited out, not fatal", async (t) => {
     const { withRegistryRateLimitRetry } = await import("../src/index.js");
     const sleeps: number[] = [];
     let calls = 0;
+    const narrated: string[] = [];
     const value = await withRegistryRateLimitRetry(
       async () => {
         calls += 1;
@@ -133,10 +134,18 @@ test("registry rate limits are waited out, not fatal", async (t) => {
         }
         return "pinned";
       },
-      { waitMs: 5, sleep: async (ms) => { sleeps.push(ms); } },
+      {
+        waitMs: 5,
+        sleep: async (ms) => { sleeps.push(ms); },
+        onWait: (waitMs, attempt, retries) => {
+          narrated.push(`${waitMs}:${attempt}/${retries}`);
+        },
+      },
     );
     assert.equal(value, "pinned");
     assert.deepEqual(sleeps, [5]);
+    // The minute-scale sleep announces itself instead of passing as a hang.
+    assert.deepEqual(narrated, ["5:1/2"]);
   });
 
   await t.test("a non-rate-limit failure is rethrown immediately", async () => {

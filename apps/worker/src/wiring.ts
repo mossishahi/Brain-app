@@ -2,6 +2,8 @@
  * Deployment wiring: turns configuration (environment/flags) into a ready
  * BrainstormRuntime. Providers are chosen here — never in content or core.
  */
+import { readFileSync } from "node:fs";
+
 import {
   ToolLoopAgentExecutor,
   type AgentTaskModelAdapter,
@@ -281,6 +283,9 @@ export function buildAgentExecutor(
     modelRouteResolver: new TaskDescribedRouteResolver(defaultModel),
     taskAdapter: new DispatchPriorityTaskAdapter(new BrainstormAgentTaskAdapter()),
     outputValidator: new ContentArtifactOutputValidator(),
+    // The coordinator pauses dispatch inside provider.complete; handing the
+    // executor a window onto it lets the activity feed narrate those waits.
+    dispatchGate: coordinator,
   });
 }
 
@@ -615,6 +620,42 @@ function launchIntervalFromEnv(env: NodeJS.ProcessEnv): number | undefined {
   return Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
 
+/**
+ * Secrets from the owner-only credentials file, for submission channels
+ * that cannot inject a scheduler environment (held pilots are queued long
+ * before the run exists, with --export=NONE). The environment always wins;
+ * the file only fills gaps. Unreadable/malformed files contribute nothing —
+ * the run then fails with the normal missing-credential error.
+ */
+function credentialsFromFile(env: NodeJS.ProcessEnv): {
+  anthropicApiKey?: string;
+  claudeSetupToken?: string;
+  openRouterApiKey?: string;
+} {
+  const path = env.BRAINSTORM_AGENTIC_CREDENTIALS_FILE?.trim();
+  if (!path) return {};
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as {
+      anthropicApiKey?: unknown;
+      claudeSetupToken?: unknown;
+      openRouterApiKey?: unknown;
+    };
+    return {
+      ...(typeof parsed.anthropicApiKey === "string" && parsed.anthropicApiKey
+        ? { anthropicApiKey: parsed.anthropicApiKey }
+        : {}),
+      ...(typeof parsed.claudeSetupToken === "string" && parsed.claudeSetupToken
+        ? { claudeSetupToken: parsed.claudeSetupToken }
+        : {}),
+      ...(typeof parsed.openRouterApiKey === "string" && parsed.openRouterApiKey
+        ? { openRouterApiKey: parsed.openRouterApiKey }
+        : {}),
+    };
+  } catch {
+    return {};
+  }
+}
+
 export function providerConfigFromEnv(env: NodeJS.ProcessEnv, offline: boolean): ProviderConfig {
   const launchIntervalMs = launchIntervalFromEnv(env);
   if (offline) {
@@ -623,6 +664,7 @@ export function providerConfigFromEnv(env: NodeJS.ProcessEnv, offline: boolean):
       ...(launchIntervalMs !== undefined ? { launchIntervalMs } : {}),
     };
   }
+  const fileCredentials = credentialsFromFile(env);
   const selectedProvider =
     env.BRAINSTORM_AGENTIC_PROVIDER === "claude-agent"
       ? "claude-agent"
@@ -664,8 +706,8 @@ export function providerConfigFromEnv(env: NodeJS.ProcessEnv, offline: boolean):
     ...(Number.isFinite(safetyBufferSeconds) && safetyBufferSeconds >= 0
       ? { safetyBufferSeconds }
       : {}),
-    ...(env.OPENROUTER_API_KEY
-      ? { openRouterApiKey: env.OPENROUTER_API_KEY }
+    ...(env.OPENROUTER_API_KEY ?? fileCredentials.openRouterApiKey
+      ? { openRouterApiKey: (env.OPENROUTER_API_KEY ?? fileCredentials.openRouterApiKey)! }
       : {}),
     ...(env.BRAINSTORM_AGENTIC_OPENROUTER_MODEL
       ? { openRouterModel: env.BRAINSTORM_AGENTIC_OPENROUTER_MODEL }
@@ -676,9 +718,11 @@ export function providerConfigFromEnv(env: NodeJS.ProcessEnv, offline: boolean):
     provider: selectedProvider,
     ...(Object.keys(models).length > 0 ? { models } : {}),
     ...(defaultModel ? { defaultModel } : {}),
-    ...(env.ANTHROPIC_API_KEY ? { apiKey: env.ANTHROPIC_API_KEY } : {}),
-    ...(env.CLAUDE_CODE_OAUTH_TOKEN
-      ? { setupToken: env.CLAUDE_CODE_OAUTH_TOKEN }
+    ...(env.ANTHROPIC_API_KEY ?? fileCredentials.anthropicApiKey
+      ? { apiKey: (env.ANTHROPIC_API_KEY ?? fileCredentials.anthropicApiKey)! }
+      : {}),
+    ...(env.CLAUDE_CODE_OAUTH_TOKEN ?? fileCredentials.claudeSetupToken
+      ? { setupToken: (env.CLAUDE_CODE_OAUTH_TOKEN ?? fileCredentials.claudeSetupToken)! }
       : {}),
     ...(Object.keys(agentSdk).length > 0 ? { agentSdk } : {}),
     ...(Object.keys(creditRecovery).length > 0

@@ -232,6 +232,7 @@ async function main(): Promise<void> {
       );
   let running;
   try {
+    const pilotPool = stringFlag(args, "slurm-pilot-pool");
     running = await startBrainServer({
       workspace,
       host,
@@ -241,7 +242,13 @@ async function main(): Promise<void> {
         : {}),
       contentRegistryUrl: spawned.url,
       contentRegistryStatus,
-      selfUpdateCheck: true,
+      // A shift job cannot rebuild after an in-app update checkout (no
+      // wrapper loop follows it), so shifts launch with --no-self-update
+      // and releases are applied from the login node by the runway script.
+      selfUpdateCheck: !args.values.has("no-self-update"),
+      ...(pilotPool !== undefined
+        ? { pilotPoolDir: expandHome(pilotPool) }
+        : {}),
     });
   } catch (error) {
     spawned.child?.kill("SIGTERM");

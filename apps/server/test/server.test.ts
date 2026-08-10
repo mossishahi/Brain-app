@@ -105,6 +105,10 @@ async function startTestBrainServer(
   const registry = await startTestRegistry(staticRegistryRoot);
   try {
     const server = await startBrainServer({
+      // Production defaults a 3-minute post-start grace before unattended
+      // gate countdowns arm (shift handovers must not swallow gates); the
+      // suite's countdown tests need arming within seconds.
+      gateAutoApproveGraceMs: 0,
       ...options,
       contentRegistryUrl: registry.url,
       contentRegistryStatus: { running: true, url: registry.url },
@@ -906,6 +910,53 @@ test("failed required readiness checks re-probe on their cooldown; passing check
   }
 });
 
+test("the SLURM readiness check validates the pilot pool on pilot deployments", async () => {
+  // The server runs AS a SLURM job there — sbatch is denied on its node, so
+  // an sbatch probe would stay red forever and the readiness gate would
+  // block every submission. The honest check is the pool: held, claimable
+  // pilots in the queue.
+  const workspace = tempRoot();
+  try {
+    const bin = join(workspace, "bin");
+    const pool = join(workspace, "pool");
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(join(pool, "available"), { recursive: true });
+    writeFileSync(join(pool, "available", "111"), "serial");
+    writeFileSync(join(pool, "available", "222"), "serial");
+    // 111 is genuinely held; 222 already runs a claim — only 111 counts.
+    writeFileSync(
+      join(bin, "squeue"),
+      "#!/usr/bin/env bash\nprintf 'CLUSTER: serial\\n111 PENDING\\n222 RUNNING\\n'\n",
+    );
+    chmodSync(join(bin, "squeue"), 0o755);
+
+    const probes = defaultReadinessProbes({
+      validateAnthropic: async () => undefined,
+      validateClaudeAgent: async () => undefined,
+      pilotPoolDir: pool,
+    });
+    const base = defaultServerSettings();
+    const context: ReadinessProbeContext = {
+      settings: { ...base, runner: "slurm" },
+      env: { PATH: `${bin}:${process.env.PATH ?? ""}` },
+      workspace,
+      signal: new AbortController().signal,
+      credentials: {},
+      onProgress: () => undefined,
+    };
+    const ready = await probes.slurm(context);
+    assert.match(ready.message ?? "", /1 held pilot/);
+    assert.match(ready.message ?? "", /pilot channel ready/);
+
+    // An empty pool fails with the exact top-up instruction.
+    rmSync(join(pool, "available", "111"));
+    rmSync(join(pool, "available", "222"));
+    await assert.rejects(probes.slurm(context), /lrz-queue-runway/);
+  } finally {
+    await removeWorkspace(workspace);
+  }
+});
+
 test("llm and internet probes retry once, so a launch-time flicker never paints the dashboard red", async () => {
   // A freshly started host loses its first attempts to cold caches: the
   // first outbound connection overruns the fetch timeout, the Claude CLI's
@@ -1573,6 +1624,149 @@ test("fake sbatch submission records id and cancellation calls scancel", async (
     assert.equal(readFileSync(cancelRecord, "utf8"), "-M serial 123");
   } finally {
     await server.close();
+    await removeWorkspace(workspace);
+  }
+});
+
+test("the pilot channel claims a held job, releases it, and never calls sbatch", async () => {
+  // Server-as-a-SLURM-job deployments (LRZ): sbatch is denied at runtime,
+  // so submission = claim a pre-queued held pilot + scontrol release.
+  const workspace = tempRoot();
+  const bin = join(workspace, "bin");
+  const pool = join(workspace, "pilot-pool");
+  mkdirSync(bin, { recursive: true });
+  mkdirSync(join(pool, "available"), { recursive: true });
+  writeFileSync(join(pool, "available", "4242"), "serial");
+  const scontrolRecord = join(workspace, "scontrol.txt");
+  const scancelRecord = join(workspace, "scancel.txt");
+  writeFileSync(
+    join(bin, "scontrol"),
+    "#!/usr/bin/env bash\nprintf '%s' \"$*\" > \"$SCONTROL_RECORD\"\n",
+  );
+  writeFileSync(
+    join(bin, "scancel"),
+    "#!/usr/bin/env bash\nprintf '%s' \"$*\" > \"$SCANCEL_RECORD\"\n",
+  );
+  // No sbatch on PATH at all: a pilot submission must never need it.
+  chmodSync(join(bin, "scontrol"), 0o755);
+  chmodSync(join(bin, "scancel"), 0o755);
+  const server = await startTestBrainServer({
+    workspace,
+    port: 0,
+    pilotPoolDir: pool,
+    env: {
+      ...process.env,
+      PATH: `${bin}:${process.env.PATH ?? ""}`,
+      SCONTROL_RECORD: scontrolRecord,
+      SCANCEL_RECORD: scancelRecord,
+    },
+    readinessProbes: { slurm: async () => ({ message: "stubbed" }) },
+    readinessAdvisor: null,
+  });
+  try {
+    await putSettings(server, { llm: { provider: "offline" } });
+    const jobId = await submit(server, "Ride a held pilot");
+
+    const stored = JSON.parse(
+      readFileSync(join(workspace, "workspace", "jobs", jobId, "job.json"), "utf8"),
+    ) as { slurmJobId?: string; slurmCluster?: string };
+    assert.equal(stored.slurmJobId, "4242");
+    assert.equal(stored.slurmCluster, "serial");
+    assert.equal(
+      readFileSync(scontrolRecord, "utf8"),
+      "-M serial release 4242",
+      "the release carries the pilot's landing cluster",
+    );
+    // The claim moved the marker and spooled the assignment.
+    assert.equal(existsSync(join(pool, "available", "4242")), false);
+    assert.equal(existsSync(join(pool, "claimed", "4242")), true);
+    const assignment = readFileSync(join(pool, "spool", "4242.sh"), "utf8");
+    assert.ok(
+      assignment.includes(join(workspace, "workspace", "jobs", jobId)),
+      "the assignment cds into the job directory",
+    );
+    assert.match(assignment, /exec bash .*submit\.sh/);
+
+    // An empty pool fails LOUD with the runway instruction, creating no job.
+    const empty = await requestJson<{ message: string }>(server, "/api/jobs", {
+      method: "POST",
+      body: JSON.stringify({ topic: "no pilot left" }),
+    });
+    assert.equal(empty.status, 400);
+    assert.match(empty.value.message, /no held pilot jobs are available/);
+
+    // Cancel goes through scancel with the recorded cluster, as usual.
+    const cancelled = await requestJson<{ status: string }>(
+      server,
+      `/api/jobs/${jobId}/cancel`,
+      { method: "POST", body: "{}" },
+    );
+    assert.equal(cancelled.value.status, "cancelled");
+    assert.equal(readFileSync(scancelRecord, "utf8"), "-M serial 4242");
+  } finally {
+    await server.close();
+    await removeWorkspace(workspace);
+  }
+});
+
+test("gate countdowns do not arm during the post-start grace window", async () => {
+  // A gate raised while no server was running (shift handover, restart)
+  // must not auto-approve before a human could possibly have seen it.
+  const workspace = tempRoot();
+  try {
+    const jobId = "handover-gate-job";
+    const jobDir = join(workspace, "workspace", "jobs", jobId);
+    const sessionDir = join(workspace, "workspace", "sessions", jobId);
+    mkdirSync(jobDir, { recursive: true });
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(
+      join(jobDir, "job.json"),
+      JSON.stringify({
+        jobId,
+        topic: "suspended across a shift handover",
+        status: "suspended",
+        runner: "local",
+        createdAt: Date.now() - 60_000,
+        updatedAt: Date.now() - 30_000,
+        submissionCount: 1,
+      }),
+    );
+    writeFileSync(
+      join(sessionDir, "checkpoint.json"),
+      JSON.stringify({
+        runId: jobId,
+        workflowId: "brainstorm",
+        status: "suspended",
+        input: {},
+        journal: [],
+        pendingGates: [
+          { gateKey: "confirm-panel", journalKey: "confirm-panel::response", path: "root/confirm-panel" },
+        ],
+        seq: 4,
+        updatedAt: Date.now() - 30_000,
+      }),
+    );
+
+    const graced = new JobManager({ workspace, gateAutoApproveGraceMs: 60_000 });
+    graced.reload();
+    await graced.autoApproveDueGates();
+    const withGrace = JSON.parse(readFileSync(join(jobDir, "job.json"), "utf8")) as {
+      gateAutoApprove?: unknown;
+    };
+    assert.equal(
+      withGrace.gateAutoApprove,
+      undefined,
+      "inside the grace window the countdown must not arm",
+    );
+
+    const immediate = new JobManager({ workspace, gateAutoApproveGraceMs: 0 });
+    immediate.reload();
+    await immediate.autoApproveDueGates();
+    const withoutGrace = JSON.parse(readFileSync(join(jobDir, "job.json"), "utf8")) as {
+      gateAutoApprove?: { gateKey?: string };
+    };
+    assert.equal(withoutGrace.gateAutoApprove?.gateKey, "confirm-panel");
+  } finally {
     await removeWorkspace(workspace);
   }
 });
@@ -3046,6 +3240,68 @@ test("readiness reports required checks, gates submissions while red, and re-run
   }
 });
 
+test("a SLURM worker's fresh workspace activity proves it alive without a scheduler call", async () => {
+  // LRZ policy treats seconds-scale squeue/sacct polling as bannable. The
+  // worker's own checkpoint/events writes on shared storage are the primary
+  // liveness signal; the scheduler is only consulted once they go quiet.
+  const workspace = tempRoot();
+  try {
+    const jobId = "slurm-fresh-job";
+    const jobDir = join(workspace, "workspace", "jobs", jobId);
+    const sessionDir = join(workspace, "workspace", "sessions", jobId);
+    mkdirSync(jobDir, { recursive: true });
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(
+      join(jobDir, "job.json"),
+      JSON.stringify({
+        jobId,
+        topic: "runs on the serial cluster",
+        status: "running",
+        runner: "slurm",
+        slurmJobId: "424242",
+        createdAt: Date.now() - 120_000,
+        updatedAt: Date.now() - 60_000,
+        submissionCount: 1,
+      }),
+    );
+    // Written NOW: the mtime is fresh even though the checkpoint says the
+    // run is mid-flight.
+    writeFileSync(
+      join(sessionDir, "checkpoint.json"),
+      JSON.stringify({
+        runId: jobId,
+        workflowId: "brainstorm",
+        status: "running",
+        input: {},
+        journal: [],
+        pendingGates: [],
+        seq: 3,
+        updatedAt: Date.now() - 60_000,
+      }),
+    );
+    // PATH has no squeue/sacct: any scheduler probe would report dead.
+    const env = { PATH: join(workspace, "no-bin") };
+
+    const fresh = new JobManager({ workspace, env });
+    fresh.reload();
+    assert.equal(
+      (await fresh.detail(jobId)).status,
+      "running",
+      "fresh on-disk activity is the liveness verdict; the scheduler is never needed",
+    );
+
+    const strict = new JobManager({ workspace, env, slurmActivityFreshnessMs: 0 });
+    strict.reload();
+    assert.equal(
+      (await strict.detail(jobId)).status,
+      "orphaned",
+      "with the freshness shortcut disabled, the (unreachable) scheduler decides",
+    );
+  } finally {
+    await removeWorkspace(workspace);
+  }
+});
+
 test("interrupted jobs resume manually from their last checkpoint", async () => {
   const workspace = tempRoot();
   const marker = join(workspace, "interrupted-resume-marker.txt");
@@ -3388,6 +3644,9 @@ fs.writeFileSync(checkpointPath, JSON.stringify(checkpoint, null, 2));
     workspace,
     workerPath: fakeCli,
     now: () => clock,
+    // This test drives arming/firing directly; the post-start handover
+    // grace is covered by its own test.
+    gateAutoApproveGraceMs: 0,
   });
   const settings = await manager.settings.put({
     ...manager.settings.get(),

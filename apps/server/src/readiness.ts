@@ -11,7 +11,14 @@
  * immediately and re-verifies in the background.
  */
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import process from "node:process";
 
@@ -203,10 +210,28 @@ export interface DefaultReadinessProbeOptions {
   readonly validateClaudeAgent: ClaudeAgentConnectionValidator;
   /** Ceiling for the whole SLURM probe (submission + queue wait). */
   readonly slurmProbeTimeoutMs?: number;
+  /**
+   * Held-pilot deployments: verify the pilot pool (markers + one squeue)
+   * instead of submitting an sbatch probe job — sbatch is denied on the
+   * compute node the server runs on.
+   */
+  readonly pilotPoolDir?: string;
   readonly fetchImpl?: typeof fetch;
 }
 
+/**
+ * Loop tick: sentinel-file, abort, and deadline checks — local work only.
+ * The sentinel on shared storage is the probe's primary success signal, so
+ * a fast tick costs the scheduler nothing.
+ */
 const SLURM_POLL_MS = 3_000;
+/**
+ * Scheduler cadence: squeue fires on its own, far slower clock (progress
+ * narration and gone-detection only). Shared clusters treat seconds-scale
+ * squeue polling as abuse (LRZ policy); the probe is bounded at ~4 minutes,
+ * so this costs at most ~8 squeue calls.
+ */
+const SLURM_SCHEDULER_POLL_MS = 30_000;
 /** Grace between "job left the queue" and judging the sentinel missing. */
 const SLURM_GONE_GRACE_MS = 15_000;
 
@@ -395,6 +420,54 @@ export function defaultReadinessProbes(
     },
 
     slurm: async (context) => {
+      // Pilot deployments (server runs AS a SLURM job; sbatch is denied on
+      // compute nodes) submit by releasing pre-queued held pilots, so the
+      // honest check is the pool itself: are claimable pilots actually
+      // queued and held right now? One squeue call — probes run on user
+      // action, startup, and slow cooldowns, well within polling etiquette.
+      if (options.pilotPoolDir !== undefined) {
+        const availableDir = join(options.pilotPoolDir, "available");
+        const markers = (() => {
+          try {
+            return readdirSync(availableDir).filter((name) => /^\d+$/.test(name));
+          } catch {
+            return [] as string[];
+          }
+        })();
+        if (markers.length === 0) {
+          throw new ReadinessProbeError(
+            "the pilot pool is empty — top it up from a login node with deploy/lrz-queue-runway.sh",
+            `no available/<jobid> markers below ${availableDir}`,
+          );
+        }
+        const cluster =
+          readFileSync(join(availableDir, markers[0]!), "utf8").trim() || undefined;
+        const listed = await runCommand(
+          "squeue",
+          [
+            ...slurmClusterArgs(cluster),
+            "-h",
+            "-j",
+            markers.join(","),
+            "-o",
+            "%i %T",
+          ],
+          { env: context.env, timeoutMs: 8_000 },
+        );
+        const held = stripSlurmClusterBanners(listed.stdout)
+          .split("\n")
+          .filter((line) => /\bPENDING\b/i.test(line)).length;
+        if (held === 0) {
+          throw new ReadinessProbeError(
+            "every pilot marker is stale (no held pilot jobs in the queue) — re-run deploy/lrz-queue-runway.sh from a login node",
+            listed.stdout.trim() || "(squeue listed none of the marker job ids)",
+          );
+        }
+        return {
+          message: `pilot channel ready · ${held} held pilot(s) claimable via scontrol release`,
+        };
+      }
+
       await runCommand("sbatch", ["--version"], {
         env: context.env,
         timeoutMs: 8_000,
@@ -454,6 +527,7 @@ export function defaultReadinessProbes(
 
       const deadline = Date.now() + (options.slurmProbeTimeoutMs ?? 240_000);
       let goneSince: number | undefined;
+      let lastSchedulerPollAt = Number.NEGATIVE_INFINITY;
       const cleanup = (): void => {
         rmSync(scriptPath, { force: true });
         rmSync(sentinel, { force: true });
@@ -474,6 +548,11 @@ export function defaultReadinessProbes(
             tailOfFile(log),
           );
         }
+        if (Date.now() - lastSchedulerPollAt < SLURM_SCHEDULER_POLL_MS) {
+          await sleep(SLURM_POLL_MS, context.signal);
+          continue;
+        }
+        lastSchedulerPollAt = Date.now();
         const queueState = await runCommand(
           "squeue",
           ["-h", "-j", jobId, "-o", "%T", ...clusterArgs],
