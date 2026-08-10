@@ -79,6 +79,30 @@ export interface GpuRunConfig {
   readonly sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
 }
 
+/**
+ * Multi-cluster SLURM helpers. On sites running several SLURM clusters
+ * (e.g. LRZ CoolMUC-4: cm4/serial/inter), sbatch reports where a job
+ * landed ("Submitted batch job N on cluster X"); every later squeue/sacct/
+ * scancel must then carry -M X or the job is invisible. -M output prefixes
+ * a "CLUSTER: X" banner line that state parsers must ignore.
+ */
+export function slurmClusterFrom(sbatchStdout: string): string | undefined {
+  return /Submitted batch job\s+\S+\s+on cluster\s+(\S+)/.exec(sbatchStdout)?.[1];
+}
+
+/** Drops "CLUSTER: X" banner lines from squeue/sacct output. */
+export function stripSlurmClusterBanners(output: string): string {
+  return output
+    .split("\n")
+    .filter((line) => !/^\s*CLUSTER\s*:/i.test(line))
+    .join("\n");
+}
+
+/** The -M argument list for a captured cluster (empty when single-cluster). */
+export function slurmClusterArgs(cluster: string | undefined): readonly string[] {
+  return cluster === undefined ? [] : ["-M", cluster];
+}
+
 /** Splices the agent's script into the user's template, verbatim. */
 export function renderGpuTemplate(template: string, script: string): string {
   const index = template.indexOf(AGENT_COMMAND_TAG);
@@ -312,20 +336,24 @@ export function gpuRunTools(config: GpuRunConfig): readonly Tool[] {
         };
       }
       const jobId = match[1]!;
+      // Multi-cluster sites report the landing cluster; later scheduler
+      // commands need it or the job is invisible to them.
+      const cluster = slurmClusterFrom(submitted.stdout);
+      const clusterArgs = slurmClusterArgs(cluster);
 
       const deadline = now() + maxQueueWaitMs + minutes * 60_000 + 60_000;
       const startedAt = now();
       let goneSince: number | undefined;
       for (;;) {
         if (signal?.aborted) {
-          await run("scancel", [jobId], {
+          await run("scancel", [...clusterArgs, jobId], {
             cwd: jobDir,
             timeoutMs: SCHEDULER_COMMAND_TIMEOUT_MS,
           }).catch(() => undefined);
           throw abortError();
         }
         if (now() > deadline) {
-          await run("scancel", [jobId], {
+          await run("scancel", [...clusterArgs, jobId], {
             cwd: jobDir,
             timeoutMs: SCHEDULER_COMMAND_TIMEOUT_MS,
           }).catch(() => undefined);
@@ -349,12 +377,16 @@ export function gpuRunTools(config: GpuRunConfig): readonly Tool[] {
             isError: true,
           };
         }
-        const queueState = await run("squeue", ["-h", "-j", jobId, "-o", "%T"], {
-          cwd: jobDir,
-          timeoutMs: SCHEDULER_COMMAND_TIMEOUT_MS,
-          ...(signal ? { signal } : {}),
-        })
-          .then((result) => result.stdout.trim() || undefined)
+        const queueState = await run(
+          "squeue",
+          ["-h", "-j", jobId, "-o", "%T", ...clusterArgs],
+          {
+            cwd: jobDir,
+            timeoutMs: SCHEDULER_COMMAND_TIMEOUT_MS,
+            ...(signal ? { signal } : {}),
+          },
+        )
+          .then((result) => stripSlurmClusterBanners(result.stdout).trim() || undefined)
           .catch(() => undefined);
         if (queueState && LIVE_STATES.test(queueState)) {
           goneSince = undefined;
@@ -367,11 +399,18 @@ export function gpuRunTools(config: GpuRunConfig): readonly Tool[] {
         await sleep(pollIntervalMs, signal);
       }
 
-      const finalState = await run("sacct", ["-n", "-j", jobId, "--format=State"], {
-        cwd: jobDir,
-        timeoutMs: SCHEDULER_COMMAND_TIMEOUT_MS,
-      })
-        .then((result) => result.stdout.trim().split(/\s+/)[0] ?? "")
+      const finalState = await run(
+        "sacct",
+        ["-n", "-j", jobId, "--format=State", ...clusterArgs],
+        {
+          cwd: jobDir,
+          timeoutMs: SCHEDULER_COMMAND_TIMEOUT_MS,
+        },
+      )
+        .then(
+          (result) =>
+            stripSlurmClusterBanners(result.stdout).trim().split(/\s+/)[0] ?? "",
+        )
         .catch(() => "");
       const state = finalState || "UNKNOWN";
       const { log, truncated } = readJobLog(logPath);

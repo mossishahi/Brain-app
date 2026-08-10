@@ -50,6 +50,9 @@ export {
   GPU_RUN_TOOL_NAMES,
   gpuRunTools,
   renderGpuTemplate,
+  slurmClusterArgs,
+  slurmClusterFrom,
+  stripSlurmClusterBanners,
 } from "./gpu-run.js";
 export type { GpuRunConfig, RunSchedulerCommand } from "./gpu-run.js";
 export type {

@@ -10,6 +10,8 @@ import {
   GPU_RUN_MANIFEST,
   gpuRunTools,
   renderGpuTemplate,
+  slurmClusterFrom,
+  stripSlurmClusterBanners,
 } from "../src/index.js";
 
 const TEMPLATE = `#!/usr/bin/env bash
@@ -34,27 +36,32 @@ function fakeScheduler(options: {
   readonly finalState?: string;
   readonly submitResult?: ExecutionResult;
   readonly writeLogOnLeave?: (jobDir: string) => void;
+  /** Multi-cluster shape: sbatch names the cluster, output carries banners. */
+  readonly cluster?: string;
 }): { run: RunSchedulerCommand; calls: Array<{ command: string; args: readonly string[] }> } {
   const calls: Array<{ command: string; args: readonly string[] }> = [];
   const queue = [...(options.queueStates ?? [])];
+  const banner = options.cluster !== undefined ? `CLUSTER: ${options.cluster}\n` : "";
   let jobDir: string | undefined;
   const run: RunSchedulerCommand = async (command, args, runOptions) => {
     calls.push({ command, args });
     jobDir ??= runOptions.cwd;
     if (command === "sbatch") {
+      const suffix = options.cluster !== undefined ? ` on cluster ${options.cluster}` : "";
       return (
-        options.submitResult ?? ok(`Submitted batch job ${options.jobId ?? "4242"}\n`)
+        options.submitResult ??
+        ok(`Submitted batch job ${options.jobId ?? "4242"}${suffix}\n`)
       );
     }
     if (command === "squeue") {
       const state = queue.shift();
       if (state === undefined) {
         options.writeLogOnLeave?.(jobDir);
-        return ok("");
+        return ok(banner);
       }
-      return ok(`${state}\n`);
+      return ok(`${banner}${state}\n`);
     }
-    if (command === "sacct") return ok(`${options.finalState ?? "COMPLETED"}\n`);
+    if (command === "sacct") return ok(`${banner}${options.finalState ?? "COMPLETED"}\n`);
     if (command === "scancel") return ok("");
     throw new Error(`unexpected scheduler command: ${command}`);
   };
@@ -263,6 +270,46 @@ describe("gpu_run", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it("tracks the landing cluster on multi-cluster sites and reads through banners", async () => {
+    const root = mkdtempSync(join(tmpdir(), "gpu-run-"));
+    try {
+      const scheduler = fakeScheduler({
+        jobId: "55",
+        cluster: "serial",
+        queueStates: ["PENDING", "RUNNING"],
+        finalState: "COMPLETED",
+        writeLogOnLeave: (jobDir) => {
+          writeFileSync(join(jobDir, "job.log"), "done\n", "utf8");
+        },
+      });
+      const [tool] = gpuRunTools(config(root, scheduler.run));
+      const result = await tool!.execute({ script: "true" }, { runId: "r1" });
+      assert.equal(result.isError, undefined);
+      assert.equal((result.output as { state: string }).state, "COMPLETED");
+      // Every post-submission scheduler command carries -M <cluster>.
+      for (const call of scheduler.calls.filter((c) => c.command !== "sbatch")) {
+        const flag = call.args.indexOf("-M");
+        assert.ok(flag >= 0, `${call.command} carries -M`);
+        assert.equal(call.args[flag + 1], "serial");
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("parses multi-cluster sbatch output and strips banners", () => {
+    assert.equal(
+      slurmClusterFrom("Submitted batch job 5397996 on cluster serial\n"),
+      "serial",
+    );
+    assert.equal(slurmClusterFrom("Submitted batch job 123\n"), undefined);
+    assert.equal(
+      stripSlurmClusterBanners("CLUSTER: serial\nRUNNING\n").trim(),
+      "RUNNING",
+    );
+    assert.equal(stripSlurmClusterBanners("CLUSTER: serial\n").trim(), "");
   });
 
   it("declares gpu.run and stays disabled by default", () => {

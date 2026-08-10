@@ -14,6 +14,13 @@ export interface JobRecord {
   readonly createdAt: number;
   updatedAt: number;
   slurmJobId?: string;
+  /**
+   * The SLURM cluster the submission landed on, as reported by sbatch
+   * ("Submitted batch job N on cluster X"). Multi-cluster sites (e.g. LRZ)
+   * route submissions by script directives, but squeue/sacct/scancel then
+   * need an explicit -M for the job to be visible at all.
+   */
+  slurmCluster?: string;
   pid?: number;
   warnings?: string[];
   error?: string;

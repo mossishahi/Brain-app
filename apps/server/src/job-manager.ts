@@ -19,6 +19,11 @@ import {
 import type { WorkflowCheckpoint } from "@brainstorm-agentic/core";
 import { MIN_SUPPORTED_WORKFLOW_VERSION } from "@brainstorm-agentic/content";
 import {
+  slurmClusterArgs,
+  slurmClusterFrom,
+  stripSlurmClusterBanners,
+} from "@brainstorm-agentic/host-tools";
+import {
   isCreditLimitMessage,
   resolveCreditReset,
 } from "@brainstorm-agentic/credit-recovery";
@@ -359,6 +364,11 @@ export class JobManager {
         throw new Error(`sbatch returned an unrecognized response: ${result.stdout.trim()}`);
       }
       record.slurmJobId = match[1]!;
+      // Multi-cluster sites (LRZ) name the landing cluster; every later
+      // squeue/sacct/scancel needs it or the job is invisible to them.
+      const cluster = slurmClusterFrom(result.stdout);
+      if (cluster !== undefined) record.slurmCluster = cluster;
+      else delete record.slurmCluster;
       delete record.pid;
       return;
     }
@@ -568,34 +578,43 @@ export class JobManager {
     { at: number; alive: Promise<boolean> }
   >();
 
-  private slurmAlive(id: string | undefined): Promise<boolean> {
+  private slurmAlive(record: JobRecord): Promise<boolean> {
+    const id = record.slurmJobId;
     if (!id) return Promise.resolve(false);
-    const cached = this.slurmAliveCache.get(id);
+    const key = `${record.slurmCluster ?? ""}:${id}`;
+    const cached = this.slurmAliveCache.get(key);
     if (cached && this.now() - cached.at < JobManager.SLURM_ALIVE_TTL_MS) {
       return cached.alive;
     }
-    const alive = this.probeSlurmAlive(id);
-    this.slurmAliveCache.set(id, { at: this.now(), alive });
+    const alive = this.probeSlurmAlive(id, record.slurmCluster);
+    this.slurmAliveCache.set(key, { at: this.now(), alive });
     return alive;
   }
 
-  private async probeSlurmAlive(id: string): Promise<boolean> {
+  private async probeSlurmAlive(id: string, cluster?: string): Promise<boolean> {
+    const clusterArgs = slurmClusterArgs(cluster);
     try {
-      const queue = await execute("squeue", ["-h", "-j", id, "-o", "%T"], {
-        env: this.env,
-        timeout: 2_000,
-      });
-      if (queue.stdout.trim().length > 0) return true;
+      const queue = await execute(
+        "squeue",
+        ["-h", "-j", id, "-o", "%T", ...clusterArgs],
+        {
+          env: this.env,
+          timeout: 2_000,
+        },
+      );
+      // -M output carries a "CLUSTER: X" banner even for an empty queue;
+      // only real state lines mean the job still exists there.
+      if (stripSlurmClusterBanners(queue.stdout).trim().length > 0) return true;
     } catch {
       // Fall through to accounting; clusters commonly purge squeue quickly.
     }
     try {
       const accounting = await execute(
         "sacct",
-        ["-n", "-j", id, "--format=State"],
+        ["-n", "-j", id, "--format=State", ...clusterArgs],
         { env: this.env, timeout: 2_000 },
       );
-      return accounting.stdout
+      return stripSlurmClusterBanners(accounting.stdout)
         .split(/\s+/)
         .some((state) =>
           /^(PENDING|RUNNING|CONFIGURING|COMPLETING|SUSPENDED|RESIZING)$/i.test(
@@ -633,7 +652,7 @@ export class JobManager {
         const alive =
           record.runner === "local"
             ? this.localAlive(record.pid)
-            : await this.slurmAlive(record.slurmJobId);
+            : await this.slurmAlive(record);
         if (alive || this.now() - submittedAt < 30_000) {
           if (record.status !== "queued") {
             record.status = "queued";
@@ -683,7 +702,7 @@ export class JobManager {
     const alive =
       record.runner === "local"
         ? this.localAlive(record.pid)
-        : await this.slurmAlive(record.slurmJobId);
+        : await this.slurmAlive(record);
     if (!alive) {
       if (record.status !== "orphaned") {
         record.status = "orphaned";
@@ -835,7 +854,7 @@ export class JobManager {
     }
     try {
       if (record.runner === "slurm" && record.slurmJobId) {
-        await execute("scancel", [record.slurmJobId], {
+        await execute("scancel", [...slurmClusterArgs(record.slurmCluster), record.slurmJobId], {
           env: this.env,
           timeout: 5_000,
         });
@@ -889,7 +908,7 @@ export class JobManager {
         const alive =
           record.runner === "local"
             ? this.localAlive(record.pid)
-            : await this.slurmAlive(record.slurmJobId);
+            : await this.slurmAlive(record);
         if (alive || this.now() - record.autoResumePending.submittedAt < 30_000) {
           continue;
         }
@@ -945,7 +964,7 @@ export class JobManager {
       const alive =
         record.runner === "local"
           ? this.localAlive(record.pid)
-          : await this.slurmAlive(record.slurmJobId);
+          : await this.slurmAlive(record);
       if (alive || this.now() - record.autoResumePending.submittedAt < 30_000) {
         throw new JobConflictError(
           `job "${jobId}" already has a resume submission in progress`,
@@ -996,7 +1015,7 @@ export class JobManager {
       const alive =
         record.runner === "local"
           ? this.localAlive(record.pid)
-          : await this.slurmAlive(record.slurmJobId);
+          : await this.slurmAlive(record);
       if (alive || this.now() - record.autoResumePending.submittedAt < 30_000) {
         throw new JobConflictError(
           `job "${jobId}" already has a resume submission in progress`,

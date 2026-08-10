@@ -43,9 +43,12 @@ echo "PROBE proxy environment (empty = direct):"
 env | grep -i -E '^(https?|no)_proxy=' || echo "  (none set)"
 
 check_https() {
-  local label=$1 url=$2
-  if curl -fsS --max-time 20 -o /dev/null -w "%{http_code}" "$url" >/tmp/probe-code 2>/tmp/probe-err; then
-    echo "PROBE https $label: OK (HTTP $(cat /tmp/probe-code))"
+  local label=$1 url=$2 code
+  # ANY HTTP status (401 included) proves DNS + TLS + outbound routing;
+  # only transport failures (code 000) mean the host is unreachable.
+  code=$(curl -sS --max-time 20 -o /dev/null -w "%{http_code}" "$url" 2>/tmp/probe-err || true)
+  if [ -n "$code" ] && [ "$code" != "000" ]; then
+    echo "PROBE https $label: OK (HTTP $code — transport works)"
   else
     echo "PROBE https $label: FAILED ($(head -c 200 /tmp/probe-err))"
   fi

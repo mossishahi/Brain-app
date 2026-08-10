@@ -1531,10 +1531,15 @@ test("fake sbatch submission records id and cancellation calls scancel", async (
   const cancelRecord = join(workspace, "scancel.txt");
   const sbatch = join(bin, "sbatch");
   const scancel = join(bin, "scancel");
-  writeFileSync(sbatch, "#!/usr/bin/env bash\necho 'Submitted batch job 123'\n");
+  // Multi-cluster SLURM (LRZ shape): sbatch names the landing cluster, and
+  // later scheduler commands must carry -M for the job to be visible.
+  writeFileSync(
+    sbatch,
+    "#!/usr/bin/env bash\necho 'Submitted batch job 123 on cluster serial'\n",
+  );
   writeFileSync(
     scancel,
-    "#!/usr/bin/env bash\nprintf '%s' \"$1\" > \"$SCANCEL_RECORD\"\n",
+    "#!/usr/bin/env bash\nprintf '%s' \"$*\" > \"$SCANCEL_RECORD\"\n",
   );
   chmodSync(sbatch, 0o755);
   chmodSync(scancel, 0o755);
@@ -1556,15 +1561,16 @@ test("fake sbatch submission records id and cancellation calls scancel", async (
     const jobId = await submit(server, "Submit through fake Slurm");
     const stored = JSON.parse(
       readFileSync(join(workspace, "workspace", "jobs", jobId, "job.json"), "utf8"),
-    ) as { slurmJobId?: string };
+    ) as { slurmJobId?: string; slurmCluster?: string };
     assert.equal(stored.slurmJobId, "123");
+    assert.equal(stored.slurmCluster, "serial");
     const cancelled = await requestJson<{ status: string }>(
       server,
       `/api/jobs/${jobId}/cancel`,
       { method: "POST", body: "{}" },
     );
     assert.equal(cancelled.value.status, "cancelled");
-    assert.equal(readFileSync(cancelRecord, "utf8"), "123");
+    assert.equal(readFileSync(cancelRecord, "utf8"), "-M serial 123");
   } finally {
     await server.close();
     await removeWorkspace(workspace);
@@ -2296,6 +2302,119 @@ test("manual gate can shrink, complete, and reload after restart", async () => {
     assert.equal(reloaded.value.status, "completed");
     assert.ok(reloaded.value.stages[6]!.id === "bridge-audit");
     assert.ok(reloaded.value.stages[7]!.id === "synthesize-proposal");
+  } finally {
+    await server.close();
+    await removeWorkspace(workspace);
+  }
+});
+
+test("a classification revision over HTTP proceeds with the revised reading", async () => {
+  // Regression: the gate route validated action against approve|shrink only
+  // and answered 400 "invalid gate answer" for "revise", while
+  // JobManager.answerGate and the webapp's classification gate card fully
+  // implement it — revising the submission type from the dashboard was
+  // impossible.
+  const workspace = tempRoot();
+  const server = await startTestBrainServer({ workspace, port: 0 });
+  try {
+    await putSettings(server, {
+      runner: "local",
+      panelConfirmation: "manual",
+      llm: { provider: "offline" },
+    });
+    const jobId = await submit(server, "Revise this run's reading at the gate");
+    const suspended = await waitFor(server, jobId, "suspended");
+    if (suspended.pendingGate?.gateKey !== "confirm-classification") {
+      // Pre-split bundles (< 0.14.0) have no classification gate to revise.
+      assert.ok(suspended.pendingGate, "the run paused on a gate");
+      return;
+    }
+    const classification = suspended.pendingGate.classification;
+    assert.ok(classification, "the classification gate carries the offered readings");
+
+    // Structurally malformed asks are refused at the route.
+    const malformed = await requestJson<{ message: string }>(
+      server,
+      `/api/jobs/${jobId}/gate`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          gateKey: "confirm-classification",
+          action: "revise",
+          requestedOutputs: [{ title: "Missing the ask" }],
+        }),
+      },
+    );
+    assert.equal(malformed.status, 400);
+    assert.match(malformed.value.message, /invalid gate answer/);
+
+    // Semantically invalid revisions still fail in the manager: a type the
+    // run's catalog never offered is rejected, not forwarded to the worker.
+    const unknownType = await requestJson<{ message: string }>(
+      server,
+      `/api/jobs/${jobId}/gate`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          gateKey: "confirm-classification",
+          action: "revise",
+          type: "not-a-catalog-type",
+        }),
+      },
+    );
+    assert.equal(unknownType.status, 400);
+    assert.match(unknownType.value.message, /not a type/);
+
+    // Revise the requested outputs while keeping the primary reading — the
+    // offline executor stubs only the paper shape, so the type stays put and
+    // the asks carry the revision end to end.
+    const requestedOutputs = [
+      { title: "Benchmark table", ask: "Summarize the benchmark results as one table." },
+    ];
+    const revised = await requestJson<JobDetail>(server, `/api/jobs/${jobId}/gate`, {
+      method: "POST",
+      body: JSON.stringify({
+        gateKey: "confirm-classification",
+        action: "revise",
+        requestedOutputs,
+      }),
+    });
+    assert.equal(revised.status, 200);
+
+    // The revision resumes the run to the panel gate; approve it as seated.
+    const deadline = Date.now() + 120_000;
+    for (;;) {
+      const detail = (await requestJson<JobDetail>(server, `/api/jobs/${jobId}`)).value;
+      if (detail.status === "suspended" && detail.pendingGate?.gateKey === "confirm-panel") {
+        break;
+      }
+      if (Date.now() > deadline) {
+        throw new Error("the panel gate never arrived after the revision");
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    const approved = await requestJson<JobDetail>(server, `/api/jobs/${jobId}/gate`, {
+      method: "POST",
+      body: JSON.stringify({ gateKey: "confirm-panel", action: "approve" }),
+    });
+    assert.equal(approved.status, 200);
+
+    const completed = await waitFor(server, jobId, "completed");
+    const stage = completed.stages[0]!;
+    assert.equal(stage.id, "process-input");
+    if (stage.id === "process-input") {
+      assert.equal(stage.classification?.gate.state, "revised");
+      assert.equal(
+        stage.output?.type,
+        classification.primary.type,
+        "an asks-only revision keeps the primary reading",
+      );
+      assert.deepEqual(
+        stage.output?.requestedOutputs?.map((entry) => entry.title),
+        ["Benchmark table"],
+        "the revised asks replace the classifier's suggestions",
+      );
+    }
   } finally {
     await server.close();
     await removeWorkspace(workspace);

@@ -25,6 +25,9 @@ import {
   ATTACHMENT_MANIFESTS,
   TAXONOMY_MANIFESTS,
   prepareCodeWorkspace,
+  slurmClusterArgs,
+  slurmClusterFrom,
+  stripSlurmClusterBanners,
 } from "@brainstorm-agentic/host-tools";
 import {
   READINESS_CHECK_IDS,
@@ -444,6 +447,9 @@ export function defaultReadinessProbes(
         );
       }
       const jobId = match[1]!;
+      // Multi-cluster sites (LRZ) report the landing cluster; polls and
+      // cancels need -M for the probe job to be visible to them at all.
+      const clusterArgs = slurmClusterArgs(slurmClusterFrom(submitted.stdout));
       context.onProgress(`probe job ${jobId} submitted; waiting for the scheduler…`);
 
       const deadline = Date.now() + (options.slurmProbeTimeoutMs ?? 240_000);
@@ -459,7 +465,7 @@ export function defaultReadinessProbes(
         }
         if (context.signal.aborted) throw new Error("readiness check aborted");
         if (Date.now() > deadline) {
-          await runCommand("scancel", [jobId], {
+          await runCommand("scancel", [...clusterArgs, jobId], {
             env: context.env,
             timeoutMs: 5_000,
           }).catch(() => undefined);
@@ -468,11 +474,17 @@ export function defaultReadinessProbes(
             tailOfFile(log),
           );
         }
-        const queueState = await runCommand("squeue", ["-h", "-j", jobId, "-o", "%T"], {
-          env: context.env,
-          timeoutMs: 5_000,
-        })
-          .then((result) => result.stdout.trim() || undefined)
+        const queueState = await runCommand(
+          "squeue",
+          ["-h", "-j", jobId, "-o", "%T", ...clusterArgs],
+          {
+            env: context.env,
+            timeoutMs: 5_000,
+          },
+        )
+          .then(
+            (result) => stripSlurmClusterBanners(result.stdout).trim() || undefined,
+          )
           .catch(() => undefined);
         if (queueState && SLURM_LIVE_STATES.test(queueState)) {
           goneSince = undefined;
@@ -486,10 +498,13 @@ export function defaultReadinessProbes(
           if (Date.now() - goneSince > SLURM_GONE_GRACE_MS) {
             const finalState = await runCommand(
               "sacct",
-              ["-n", "-j", jobId, "--format=State"],
+              ["-n", "-j", jobId, "--format=State", ...clusterArgs],
               { env: context.env, timeoutMs: 5_000 },
             )
-              .then((result) => result.stdout.trim().split(/\s+/)[0] ?? "")
+              .then(
+                (result) =>
+                  stripSlurmClusterBanners(result.stdout).trim().split(/\s+/)[0] ?? "",
+              )
               .catch(() => "");
             throw new ReadinessProbeError(
               finalState && !/^COMPLETED/i.test(finalState)
