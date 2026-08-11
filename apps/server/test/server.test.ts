@@ -563,6 +563,7 @@ test("verified settings populate orchestration environment without exposing the 
   try {
     const store = new SettingsStore(workspace, {
       validateAnthropic: async () => undefined,
+      validateOpenRouter: async () => undefined,
     });
     await store.put({
       ...store.get(),
@@ -572,6 +573,10 @@ test("verified settings populate orchestration environment without exposing the 
         baseUrl: "https://api.example.test",
         apiKey: "job-secret",
         modelsByRoute: { writing: "claude-writer" },
+      },
+      creditRecovery: {
+        ...store.get().creditRecovery,
+        openRouterApiKey: "parser-secret",
       },
     } satisfies ServerSettingsUpdate);
     const publicSettings = store.get();
@@ -584,6 +589,14 @@ test("verified settings populate orchestration environment without exposing the 
       env.BRAINSTORM_AGENTIC_MODEL_WRITING,
       "claude-writer",
     );
+    // Credit-recovery parsing settings travel on the Messages-API path too:
+    // the worker's CreditBlockDetectingAgentExecutor — which exists precisely
+    // for this provider — needs them to turn a provider credit failure into a
+    // schedulable credit_blocked checkpoint. They used to be emitted only for
+    // claude-agent, leaving anthropic runs without the OpenRouter parse lane.
+    assert.equal(env.BRAINSTORM_AGENTIC_CREDIT_SAFETY_BUFFER_SECONDS, "60");
+    assert.equal(env.BRAINSTORM_AGENTIC_OPENROUTER_MODEL, "openrouter/free");
+    assert.equal(env.OPENROUTER_API_KEY, "parser-secret");
   } finally {
     await removeWorkspace(workspace);
   }

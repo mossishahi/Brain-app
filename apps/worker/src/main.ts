@@ -41,7 +41,7 @@ import {
   type GpuRunConfig,
 } from "@brainstorm-agentic/host-tools";
 
-import { defaultSessionRoot, loadDotEnv } from "./env.js";
+import { defaultSessionRoot, loadDotEnv, workspaceRootFromSessionRoot } from "./env.js";
 import { configureOutboundHttp } from "./proxy.js";
 import { FsArtifactStore, FsCheckpointStore } from "./fs-stores.js";
 import {
@@ -506,11 +506,6 @@ const APP_VERSION: string = (() => {
   }
 })();
 
-/** The workspace that owns this session root — where the install id lives. */
-function defaultWorkspaceRoot(sessionRoot: string): string {
-  return dirname(sessionRoot);
-}
-
 function reportResult(result: RunResult, sessionRoot: string): void {
   console.log("");
   if (result.status === "completed") {
@@ -690,7 +685,7 @@ async function main(): Promise<void> {
       // all rather than one written and then withheld.
       if (process.env.BRAINSTORM_AGENTIC_TELEMETRY !== "off") {
         recordRunSummary({
-          workspace: defaultWorkspaceRoot(sessionRoot),
+          workspace: workspaceRootFromSessionRoot(sessionRoot),
           sessionRoot,
           runId,
           result,
@@ -771,7 +766,7 @@ async function main(): Promise<void> {
       // all rather than one written and then withheld.
       if (process.env.BRAINSTORM_AGENTIC_TELEMETRY !== "off") {
         recordRunSummary({
-          workspace: defaultWorkspaceRoot(sessionRoot),
+          workspace: workspaceRootFromSessionRoot(sessionRoot),
           sessionRoot,
           runId,
           result,

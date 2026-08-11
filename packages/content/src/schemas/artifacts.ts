@@ -1121,7 +1121,7 @@ export const confidenceSchema = z
 export type Confidence = z.infer<typeof confidenceSchema>;
 
 // ---------------------------------------------------------------------------
-// developed-output bodies: the eight structural shapes
+// developed-output bodies: the nine structural shapes
 // ---------------------------------------------------------------------------
 
 /** paper — a five-section research paper developing an idea into a contribution. */
@@ -1407,7 +1407,7 @@ export type SolutionBody = z.infer<typeof solutionBodySchema>;
 /**
  * One member's direct response to an explicitly requested output: the run's
  * section `title` echoed verbatim plus the answer itself. Uniform across all
- * eight shapes — the sections sit on the envelope next to the shape body, so
+ * nine shapes — the sections sit on the envelope next to the shape body, so
  * every projection that carries a member's `output` (integrator, chair,
  * dashboard) carries the responses automatically. Presence is run data:
  * exactly when the processor recorded `requestedOutputs`, one section per

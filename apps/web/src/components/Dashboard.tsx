@@ -46,10 +46,11 @@ import { DecomposeBody } from "./panels/DecomposePanel";
 import { SelectPanelBody } from "./panels/SelectPanelPanel";
 import { GateCard, GateDecided } from "./panels/ConfirmPanelPanel";
 import { FirstPassBody } from "./panels/FirstPassPanel";
-import { ReviewBody } from "./panels/ReviewPanel";
+import { ReviewStagePanels } from "./panels/ReviewPanel";
 import { BridgeAuditBody } from "./panels/BridgeAuditPanel";
 import { ProposalActions, ProposalBody } from "./panels/ProposalPanel";
 import { DoneBody } from "./panels/DonePanel";
+import { ToolUsagePanel } from "./panels/ToolUsagePanel";
 
 function stageOf<K extends StageId>(
   job: JobDetail,
@@ -415,12 +416,10 @@ export function Dashboard({
         const stage = stageOf(job, id);
         return stage && stage.members.length > 0 ? <FirstPassBody members={stage.members} /> : null;
       }
-      case "review-members": {
-        const stage = stageOf(job, id);
-        return stage && stage.members.length > 0 ? (
-          <ReviewBody stage={stage} />
-        ) : null;
-      }
+      case "review-members":
+        // The review stage renders as two detached panels through
+        // ReviewStagePanels in the pager below, not through this body switch.
+        return null;
       case "bridge-audit": {
         const stage = stageOf(job, id);
         return stage?.bridge ? <BridgeAuditBody stage={stage} /> : null;
@@ -431,21 +430,43 @@ export function Dashboard({
       }
       case "done": {
         const stage = stageOf(job, id);
-        return stage?.summary ? <DoneBody summary={stage.summary} /> : null;
+        if (!stage?.summary) return null;
+        return (
+          <div>
+            <DoneBody summary={stage.summary} />
+            {/* The capability & tool usage receipt: which tools each role
+                actually called, per stage, and how the broker resolved every
+                declared capability operation (provider-native, host tool, or
+                honest unavailability). */}
+            <ToolUsagePanel
+              jobId={jobId}
+              updatedAt={job.updatedAt}
+              active={job.status === "running"}
+            />
+          </div>
+        );
       }
     }
   };
 
   return (
     <div className="dash">
-      {/* The run's state at a glance, always: amber shimmer while waiting
-          for the queue, steady green while running, red when it failed —
-          so a retry is VISIBLE the moment the server accepts it. */}
-      <div
-        className={`job-state-strip job-state-strip-${job.status}`}
-        role="status"
-        aria-label={`job status: ${job.status}`}
-      />
+      {/* The state strip renders ONLY for attention states — amber shimmer
+          while waiting for the queue, red when failed/interrupted — so a
+          retry is VISIBLE the moment the server accepts it. Healthy states
+          (running, completed, cancelled) draw no line: the status dot in the
+          header already says so, and a permanent colored bar is noise. */}
+      {(job.status === "queued" ||
+        job.status === "suspended" ||
+        job.status === "credit-blocked" ||
+        job.status === "failed" ||
+        job.status === "orphaned") && (
+        <div
+          className={`job-state-strip job-state-strip-${job.status}`}
+          role="status"
+          aria-label={`job status: ${job.status}`}
+        />
+      )}
       <header className="dash-header">
         <a href="#/" className="ghost-btn" aria-label="back to all jobs">
           <BackIcon />
@@ -602,34 +623,50 @@ export function Dashboard({
 
       {(() => {
         const stage = stageMap.get(selected);
+        const frame = (children: ReactNode) => (
+          <StageFrame
+            id={selected}
+            title={STAGE_TITLES[selected]}
+            status={stage?.status ?? "pending"}
+            startedAt={stage?.startedAt}
+            finishedAt={stage?.finishedAt}
+            fallbackEnd={fallbackEnd}
+            now={now}
+            error={stage?.error}
+            activity={stage?.activity}
+            selected={false}
+            expanded={!collapsed.has(selected)}
+            onToggle={() => toggleStage(selected)}
+            refCb={() => undefined}
+            actions={
+              selected === "synthesize-proposal" && proposalStage?.proposal ? (
+                <ProposalActions proposal={proposalStage.proposal} />
+              ) : undefined
+            }
+          >
+            {children}
+          </StageFrame>
+        );
         return (
           <div className="stage-pager">
             <div
               key={selected}
               className={`stage-page stage-page-${slideDirection}`}
             >
-              <StageFrame
-                id={selected}
-                title={STAGE_TITLES[selected]}
-                status={stage?.status ?? "pending"}
-                startedAt={stage?.startedAt}
-                finishedAt={stage?.finishedAt}
-                fallbackEnd={fallbackEnd}
-                now={now}
-                error={stage?.error}
-                activity={stage?.activity}
-                selected={false}
-                expanded={!collapsed.has(selected)}
-                onToggle={() => toggleStage(selected)}
-                refCb={() => undefined}
-                actions={
-                  selected === "synthesize-proposal" && proposalStage?.proposal ? (
-                    <ProposalActions proposal={proposalStage.proposal} />
-                  ) : undefined
-                }
-              >
-                {renderBody(selected)}
-              </StageFrame>
+              {selected === "review-members" && reviewStage && reviewStage.members.length > 0 ? (
+                // The review stage splits into two detached panels (grid +
+                // walk inspector) with the page background visible between
+                // them; the first-pass stage seeds the inspector's change
+                // tracking so every diff reaches back to the original chain.
+                <ReviewStagePanels
+                  stage={reviewStage}
+                  firstPass={stageOf(job, "first-pass")}
+                  expanded={!collapsed.has(selected)}
+                  frame={frame}
+                />
+              ) : (
+                frame(renderBody(selected))
+              )}
             </div>
             <div className="stage-pager-nav">
               <button

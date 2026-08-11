@@ -8,7 +8,12 @@
 
 /* ------------------------------------------------------------------ stages */
 
-/** Pipeline stage ids. These match the node ids in the shipped brainstorm workflow. */
+/**
+ * Pipeline stage ids. Most match node ids in the shipped brainstorm workflow;
+ * `decompose-experts` is the dashboard's umbrella for the split decompose
+ * pipeline (partition-files-* → build-pool → … → bridge-experts), kept as one
+ * stage id so pre-split runs and the split topology share a dashboard.
+ */
 export const STAGE_IDS = [
   "process-input",
   "decompose-experts",
@@ -217,7 +222,7 @@ export interface GroundingView {
 /* ------------------------------------------- per-shape developed-output views */
 
 /**
- * The eight structural output shapes (mirrors the content package's
+ * The nine structural output shapes (mirrors the content package's
  * OUTPUT_SHAPES). Which submission TYPES exist — and what they are called —
  * is bundle data (catalog/input-types.json), so views carry the type as a
  * free-form label alongside the closed shape id the body was validated as.

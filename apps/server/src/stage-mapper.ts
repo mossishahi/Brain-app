@@ -237,13 +237,34 @@ function journalStateField(
 }
 
 /**
- * The decomposer split's workflow nodes: they all surface on the dashboard's
- * single Decompose stage (their agent activity, timing, and sub-step views).
+ * The workflow nodes that surface on the dashboard's single Decompose stage
+ * (their agent activity, timing, and sub-step views): the file-partition trio
+ * that builds the file map the pool reads, the conditional code-annotation
+ * pass, and the decomposer split's pipeline steps.
  */
 const DECOMPOSE_SUBNODES = [
+  "partition-files-useful",
+  "partition-files-ignored",
   "partition-files-code",
+  "maybe-annotate-code",
   "annotate-code",
   "merge-code-annotations",
+  "build-pool",
+  "match-taxonomy",
+  "place-fields",
+  "submit-decisions",
+  "bridge-experts",
+] as const;
+
+/**
+ * The nodes that prove a run used the SPLIT decompose pipeline (the former
+ * decomposer split into pool-builder + placer, bundle >= 0.9.0). Deliberately
+ * narrower than DECOMPOSE_SUBNODES: the file-partition nodes have existed
+ * since bundle 0.1.0, so their presence proves nothing about the split, and a
+ * pre-split run's dashboard must not render a step strip of steps that never
+ * ran.
+ */
+const SPLIT_DECOMPOSE_NODES = [
   "build-pool",
   "match-taxonomy",
   "place-fields",
@@ -262,12 +283,23 @@ const PREPROCESS_SUBNODES = [
   "confirm-classification",
 ] as const;
 
+/**
+ * The interdisciplinary weave (workflow >= 0.12.0) runs as its own root-level
+ * node right after panel.select and REPLACES the panel artifact; the panel the
+ * dashboard's Select-panel stage shows is the woven one, so the weave's
+ * events and any failure it carries belong to that stage.
+ */
+const SELECT_PANEL_SUBNODES = ["weave-panel"] as const;
+
 export function stageForPath(path: string): StageId | undefined {
   const segments = path.split("/");
   const direct = STAGE_IDS.find((id) => segments.includes(id));
   if (direct) return direct;
   if (PREPROCESS_SUBNODES.some((node) => segments.includes(node))) {
     return "process-input";
+  }
+  if (SELECT_PANEL_SUBNODES.some((node) => segments.includes(node))) {
+    return "select-panel";
   }
   return DECOMPOSE_SUBNODES.some((node) => segments.includes(node))
     ? "decompose-experts"
@@ -2204,7 +2236,9 @@ export function buildJobDetail(input: MapperInput): JobDetail {
       ? [id, ...DECOMPOSE_SUBNODES]
       : id === "process-input"
         ? [id, ...PREPROCESS_SUBNODES]
-        : [id];
+        : id === "select-panel"
+          ? [id, ...SELECT_PANEL_SUBNODES]
+          : [id];
   const journalPresent = new Map<StageId, boolean>(
     STAGE_IDS.map((id) => [
       id,
@@ -2377,14 +2411,14 @@ export function buildJobDetail(input: MapperInput): JobDetail {
   const placementsValue = object(artifact(artifacts, "placements"));
   const receiptValue = object(artifact(artifacts, "suggestionReceipt"));
   const decomposeIsSplit =
-    DECOMPOSE_SUBNODES.some((node) =>
+    SPLIT_DECOMPOSE_NODES.some((node) =>
       entries.some((entry) => entry.key.includes(`/${node}`)),
     ) ||
     events.some(
       (event) =>
         "path" in event &&
         typeof event.path === "string" &&
-        DECOMPOSE_SUBNODES.some((node) => event.path.split("/").includes(node)),
+        SPLIT_DECOMPOSE_NODES.some((node) => event.path.split("/").includes(node)),
     ) ||
     poolValue !== undefined;
   let decomposeSteps: DecomposeStepView[] | undefined;

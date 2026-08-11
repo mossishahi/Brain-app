@@ -1,7 +1,7 @@
 /** Minimal .env loader (no dependency): KEY=VALUE lines, # comments, no expansion. */
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 export function loadDotEnv(dir: string): void {
   const file = join(dir, ".env");
@@ -32,4 +32,24 @@ export function expandHome(path: string): string {
 export function defaultSessionRoot(): string {
   const configured = process.env.BRAINSTORM_AGENTIC_SESSION_ROOT;
   return expandHome(configured && configured.trim() !== "" ? configured : "~/.brainstorm-agentic/workspace/sessions");
+}
+
+/**
+ * The workspace root that owns a session root — where the telemetry spool
+ * (`<root>/telemetry/spool.jsonl`) and install id (`<root>/install-id`) live.
+ *
+ * The server lays runs out as `<workspace>/workspace/sessions` (JobManager)
+ * and its telemetry sender drains `<workspace>/telemetry`, so a session root
+ * following that convention resolves two levels up — anything less and the
+ * worker spools run summaries into a directory the server never drains. A
+ * bespoke session root (a hand-set BRAINSTORM_AGENTIC_SESSION_ROOT outside the
+ * convention) keeps the one-level parent: no server drains those spools, but
+ * the records stay local and inspectable next to the sessions.
+ */
+export function workspaceRootFromSessionRoot(sessionRoot: string): string {
+  const parent = dirname(sessionRoot);
+  if (basename(sessionRoot) === "sessions" && basename(parent) === "workspace") {
+    return dirname(parent);
+  }
+  return parent;
 }

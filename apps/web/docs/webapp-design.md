@@ -130,9 +130,9 @@ theme/gear buttons. Below the header, two zones: the pipeline graph (minimap) an
 
 ### Pipeline graph
 
-A horizontal SVG graph, full width, ~120px tall, eight nodes joined by 1px connectors:
+A horizontal SVG graph, full width, ~120px tall, nine nodes joined by 1px connectors:
 
-Process → Decompose → Panel → Confirm → First pass → Review → Proposal → Done
+Process → Decompose → Panel → Confirm → First pass → Review → Audit → Proposal → Done
 
 - Node: rounded rect, 96×44, label under it. Fill `--surface`, border `--border`.
 - Status ring: pending = dim border; active = accent border + an implicit dark-grey pulse
@@ -211,7 +211,7 @@ rewritten.
 **5. First pass** — parallel thinking. Body: a member grid (2 columns desktop, 1 mobile). Each
 member card: header (umbrella + department dim), live status ("thinking…" with pulse /
 "done" / "failed"), and when the output lands, tabs: **[shape tab] · Chain · Novelty · Papers**.
-The primary tab is DESIGNED PER OUTPUT SHAPE — the eight shapes are code; which type maps to
+The primary tab is DESIGNED PER OUTPUT SHAPE — the nine shapes are code; which type maps to
 which shape is catalog data:
 
 - `paper` → **Paper**: Abstract/Introduction/Method/Discussion/Conclusion as labeled sections,
@@ -242,6 +242,10 @@ which shape is catalog data:
 - `explanation` → **Explanation**: Why it matters, the Core intuition as an accent callout, Formal
   treatment, Worked example, Common misconceptions (each with its correction in a dim line), and
   Connections as a tag row.
+- `solution` → **Solution**: Problem framing, the Diagnosis as an ordered list (most likely cause
+  first, rationale dim under each), an "Already tried" table (attempt / outcome) when prior
+  attempts exist, Candidate solutions, the Recommendation as a callout, the Validation plan as a
+  numbered list, and Residual risks.
 
 Shared tabs on every card:
 - Chain: numbered steps 1..N, each one paragraph; the numbers become the anchor the review stage
@@ -252,24 +256,55 @@ Shared tabs on every card:
 - Papers: the literature table (title, year, venue, one-line relation; title links out when a URL
   exists). Tab hidden when the member returned no literature.
 
-**6. Review** — the deep one. The stage's nature is a nested walk (member → chain step → rounds),
-so the body is a *progress matrix* plus a *round inspector*:
-- Matrix: one row per member (label = umbrella), N square cells per row (chain steps). Cell
-  states: dim (pending), accent pulse (under review now), `--ok` (passed round 1), `--ok` with a
-  small ×k corner count (passed after k redevelopments), `--warn` (force-passed at the cap).
-  A caption under the matrix: "cell = one chain step · colors = how it passed".
-- Cursor line above the matrix while active: "Reviewing member 2/5 · step 3/6 · round 2 of ≤4".
-- Round inspector: clicking a cell opens the rounds for that step, newest first. Each round block:
-  - the P−1 comment chips in a row: commentor umbrella + verdict chip (Pass `--ok` outline,
-    Build `--warn`, Interrupt `--bad`); clicking a chip expands reason, suggestion (Build), and
-    evidence (Interrupt) — script evidence in a code block with its result, math as a block,
-    reference as citation + locator link + "shows" line.
-  - the judge card: verdict chip, reason, per-commentor assessment badges ("verified" accent /
-    "authority" dim), evidence when present.
-  - when the round ended in redevelopment: a bar "Re-developed from step i — steps 1..i−1 frozen"
-    and the count of replaced steps.
-- Final output: each member's section ends in a fold carrying the member's output as the review
-  leaves it — the first pass with every redevelopment applied, rendered with the same tabs as a
+**6. Review** — the deep one. The stage renders as TWO detached panels with the page background
+visible in the gap between them: the *progress grid* rides inside the stage frame (header,
+activity feed, fold), and the *walk inspector* sits below in its own panel.
+- Grid panel: one row per member (label = seat name), N square cells per row (chain steps), then
+  the seat's FULL expertise reading left to right from biggest granularity to smallest —
+  "department / umbrella · subfield · subfield" — dim and ellipsized. Cell states: dim
+  (pending), accent pulse (under review now), `--ok` (passed round 1), `--ok` with a small ×k
+  corner count (passed after k redevelopments), `--warn` (force-passed at the cap). A caption
+  under the grid: "cell = one chain step · colors = how it passed". Clicking a cell opens that
+  seat's walk in the inspector and scrolls to the step. Cursor line above the grid while
+  active: "Reviewing member 2/5 · step 3/6 · round 2 of ≤4".
+- Card elevation: the inspector reads as cards resting on a background — minimal, with a bit of
+  shadow. The walk panel is the deepest (darkest) level (`--elev-0`); every card sits on the one
+  beneath with a soft shadow (`--card-shadow`) and a slightly lighter surface (`--elev-1/2/3`),
+  in BOTH themes — dark lightens toward the front, light steps from grey up to pure white — so
+  the front-most card is always the lightest. The deepest level — the walk panel the seat card
+  rests on — carries no stroke: it reads as ground, not as a card. No stacked-deck peeking
+  anywhere.
+- Walk inspector: everything belonging to ONE seat lives in one outer card (no rule under its
+  header). The header packs the pager arrows tight around the title — "← Seat 1 / 3 →" — then
+  the state chip ("under review" pulse / "done with thinking" `--ok`), and balances the seat's
+  full expertise (department / umbrella · subfields) on the right. One seat visible at a time.
+  Inside, one card per chain step stacks vertically ("Step i / N" colored by its outcome, plus
+  the ×k redeveloped badge).
+- Round deck: each step card holds its rounds as sub-cards, NEWEST ON TOP (round k sits over
+  round k−1), paged exactly like the seats: the same ghost prev/next chevrons hugging the
+  "Round k / K" title in the card header (disabled dim at either end). The header also carries
+  the verdict chip, a "redeveloped" badge, and a copy icon that copies the round as a
+  plain-text bug report (seat, step, round, verdict, issues, texts).
+- Round text: the step text as it came OUT of that round, full height, never clamped or
+  scrolled. Words carried from earlier rounds render dimmed; the round's own changes render at
+  full weight (round 1 is all full-weight — nothing was reviewed before it). Rewrites the round
+  applied to OTHER steps render below in red — a `--bad`-tinted block per rewritten step,
+  changed words in red — because they moved text the reader is not currently looking at.
+- Retroactive rewrites land on the AFFECTED step too: when a later walk position's round
+  rewrote this step, its latest card shows the UPDATED standing text with the cross-step
+  changes in red (dotted underline, help cursor); hovering a red part names the origin
+  ("changed during step 2 · round 1 — not by this step's own review"). Older cards keep the
+  step's own history untouched.
+- Comments panel: under each round's text, collapsed by default. The reviewer names ride ON the
+  summary row itself, right after the "Comments & judgement" label — Judge first, then each
+  commentor — each name colored by its verdict (`--ok` Pass, `--warn` Build, `--bad` Interrupt,
+  dim pending), so the row is a verdict summary even while folded. Clicking a name opens the
+  panel on that reviewer (Judge is the default): the judge's reason, confirmed issues (step /
+  verified-vs-authority / must-address badges, evidence), and per-commentor assessment badges;
+  a commentor's reason, suggestion (Build), and evidence (Interrupt). A copy icon copies the
+  selected view.
+- Final output: the seat card ends in a fold carrying the member's output as the review leaves
+  it — the first pass with every redevelopment applied, rendered with the same tabs as a
   first-pass card. Chip-marked "final version" (`--ok`) once every step of the member's walk has
   passed or force-passed, "in progress" until then, with a meta line "revised ×k during review" /
   "unchanged from the first pass". The first-pass panel keeps showing the original version — the
@@ -287,7 +322,11 @@ content).
 
 **8. Done** — the receipt. Body: total duration, a per-stage duration bar list (label + thin
 horizontal bar scaled to the longest stage + ms), and agent-task count. One line, dim: session
-directory path.
+directory path. Below a hairline, the **capability & tool usage receipt** (`GET
+/api/jobs/:id/tool-usage`): which tools each role actually called, calls by stage, and the
+capability-resolution matrix (per declared operation: how many tasks resolved it
+provider-native, host-tool, or unavailable — with a dim note naming any operation that ran in
+"unavailable" honesty mode).
 
 ### Failure & cancellation
 

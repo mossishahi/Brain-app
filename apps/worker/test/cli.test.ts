@@ -319,14 +319,22 @@ test("run and resume accept content-dir and append JSONL events", () => {
   const root = tempRoot();
   try {
     const runId = "bsa_test_cli_flags";
+    // The server's layout: sessions under <workspace>/workspace/sessions. The
+    // run's telemetry summary must land in <workspace>/telemetry — the spool
+    // the server's sender drains.
+    const sessionRoot = join(root, "workspace", "sessions");
     const eventsFile = join(root, "nested", "events.jsonl");
     const cli = new URL("../src/main.js", import.meta.url);
+    const spawnOptions = {
+      encoding: "utf8",
+      env: { ...process.env, BRAINSTORM_AGENTIC_TELEMETRY: "on" },
+    } as const;
     const common = [
       "--offline",
       "--run-id",
       runId,
       "--session-root",
-      root,
+      sessionRoot,
       "--events-file",
       eventsFile,
       "--content-dir",
@@ -335,11 +343,11 @@ test("run and resume accept content-dir and append JSONL events", () => {
     const started = spawnSync(
       process.execPath,
       [cli.pathname, "run", "--topic", "Exercise CLI flags", ...common],
-      { encoding: "utf8" },
+      spawnOptions,
     );
     assert.equal(started.status, 0, started.stderr);
     let checkpoint = JSON.parse(
-      readFileSync(join(root, runId, "checkpoint.json"), "utf8"),
+      readFileSync(join(sessionRoot, runId, "checkpoint.json"), "utf8"),
     ) as { status: string; pendingGates: Array<{ gateKey: string }> };
     assert.equal(checkpoint.status, "suspended");
     const before = readFileSync(eventsFile, "utf8").trim().split("\n").length;
@@ -349,18 +357,18 @@ test("run and resume accept content-dir and append JSONL events", () => {
     let resumed = spawnSync(
       process.execPath,
       [cli.pathname, "resume", ...common, "--gate", `${checkpoint.pendingGates[0]!.gateKey}=approve`],
-      { encoding: "utf8" },
+      spawnOptions,
     );
     assert.equal(resumed.status, 0, resumed.stderr);
     for (let round = 0; round < 2; round += 1) {
       checkpoint = JSON.parse(
-        readFileSync(join(root, runId, "checkpoint.json"), "utf8"),
+        readFileSync(join(sessionRoot, runId, "checkpoint.json"), "utf8"),
       ) as { status: string; pendingGates: Array<{ gateKey: string }> };
       if (checkpoint.status !== "suspended") break;
       resumed = spawnSync(
         process.execPath,
         [cli.pathname, "resume", ...common, "--gate", `${checkpoint.pendingGates[0]!.gateKey}=approve`],
-        { encoding: "utf8" },
+        spawnOptions,
       );
       assert.equal(resumed.status, 0, resumed.stderr);
     }
@@ -370,10 +378,23 @@ test("run and resume accept content-dir and append JSONL events", () => {
     assert.ok(events.some((event) => event.type === "run:suspended"));
     assert.ok(events.some((event) => event.type === "run:completed"));
 
+    // The run summary is spooled at the WORKSPACE root (<ws>/telemetry), not
+    // one level short of it — deriving the workspace as dirname(sessionRoot)
+    // was the original defect, and it stranded every worker run summary in a
+    // directory the server never drains.
+    const spooled = readFileSync(join(root, "telemetry", "spool.jsonl"), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { type: string; runId?: string });
+    assert.ok(
+      spooled.some((event) => event.type === "run.summary" && event.runId === runId),
+      "the run summary lands in the spool the server's sender drains",
+    );
+
     // The finished run leaves readable copies of the reviewed deliverables
     // beside the checkpoint: one file per member's final output plus the
     // chair's proposal, and the CLI names each written file.
-    const finalDir = join(root, runId, "final");
+    const finalDir = join(sessionRoot, runId, "final");
     const finalFiles = readdirSync(finalDir).sort();
     assert.ok(finalFiles.includes("proposal.json"), "final/proposal.json is written");
     const memberFiles = finalFiles.filter((name) => /^member-\d+\.json$/.test(name));

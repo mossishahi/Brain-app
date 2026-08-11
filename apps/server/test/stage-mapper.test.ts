@@ -862,3 +862,144 @@ test("live per-seat progress is derived from parallel fan-out event paths", () =
     rmSync(workspace, { recursive: true, force: true });
   }
 });
+
+test("every root-level workflow node maps to a dashboard stage", async () => {
+  const { stageForPath } = await import("../src/stage-mapper.js");
+  // The complete root-level node roster of the shipped workflow (bundle
+  // 0.18.0) and the stage each node's events surface on. The file-partition
+  // trio, the code-annotation condition wrapper, and the panel weave used to
+  // map to no stage at all, so their node events (and any failure they
+  // carried) rendered without stage attribution. When a bundle release adds a
+  // root node, add it here with its stage — an unmapped node is the defect
+  // this test exists to catch.
+  const rootNodes: Record<string, string> = {
+    "process-input": "process-input",
+    "classify-input": "process-input",
+    "apply-classification": "process-input",
+    "confirm-classification": "process-input",
+    "partition-files-useful": "decompose-experts",
+    "partition-files-ignored": "decompose-experts",
+    "partition-files-code": "decompose-experts",
+    "maybe-annotate-code": "decompose-experts",
+    "build-pool": "decompose-experts",
+    "match-taxonomy": "decompose-experts",
+    "place-fields": "decompose-experts",
+    "submit-decisions": "decompose-experts",
+    "bridge-experts": "decompose-experts",
+    "select-panel": "select-panel",
+    "weave-panel": "select-panel",
+    "confirm-panel": "confirm-panel",
+    "first-pass": "first-pass",
+    "review-members": "review-members",
+    "bridge-audit": "bridge-audit",
+    "synthesize-proposal": "synthesize-proposal",
+    done: "done",
+  };
+  for (const [node, stage] of Object.entries(rootNodes)) {
+    assert.equal(
+      stageForPath(`brainstorm-root/${node}`),
+      stage,
+      `${node} folds into the ${stage} stage`,
+    );
+  }
+  // Nodes nested under the condition wrapper resolve through it.
+  assert.equal(
+    stageForPath("brainstorm-root/maybe-annotate-code/annotate-code-flow/annotate-code"),
+    "decompose-experts",
+  );
+});
+
+test("the split step strip renders only for runs that actually used the split pipeline", () => {
+  // The partition nodes have existed since bundle 0.1.0 — long before the
+  // decomposer split landed at 0.9.0 — so their presence in a legacy run's
+  // journal must not conjure a step strip of pipeline steps that never ran.
+  // Only the split-defining nodes (build-pool … bridge-experts) prove the
+  // topology.
+  const decomposeFor = (journal: readonly unknown[]) => {
+    const workspace = mkdtempSync(join(tmpdir(), "stage-mapper-test-"));
+    try {
+      const sessionDir = join(workspace, "session");
+      const jobDir = join(workspace, "job");
+      mkdirSync(join(sessionDir, "artifacts"), { recursive: true });
+      mkdirSync(jobDir, { recursive: true });
+      writeFileSync(
+        join(sessionDir, "artifacts", "index.json"),
+        JSON.stringify({ refs: [] }),
+      );
+      writeFileSync(
+        join(sessionDir, "checkpoint.json"),
+        JSON.stringify({
+          runId: "job-1",
+          workflowId: "brainstorm",
+          status: "running",
+          input: {},
+          journal,
+          pendingGates: [],
+          seq: 1,
+          updatedAt: Date.now(),
+        }),
+      );
+      const record: JobRecord = {
+        jobId: "job-1",
+        topic: "topic",
+        status: "running",
+        runner: "local",
+        createdAt: 1,
+        updatedAt: 2,
+      };
+      const detail = buildJobDetail({
+        record,
+        status: "running",
+        sessionDir,
+        jobDir,
+        settings,
+      });
+      const stage = detail.stages.find(
+        (candidate) => candidate.id === "decompose-experts",
+      );
+      assert.ok(stage && stage.id === "decompose-experts");
+      return stage;
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  };
+  const partitions = [
+    {
+      key: "brainstorm-root/partition-files-useful::result",
+      kind: "activity",
+      value: { files: [] },
+    },
+    {
+      key: "brainstorm-root/partition-files-ignored::result",
+      kind: "activity",
+      value: { files: [] },
+    },
+  ];
+  // A legacy single-decomposer run: partitions plus the monolithic node.
+  const legacy = decomposeFor([
+    ...partitions,
+    {
+      key: "brainstorm-root/decompose-experts::result",
+      kind: "agent",
+      value: { taskId: "t", status: "ok", output: {} },
+    },
+  ]);
+  assert.equal(legacy.steps, undefined, "no step strip for a pre-split run");
+  // A split run: any split-pipeline node proves the topology.
+  const split = decomposeFor([
+    ...partitions,
+    {
+      key: "brainstorm-root/build-pool::result",
+      kind: "agent",
+      value: {
+        taskId: "t",
+        status: "ok",
+        output: { members: [], grounding: { papers: [], scholars: [] } },
+      },
+    },
+  ]);
+  assert.ok(
+    Array.isArray(split.steps) && split.steps.length > 0,
+    "split runs render the step strip",
+  );
+});

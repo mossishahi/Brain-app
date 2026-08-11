@@ -1,13 +1,22 @@
 /**
  * Stage 6 — Review: the progress matrix (member × chain step) above the
- * per-step round sub-panels. Every reviewed step renders as a collapsible
- * sub-panel (rounds nested inside as their own folds) — nothing is hidden
- * behind the board; a matrix cell is a shortcut that toggles its step panel
- * and scrolls to it.
+ * seat-paged walk inspector.
+ *
+ * The inspector is a three-level card system:
+ *  - SEATS page horizontally (prev/next buttons; one seat's walk at a time);
+ *  - STEPS stack vertically inside the visible seat, one card per
+ *    chain-of-thought step;
+ *  - ROUNDS sit inside each step card as a deck of sub-cards, newest on top,
+ *    paged with prev/next buttons (never scrolled). A round card shows the
+ *    text that came OUT of that round — words carried from earlier rounds
+ *    dimmed, this round's changes at full weight, and rewrites the round
+ *    applied to OTHER steps in red — plus a collapsed comments panel whose
+ *    tags switch between the judge (default) and each commentor.
  */
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import type {
   CommentView,
+  FirstPassStage,
   JudgeDecisionView,
   ReviewMemberView,
   ReviewRoundView,
@@ -15,8 +24,18 @@ import type {
   ReviewStepView,
 } from "@brainstorm-agentic/protocol";
 import { prefersReducedMotion } from "../../format";
-import { EvidenceBlock, VerdictChip } from "../common";
+import { EvidenceBlock } from "../common";
+import { BackIcon, CopyIcon, ForwardIcon } from "../Icons";
 import { IdeaTabs } from "./FirstPassPanel";
+import {
+  computeSeatTimeline,
+  diffWords,
+  roundViewKey,
+  type DiffSegment,
+  type RetroNote,
+  type RoundComputedView,
+  type SeatTimeline,
+} from "./review-diff";
 
 function redevCount(step: ReviewStepView): number {
   return step.rounds.filter((r) => r.revision !== undefined).length;
@@ -46,21 +65,9 @@ function cellLabel(member: ReviewMemberView, step: ReviewStepView): string {
   return `${member.label}, step ${step.index}: ${outcome}`;
 }
 
-/** A step earns a sub-panel once the review walk has reached it. */
+/** A step has something to inspect once the review walk has reached it. */
 function reviewable(step: ReviewStepView): boolean {
   return step.rounds.length > 0 || step.outcome === "under-review";
-}
-
-function stepKey(memberId: string, stepIndex: number): string {
-  return `${memberId}:${stepIndex}`;
-}
-
-function roundKey(memberId: string, stepIndex: number, round: number): string {
-  return `${memberId}:${stepIndex}:${round}`;
-}
-
-function finalKey(memberId: string): string {
-  return `${memberId}:final`;
 }
 
 /** Every step of the member's walk has passed (or force-passed at the cap). */
@@ -73,175 +80,524 @@ function walkComplete(member: ReviewMemberView): boolean {
   );
 }
 
-function StepOutcomeChip({ step }: { step: ReviewStepView }) {
+/* The step's outcome is carried by the COLOR of its "Step X" title. */
+function stepTitleClass(step: ReviewStepView): string {
   switch (step.outcome) {
     case "under-review":
-      return <span className="step-chip step-chip-active">under review</span>;
+      return "step-title-active";
     case "passed":
-      return <span className="step-chip step-chip-ok">passed</span>;
+      return "step-title-ok";
     case "force-passed":
-      return (
-        <span className="step-chip step-chip-warn" title="force-passed at the round cap">
-          force-passed
-        </span>
-      );
+      return "step-title-warn";
     case "pending":
-      return null;
+      return "step-title-dim";
   }
 }
 
-/** One reviewer's comment as a stacked, collapsible inner panel (open by default). */
-function CommentFold({ comment: c }: { comment: CommentView }) {
+function stepOutcomeHint(step: ReviewStepView): string {
+  return step.outcome === "force-passed" ? "force-passed at the round cap" : step.outcome;
+}
+
+/**
+ * Copies text for pasting into a bug report. The async clipboard API needs a
+ * secure context and can be denied outright; the hidden-textarea copy still
+ * works on a real click, and a bug-report affordance must not fail silently.
+ */
+async function copyForBugReport(value: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(value);
+    return true;
+  } catch {
+    try {
+      const area = document.createElement("textarea");
+      area.value = value;
+      area.setAttribute("readonly", "");
+      area.style.position = "fixed";
+      area.style.opacity = "0";
+      document.body.appendChild(area);
+      area.select();
+      const ok = document.execCommand("copy");
+      area.remove();
+      return ok;
+    } catch {
+      return false;
+    }
+  }
+}
+
+/** Copy-to-clipboard ghost button with the app's transient "copied" state. */
+function CopyButton({ text, label }: { text: () => string; label: string }) {
+  const [copied, setCopied] = useState(false);
   return (
-    <details className="review-fold" open>
-      <summary className="review-fold-head">
-        <span className="review-fold-name">{c.commentorLabel}</span>
-        <VerdictChip verdict={c.verdict} />
-        {c.step !== undefined && <span className="badge">step {c.step}</span>}
-      </summary>
-      <div className="review-fold-body">
-        <div>
-          <span className="detail-label">reason</span>
-          <div>{c.reason}</div>
-        </div>
-        {c.suggestion !== undefined && (
-          <div>
-            <span className="detail-label">suggestion</span>
-            <div>{c.suggestion}</div>
-          </div>
-        )}
-        {c.evidence && <EvidenceBlock evidence={c.evidence} />}
-      </div>
-    </details>
+    <button
+      type="button"
+      className="ghost-btn copy-btn"
+      aria-label={label}
+      title={label}
+      onClick={() => {
+        void copyForBugReport(text()).then((ok) => {
+          if (!ok) return;
+          setCopied(true);
+          window.setTimeout(() => setCopied(false), 1500);
+        });
+      }}
+    >
+      {copied ? <span className="small">copied</span> : <CopyIcon />}
+    </button>
   );
 }
 
-function JudgeFold({
+function segmentSpans(segments: readonly DiffSegment[], changedClass: string) {
+  return segments.map((segment, index) => (
+    <span key={index} className={segment.changed ? changedClass : "diff-keep"}>
+      {index > 0 ? " " : ""}
+      {segment.text}
+    </span>
+  ));
+}
+
+/** The judge's decision, rendered flat inside the comments panel. */
+function JudgeContent({
   decision,
   labelOf,
 }: {
   decision: JudgeDecisionView;
   labelOf: (commentorId: string) => string;
 }) {
+  // No verdict chip here: the colored name on the summary row IS the verdict.
   return (
-    <details className="review-fold review-fold-judge" open>
-      <summary className="review-fold-head">
-        <span className="review-fold-name">
-          <strong>Judge</strong>
-        </span>
-        <VerdictChip verdict={decision.verdict} />
-      </summary>
-      <div className="review-fold-body">
-        <div>{decision.reason}</div>
-        {decision.suggestion !== undefined && (
-          <div>
-            <span className="detail-label">suggestion</span>
-            <div>{decision.suggestion}</div>
-          </div>
-        )}
-        {decision.issues !== undefined && decision.issues.length > 0 && (
-          <div>
-            <span className="detail-label">confirmed issues</span>
-            {decision.issues.map((issue, index) => (
-              <div key={index} className="comment-detail">
-                <div className="assessment-row">
-                  <span className="badge">step {issue.step}</span>
-                  <span className={`badge${issue.basis === "verified" ? " badge-accent" : ""}`}>
-                    {issue.basis}
-                  </span>
-                  {issue.mustAddress && <span className="badge">must address</span>}
-                </div>
-                <div>{issue.point}</div>
-                {issue.suggestion !== undefined && <div className="dim small">{issue.suggestion}</div>}
-                {issue.evidence && <EvidenceBlock evidence={issue.evidence} />}
+    <div className="comment-content">
+      <div>{decision.reason}</div>
+      {decision.suggestion !== undefined && (
+        <div>
+          <span className="detail-label">suggestion</span>
+          <div>{decision.suggestion}</div>
+        </div>
+      )}
+      {decision.issues !== undefined && decision.issues.length > 0 && (
+        <div>
+          <span className="detail-label">confirmed issues</span>
+          {decision.issues.map((issue, index) => (
+            <div key={index} className="comment-detail">
+              <div className="assessment-row">
+                <span className="badge">step {issue.step}</span>
+                <span className={`badge${issue.basis === "verified" ? " badge-accent" : ""}`}>
+                  {issue.basis}
+                </span>
+                {issue.mustAddress && <span className="badge">must address</span>}
               </div>
-            ))}
-          </div>
-        )}
-        {Object.keys(decision.assessment).length > 0 && (
-          <div className="assessment-row">
-            {Object.entries(decision.assessment).map(([commentorId, kind]) => (
-              <span
-                key={commentorId}
-                className={`badge${kind === "verified" ? " badge-accent" : ""}`}
-              >
-                {labelOf(commentorId)} · {kind}
-              </span>
-            ))}
-          </div>
-        )}
-        {decision.evidence && <EvidenceBlock evidence={decision.evidence} />}
-      </div>
-    </details>
+              <div>{issue.point}</div>
+              {issue.suggestion !== undefined && (
+                <div className="dim small">{issue.suggestion}</div>
+              )}
+              {issue.evidence && <EvidenceBlock evidence={issue.evidence} />}
+            </div>
+          ))}
+        </div>
+      )}
+      {Object.keys(decision.assessment).length > 0 && (
+        <div className="assessment-row">
+          {Object.entries(decision.assessment).map(([commentorId, kind]) => (
+            <span
+              key={commentorId}
+              className={`badge${kind === "verified" ? " badge-accent" : ""}`}
+            >
+              {labelOf(commentorId)} · {kind}
+            </span>
+          ))}
+        </div>
+      )}
+      {decision.evidence && <EvidenceBlock evidence={decision.evidence} />}
+    </div>
   );
 }
 
-/** One review round as a collapsible sub-panel of its step. */
-function RoundFold({
-  round,
+function CommentContent({ comment }: { comment: CommentView }) {
+  // No verdict chip here: the colored name on the summary row IS the verdict.
+  return (
+    <div className="comment-content">
+      {comment.step !== undefined && (
+        <div className="assessment-row">
+          <span className="badge">step {comment.step}</span>
+        </div>
+      )}
+      <div>
+        <span className="detail-label">reason</span>
+        <div>{comment.reason}</div>
+      </div>
+      {comment.suggestion !== undefined && comment.suggestion !== "" && (
+        <div>
+          <span className="detail-label">suggestion</span>
+          <div>{comment.suggestion}</div>
+        </div>
+      )}
+      {comment.evidence && <EvidenceBlock evidence={comment.evidence} />}
+    </div>
+  );
+}
+
+function commentCopyText(selected: "judge" | string, computed: RoundComputedView): string {
+  const round = computed.round;
+  if (selected === "judge") {
+    const d = round.decision;
+    if (!d) return `round ${round.round}: judgement in progress`;
+    const issues = (d.issues ?? [])
+      .map(
+        (issue, i) =>
+          `${i + 1}. [step ${issue.step}] (${issue.basis}${issue.mustAddress ? ", must address" : ""}) ${issue.point}`,
+      )
+      .join("\n");
+    return [
+      `Judge — round ${round.round}: ${d.verdict}`,
+      d.reason,
+      ...(issues ? [`Issues:\n${issues}`] : []),
+    ].join("\n");
+  }
+  const c = round.comments.find((entry) => entry.commentorId === selected);
+  if (!c) return "";
+  return [
+    `${c.commentorLabel} — round ${round.round}: ${c.verdict}${c.step !== undefined ? ` (step ${c.step})` : ""}`,
+    c.reason,
+    ...(c.suggestion ? [`Suggestion: ${c.suggestion}`] : []),
+  ].join("\n");
+}
+
+/**
+ * The collapsed-by-default comments panel under a round's text. Tags switch
+ * between the judge (default) and each commentor; the copy button copies the
+ * selected view for pasting into a bug report.
+ */
+/* The round's verdict is carried by the COLOR of its index number alone. */
+function roundNumClass(round: ReviewRoundView): string {
+  switch (round.decision?.verdict) {
+    case "Pass":
+      return "round-num-ok";
+    case "Build":
+      return "round-num-warn";
+    case "Interrupt":
+      return "round-num-bad";
+    default:
+      return "round-num-active";
+  }
+}
+
+/** The reviewer's name colored by its verdict — the color IS the status. */
+function verdictClass(verdict: string | undefined): string {
+  switch (verdict) {
+    case "Pass":
+      return "reviewer-name-ok";
+    case "Build":
+      return "reviewer-name-warn";
+    case "Interrupt":
+      return "reviewer-name-bad";
+    default:
+      return "reviewer-name-dim";
+  }
+}
+
+function CommentsPanel({
+  computed,
   open,
   onToggle,
+  selected,
+  onSelect,
 }: {
-  round: ReviewRoundView;
+  computed: RoundComputedView;
   open: boolean;
   onToggle: () => void;
+  selected: string;
+  onSelect: (tag: string) => void;
 }) {
+  const round = computed.round;
   const labelOf = (commentorId: string): string =>
     round.comments.find((c) => c.commentorId === commentorId)?.commentorLabel ?? commentorId;
-  const revision = round.revision;
+  const active = selected === "judge" || round.comments.some((c) => c.commentorId === selected)
+    ? selected
+    : "judge";
+  // Selecting a name shows that reviewer — opening the panel if it was folded.
+  const pick = (tag: string): void => {
+    onSelect(tag);
+    if (!open) onToggle();
+  };
   return (
-    <details className="review-fold review-round" open={open}>
+    <details className="review-fold comments-panel" open={open}>
       <summary
         className="review-fold-head"
         onClick={(event) => {
           event.preventDefault();
+          // The reviewer names inside the summary are their own controls;
+          // only a click on the row itself folds the panel.
+          if ((event.target as HTMLElement).closest("button")) return;
           onToggle();
         }}
       >
-        <span className="review-fold-name">Round {round.round}</span>
-        {round.decision && <VerdictChip verdict={round.decision.verdict} />}
-        {revision && <span className="badge">redeveloped</span>}
+        <span className="review-fold-name">Comments & judgement</span>
+        <span className="reviewer-names" role="tablist" aria-label="reviewer">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={open && active === "judge"}
+            className={`reviewer-name ${verdictClass(round.decision?.verdict)}${
+              open && active === "judge" ? " reviewer-name-selected" : ""
+            }`}
+            onClick={() => pick("judge")}
+          >
+            Judge
+          </button>
+          {round.comments.map((comment) => (
+            <button
+              key={comment.commentorId}
+              type="button"
+              role="tab"
+              aria-selected={open && active === comment.commentorId}
+              className={`reviewer-name ${verdictClass(comment.verdict)}${
+                open && active === comment.commentorId ? " reviewer-name-selected" : ""
+              }`}
+              onClick={() => pick(comment.commentorId)}
+            >
+              {comment.commentorLabel}
+            </button>
+          ))}
+        </span>
+        <span className="round-card-actions">
+          <CopyButton
+            label="copy this view for a bug report"
+            text={() => commentCopyText(active, computed)}
+          />
+        </span>
       </summary>
       {open && (
         <div className="review-fold-body">
-          {round.cot !== undefined && (
-            <div className="round-cot">
-              <span className="detail-label">
-                chain-of-thought step under review{round.round > 1 ? " (as revised)" : ""}
-              </span>
-              <div>{round.cot}</div>
-            </div>
+          {active === "judge" ? (
+            round.decision ? (
+              <JudgeContent decision={round.decision} labelOf={labelOf} />
+            ) : (
+              <p className="dim small">judgement in progress — comments land first</p>
+            )
+          ) : (
+            (() => {
+              const comment = round.comments.find((c) => c.commentorId === active);
+              return comment ? <CommentContent comment={comment} /> : null;
+            })()
           )}
-          {round.comments.map((c) => (
-            <CommentFold key={c.commentorId} comment={c} />
-          ))}
-          {round.decision && <JudgeFold decision={round.decision} labelOf={labelOf} />}
-          {revision && (
-            <div className="redev-bar">
-              {revision.touchedSteps.length === 0
-                ? "Re-developed — no step text changed"
-                : `Re-developed — step${revision.touchedSteps.length === 1 ? "" : "s"} ${revision.touchedSteps.join(", ")} rewritten, the rest carried verbatim`}
-            </div>
-          )}
-          {revision?.rewritten?.map((entry) => (
-            <details key={entry.index} className="review-fold">
-              <summary className="review-fold-head">
-                <span className="review-fold-name">
-                  step {entry.index} — rewritten text
-                </span>
-              </summary>
-              <div className="round-cot">
-                <div>{entry.text}</div>
-              </div>
-            </details>
-          ))}
         </div>
       )}
     </details>
   );
 }
 
-export function ReviewBody({ stage }: { stage: ReviewStage }) {
+function bugReportText(
+  member: ReviewMemberView,
+  step: ReviewStepView,
+  computed: RoundComputedView | undefined,
+): string {
+  const head = `${member.label}${member.umbrella ? ` (${member.umbrella})` : ""} — step ${step.index}`;
+  if (!computed) return `${head}: not yet reviewed`;
+  const round = computed.round;
+  const lines = [
+    `${head}, round ${round.round}`,
+    `verdict: ${round.decision?.verdict ?? "in progress"}`,
+  ];
+  const issues = round.decision?.issues ?? [];
+  if (issues.length > 0) {
+    lines.push("issues:");
+    for (const [i, issue] of issues.entries()) {
+      lines.push(
+        `${i + 1}. [step ${issue.step}] (${issue.basis}${issue.mustAddress ? ", must address" : ""}) ${issue.point}`,
+      );
+    }
+  }
+  if (computed.outText !== undefined) {
+    lines.push(`step text out of round ${round.round}:`, computed.outText);
+  }
+  for (const change of computed.crossChanges) {
+    lines.push(`also rewrote step ${change.index}:`, change.after);
+  }
+  return lines.join("\n");
+}
+
+/**
+ * The round deck inside one step card: newest round on top, older rounds
+ * behind it, paged with buttons. The visible card's text is never clamped or
+ * scrolled — the card takes the height of the full text.
+ */
+function RoundDeck({
+  member,
+  step,
+  timeline,
+  retroNotes,
+  selectedRound,
+  onSelectRound,
+  commentState,
+}: {
+  member: ReviewMemberView;
+  step: ReviewStepView;
+  timeline: SeatTimeline;
+  /** Rewrites applied to THIS step by other walk positions' rounds. */
+  retroNotes: readonly RetroNote[];
+  selectedRound: number | undefined;
+  onSelectRound: (round: number) => void;
+  commentState: {
+    open: (key: string) => boolean;
+    toggle: (key: string) => void;
+    tag: (key: string) => string;
+    select: (key: string, tag: string) => void;
+  };
+}) {
+  // Newest first: round k sits on top of round k-1.
+  const rounds = [...step.rounds].sort((a, b) => b.round - a.round);
+  if (rounds.length === 0) {
+    const text = timeline.chain.get(step.index);
+    return (
+      <div className="round-card round-card-pending">
+        <p className="dim small">
+          {step.outcome === "under-review"
+            ? "round 1 in progress — comments are being gathered"
+            : "not yet reviewed"}
+        </p>
+        {text !== undefined && <p className="round-text diff-keep-block">{text}</p>}
+      </div>
+    );
+  }
+  const latest = rounds[0]!.round;
+  const shown =
+    selectedRound !== undefined && rounds.some((r) => r.round === selectedRound)
+      ? selectedRound
+      : latest;
+  const position = rounds.findIndex((r) => r.round === shown);
+  const computed = timeline.rounds.get(roundViewKey(step.index, shown));
+  const round = rounds[position]!;
+  const commentKey = `${member.memberId}:${step.index}:${shown}`;
+  // When a LATER walk position's redevelopment rewrote this step, the step's
+  // standing text is no longer what its own review left. The latest card
+  // shows the UPDATED text, with the cross-step changes in red; hovering the
+  // red names the round that originated them.
+  const finalText = timeline.chain.get(step.index);
+  const retroActive =
+    shown === latest &&
+    retroNotes.length > 0 &&
+    computed?.outText !== undefined &&
+    finalText !== undefined &&
+    finalText !== computed.outText;
+  const retroOrigin = retroNotes
+    .map((note) => `step ${note.byStep} · round ${note.byRound}`)
+    .join(", ");
+  // The pager arrows hug the "Round k / K" title — exactly the seat pager's
+  // pattern — so paging a step's history reads the same as paging seats.
+  return (
+    <div className="round-card" key={shown}>
+      <div className="round-card-head">
+        <button
+          type="button"
+          className="ghost-btn"
+          aria-label="older round"
+          disabled={position === rounds.length - 1}
+          onClick={() => onSelectRound(rounds[position + 1]!.round)}
+        >
+          <BackIcon size={16} />
+        </button>
+        <span className="review-fold-name">
+          Round{" "}
+          <span
+            className={roundNumClass(round)}
+            title={round.decision?.verdict ?? "in progress"}
+          >
+            {round.round}
+          </span>
+          <span className="dim"> / {latest}</span>
+        </span>
+        <button
+          type="button"
+          className="ghost-btn"
+          aria-label="newer round"
+          disabled={position === 0}
+          onClick={() => onSelectRound(rounds[position - 1]!.round)}
+        >
+          <ForwardIcon size={16} />
+        </button>
+        {round.revision && <span className="badge badge-warn">redeveloped</span>}
+        {latest > 1 && (
+          <span className="review-step-meta">
+            {[
+              ...(!computed?.ownRewrite && round.round > 1 ? ["unchanged this round"] : []),
+              shown === latest ? "as the review leaves it" : "an earlier version",
+            ].join(" · ")}
+          </span>
+        )}
+        <span className="round-card-actions">
+          <CopyButton
+            label="copy this round for a bug report"
+            text={() => bugReportText(member, step, computed)}
+          />
+        </span>
+      </div>
+      {retroActive ? (
+        <p className="round-text">
+          {diffWords(computed.outText, finalText).map((segment, index) => (
+            <span
+              key={index}
+              className={segment.changed ? "diff-red retro-change" : undefined}
+              title={
+                segment.changed
+                  ? `changed during ${retroOrigin} — not by this step's own review`
+                  : undefined
+              }
+            >
+              {index > 0 ? " " : ""}
+              {segment.text}
+            </span>
+          ))}
+        </p>
+      ) : (
+        computed?.outText !== undefined && (
+          <p className="round-text">{segmentSpans(computed.segments, "diff-new")}</p>
+        )
+      )}
+      {computed !== undefined && computed.crossChanges.length > 0 && (
+        <div className="round-cross-list">
+          {computed.crossChanges.map((change) => (
+            <div key={change.index} className="round-cross">
+              <span className="detail-label detail-label-bad">
+                also rewrote step {change.index} this round
+              </span>
+              <p className="round-text">{segmentSpans(change.segments, "diff-red")}</p>
+            </div>
+          ))}
+        </div>
+      )}
+      {computed !== undefined && (
+        <CommentsPanel
+          computed={computed}
+          open={commentState.open(commentKey)}
+          onToggle={() => commentState.toggle(commentKey)}
+          selected={commentState.tag(commentKey)}
+          onSelect={(tag) => commentState.select(commentKey, tag)}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * The review stage renders as TWO detached panels with the page background
+ * visible between them: the progress grid rides inside the stage frame (the
+ * `frame` callback wraps it, so the stage header/activity stay with the
+ * grid), and the walk inspector sits below in its own panel. Both share one
+ * component so a grid-cell click can drive the inspector's seat.
+ */
+export function ReviewStagePanels({
+  stage,
+  firstPass,
+  frame,
+  expanded,
+}: {
+  stage: ReviewStage;
+  firstPass?: FirstPassStage;
+  /** Wraps the grid panel in the stage frame (header, fold, activity). */
+  frame: (gridPanel: ReactNode) => ReactNode;
+  /** The stage frame's fold state — the walk panel folds with it. */
+  expanded: boolean;
+}) {
   // No global cursor: each seat carries its own progress, so several seats can
   // be under review at once.
   const activeSeats = stage.members.filter((member) => member.progress !== undefined);
@@ -256,45 +612,93 @@ export function ReviewBody({ stage }: { stage: ReviewStage }) {
           maxRounds: stage.maxRounds,
         }
       : undefined;
-  // Fold state: user choices override the defaults (the step under review
-  // opens itself and follows the walk; finished steps start collapsed;
-  // rounds inside an open step start open).
-  const [folds, setFolds] = useState<ReadonlyMap<string, boolean>>(new Map());
+
+  // The seat pager follows the lone active seat until the reader pins one.
+  const [pinnedSeat, setPinnedSeat] = useState<string | undefined>(undefined);
+  // Deck position per step; comments fold + selected tag per round. All fold
+  // state is controlled: live snapshots re-render this panel continuously, so
+  // an uncontrolled <details> would snap back on every SSE tick.
+  const [roundChoices, setRoundChoices] = useState<ReadonlyMap<string, number>>(new Map());
+  const [commentOpen, setCommentOpen] = useState<ReadonlyMap<string, boolean>>(new Map());
+  const [commentTags, setCommentTags] = useState<ReadonlyMap<string, string>>(new Map());
+  const [finalOpen, setFinalOpen] = useState<ReadonlyMap<string, boolean>>(new Map());
   const stepRefs = useRef(new Map<string, HTMLElement | null>());
 
-  const setFold = useCallback((key: string, open: boolean) => {
-    setFolds((prev) => {
-      const next = new Map(prev);
-      next.set(key, open);
-      return next;
+  const members = stage.members;
+  const pinnedIndex = members.findIndex((m) => m.memberId === pinnedSeat);
+  const seatIndex =
+    pinnedIndex >= 0
+      ? pinnedIndex
+      : activeSeats.length === 1
+        ? members.indexOf(activeSeats[0]!)
+        : 0;
+  const seat = members[seatIndex];
+
+  const selectSeat = useCallback(
+    (memberId: string) => setPinnedSeat(memberId),
+    [],
+  );
+
+  // A grid-cell click on ANOTHER seat must wait for that seat's cards to
+  // mount before it can scroll to the step; the effect below fires after the
+  // commit and performs the deferred scroll exactly once.
+  const pendingScroll = useRef<string | undefined>(undefined);
+  const scrollToStep = (key: string): void => {
+    stepRefs.current.get(key)?.scrollIntoView({
+      behavior: prefersReducedMotion() ? "auto" : "smooth",
+      block: "nearest",
     });
-  }, []);
-
-  const stepOpen = (member: ReviewMemberView, step: ReviewStepView): boolean =>
-    folds.get(stepKey(member.memberId, step.index)) ?? step.outcome === "under-review";
-  const roundOpen = (member: ReviewMemberView, step: ReviewStepView, round: number): boolean =>
-    folds.get(roundKey(member.memberId, step.index, round)) ?? true;
-
+  };
   const onCellClick = (member: ReviewMemberView, step: ReviewStepView): void => {
-    const key = stepKey(member.memberId, step.index);
-    const opening = !stepOpen(member, step);
-    setFold(key, opening);
-    if (opening) {
-      // After the fold expands, bring the step panel into view.
-      requestAnimationFrame(() => {
-        stepRefs.current.get(key)?.scrollIntoView({
-          behavior: prefersReducedMotion() ? "auto" : "smooth",
-          block: "nearest",
-        });
-      });
+    const key = `${member.memberId}:${step.index}`;
+    if (seat?.memberId === member.memberId) {
+      scrollToStep(key);
+      return;
     }
+    pendingScroll.current = key;
+    selectSeat(member.memberId);
+  };
+  useEffect(() => {
+    const key = pendingScroll.current;
+    if (key === undefined || stepRefs.current.get(key) == null) return;
+    pendingScroll.current = undefined;
+    scrollToStep(key);
+  });
+
+  const commentState = {
+    open: (key: string) => commentOpen.get(key) ?? false,
+    toggle: (key: string) =>
+      setCommentOpen((prev) => {
+        const next = new Map(prev);
+        next.set(key, !(prev.get(key) ?? false));
+        return next;
+      }),
+    tag: (key: string) => commentTags.get(key) ?? "judge",
+    select: (key: string, tag: string) =>
+      setCommentTags((prev) => {
+        const next = new Map(prev);
+        next.set(key, tag);
+        return next;
+      }),
   };
 
-  const sections = stage.members
-    .map((member) => ({ member, steps: member.steps.filter(reviewable) }))
-    .filter(({ steps }) => steps.length > 0);
+  const firstPassMember = (memberId: string) =>
+    firstPass?.members.find((member) => member.memberId === memberId);
+  const firstPassCot = (memberId: string): readonly string[] | undefined =>
+    firstPassMember(memberId)?.idea?.cot;
+  // The seat's full expertise, biggest granularity first: department, then
+  // umbrella, then the subfields (which only the first-pass view carries).
+  const expertiseOf = (member: ReviewMemberView): string =>
+    [
+      [member.department, member.umbrella].filter(Boolean).join(" / "),
+      ...(firstPassMember(member.memberId)?.subfields ?? []),
+    ]
+      .filter((part) => part !== "")
+      .join(" · ");
 
-  return (
+  const anyReviewed = members.some((member) => member.steps.some(reviewable));
+
+  const gridPanel = (
     <div>
       {stage.status === "active" && cursor && (
         <p className="cursor-line">
@@ -303,161 +707,189 @@ export function ReviewBody({ stage }: { stage: ReviewStage }) {
         </p>
       )}
       <div className="matrix">
-        {stage.members.map((member) => (
-          <div key={member.memberId} className="matrix-row">
-            <span
-              className="matrix-label"
-              title={
-                member.department && member.umbrella
-                  ? `${member.label} — ${member.department} / ${member.umbrella}`
-                  : member.label
-              }
-            >
-              {member.label}
-            </span>
-            <div className="cells">
-              {member.steps.map((step) => {
-                const k = redevCount(step);
-                const active = reviewable(step);
-                const isOpen = active && stepOpen(member, step);
-                return (
-                  <button
-                    key={step.index}
-                    type="button"
-                    className={`cell ${cellClass(step)}${isOpen ? " cell-selected" : ""}`}
-                    aria-label={cellLabel(member, step)}
-                    aria-expanded={active ? isOpen : undefined}
-                    disabled={!active}
-                    onClick={() => onCellClick(member, step)}
-                  >
-                    {k > 0 && <span className="cell-redev">×{k}</span>}
-                  </button>
-                );
-              })}
+        {members.map((member) => {
+          const expertise = expertiseOf(member);
+          return (
+            <div key={member.memberId} className="matrix-row">
+              <span className="matrix-label" title={expertise || member.label}>
+                {member.label}
+              </span>
+              <div className="cells">
+                {member.steps.map((step) => {
+                  const k = redevCount(step);
+                  const active = reviewable(step);
+                  const isShown = seat?.memberId === member.memberId;
+                  return (
+                    <button
+                      key={step.index}
+                      type="button"
+                      className={`cell ${cellClass(step)}${isShown ? " cell-selected" : ""}`}
+                      aria-label={cellLabel(member, step)}
+                      disabled={!active}
+                      onClick={() => onCellClick(member, step)}
+                    >
+                      {k > 0 && <span className="cell-redev">×{k}</span>}
+                    </button>
+                  );
+                })}
+              </div>
+              {expertise !== "" && (
+                <span className="matrix-expertise marquee" title={expertise}>
+                  <span className="marquee-inner">{expertise}</span>
+                </span>
+              )}
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
       <p className="matrix-caption">
-        cell = one chain step · colors = how it passed · click a cell to fold its step open or
-        closed
+        cell = one chain step · colors = how it passed · click a cell to open that seat's walk
       </p>
-      {sections.length === 0 ? (
-        <p className="dim small">no review rounds recorded yet</p>
-      ) : (
-        <div className="review-steps">
-          {sections.map(({ member, steps }) => (
-            <div key={member.memberId} className="review-member">
-              <div className="review-member-head">
-                {member.label}
-                {member.umbrella && (
-                  <span className="review-member-sub">
-                    {" — "}
-                    {member.department ? `${member.department} / ` : ""}
-                    {member.umbrella}
-                  </span>
-                )}
+      {!anyReviewed && <p className="dim small">no review rounds recorded yet</p>}
+    </div>
+  );
+
+  const walkPanel =
+    !anyReviewed || seat === undefined ? null : (
+      <section className="stage review-walk-panel">
+        <div className="seat-walk">
+          <div className="seat-pager">
+            {/* The pager arrows hug the seat title; the seat's expertise
+                (biggest granularity first) balances the right side. */}
+            <button
+              type="button"
+              className="ghost-btn"
+              aria-label="previous seat"
+              disabled={seatIndex === 0}
+              onClick={() => selectSeat(members[seatIndex - 1]!.memberId)}
+            >
+              <BackIcon size={16} />
+            </button>
+            <span className="seat-pager-label">
+              {seat.label}
+              <span className="dim"> / {members.length}</span>
+            </span>
+            <button
+              type="button"
+              className="ghost-btn"
+              aria-label="next seat"
+              disabled={seatIndex === members.length - 1}
+              onClick={() => selectSeat(members[seatIndex + 1]!.memberId)}
+            >
+              <ForwardIcon size={16} />
+            </button>
+            {seat.progress !== undefined ? (
+              <span className="step-chip step-chip-active">under review</span>
+            ) : walkComplete(seat) ? (
+              <span className="step-chip step-chip-ok">done with thinking</span>
+            ) : null}
+            <span className="seat-pager-expertise marquee" title={expertiseOf(seat)}>
+              <span className="marquee-inner">{expertiseOf(seat)}</span>
+            </span>
+          </div>
+          {(() => {
+            const timeline = computeSeatTimeline(seat, firstPassCot(seat.memberId));
+            return (
+              <div className="review-cards">
+                {seat.steps.map((step) => {
+                  const stepRefKey = `${seat.memberId}:${step.index}`;
+                  const retroNotes = timeline.retro.get(step.index) ?? [];
+                  const choiceKey = stepRefKey;
+                  const k = redevCount(step);
+                  return (
+                    <section
+                      key={step.index}
+                      className="review-card"
+                      ref={(el) => {
+                        stepRefs.current.set(stepRefKey, el);
+                      }}
+                    >
+                      <div className="review-card-head">
+                        <span
+                          className={`review-card-title ${stepTitleClass(step)}`}
+                          title={stepOutcomeHint(step)}
+                        >
+                          Step {step.index}
+                          <span className="dim"> / {seat.steps.length}</span>
+                        </span>
+                        {k > 0 && <span className="badge">×{k} redeveloped</span>}
+                        <span className="review-step-meta">
+                          {step.rounds.length === 0
+                            ? ""
+                            : `${step.rounds.length} round${step.rounds.length === 1 ? "" : "s"}`}
+                        </span>
+                      </div>
+                      <RoundDeck
+                        member={seat}
+                        step={step}
+                        timeline={timeline}
+                        retroNotes={retroNotes}
+                        selectedRound={roundChoices.get(choiceKey)}
+                        onSelectRound={(round) =>
+                          setRoundChoices((prev) => {
+                            const next = new Map(prev);
+                            next.set(choiceKey, round);
+                            return next;
+                          })
+                        }
+                        commentState={commentState}
+                      />
+                    </section>
+                  );
+                })}
+                {seat.finalIdea &&
+                  (() => {
+                    // The member's output as the review leaves it: the FINAL
+                    // version once every step passed; the current version
+                    // under review until then. Also saved as a readable copy
+                    // under the session's final/ directory.
+                    const finalized = walkComplete(seat);
+                    const revisions = seat.revisionCount ?? 0;
+                    const open = finalOpen.get(seat.memberId) ?? finalized;
+                    return (
+                      <details className="review-fold review-final" open={open}>
+                        <summary
+                          className="review-fold-head"
+                          onClick={(event) => {
+                            event.preventDefault();
+                            setFinalOpen((prev) => {
+                              const next = new Map(prev);
+                              next.set(seat.memberId, !open);
+                              return next;
+                            });
+                          }}
+                        >
+                          <span className="review-fold-name">
+                            <strong>{finalized ? "Final output" : "Output under review"}</strong>
+                          </span>
+                          {finalized ? (
+                            <span className="step-chip step-chip-ok">final version</span>
+                          ) : (
+                            <span className="step-chip step-chip-active">in progress</span>
+                          )}
+                          <span className="review-step-meta">
+                            {revisions > 0
+                              ? `revised ×${revisions} during review`
+                              : "unchanged from the first pass"}
+                          </span>
+                        </summary>
+                        <div className="review-fold-body">
+                          <IdeaTabs idea={seat.finalIdea} />
+                        </div>
+                      </details>
+                    );
+                  })()}
               </div>
-              {steps.map((step) => {
-                const key = stepKey(member.memberId, step.index);
-                const open = stepOpen(member, step);
-                const k = redevCount(step);
-                return (
-                  <details
-                    key={key}
-                    className="review-fold review-step"
-                    open={open}
-                    ref={(el) => {
-                      stepRefs.current.set(key, el);
-                    }}
-                  >
-                    <summary
-                      className="review-fold-head"
-                      onClick={(event) => {
-                        event.preventDefault();
-                        setFold(key, !open);
-                      }}
-                    >
-                      <span className="review-fold-name">Step {step.index}</span>
-                      <StepOutcomeChip step={step} />
-                      <span className="review-step-meta">
-                        {step.rounds.length === 0
-                          ? "round 1 in progress"
-                          : `${step.rounds.length} round${step.rounds.length === 1 ? "" : "s"}`}
-                      </span>
-                      {k > 0 && <span className="badge">×{k} redeveloped</span>}
-                    </summary>
-                    {open && (
-                      <div className="review-fold-body">
-                        {step.rounds.length === 0 ? (
-                          <p className="dim small">no completed review rounds for this step yet</p>
-                        ) : (
-                          // Chronological: round 1 first, later rounds beneath it.
-                          [...step.rounds]
-                            .sort((a, b) => a.round - b.round)
-                            .map((round) => (
-                              <RoundFold
-                                key={round.round}
-                                round={round}
-                                open={roundOpen(member, step, round.round)}
-                                onToggle={() =>
-                                  setFold(
-                                    roundKey(member.memberId, step.index, round.round),
-                                    !roundOpen(member, step, round.round),
-                                  )
-                                }
-                              />
-                            ))
-                        )}
-                      </div>
-                    )}
-                  </details>
-                );
-              })}
-              {member.finalIdea && (() => {
-                // The member's output as the review leaves it: the FINAL
-                // version once every step passed; the current version under
-                // review until then. Also saved as a readable copy under the
-                // session's final/ directory.
-                const finalized = walkComplete(member);
-                const key = finalKey(member.memberId);
-                const open = folds.get(key) ?? finalized;
-                const revisions = member.revisionCount ?? 0;
-                return (
-                  <details className="review-fold review-final" open={open}>
-                    <summary
-                      className="review-fold-head"
-                      onClick={(event) => {
-                        event.preventDefault();
-                        setFold(key, !open);
-                      }}
-                    >
-                      <span className="review-fold-name">
-                        <strong>{finalized ? "Final output" : "Output under review"}</strong>
-                      </span>
-                      {finalized ? (
-                        <span className="step-chip step-chip-ok">final version</span>
-                      ) : (
-                        <span className="step-chip step-chip-active">in progress</span>
-                      )}
-                      <span className="review-step-meta">
-                        {revisions > 0
-                          ? `revised ×${revisions} during review`
-                          : "unchanged from the first pass"}
-                      </span>
-                    </summary>
-                    {open && (
-                      <div className="review-fold-body">
-                        <IdeaTabs idea={member.finalIdea} />
-                      </div>
-                    )}
-                  </details>
-                );
-              })()}
-            </div>
-          ))}
+            );
+          })()}
         </div>
-      )}
+      </section>
+    );
+
+  return (
+    <div className="review-split">
+      {frame(gridPanel)}
+      {expanded && walkPanel}
     </div>
   );
 }

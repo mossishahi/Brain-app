@@ -27,25 +27,56 @@
   --text: #ececec;
   --text-dim: #9a9a9a;
   --accent: #6ea0ff;
-  --ok: #2e9e6b;
+  /* A step darker than the light theme's green: full-brightness green glows
+     against dark surfaces (cells, chips, verdict names all inherit this). */
+  --ok: #27865b;
   /* Completed pipeline strokes: deliberately much darker than the --ok check mark. */
   --ok-dark: #0a3a1e;
   --warn: #d99a2b;
   --bad: #d5484d;
-  --border-step-tint: #ffffff;
+  --border-step-tint: #605e5e;
+  /* Dark keeps the classic ladder anchor for the seat stroke, dips the step
+     stroke back toward black, and lets the round stroke lift from there
+     (hand-tuned; --border-3 chains through the shared formula). */
+  --border-1: color-mix(in srgb, var(--border) 90%, var(--border-step-tint));
+  --border-2: color-mix(in srgb, var(--border-1) 90%, #000000);
+  /* Elevation: each card level a LITTLE lighter than the one beneath it, so
+     the front-most card reads lightest without washing the theme out;
+     shadows need more weight on dark. */
+  --elev-0: #1b1b1b;
+  --elev-1: #1f1f1f;
+  --elev-2: #232323;
+  --elev-3: #272727;
+  --card-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.45),
+    0 3px 10px rgba(0, 0, 0, 0.3);
 }
 
 /*
  * Nested panel stroke ladder: each nesting level (stage > card > inner box >
- * nested box) draws its border one 10% step away from its parent's, so the
- * hierarchy stays legible. Dark theme steps lighter; light theme steps darker
- * (lighter-than-parent would dissolve into the white page).
+ * nested box) draws its border one 10% step toward the theme's tint, so the
+ * hierarchy stays legible. The tints are hand-tuned per theme: light steps
+ * toward near-white (#fcfcfc) so deeper strokes soften rather than harden;
+ * dark steps toward a mid grey (#605e5e) so they lift without glowing.
  */
 :root {
-  --border-step-tint: #000000;
-  --border-1: color-mix(in srgb, var(--border) 90%, var(--border-step-tint));
+  --border-step-tint: #fcfcfc;
+  /* Light anchors its ladder at near-white (hand-tuned): the strokes stay
+     whisper-thin and soften further as they nest. */
+  --border-1: color-mix(in srgb, #ffffff 90%, var(--border-step-tint));
   --border-2: color-mix(in srgb, var(--border-1) 90%, var(--border-step-tint));
   --border-3: color-mix(in srgb, var(--border-2) 90%, var(--border-step-tint));
+  /* Card elevation, light theme: the front-most card is pure white and each
+     level beneath steps slightly grey, so the layering is visible — not just
+     implied by the shadows. The dark theme overrides these with surfaces
+     that lighten toward the front instead. */
+  --elev-0: #f6f7f9;
+  --elev-1: #f8f9fa;
+  --elev-2: #fcfcfd;
+  --elev-3: #ffffff;
+  --card-shadow:
+    0 1px 2px rgba(24, 26, 32, 0.07),
+    0 2px 8px rgba(24, 26, 32, 0.05);
 }
 
 /* ------------------------------------------------------------------ resets */
@@ -289,6 +320,8 @@ textarea,
 .gate-card,
 .judge-card,
 .review-fold,
+.review-card,
+.round-card,
 .code-block {
   transition:
     color 120ms ease,
@@ -800,21 +833,9 @@ select:disabled {
   animation: strip-march 1.2s linear infinite;
 }
 
-.job-state-strip-running {
-  background: var(--ok);
-}
-
-.job-state-strip-completed {
-  background: color-mix(in srgb, var(--ok) 55%, transparent);
-}
-
 .job-state-strip-failed,
 .job-state-strip-orphaned {
   background: var(--bad);
-}
-
-.job-state-strip-cancelled {
-  background: var(--border);
 }
 
 @keyframes strip-march {
@@ -1156,6 +1177,15 @@ select:disabled {
   font-size: 11px;
   line-height: 18px;
   color: var(--text-dim);
+}
+
+/* Cross-step retro changes rendered inside the affected step's own text:
+   red, with the origin (step · round) on hover. */
+.retro-change {
+  cursor: help;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+  text-decoration-color: color-mix(in srgb, var(--bad) 55%, transparent);
 }
 
 .badge-accent {
@@ -1970,10 +2000,10 @@ button.server-file-name {
   background: color-mix(in srgb, var(--text) 6%, transparent);
 }
 
-/* Open card: the row hands over to the content — no dead band under the title. */
-.job-card-main.job-expand-open {
-  min-height: 44px;
-}
+/* Open card: the header row keeps its closed-state height, so the title
+   stays EXACTLY where it was and the details unroll beneath it — the
+   standard accordion feel. (It used to hand over to 44px, which visibly
+   pushed the title upward on every click.) */
 
 .job-topic {
   min-width: 0;
@@ -3203,12 +3233,14 @@ details.drawer-section[open] > summary::before {
   gap: 12px;
 }
 
+/* Flush-left grid: a compact left-aligned label column, so the cells start
+   right after "Seat N" instead of floating toward the middle. */
 .matrix-label {
-  width: 150px;
+  width: 56px;
   flex: none;
   font-size: 12px;
   color: var(--text-dim);
-  text-align: right;
+  text-align: left;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -3269,38 +3301,160 @@ details.drawer-section[open] > summary::before {
   margin-top: 10px;
 }
 
+/* Each grid row carries the seat's full expertise after its cells, biggest
+   granularity first (department / umbrella · subfields), ellipsized. */
+.matrix-expertise {
+  color: var(--text-dim);
+  font-size: 12px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /*
- * The reviewed steps as always-present sub-panels below the matrix: one
- * member group per seat, one collapsible fold per reviewed step, the rounds
- * nested inside as their own folds.
+ * The review stage splits into two detached panels — the progress grid (in
+ * the stage frame) and the walk inspector — with the page background showing
+ * through the gap between them. Inside the inspector, everything belonging
+ * to the visible seat lives in ONE outer card (.seat-walk): the seat pager
+ * as its header, the step cards stacked vertically, the final-output fold.
  */
-.review-steps {
-  border-top: 1px solid var(--border);
-  margin-top: 16px;
-  padding-top: 4px;
+.review-split {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 18px;
 }
 
-.review-member {
-  margin-top: 10px;
+/* The walk panel is the BACKGROUND the seat/step/round cards rest on — the
+   deepest (darkest) elevation level, and the one level that carries NO
+   stroke: it reads as ground, not as a card. */
+.review-walk-panel {
+  background: var(--elev-0);
+  border: none;
 }
 
-.review-member-head {
+.seat-walk {
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius);
+  background: var(--elev-1);
+  box-shadow: var(--card-shadow);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Dark theme pins the seat card's stroke to a dark grey — deliberately NOT
+   via --border-1, whose value the step stroke (--border-2) derives from. */
+:root[data-theme="dark"] .seat-walk {
+  border-color: #181818;
+}
+
+.seat-pager {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* The seat's full expertise, biggest granularity first, balancing the right
+   side of the seat card's header. */
+.seat-pager-expertise {
+  flex: 1 1 auto;
+  text-align: right;
+  color: var(--text-dim);
+  font-size: 12px;
+  min-width: 0;
+}
+
+/*
+ * Truncated text that reveals itself: idle, it ellipsizes; on hover the
+ * content slides toward its END by exactly the hidden distance (container
+ * width minus content width, via container-query units), then slides back.
+ */
+.marquee {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  container-type: inline-size;
+}
+
+.marquee-inner {
+  display: inline-block;
+  /* The box must be as wide as its content — shrink-to-fit would cap it at
+     the container's width and zero out the slide distance. */
+  width: max-content;
+  transition: transform 2.4s linear;
+}
+
+.marquee:hover {
+  text-overflow: clip;
+}
+
+.marquee:hover .marquee-inner {
+  transform: translateX(min(0px, calc(100cqw - 100%)));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .marquee-inner {
+    transition: none;
+  }
+}
+
+.seat-pager-label {
   font-size: 13px;
   font-weight: 600;
-  margin-bottom: 2px;
+  /* Never let a long expertise line squeeze the title or chip into wrapping —
+     the ellipsized expertise is the only shrinkable item in the row. */
+  white-space: nowrap;
+  flex: none;
 }
 
-.review-member-sub {
-  color: var(--text-dim);
-  font-weight: 400;
-  font-size: 12px;
+.seat-pager > .step-chip {
+  white-space: nowrap;
+  flex: none;
 }
 
-.review-step > .review-fold-head {
+.seat-pager > .ghost-btn {
+  flex: none;
+}
+
+/* A pager arrow with nowhere to go disappears instead of rendering dim —
+   visibility (not display) so its slot stays reserved and the title never
+   shifts. Scoped to direct children: the copy button nested in the header's
+   actions span is unaffected. */
+.seat-pager > .ghost-btn:disabled,
+.round-card-head > .ghost-btn:disabled {
+  visibility: hidden;
+}
+
+.review-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.review-card {
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius);
+  background: var(--elev-2);
+  box-shadow: var(--card-shadow);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.review-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   flex-wrap: wrap;
+}
+
+.review-card-title {
+  font-size: 13px;
+  font-weight: 600;
 }
 
 .review-step-meta {
@@ -3331,28 +3485,92 @@ details.drawer-section[open] > summary::before {
   border-color: var(--warn);
 }
 
-.comment-chip-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.comment-chip {
+/* Reviewer names ride ON the "Comments & judgement" summary row itself —
+   Judge first, one name per commentor — each colored by its verdict (green
+   passed, amber build, red interrupt, dim pending). Selecting a name shows
+   that reviewer's content below. */
+.reviewer-names {
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 3px 10px;
+  gap: 12px;
+  margin-left: 6px;
+}
+
+.reviewer-name {
+  border: none;
+  background: none;
+  padding: 0;
   font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
 }
 
-.comment-chip:hover {
-  border-color: var(--text-dim);
+.reviewer-name:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
-.comment-chip.open {
-  border-color: var(--accent);
+.reviewer-name-selected {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.reviewer-name-ok {
+  color: var(--ok);
+}
+
+.reviewer-name-warn {
+  color: var(--warn);
+}
+
+.reviewer-name-bad {
+  color: var(--bad);
+}
+
+.reviewer-name-dim {
+  color: var(--text-dim);
+}
+
+/* Outcome/verdict carried by text color alone: the step title takes its
+   outcome's color, a round's index number takes its verdict's color. */
+.step-title-ok {
+  color: var(--ok);
+}
+
+.step-title-warn {
+  color: var(--warn);
+}
+
+.step-title-active {
+  color: var(--accent);
+}
+
+.step-title-dim {
+  color: var(--text-dim);
+}
+
+.round-num-ok {
+  color: var(--ok);
+}
+
+.round-num-warn {
+  color: var(--warn);
+}
+
+.round-num-bad {
+  color: var(--bad);
+}
+
+.round-num-active {
+  color: var(--accent);
+}
+
+.comment-content {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13px;
 }
 
 .comment-detail {
@@ -3394,13 +3612,101 @@ details.drawer-section[open] > summary::before {
   gap: 6px;
 }
 
-.redev-bar {
-  border: 1px solid var(--warn);
-  background: color-mix(in srgb, var(--warn) 10%, transparent);
+/* The round card: newest round shown by default, paged by the same ghost
+   chevrons the seat pager uses, hugging the "Round k / K" title in the card
+   header. Nothing scrolls. */
+.round-card {
+  border: 1px solid var(--border-3);
   border-radius: var(--radius);
-  padding: 6px 12px;
-  font-size: 12px;
+  background: var(--elev-3);
+  box-shadow: var(--card-shadow);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  animation: round-card-in 0.18s ease;
 }
+
+@keyframes round-card-in {
+  from {
+    opacity: 0;
+    transform: translateX(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .round-card {
+    animation: none;
+  }
+}
+
+.round-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.round-card-actions {
+  margin-left: auto;
+}
+
+/* The full step text: never clamped, never scrolled — the card takes the
+   height of the whole paragraph. Words carried from earlier rounds render
+   dimmed so this round's changes carry the full weight. */
+.round-text {
+  font-size: 13px;
+  line-height: 1.6;
+  margin: 4px 0 0;
+  white-space: pre-wrap;
+}
+
+.diff-keep,
+.diff-keep-block {
+  opacity: 0.55;
+}
+
+.diff-red {
+  color: var(--bad);
+}
+
+/* Rewrites this round applied to OTHER steps: red, because they moved text
+   the reader is not currently looking at. */
+.round-cross-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.round-cross {
+  border-left: 2px solid var(--bad);
+  background: color-mix(in srgb, var(--bad) 6%, transparent);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  padding: 8px 12px;
+}
+
+.detail-label-bad {
+  color: var(--bad);
+}
+
+.copy-btn {
+  padding: 2px 6px;
+}
+
+.badge-warn {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.badge-bad {
+  color: var(--bad);
+  border-color: var(--bad);
+}
+
 
 /* ---------------------------------------------------------------- proposal */
 
@@ -3507,6 +3813,22 @@ details.drawer-section[open] > summary::before {
   color: var(--text-dim);
 }
 
+/* The capability & tool usage receipt below the duration bars: stacked
+   matrices separated from the timing summary by a hairline. */
+.tool-usage {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+/* Wide matrices (one column per tool) scroll inside their own box. */
+.tool-usage > div {
+  overflow-x: auto;
+}
+
 /* ----------------------------------------------------------------- mobile */
 
 @media (max-width: 720px) {
@@ -3533,16 +3855,15 @@ details.drawer-section[open] > summary::before {
 .seat-card,
 .member-card,
 .cell,
-.review-step,
+.seat-walk,
 .band-col {
   border-color: var(--border-1);
 }
 
 /* Level 2 — boxes inside those cards. */
 .cell-redev,
-.comment-chip,
 .judge-card,
-.review-round,
+.review-card,
 .member-card .paper-table th,
 .member-card .paper-table td,
 .member-card .issue-item,
@@ -3553,10 +3874,9 @@ details.drawer-section[open] > summary::before {
 }
 
 /* Level 3 — evidence blocks nested one level deeper still. */
-.comment-chip .code-block,
 .judge-card .code-block,
-.review-round .review-fold,
-.review-round .code-block,
+.round-card .review-fold,
+.round-card .code-block,
 .member-card .issue-item .code-block {
   border-color: var(--border-3);
 }
@@ -3701,16 +4021,6 @@ details.drawer-section[open] > summary::before {
 
 /* ------------------------------------------------ review round redesign */
 
-.round-cot {
-  border-left: 3px solid var(--accent);
-  background: var(--surface);
-  border-radius: 0 var(--radius) var(--radius) 0;
-  padding: 10px 12px;
-  margin: 8px 0;
-  font-size: 13px;
-  white-space: pre-wrap;
-}
-
 .review-fold {
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -3757,15 +4067,6 @@ details.drawer-section[open] > summary::before {
   flex-direction: column;
   gap: 8px;
   font-size: 13px;
-}
-
-/* Step folds hold the rounds; give them a little extra breathing room. */
-.review-step {
-  margin: 8px 0;
-}
-
-.review-step > .review-fold-head {
-  padding: 10px 12px;
 }
 
 /* ------------------------------------------------------------------------- *

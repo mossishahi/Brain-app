@@ -1,4 +1,4 @@
-/** The horizontal SVG pipeline minimap: eight nodes joined by 1px connectors. */
+/** The horizontal SVG pipeline minimap: nine nodes joined by 1px connectors. */
 import type { KeyboardEvent } from "react";
 import { STAGE_IDS } from "@brainstorm-agentic/protocol";
 import type {

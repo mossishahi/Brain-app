@@ -98,7 +98,13 @@ export function ToolUsagePanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- refetch keyed on job progress
   }, [jobId, updatedAt, active]);
 
-  if (error) return <p className="dim small">tool usage unavailable: {error}</p>;
+  if (error) {
+    return (
+      <div className="tool-usage">
+        <p className="dim small">tool usage unavailable: {error}</p>
+      </div>
+    );
+  }
   if (!report) return null;
 
   const totalCalls = Object.values(report.totals).reduce((sum, count) => sum + count, 0);

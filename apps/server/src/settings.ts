@@ -917,18 +917,22 @@ export class SettingsStore {
       if (agent.fallbackModel) {
         env.BRAINSTORM_AGENTIC_AGENT_FALLBACK_MODEL = agent.fallbackModel;
       }
-      const recovery =
-        settings.creditRecovery ?? this.get().creditRecovery;
-      env.BRAINSTORM_AGENTIC_CREDIT_SAFETY_BUFFER_SECONDS = String(
-        recovery.safetyBufferSeconds,
-      );
-      env.BRAINSTORM_AGENTIC_OPENROUTER_MODEL =
-        recovery.openRouterModel;
-      const openRouterKey = this.getOpenRouterApiKey();
-      if (openRouterKey) env.OPENROUTER_API_KEY = openRouterKey;
     } else {
       return env;
     }
+    // Credit-recovery settings travel to BOTH online providers: the worker
+    // parses them provider-agnostically, and the Messages-API path needs them
+    // just as much as the Agent SDK path — its CreditBlockDetectingAgentExecutor
+    // is what upgrades a provider credit failure into a schedulable
+    // credit_blocked checkpoint, optionally using OpenRouter to parse the
+    // reset time out of the provider's message.
+    const recovery = settings.creditRecovery ?? this.get().creditRecovery;
+    env.BRAINSTORM_AGENTIC_CREDIT_SAFETY_BUFFER_SECONDS = String(
+      recovery.safetyBufferSeconds,
+    );
+    env.BRAINSTORM_AGENTIC_OPENROUTER_MODEL = recovery.openRouterModel;
+    const openRouterKey = this.getOpenRouterApiKey();
+    if (openRouterKey) env.OPENROUTER_API_KEY = openRouterKey;
     if (settings.llm.model) {
       env.BRAINSTORM_AGENTIC_MODEL = settings.llm.model;
     }
