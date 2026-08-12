@@ -139,6 +139,46 @@ test("the NA file label is schema vocabulary, not a placeholder", () => {
   );
 });
 
+// Verbatim shape from a real run (bsa_20260811-151331_685134): a judge's
+// genuine reason re-deriving a Neumann-rectangle eigenvalue law tripped a
+// filler phrase deep in its tail, failed all retries, and killed the seat's
+// whole review walk. Ambiguous phrases are probe signatures only in SHORT
+// strings — long substantive prose containing them is real content.
+test("long mathematical prose containing an ambiguous phrase passes (field-observed crash)", () => {
+  const reason =
+    "I re-derived the Neumann-rectangle eigenvalue law lambda_{m,n}=(m*pi/L)^2+(n*pi/W)^2 " +
+    "by separation of variables and confirmed the commentor's bound: taking just a test " +
+    "function supported near the corner gives the same leading constant, and the 1-D " +
+    "reduction to an interval matches the classical string length 2 spectrum term by term, " +
+    "so the objection to step 1 does not stand and the derivation holds as written.";
+  assert.ok(reason.length > 200, "the fixture must exercise the long-string path");
+  assert.deepEqual(placeholderContentIssues({ reason }), []);
+});
+
+test("the same ambiguous phrases in short probe payloads are still rejected", () => {
+  for (const value of [
+    "Just a test to satisfy the output tool.",
+    "Reason string length 30 to pass the validator check.",
+    "This field is a placeholder for the real verdict.",
+    "Submitting dummy content to see what the schema accepts.",
+  ]) {
+    assert.equal(
+      placeholderContentIssues({ reason: value }).length,
+      1,
+      `"${value}" must be rejected`,
+    );
+  }
+});
+
+test("unambiguous filler phrases are rejected at any length", () => {
+  const padding =
+    "The remainder of this field discusses the spectral gap of the Neumann Laplacian " +
+    "on convex domains and the Payne-Weinberger inequality in considerable detail. ".repeat(3);
+  const value = `${padding}Lorem ipsum dolor sit amet.`;
+  assert.ok(value.length > 200);
+  assert.equal(placeholderContentIssues({ reason: value }).length, 1);
+});
+
 test("real scientific prose never trips the guard", () => {
   const artifact = {
     verdict: "Interrupt",

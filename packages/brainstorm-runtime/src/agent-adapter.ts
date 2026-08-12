@@ -227,21 +227,39 @@ function requestedSectionIssue(
  * the validator accepts ("Test minimal reason string for schema debug
  * purpose only length check now.", "abc"). Those satisfy the SHAPE, so
  * without this check they are recorded as real verdicts and silently poison
- * the review. Every pattern here is unambiguous filler; ordinary scientific
- * prose (which legitimately contains words like "test") never matches.
+ * the review. Every pattern here is unambiguous filler in any context and
+ * at any length.
  */
 const PLACEHOLDER_PHRASES: readonly RegExp[] = [
-  /\bplaceholder\b/i,
   /\blorem ipsum\b/i,
   /\bschema debug\b/i,
   /\blength check (?:now|only)\b/i,
   /\btest minimal\b/i,
   /\bminimal (?:test|reason|suggestion) string\b/i,
+  /\bfiller text\b/i,
+];
+
+/**
+ * Phrases that mark filler in a minimal payload but also occur in genuine
+ * scientific prose — "just a test function" in a variational argument,
+ * "string length 2" in a separation-of-variables step, "placeholder" echoed
+ * from the verdict catalog's own "never placeholder text" wording. Scanned
+ * only in SHORT strings: a probe payload is minimal by nature (it exists to
+ * clear a length minimum, not to carry content), while a long substantive
+ * text containing one of these phrases is real work. Observed in production
+ * (bsa_20260811-151331_685134): a judge's genuine multi-hundred-character
+ * reason re-deriving a Neumann-rectangle eigenvalue law was rejected as
+ * filler on all retries, killing the seat's whole review walk.
+ */
+const SHORT_ONLY_PLACEHOLDER_PHRASES: readonly RegExp[] = [
+  /\bplaceholder\b/i,
   /\bstring length (?:twenty|thirty|forty|fifty|\d+)\b/i,
   /\bjust (?:a test|to fill)\b/i,
   /\bdummy (?:text|value|content)\b/i,
-  /\bfiller text\b/i,
 ];
+
+/** Above this length a string is content, not a probe (see above). */
+const SHORT_PHRASE_SCAN_MAX_CHARS = 200;
 
 /** Exact throwaway field values (whole trimmed value, case-insensitive). */
 const PLACEHOLDER_VALUES: ReadonlySet<string> = new Set([
@@ -301,7 +319,11 @@ function scanPlaceholders(
         `${path}: "${trimmed}" is placeholder text, not content — the submission is recorded verbatim as your answer; write the real value`,
       ];
     }
-    const phrase = PLACEHOLDER_PHRASES.find((pattern) => pattern.test(trimmed));
+    const phrase =
+      PLACEHOLDER_PHRASES.find((pattern) => pattern.test(trimmed)) ??
+      (trimmed.length <= SHORT_PHRASE_SCAN_MAX_CHARS
+        ? SHORT_ONLY_PLACEHOLDER_PHRASES.find((pattern) => pattern.test(trimmed))
+        : undefined);
     if (phrase) {
       const snippet = trimmed.length > 80 ? `${trimmed.slice(0, 80)}…` : trimmed;
       return [
