@@ -9,6 +9,7 @@ import {
   type AgentExecutor,
   type ArtifactStore,
   type CheckpointStore,
+  type CheckpointWriteRetryPolicy,
   type GateResponses,
   type HostToolManifest,
   type JsonValue,
@@ -24,6 +25,7 @@ import {
   type SkillResolver,
 } from "./compiler.js";
 import type { HumanGateMode } from "./gates.js";
+import { MigratingCheckpointStore } from "./journal-migrate.js";
 import type { BrainstormRouteResolver, CapabilityToolResolver } from "./routes.js";
 
 export interface BrainstormRuntimeOptions {
@@ -48,6 +50,10 @@ export interface BrainstormRuntimeOptions {
   readonly enabledHostToolIds?: ReadonlySet<string>;
   /** Capability ids the user disabled for THIS run (per-submission override). */
   readonly disabledCapabilityIds?: ReadonlySet<string>;
+  /** Journal layout to compile for; see CompileContentWorkflowOptions. */
+  readonly journalFormat?: 1 | 2;
+  /** Retry ladder for failed checkpoint writes (shared-filesystem blips). */
+  readonly checkpointWriteRetry?: CheckpointWriteRetryPolicy;
 }
 
 export interface StartBrainstormOptions {
@@ -87,8 +93,16 @@ export class BrainstormRuntime {
       enabledHostToolIds: options.enabledHostToolIds,
       disabledCapabilityIds: options.disabledCapabilityIds,
       skillResolver: options.skillResolver,
+      journalFormat: options.journalFormat,
     });
-    this.checkpoints = options.checkpoints ?? new InMemoryCheckpointStore();
+    const checkpoints = options.checkpoints ?? new InMemoryCheckpointStore();
+    // Loads migrate pre-fold (format-1) journals forward against this run's
+    // own pinned workflow, so every old run stays resumable. A runtime
+    // explicitly compiled FOR format 1 must replay format-1 journals as-is.
+    this.checkpoints =
+      (options.journalFormat ?? 2) === 1
+        ? checkpoints
+        : new MigratingCheckpointStore(checkpoints, this.compiled.content);
     this.artifacts = options.artifacts ?? new InMemoryArtifactStore();
     this.runner = new WorkflowRunner({
       functions: this.compiled.functions,
@@ -97,6 +111,11 @@ export class BrainstormRuntime {
       agentExecutor: options.agentExecutor,
       onEvent: options.onEvent,
       now: options.now,
+      // The checkpoint stamp must match the layout the compiler emitted.
+      journalFormat: options.journalFormat ?? 2,
+      ...(options.checkpointWriteRetry !== undefined
+        ? { checkpointWriteRetry: options.checkpointWriteRetry }
+        : {}),
     });
   }
 

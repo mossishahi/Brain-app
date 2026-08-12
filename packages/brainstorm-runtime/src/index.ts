@@ -1,6 +1,7 @@
 export * from "./errors.js";
 export * from "./data-ref.js";
 export * from "./json-schema.js";
+export * from "./journal-migrate.js";
 export * from "./panel.js";
 export * from "./routes.js";
 export * from "./prompts.js";

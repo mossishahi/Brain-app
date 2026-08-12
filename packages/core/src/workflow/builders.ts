@@ -30,6 +30,8 @@ export function activity(
     readonly input?: JsonValue;
     readonly inputFrom?: string;
     readonly resultKey?: string;
+    /** false = deterministic fold, re-run on every pass and never journaled. */
+    readonly journal?: boolean;
   } = {},
 ): ActivityNode {
   return { kind: "activity", activity: activityName, ...options };

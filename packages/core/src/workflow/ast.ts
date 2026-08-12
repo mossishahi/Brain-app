@@ -31,6 +31,15 @@ export interface ActivityNode extends WorkflowNodeBase {
   readonly inputFrom?: string;
   /** Scope key (current frame) that receives the activity's return value. */
   readonly resultKey?: string;
+  /**
+   * false = a deterministic FOLD: the function is re-run on every pass —
+   * first execution and every replay alike — and nothing is journaled.
+   * Only for functions that are pure over scope state and recorded effects
+   * (or idempotent), e.g. writing an already-journaled agent output into
+   * the run state. Keeps state copies out of the journal, whose size must
+   * stay bounded by the run's real outputs. Default true (journaled effect).
+   */
+  readonly journal?: boolean;
 }
 
 export interface AgentNode extends WorkflowNodeBase {

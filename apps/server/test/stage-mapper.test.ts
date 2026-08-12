@@ -1003,3 +1003,214 @@ test("the split step strip renders only for runs that actually used the split pi
     "split runs render the step strip",
   );
 });
+
+/**
+ * Format-2 journals record a content activity's OUTPUT under its `<id>-run`
+ * child instead of a full state copy under the node itself. The view
+ * fallbacks (used when the artifact index has not landed yet) must read
+ * both layouts.
+ */
+test("format-2 journal entries back the panel and file-partition views", () => {
+  const stageWorkspace = mkdtempSync(join(tmpdir(), "stage-mapper-test-"));
+  try {
+    const sessionDir = join(stageWorkspace, "session");
+    const jobDir = join(stageWorkspace, "job");
+    mkdirSync(join(sessionDir, "artifacts"), { recursive: true });
+    mkdirSync(jobDir, { recursive: true });
+    const members = [
+      { id: "member-1", department: "Physics", umbrella: "Quantum Optics", subfields: ["photonics"] },
+      { id: "member-2", department: "Biology", umbrella: "Systems Biology", subfields: [] },
+    ];
+    writeFileSync(
+      join(sessionDir, "checkpoint.json"),
+      JSON.stringify({
+        runId: "job-1",
+        workflowId: "brainstorm",
+        status: "running",
+        input: {},
+        journalFormat: 2,
+        journal: [
+          {
+            key: "brainstorm-root/partition-files-useful/partition-files-useful-run::result",
+            kind: "activity",
+            value: { files: [{ path: "a.py", label: "code", note: "the model" }] },
+          },
+          {
+            key: "brainstorm-root/partition-files-ignored/partition-files-ignored-run::result",
+            kind: "activity",
+            value: { files: [{ path: "b.txt", label: "NA", note: "unrelated" }] },
+          },
+          {
+            key: "brainstorm-root/weave-panel/weave-panel-run::result",
+            kind: "activity",
+            value: { members },
+          },
+        ],
+        pendingGates: [],
+        seq: 1,
+        updatedAt: Date.now(),
+      }),
+    );
+    writeFileSync(join(sessionDir, "artifacts", "index.json"), JSON.stringify({ refs: [] }));
+    const record: JobRecord = {
+      jobId: "job-1",
+      topic: "topic",
+      status: "running",
+      runner: "local",
+      createdAt: 1,
+      updatedAt: 2,
+    };
+    const detail = buildJobDetail({
+      record,
+      status: "running",
+      sessionDir,
+      jobDir,
+      settings,
+    });
+    const panelStage = detail.stages.find((stage) => stage.id === "select-panel");
+    assert.ok(panelStage && panelStage.id === "select-panel");
+    assert.deepEqual(
+      panelStage.panel?.map((member) => member.id),
+      ["member-1", "member-2"],
+      "the woven panel is read from the -run entry",
+    );
+    const processStage = detail.stages.find((stage) => stage.id === "process-input");
+    assert.ok(processStage && processStage.id === "process-input");
+    assert.equal(processStage.files?.useful[0]?.path, "a.py");
+    assert.equal(processStage.files?.ignored[0]?.path, "b.txt");
+  } finally {
+    rmSync(stageWorkspace, { recursive: true, force: true });
+  }
+});
+
+/**
+ * Parallel-review failure attribution: every seat failure of the current
+ * attempt is kept (never replaced by the next one), located (seat, step,
+ * round, call), and marked on the failed seat's review view — while a
+ * restarted attempt supersedes the whole record.
+ */
+test("review failures are located per seat and accumulate; a restart clears them", () => {
+  const seat2Branch =
+    "brainstorm-root/review-members/review-members-fanout/member[1]";
+  const seat2Deep =
+    `${seat2Branch}/review-members-branch/review-steps/cotStep[1]/review-round/` +
+    "review-round-loop/iter[0]/review-round-iteration/review-round-body/judge-step/judge-step-execute";
+  const seat3Branch =
+    "brainstorm-root/review-members/review-members-fanout/member[2]";
+  const seat3Deep =
+    `${seat3Branch}/review-members-branch/review-steps/cotStep[0]/review-round/` +
+    "review-round-loop/iter[0]/review-round-iteration/review-round-body/gather-comments/" +
+    "commentor[1]/dispatch-comment/else/comment-step/comment-step-execute";
+  const failure = { name: "RangeError", message: "Invalid string length" };
+  const started = (seq: number, at: number, path: string) =>
+    ({ type: "node:started", seq, at, path, kind: "sequence" });
+  const failed = (seq: number, at: number, path: string) =>
+    ({ type: "node:failed", seq, at, path, kind: "sequence", error: failure });
+
+  const detailFor = (events: readonly unknown[]) => {
+    const workspace = mkdtempSync(join(tmpdir(), "stage-mapper-test-"));
+    try {
+      const sessionDir = join(workspace, "session");
+      const jobDir = join(workspace, "job");
+      mkdirSync(join(sessionDir, "artifacts"), { recursive: true });
+      mkdirSync(jobDir, { recursive: true });
+      writeFileSync(
+        join(sessionDir, "checkpoint.json"),
+        JSON.stringify({
+          runId: "job-1",
+          workflowId: "brainstorm",
+          status: "running",
+          input: {},
+          journal: [],
+          pendingGates: [],
+          seq: 1,
+          updatedAt: Date.now(),
+        }),
+      );
+      writeFileSync(
+        join(sessionDir, "artifacts", "index.json"),
+        JSON.stringify({
+          refs: [{ id: "a-panel", metadata: { schema: "panel", path: "panel" } }],
+        }),
+      );
+      writeFileSync(
+        join(sessionDir, "artifacts", "a-panel"),
+        JSON.stringify({
+          members: [
+            { id: "member-1", department: "Physics", umbrella: "Quantum Optics", subfields: [] },
+            { id: "member-2", department: "Biology", umbrella: "Systems Biology", subfields: [] },
+            { id: "member-3", department: "CS", umbrella: "Machine Learning", subfields: [] },
+          ],
+        }),
+      );
+      writeFileSync(
+        join(jobDir, "events.jsonl"),
+        events.map((event) => JSON.stringify(event)).join("\n") + "\n",
+      );
+      const record: JobRecord = {
+        jobId: "job-1",
+        topic: "topic",
+        status: "running",
+        runner: "local",
+        createdAt: 1,
+        updatedAt: 2,
+      };
+      return buildJobDetail({
+        record,
+        status: "running",
+        sessionDir,
+        jobDir,
+        settings,
+      });
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  };
+
+  // One attempt: seat 2's judge dies first; seat 3's commentor dies later
+  // with the same message. Each failure re-emits node:failed at its branch
+  // ancestors (same error object), which must NOT create extra entries.
+  const detail = detailFor([
+    started(1, 100, "brainstorm-root/review-members"),
+    failed(2, 200, seat2Deep),
+    failed(3, 200, `${seat2Branch}/review-members-branch`),
+    failed(4, 200, seat2Branch),
+    failed(5, 300, seat3Deep),
+    failed(6, 300, seat3Branch),
+  ]);
+  const review = detail.stages.find((stage) => stage.id === "review-members");
+  assert.ok(review && review.id === "review-members");
+  assert.equal(review.status, "failed");
+  assert.ok(review.errors, "the located failure list exists");
+  assert.equal(review.errors.length, 2, "one entry per real failure, ancestors collapsed");
+  assert.equal(review.errors[0]!.message, "Invalid string length");
+  assert.equal(
+    review.errors[0]!.where,
+    "Seat 2 (Systems Biology) · step 2 · round 1 · judge task",
+  );
+  assert.equal(review.errors[0]!.path, seat2Deep);
+  assert.equal(
+    review.errors[1]!.where,
+    "Seat 3 (Machine Learning) · step 1 · round 1 · commentor Seat 2 (Systems Biology) · commentor task",
+  );
+  // The failed seats are marked on their review views; the healthy seat is not.
+  assert.equal(review.members[0]!.error, undefined);
+  assert.equal(review.members[1]!.error, "Invalid string length");
+  assert.equal(review.members[2]!.error, "Invalid string length");
+
+  // A resumed attempt replays: the stage node (and the seats) start again,
+  // which supersedes the previous attempt's whole failure record.
+  const resumed = detailFor([
+    started(1, 100, "brainstorm-root/review-members"),
+    failed(2, 200, seat2Deep),
+    failed(3, 200, `${seat2Branch}/review-members-branch`),
+    failed(4, 200, seat2Branch),
+    started(5, 400, "brainstorm-root/review-members"),
+    started(6, 401, seat2Branch),
+  ]);
+  const resumedReview = resumed.stages.find((stage) => stage.id === "review-members");
+  assert.ok(resumedReview && resumedReview.id === "review-members");
+  assert.equal(resumedReview.errors, undefined, "a fresh attempt starts clean");
+  assert.equal(resumedReview.members[1]!.error, undefined);
+  assert.notEqual(resumedReview.status, "failed");
+});

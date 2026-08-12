@@ -6,6 +6,7 @@ import type {
   GateAnswerRequest,
   JobDetail,
   StageActivityEntry,
+  StageErrorView,
   StageId,
   StageStatus,
   StageView,
@@ -69,6 +70,41 @@ function useNow(enabled: boolean): number {
   return now;
 }
 
+/**
+ * The stage's failure record: every located failure of the current attempt,
+ * oldest first — a parallel stage can fail in several places while the rest
+ * keeps working, so no failure may replace an earlier one. Older snapshots
+ * (and stages without located failures) fall back to the single message.
+ */
+function StageErrors({
+  errors,
+  error,
+}: {
+  errors?: readonly StageErrorView[];
+  error?: string;
+}) {
+  if (errors === undefined || errors.length === 0) {
+    return error ? <div className="stage-error">{error}</div> : null;
+  }
+  return (
+    <div className="stage-error" role="alert">
+      {errors.map((entry, index) => (
+        <div key={index} className="stage-error-row" title={entry.path}>
+          <span className="stage-error-meta">
+            {entry.at !== undefined && (
+              <span className="stage-error-when">{formatClock(entry.at)}</span>
+            )}
+            {entry.where !== undefined && (
+              <span className="stage-error-where">{entry.where}</span>
+            )}
+          </span>
+          <div className="stage-error-message">{entry.message}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function StageFrame({
   id,
   title,
@@ -78,6 +114,7 @@ function StageFrame({
   fallbackEnd,
   now,
   error,
+  errors,
   activity,
   selected,
   expanded,
@@ -95,6 +132,7 @@ function StageFrame({
   fallbackEnd: number;
   now: number;
   error?: string;
+  errors?: readonly StageErrorView[];
   activity?: readonly StageActivityEntry[];
   selected: boolean;
   expanded: boolean;
@@ -150,7 +188,7 @@ function StageFrame({
       <div id={bodyId}>
         {expanded && (
           <>
-            {error && <div className="stage-error">{error}</div>}
+            <StageErrors errors={errors} error={error} />
             <ActivityFeed entries={activity ?? []} active={status === "active"} now={now} />
             {children ??
               (status === "active" && (activity?.length ?? 0) === 0 ? (
@@ -633,6 +671,7 @@ export function Dashboard({
             fallbackEnd={fallbackEnd}
             now={now}
             error={stage?.error}
+            errors={stage?.errors}
             activity={stage?.activity}
             selected={false}
             expanded={!collapsed.has(selected)}

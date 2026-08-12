@@ -58,6 +58,7 @@ import {
   type ServerSettings,
   type StageActivityEntry,
   type StageBase,
+  type StageErrorView,
   type StageId,
   type StageStatus,
   type DecomposeStepView,
@@ -98,7 +99,39 @@ interface StageTiming {
   finishedAt?: number;
   active: boolean;
   error?: string;
+  /**
+   * Every failure of the stage's current attempt, oldest first. Location
+   * prose (`where`) is filled in later, once the panel is known.
+   */
+  errors: StageErrorView[];
   activity: StageActivityEntry[];
+}
+
+/** Failures kept per stage and attempt; older ones roll off first. */
+const MAX_STAGE_ERRORS = 20;
+
+/**
+ * Records one node:failed event on its stage, collapsing the propagation
+ * chain: a failure deep in a branch re-emits node:failed at every ancestor
+ * node with the same message, so an event whose path is a PREFIX of an
+ * already-recorded deeper failure (same message) adds nothing.
+ */
+function recordStageError(
+  timing: StageTiming,
+  event: { readonly at: number; readonly path: string },
+  message: string,
+): void {
+  const duplicate = timing.errors.some(
+    (entry) =>
+      entry.message === message &&
+      entry.path !== undefined &&
+      (entry.path === event.path || entry.path.startsWith(`${event.path}/`)),
+  );
+  if (duplicate) return;
+  timing.errors.push({ at: event.at, message, path: event.path });
+  if (timing.errors.length > MAX_STAGE_ERRORS) {
+    timing.errors.splice(0, timing.errors.length - MAX_STAGE_ERRORS);
+  }
 }
 
 interface Coordinates {
@@ -237,6 +270,28 @@ function journalStateField(
 }
 
 /**
+ * A content activity node's recorded output, across both journal layouts:
+ * format-2 journals record the handler output itself under the node's
+ * `<id>-run` child; format-1 journals recorded the full post-apply state
+ * under the node itself, so the declared output field is projected out.
+ */
+function journalNodeOutput(
+  entries: readonly JournalEntry[],
+  nodeId: string,
+  field: string,
+): unknown {
+  const run = entries.find((entry) =>
+    entry.key.endsWith(`/${nodeId}/${nodeId}-run::result`),
+  );
+  if (run) return run.value;
+  return journalStateField(
+    entries,
+    (key) => key.endsWith(`/${nodeId}::result`),
+    field,
+  );
+}
+
+/**
  * The workflow nodes that surface on the dashboard's single Decompose stage
  * (their agent activity, timing, and sub-step views): the file-partition trio
  * that builds the file map the pool reads, the conditional code-annotation
@@ -360,7 +415,7 @@ function activityDetail(progress: {
 
 function timings(events: readonly RunEvent[]): Map<StageId, StageTiming> {
   const result = new Map<StageId, StageTiming>(
-    STAGE_IDS.map((id) => [id, { active: false, activity: [] }]),
+    STAGE_IDS.map((id) => [id, { active: false, errors: [], activity: [] }]),
   );
   for (const event of events) {
     if (
@@ -438,6 +493,13 @@ function timings(events: readonly RunEvent[]): Map<StageId, StageTiming> {
       continue;
     }
     const stage = stageForPath(event.path);
+    // Every failure is recorded WITH its path, however deep it happened —
+    // a parallel stage keeps running after one branch dies, and "which
+    // seat/call failed" is exactly the information the top-level fold
+    // below throws away.
+    if (stage && event.type === "node:failed") {
+      recordStageError(result.get(stage)!, event, event.error.message);
+    }
     const leaf = event.path.split("/").pop() ?? "";
     if (!stage || event.path !== `brainstorm-root/${leaf}`) continue;
     // A decompose sub-node finishing is stage progress, not stage completion:
@@ -453,12 +515,21 @@ function timings(events: readonly RunEvent[]): Map<StageId, StageTiming> {
     }
     const timing = result.get(stage)!;
     if (event.type === "node:started") {
-      if (timing.finishedAt !== undefined || timing.error !== undefined) {
+      if (
+        timing.finishedAt !== undefined ||
+        timing.error !== undefined ||
+        timing.errors.length > 0
+      ) {
         // The stage terminated before and is starting again (credit-block
         // auto-resume, retry): the fresh attempt supersedes the old outcome.
+        // Deep branch failures count as an outcome too — a worker killed
+        // before the stage node itself could fail leaves only those.
         timing.startedAt = event.at;
         timing.finishedAt = undefined;
         timing.error = undefined;
+        // The failure list follows the same rule: it describes the CURRENT
+        // attempt, so a restart clears it and new failures accumulate fresh.
+        timing.errors = [];
       } else {
         timing.startedAt = timing.startedAt === undefined
           ? event.at
@@ -490,6 +561,65 @@ function coordinates(path: string): Coordinates {
     round: number(/iter\[(\d+)\]/),
     commentor: number(/commentor\[(\d+)\]/),
   };
+}
+
+/** Friendly names for the calls a failure most commonly lands on. */
+const CALL_NAMES: Readonly<Record<string, string>> = {
+  "develop-idea": "first-pass task",
+  "comment-step": "commentor task",
+  "comment-step-bridge": "interdisciplinary commentor task",
+  "judge-step": "judge task",
+  "redevelop-idea": "redeveloper task",
+};
+
+/** The call a failing path names, from its leaf node id. */
+function callNameOf(path: string): string | undefined {
+  const leaf = path.split("/").pop() ?? "";
+  if (leaf === "" || /^(then|else|member\[\d+\]|iter\[\d+\]|commentor\[\d+\]|cotStep\[\d+\])$/.test(leaf)) {
+    return undefined;
+  }
+  const executed = /^(.+)-execute$/.exec(leaf);
+  if (executed) return CALL_NAMES[executed[1]!] ?? `${executed[1]!} task`;
+  const stored = /^(.+)-store$/.exec(leaf);
+  if (stored) return `saving ${CALL_NAMES[stored[1]!] ?? stored[1]!} output`;
+  const phased = /^(.+)-phase$/.exec(leaf);
+  if (phased) return `${CALL_NAMES[phased[1]!] ?? phased[1]!} phase stamp`;
+  return CALL_NAMES[leaf] ?? leaf;
+}
+
+/**
+ * The human place of one failing node path: which seat, chain step, review
+ * round, commentor, and call. Works for the review walk and the first pass
+ * (the two parallel fan-outs, where "which branch died" is otherwise
+ * invisible); other stages fall back to the failing call name alone.
+ */
+function locateFailure(
+  path: string,
+  panel: readonly PanelMemberView[],
+): string | undefined {
+  const at = coordinates(path);
+  const firstPass = /first-pass(?:\/first-pass-fanout)?\/member\[(\d+)\]/.exec(path);
+  const memberIndex = at.member ?? (firstPass ? Number(firstPass[1]) : undefined);
+  const seatOf = (index: number): string => {
+    const member = panel[index];
+    return `Seat ${index + 1}${member ? ` (${member.umbrella})` : ""}`;
+  };
+  const parts: string[] = [];
+  if (memberIndex !== undefined) parts.push(seatOf(memberIndex));
+  if (firstPass !== null && at.member === undefined) parts.push("first pass");
+  if (at.step !== undefined) parts.push(`step ${at.step + 1}`);
+  if (at.round !== undefined) parts.push(`round ${at.round + 1}`);
+  if (at.commentor !== undefined && at.member !== undefined) {
+    // Commentors are the panel minus the seat under review, in seat order —
+    // the same projection the review reconstruction uses.
+    const thinker = panel[at.member];
+    const commentors = panel.filter((member) => member.id !== thinker?.id);
+    const author = commentors[at.commentor];
+    if (author) parts.push(`commentor ${seatOf(panel.indexOf(author))}`);
+  }
+  const call = callNameOf(path);
+  if (call !== undefined) parts.push(call);
+  return parts.length > 0 ? parts.join(" · ") : undefined;
 }
 
 function panelMembers(value: unknown): PanelMemberView[] {
@@ -1766,16 +1896,40 @@ function buildReviews(
       }
     }
   }
+  // A seat whose OWN walk failed (and has not started again) is marked, so
+  // the dashboard can say which agent stopped while the other seats keep
+  // reviewing in parallel. The branch node's path ends at .../member[i] in
+  // both topologies; only the LAST lifecycle event decides, so a restarted
+  // walk (retry, credit-block resume) is running again, not failed.
+  const seatFailure = (memberIndex: number): string | undefined => {
+    const branchEnd = new RegExp(
+      `review-members(?:/review-members-fanout)?/member\\[${memberIndex}\\]$`,
+    );
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const event = events[i]!;
+      if (
+        (event.type === "node:started" ||
+          event.type === "node:completed" ||
+          event.type === "node:failed") &&
+        branchEnd.test(event.path)
+      ) {
+        return event.type === "node:failed" ? event.error.message : undefined;
+      }
+    }
+    return undefined;
+  };
   const withProgress = members.map((member, memberIndex) => {
     const progress = progressFor.get(memberIndex);
-    if (!progress) return member;
+    const error = seatFailure(memberIndex);
+    if (!progress && error === undefined) return member;
     return {
       ...member,
-      progress,
+      ...(progress ? { progress } : {}),
+      ...(error !== undefined ? { error } : {}),
       // Mirror the live phase onto the step under review, so a per-step status
       // light needs no cross-referencing.
       steps: member.steps.map((step) =>
-        step.index === progress.step && progress.phase !== undefined
+        progress && step.index === progress.step && progress.phase !== undefined
           ? { ...step, phase: progress.phase }
           : step,
       ),
@@ -1874,6 +2028,7 @@ function base(
     ...(timing.startedAt !== undefined ? { startedAt: timing.startedAt } : {}),
     ...(timing.finishedAt !== undefined ? { finishedAt: timing.finishedAt } : {}),
     ...(timing.error ? { error: timing.error } : {}),
+    ...(timing.errors.length > 0 ? { errors: timing.errors } : {}),
     ...(timing.activity.length > 0 ? { activity: timing.activity } : {}),
   };
 }
@@ -1952,19 +2107,11 @@ export function buildJobDetail(input: MapperInput): JobDetail {
   }
   const usefulFilesView = annotatedFiles(
     artifactLatest(artifacts, "usefulFiles") ??
-      journalStateField(
-        entries,
-        (key) => key.endsWith("/partition-files-useful::result"),
-        "usefulFiles",
-      ),
+      journalNodeOutput(entries, "partition-files-useful", "usefulFiles"),
   );
   const ignoredFilesView = annotatedFiles(
     artifact(artifacts, "ignoredFiles") ??
-      journalStateField(
-        entries,
-        (key) => key.endsWith("/partition-files-ignored::result"),
-        "ignoredFiles",
-      ),
+      journalNodeOutput(entries, "partition-files-ignored", "ignoredFiles"),
   );
   const filePartition: FilePartitionView | undefined =
     usefulFilesView.length > 0 || ignoredFilesView.length > 0
@@ -1987,16 +2134,8 @@ export function buildJobDetail(input: MapperInput): JobDetail {
   // the same reason.
   let selectedPanel = panelMembers(
     artifactLatest(artifacts, "panel") ??
-      journalStateField(
-        entries,
-        (key) => key.endsWith("/weave-panel::result"),
-        "panel",
-      ) ??
-      journalStateField(
-        entries,
-        (key) => key.endsWith("/select-panel::result"),
-        "panel",
-      ),
+      journalNodeOutput(entries, "weave-panel", "panel") ??
+      journalNodeOutput(entries, "select-panel", "panel"),
   );
   if (selectedPanel.length === 0) {
     selectedPanel = panelMembers(
@@ -2280,7 +2419,22 @@ export function buildJobDetail(input: MapperInput): JobDetail {
       timing.startedAt ??= checkpoint.updatedAt;
       if (checkpoint.status === "failed" && failedStageId === undefined) {
         failedStageId = id;
-        if (checkpoint.error?.message) timing.error = checkpoint.error.message;
+        if (checkpoint.error?.message) {
+          timing.error = checkpoint.error.message;
+          // Keep the list in step with the box: a run that failed without a
+          // node:failed event (a pre-checkpoint death, a failed checkpoint
+          // write) still shows its failure in the located list.
+          if (
+            !timing.errors.some(
+              (entry) => entry.message === checkpoint.error!.message,
+            )
+          ) {
+            timing.errors.push({
+              at: checkpoint.updatedAt,
+              message: checkpoint.error.message,
+            });
+          }
+        }
       }
     }
   }
@@ -2303,6 +2457,17 @@ export function buildJobDetail(input: MapperInput): JobDetail {
   } else if (input.status === "cancelled" && checkpoint?.status !== "completed") {
     const active = STAGE_IDS.find((id) => statuses.get(id) === "active");
     if (active) statuses.set(active, "cancelled");
+  }
+
+  // Fill in each recorded failure's human location now that the seated
+  // panel is known (seat labels come from it).
+  for (const timing of stageTimings.values()) {
+    if (timing.errors.length === 0) continue;
+    timing.errors = timing.errors.map((entry) => {
+      if (entry.where !== undefined || entry.path === undefined) return entry;
+      const where = locateFailure(entry.path, finalPanel);
+      return where !== undefined ? { ...entry, where } : entry;
+    });
   }
 
   const processBase = base(

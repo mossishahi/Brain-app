@@ -29,7 +29,7 @@ import type {
   RunStatus,
   WorkflowCheckpoint,
 } from "./checkpoint.js";
-import { InMemoryCheckpointStore } from "./checkpoint.js";
+import { InMemoryCheckpointStore, JOURNAL_FORMAT } from "./checkpoint.js";
 import type { RunEvent, RunEventBody, RunEventListener } from "./events.js";
 import type { JournalEntryKind } from "./journal.js";
 import { RunJournal } from "./journal.js";
@@ -38,6 +38,66 @@ import type { EffectResult, NodeExecutionContext, NodeExecutorRegistry } from ".
 import { Scope } from "./scope.js";
 import { SuspendSignal, TerminalSignal } from "./signals.js";
 import { WorkflowFunctions } from "./functions.js";
+
+/**
+ * Bounded retry for failed checkpoint writes.
+ *
+ * Checkpoint writes coalesce: one physical write settles the promise of
+ * EVERY effect recorded while it was pending, so on a shared filesystem a
+ * single transient write failure (a Lustre blip, a momentary quota, a slow
+ * metadata server) used to fail several parallel branches in one stroke.
+ * A short retry ladder heals the blip invisibly; a write still failing
+ * after the ladder is a real storage problem and fails loud — deliberately,
+ * so a run never keeps consuming model budget against a dead workspace.
+ */
+export interface CheckpointWriteRetryPolicy {
+  /** Additional attempts after a failed write; 0 disables retries. Default 3. */
+  readonly retries?: number;
+  /** Waits before each retry, in ms; the last entry repeats. Default 1s, 5s, 15s. */
+  readonly delaysMs?: readonly number[];
+  /** Called before each wait; defaults to one stderr line per retry. */
+  readonly onRetry?: (
+    error: unknown,
+    attempt: number,
+    retries: number,
+    delayMs: number,
+  ) => void;
+  /** Test seam. */
+  readonly sleep?: (ms: number) => Promise<void>;
+}
+
+interface ResolvedCheckpointWriteRetry {
+  readonly retries: number;
+  readonly delaysMs: readonly number[];
+  readonly onRetry: NonNullable<CheckpointWriteRetryPolicy["onRetry"]>;
+  readonly sleep: NonNullable<CheckpointWriteRetryPolicy["sleep"]>;
+}
+
+const DEFAULT_CHECKPOINT_RETRY_DELAYS_MS: readonly number[] = [1_000, 5_000, 15_000];
+
+function resolveCheckpointWriteRetry(
+  policy: CheckpointWriteRetryPolicy = {},
+): ResolvedCheckpointWriteRetry {
+  const retries = policy.retries ?? 3;
+  if (!Number.isSafeInteger(retries) || retries < 0) {
+    throw new WorkflowConfigError(`checkpoint write retries must be a non-negative integer, got ${retries}`);
+  }
+  return {
+    retries,
+    delaysMs: policy.delaysMs?.length ? policy.delaysMs : DEFAULT_CHECKPOINT_RETRY_DELAYS_MS,
+    onRetry:
+      policy.onRetry ??
+      ((error, attempt, total, delayMs) => {
+        console.error(
+          `[checkpoint] save failed (attempt ${attempt}/${total + 1}); retrying in ` +
+            `${Math.round(delayMs / 1000)}s: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }),
+    sleep:
+      policy.sleep ??
+      ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))),
+  };
+}
 
 export interface WorkflowRunnerOptions {
   /** Named host functions referenced by workflow nodes. */
@@ -52,6 +112,15 @@ export interface WorkflowRunnerOptions {
   readonly onEvent?: RunEventListener;
   /** Injectable clock for deterministic tests. */
   readonly now?: () => number;
+  /**
+   * Journal layout stamped into checkpoints. The layout is decided by
+   * whoever COMPILED the definition (which nodes are journaled folds), so a
+   * host compiling the legacy layout must stamp 1. Defaults to the current
+   * JOURNAL_FORMAT.
+   */
+  readonly journalFormat?: number;
+  /** Retry ladder for failed checkpoint writes; see the policy type. */
+  readonly checkpointWriteRetry?: CheckpointWriteRetryPolicy;
 }
 
 export interface RunOptions {
@@ -104,6 +173,8 @@ export class WorkflowRunner {
   private readonly agentExecutor: AgentExecutor | undefined;
   private readonly listeners: RunEventListener[] = [];
   private readonly now: () => number;
+  private readonly journalFormat: number;
+  private readonly checkpointWriteRetry: ResolvedCheckpointWriteRetry;
 
   constructor(options: WorkflowRunnerOptions = {}) {
     this.functions = options.functions ?? new WorkflowFunctions();
@@ -112,6 +183,8 @@ export class WorkflowRunner {
     this.artifacts = options.artifacts;
     this.agentExecutor = options.agentExecutor;
     this.now = options.now ?? (() => Date.now());
+    this.journalFormat = options.journalFormat ?? JOURNAL_FORMAT;
+    this.checkpointWriteRetry = resolveCheckpointWriteRetry(options.checkpointWriteRetry);
     if (options.onEvent) this.listeners.push(options.onEvent);
   }
 
@@ -146,6 +219,8 @@ export class WorkflowRunner {
       artifacts: this.artifacts,
       agentExecutor: this.agentExecutor,
       now: this.now,
+      journalFormat: this.journalFormat,
+      checkpointWriteRetry: this.checkpointWriteRetry,
     });
     return execution.execute();
   }
@@ -196,6 +271,8 @@ export class WorkflowRunner {
       artifacts: this.artifacts,
       agentExecutor: this.agentExecutor,
       now: this.now,
+      journalFormat: this.journalFormat,
+      checkpointWriteRetry: this.checkpointWriteRetry,
     });
     return execution.execute();
   }
@@ -220,6 +297,8 @@ interface ExecutionConfig {
   readonly artifacts: ArtifactStore | undefined;
   readonly agentExecutor: AgentExecutor | undefined;
   readonly now: () => number;
+  readonly journalFormat: number;
+  readonly checkpointWriteRetry: ResolvedCheckpointWriteRetry;
 }
 
 interface CheckpointExtras {
@@ -441,6 +520,7 @@ class RunExecution {
       ...(this.cfg.definition.version !== undefined ? { workflowVersion: this.cfg.definition.version } : {}),
       status,
       ...(this.cfg.input !== undefined ? { input: this.cfg.input } : {}),
+      journalFormat: this.cfg.journalFormat,
       journal: this.cfg.journal.toEntries(),
       pendingGates: extras.pendingGates ?? [],
       ...(extras.creditBlock !== undefined
@@ -451,7 +531,22 @@ class RunExecution {
       seq: ++this.checkpointSeq,
       updatedAt: this.cfg.now(),
     };
-    await this.cfg.checkpoints.save(checkpoint);
+    // One physical write settles every coalesced requester, so a transient
+    // storage failure here used to kill several parallel branches at once.
+    // The bounded ladder rides out the blip; exhausting it means the
+    // workspace is genuinely unwritable and the failure propagates as before.
+    const { retries, delaysMs, onRetry, sleep } = this.cfg.checkpointWriteRetry;
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await this.cfg.checkpoints.save(checkpoint);
+        break;
+      } catch (error) {
+        if (attempt >= retries) throw error;
+        const delayMs = delaysMs[Math.min(attempt, delaysMs.length - 1)]!;
+        onRetry(error, attempt + 1, retries, delayMs);
+        await sleep(delayMs);
+      }
+    }
     this.emit({ type: "checkpoint:saved", status });
   }
 }

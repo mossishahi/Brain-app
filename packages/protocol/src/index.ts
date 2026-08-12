@@ -77,12 +77,37 @@ export interface StageActivityEntry {
   readonly detail?: ActivityDetailView;
 }
 
+/**
+ * One located failure inside a stage. Parallel stages (first pass, review)
+ * can fail in several places while the rest keep working, so a stage carries
+ * every failure of the current attempt — never just the newest one.
+ */
+export interface StageErrorView {
+  readonly at?: number;
+  readonly message: string;
+  /**
+   * The human-readable place: which seat, chain step, review round, and
+   * call failed — e.g. "Seat 3 (Manifold Learning) · step 2 · round 1 ·
+   * judge task". Absent when the failure has no finer location than the
+   * stage itself.
+   */
+  readonly where?: string;
+  /** The failing workflow node path, verbatim (for bug reports). */
+  readonly path?: string;
+}
+
 export interface StageBase {
   readonly id: StageId;
   readonly status: StageStatus;
   readonly startedAt?: number;
   readonly finishedAt?: number;
   readonly error?: string;
+  /**
+   * Every failure of the stage's CURRENT attempt, oldest first (a resumed
+   * attempt supersedes the previous list, like `error`). `error` stays the
+   * newest message for compatibility.
+   */
+  readonly errors?: readonly StageErrorView[];
   /** Sanitized operational events, oldest to newest (never chain-of-thought). */
   readonly activity?: readonly StageActivityEntry[];
 }
@@ -516,6 +541,12 @@ export interface ReviewMemberView {
   readonly revisionCount?: number;
   /** Present while this seat is actively under review. */
   readonly progress?: ReviewSeatProgress;
+  /**
+   * Present when this seat's walk FAILED and has not been restarted: the
+   * failure message. The other seats keep reviewing in parallel; a resume
+   * re-executes exactly this seat's failed task.
+   */
+  readonly error?: string;
 }
 
 /**

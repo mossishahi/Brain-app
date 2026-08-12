@@ -400,9 +400,26 @@ function logEvent(event: RunEvent): void {
 function eventListener(verbose: boolean, eventsFile: string | undefined): RunEventListener | undefined {
   if (!verbose && eventsFile === undefined) return undefined;
   if (eventsFile !== undefined) mkdirSync(dirname(eventsFile), { recursive: true });
+  // The event log is observability, never load-bearing: a failed append (a
+  // shared-filesystem blip mid-run) must not ride up into the emitting node
+  // and fail the task that happened to emit. Warned once, not per event.
+  let appendFailed = false;
   return (event) => {
     if (verbose) logEvent(event);
-    if (eventsFile !== undefined) appendFileSync(eventsFile, `${JSON.stringify(event)}\n`, "utf8");
+    if (eventsFile === undefined) return;
+    try {
+      appendFileSync(eventsFile, `${JSON.stringify(event)}\n`, "utf8");
+    } catch (error) {
+      if (!appendFailed) {
+        appendFailed = true;
+        console.error(
+          `[events] append to ${eventsFile} failed; the run continues without ` +
+            `event-log updates until writes recover: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+        );
+      }
+    }
   };
 }
 

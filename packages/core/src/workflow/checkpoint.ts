@@ -34,6 +34,22 @@ export interface PendingGate {
 }
 
 /**
+ * The journal layout this build writes.
+ *
+ * - 1 (implicit, absent field): every activity's return value is journaled —
+ *   including the state-fold activities, whose value is a full copy of the
+ *   run state. Journals grew as nodes × state size and eventually crossed
+ *   the engine's maximum string length.
+ * - 2: deterministic folds are never journaled (they re-run on replay);
+ *   the journal carries only real outputs — agent results, activity handler
+ *   outputs, gate answers, condition verdicts, collections.
+ *
+ * Loaders that understand only format 1 must not replay a format-2 journal;
+ * hosts migrate old journals forward before resuming (never backward).
+ */
+export const JOURNAL_FORMAT = 2;
+
+/**
  * Full persisted state of a run: input plus the effect journal. Scope and
  * interpreter position are intentionally NOT persisted; they are rebuilt by
  * deterministic replay of the workflow definition against the journal.
@@ -44,6 +60,8 @@ export interface WorkflowCheckpoint {
   readonly workflowVersion?: string;
   readonly status: RunStatus;
   readonly input?: JsonObject;
+  /** Journal layout version; absent means 1 (pre-fold journals). */
+  readonly journalFormat?: number;
   readonly journal: readonly JournalEntry[];
   readonly pendingGates: readonly PendingGate[];
   readonly creditBlock?: CreditBlock;

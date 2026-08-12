@@ -315,6 +315,52 @@ test("an explicit gate answer wins over --auto-approve on resume", () => {
   }
 });
 
+test("an unwritable events log never fails the run", () => {
+  const root = tempRoot();
+  try {
+    const runId = "bsa_test_events_hardening";
+    // The events path IS a directory, so every append throws (EISDIR) —
+    // the same failure class as a shared-filesystem blip mid-run. The event
+    // log is observability, never load-bearing: the run must complete.
+    const eventsFile = join(root, "events.jsonl");
+    execFileSync("mkdir", ["-p", eventsFile]);
+    const cli = new URL("../src/main.js", import.meta.url);
+    const finished = spawnSync(
+      process.execPath,
+      [
+        cli.pathname,
+        "run",
+        "--topic",
+        "Events log outage",
+        "--offline",
+        "--auto-approve",
+        "--run-id",
+        runId,
+        "--session-root",
+        root,
+        "--events-file",
+        eventsFile,
+        "--content-dir",
+        registryContentDir,
+      ],
+      { encoding: "utf8" },
+    );
+    assert.equal(finished.status, 0, finished.stderr);
+    assert.match(finished.stderr, /\[events\] append/, "the outage is narrated once");
+    assert.equal(
+      (finished.stderr.match(/\[events\] append/g) ?? []).length,
+      1,
+      "warned once, not per event",
+    );
+    const checkpoint = JSON.parse(
+      readFileSync(join(root, runId, "checkpoint.json"), "utf8"),
+    ) as { status: string };
+    assert.equal(checkpoint.status, "completed");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("run and resume accept content-dir and append JSONL events", () => {
   const root = tempRoot();
   try {

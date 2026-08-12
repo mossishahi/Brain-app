@@ -445,3 +445,127 @@ test("reduce threads an accumulator sequentially and supports one-based indices"
   assert.equal(result.status === "completed" && result.output, 10);
   assert.deepEqual(visited, [1, 2, 3]);
 });
+
+test("a transient checkpoint write failure heals inside the retry ladder", async () => {
+  // One physical write settles every coalesced requester, so before the
+  // ladder existed one storage blip failed several parallel branches at once.
+  let failuresLeft = 2;
+  let saves = 0;
+  const checkpoints: CheckpointStore = {
+    async save() {
+      saves += 1;
+      if (failuresLeft > 0) {
+        failuresLeft -= 1;
+        throw new Error("EIO: filesystem blip");
+      }
+    },
+    async load() {
+      return undefined;
+    },
+    async delete() {},
+  };
+  const waits: number[] = [];
+  const retried: number[] = [];
+  const functions = new WorkflowFunctions().registerActivity("work", () => "done");
+  const runner = new WorkflowRunner({
+    functions,
+    checkpoints,
+    checkpointWriteRetry: {
+      retries: 2,
+      delaysMs: [7, 13],
+      onRetry: (_error, attempt) => retried.push(attempt),
+      sleep: async (ms) => {
+        waits.push(ms);
+      },
+    },
+  });
+  const result = await runner.run(workflow("blip", activity("work", { id: "w" })));
+  assert.equal(result.status, "completed", "the blip never reaches any task");
+  assert.deepEqual(retried, [1, 2], "both failed attempts retried");
+  assert.deepEqual(waits, [7, 13], "the ladder's waits apply in order");
+  assert.ok(saves >= 3, "the first write eventually landed");
+});
+
+test("a write still failing after the ladder fails the run loudly", async () => {
+  let saves = 0;
+  const checkpoints: CheckpointStore = {
+    async save() {
+      saves += 1;
+      throw new Error("ENOSPC: the workspace is full");
+    },
+    async load() {
+      return undefined;
+    },
+    async delete() {},
+  };
+  const functions = new WorkflowFunctions().registerActivity("work", () => "done");
+  const runner = new WorkflowRunner({
+    functions,
+    checkpoints,
+    checkpointWriteRetry: { retries: 1, delaysMs: [1], onRetry: () => {}, sleep: async () => {} },
+  });
+  // The initial "running" write exhausts its ladder and fails the run; the
+  // terminal "failed" write then fails its own ladder too, so the run's
+  // outcome surfaces as a rejection the host reports (worker:fatal).
+  await assert.rejects(
+    () => runner.run(workflow("dead-disk", activity("work", { id: "w" }))),
+    /ENOSPC/,
+  );
+  assert.equal(saves, 4, "two writes, each attempted twice");
+});
+
+test("a journal:false fold is never journaled and re-runs on replay", async () => {
+  const checkpoints = new InMemoryCheckpointStore();
+  let produceRuns = 0;
+  let foldRuns = 0;
+  const functions = new WorkflowFunctions()
+    .registerActivity("produce", () => {
+      produceRuns += 1;
+      return 21;
+    })
+    .registerActivity("double", (_input, scope) => {
+      foldRuns += 1;
+      return (scope.get("value") as number) * 2;
+    })
+    .registerSelector("out", (scope) => ({
+      folded: scope.get("folded") as JsonValue,
+      answer: scope.get("answer") as JsonValue,
+    }));
+  const definition = workflow(
+    "folds",
+    sequence(
+      [
+        activity("produce", { id: "produce", resultKey: "value" }),
+        activity("double", { id: "double", resultKey: "folded", journal: false }),
+        { kind: "humanGate", id: "gate", gateKey: "g", resultKey: "answer" } as WorkflowNode,
+        terminal("success", { id: "done", outputFrom: "out" }),
+      ],
+      { id: "main" },
+    ),
+  );
+  const runner = new WorkflowRunner({ functions, checkpoints });
+
+  const first = await runner.run(definition, { runId: "fold-run" });
+  assert.equal(first.status, "suspended");
+  assert.equal(produceRuns, 1);
+  assert.equal(foldRuns, 1);
+  const checkpoint = await checkpoints.load("fold-run");
+  const keys = (checkpoint?.journal ?? []).map((entry) => entry.key);
+  assert.ok(keys.some((key) => key.endsWith("/produce::result")), "the effect is journaled");
+  assert.ok(
+    !keys.some((key) => key.includes("/double")),
+    "the fold never reaches the journal",
+  );
+  assert.equal(checkpoint?.journalFormat, 2, "checkpoints are stamped with the journal format");
+
+  const resumed = await runner.resume(definition, "fold-run", {
+    responses: { g: "approved" },
+  });
+  assert.equal(resumed.status, "completed");
+  assert.deepEqual(resumed.status === "completed" && resumed.output, {
+    folded: 42,
+    answer: "approved",
+  });
+  assert.equal(produceRuns, 1, "the journaled effect replays without re-running");
+  assert.equal(foldRuns, 2, "the fold recomputes on replay");
+});

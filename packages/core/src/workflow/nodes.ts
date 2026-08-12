@@ -10,6 +10,7 @@ import type { AgentTask } from "../agent/contracts.js";
 import {
   AgentTaskFailedError,
   MaxIterationsExceededError,
+  WorkflowCancelledError,
   WorkflowConfigError,
   isCancellation,
 } from "../errors.js";
@@ -68,14 +69,26 @@ const executeActivity: NodeExecutor = async (node, context) => {
   if (spec.input !== undefined && spec.inputFrom !== undefined) {
     throw new WorkflowConfigError(`activity node at "${context.path}" sets both input and inputFrom`);
   }
-  const { value } = await context.effect("result", "activity", async () => {
+  const produce = async () => {
     const fn = context.functions.activity(spec.activity);
     const input =
       spec.inputFrom !== undefined
         ? await context.functions.selector(spec.inputFrom)(context.scope, context.fnContext())
         : spec.input;
     return await fn(input, context.scope, context.fnContext());
-  });
+  };
+  let value: JsonValue | undefined;
+  if (spec.journal === false) {
+    // A deterministic fold: re-run on first execution AND on every replay,
+    // never journaled. State rebuilding stays exact because the fold's
+    // inputs (scope state plus recorded effects) replay identically; the
+    // journal stays bounded by the run's real outputs instead of carrying
+    // a state copy per executed node.
+    if (context.signal.aborted) throw new WorkflowCancelledError();
+    value = await produce();
+  } else {
+    ({ value } = await context.effect("result", "activity", produce));
+  }
   if (spec.resultKey !== undefined) context.scope.set(spec.resultKey, value ?? null);
   return value;
 };

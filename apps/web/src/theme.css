@@ -2496,6 +2496,36 @@ details.drawer-section[open] > summary::before {
   margin-bottom: 12px;
 }
 
+/* The located failure list: one row per failure of the current attempt,
+   oldest first — when, where (seat · step · round · call), then the message.
+   A parallel stage can fail in several places, so rows never replace each
+   other. */
+.stage-error-row + .stage-error-row {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid color-mix(in srgb, var(--bad) 25%, transparent);
+}
+
+.stage-error-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 2px;
+}
+
+.stage-error-when {
+  color: var(--text-dim);
+}
+
+.stage-error-where {
+  color: var(--bad);
+  font-weight: 600;
+}
+
+.stage-error-message {
+  white-space: pre-wrap;
+}
+
 .activity-feed {
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -3246,6 +3276,13 @@ details.drawer-section[open] > summary::before {
   white-space: nowrap;
 }
 
+/* A seat whose walk failed: the label carries the verdict color, and its
+   hover title names the failure. */
+.matrix-label-bad {
+  color: var(--bad);
+  font-weight: 600;
+}
+
 .cells {
   display: flex;
   flex-wrap: wrap;
@@ -3483,6 +3520,11 @@ details.drawer-section[open] > summary::before {
 .step-chip-warn {
   color: var(--warn);
   border-color: var(--warn);
+}
+
+.step-chip-bad {
+  color: var(--bad);
+  border-color: var(--bad);
 }
 
 /* Reviewer names ride ON the "Comments & judgement" summary row itself —

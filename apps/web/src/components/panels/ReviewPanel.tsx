@@ -711,7 +711,14 @@ export function ReviewStagePanels({
           const expertise = expertiseOf(member);
           return (
             <div key={member.memberId} className="matrix-row">
-              <span className="matrix-label" title={expertise || member.label}>
+              <span
+                className={`matrix-label${member.error !== undefined ? " matrix-label-bad" : ""}`}
+                title={
+                  member.error !== undefined
+                    ? `${member.label} failed: ${member.error}`
+                    : expertise || member.label
+                }
+              >
                 {member.label}
               </span>
               <div className="cells">
@@ -778,7 +785,9 @@ export function ReviewStagePanels({
             >
               <ForwardIcon size={16} />
             </button>
-            {seat.progress !== undefined ? (
+            {seat.error !== undefined ? (
+              <span className="step-chip step-chip-bad">failed</span>
+            ) : seat.progress !== undefined ? (
               <span className="step-chip step-chip-active">under review</span>
             ) : walkComplete(seat) ? (
               <span className="step-chip step-chip-ok">done with thinking</span>
@@ -787,6 +796,12 @@ export function ReviewStagePanels({
               <span className="marquee-inner">{expertiseOf(seat)}</span>
             </span>
           </div>
+          {seat.error !== undefined && (
+            <div className="stage-error">
+              This seat&apos;s walk failed and is waiting for a retry; the other
+              seats keep reviewing. {seat.error}
+            </div>
+          )}
           {(() => {
             const timeline = computeSeatTimeline(seat, firstPassCot(seat.memberId));
             return (

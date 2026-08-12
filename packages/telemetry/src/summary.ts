@@ -160,6 +160,68 @@ function roleFacts(
   return [...roles.values()];
 }
 
+/* ------------------------------------------------------------------------
+ * Journal-sourced facts (format-2 journals).
+ *
+ * Pre-fold journals carried the full run state, and the facts below read it
+ * directly. Format-2 journals carry only real outputs, so the same facts are
+ * derived from the recorded entries instead: a content activity's output
+ * lives under its `<id>-run` node, agent outputs under `<id>-execute`, and
+ * gate answers under their gate/auto entries.
+ * ---------------------------------------------------------------------- */
+
+/** A journaled agent entry's output, when the task succeeded. */
+function agentEntryOutput(entry: JsonObject): JsonObject | undefined {
+  if (str(entry.kind) !== "agent") return undefined;
+  const value = obj(entry.value);
+  if (value?.status !== "ok") return undefined;
+  return obj(value.output);
+}
+
+/** The LAST recorded output of a content activity node (format-2 layout). */
+function journalRunOutput(
+  journal: readonly JsonObject[],
+  nodeId: string,
+): JsonObject | undefined {
+  for (let index = journal.length - 1; index >= 0; index -= 1) {
+    const entry = journal[index]!;
+    const key = str(entry.key);
+    if (key?.endsWith(`/${nodeId}/${nodeId}-run::result`)) return obj(entry.value);
+  }
+  return undefined;
+}
+
+/** The recorded answer of a human gate (manual response or auto decision). */
+function journalGateAnswer(
+  journal: readonly JsonObject[],
+  gateId: string,
+): JsonObject | undefined {
+  for (const entry of journal) {
+    const key = str(entry.key);
+    if (!key?.includes(`/${gateId}`)) continue;
+    if (str(entry.kind) === "gate" && key.endsWith("::response")) return obj(entry.value);
+    if (key.endsWith(`/${gateId}-auto::result`)) return obj(entry.value);
+  }
+  return undefined;
+}
+
+/** Review coordinates from a journal key (both review topologies). */
+function reviewCoordinates(key: string): {
+  member?: number;
+  step?: number;
+  round?: number;
+} {
+  const number = (pattern: RegExp): number | undefined => {
+    const match = pattern.exec(key);
+    return match ? Number(match[1]) : undefined;
+  };
+  return {
+    member: number(/review-members(?:\/review-members-fanout)?\/member\[(\d+)\]/),
+    step: number(/cotStep\[(\d+)\]/),
+    round: number(/iter\[(\d+)\]/),
+  };
+}
+
 function classificationFact(state: JsonObject | undefined): ClassificationFact | undefined {
   const input = obj(state?.input);
   if (!input) return undefined;
@@ -174,8 +236,28 @@ function classificationFact(state: JsonObject | undefined): ClassificationFact |
   };
 }
 
-function panelFact(state: JsonObject | undefined): PanelFact | undefined {
-  const members = arr(obj(state?.panel)?.members);
+function classificationFactFromJournal(
+  journal: readonly JsonObject[],
+): ClassificationFact | undefined {
+  const input = journalRunOutput(journal, "apply-classification");
+  if (!input) return undefined;
+  const answer = journalGateAnswer(journal, "confirm-classification");
+  const action = str(answer?.action);
+  // A revised gate answer overrides the classifier's primary reading.
+  const type = str(answer?.type) ?? str(input.type);
+  const requested =
+    answer?.requestedOutputs !== undefined
+      ? arr(answer.requestedOutputs)
+      : arr(input.requestedOutputs);
+  return {
+    ...(type !== undefined ? { type } : {}),
+    ...(num(input.cotSteps) !== undefined ? { cotSteps: num(input.cotSteps)! } : {}),
+    requestedOutputs: requested.length,
+    ...(action === "approve" || action === "revise" ? { gateAction: action } : {}),
+  };
+}
+
+function panelMembersFact(members: readonly JsonValue[]): PanelFact | undefined {
   if (members.length === 0) return undefined;
   const fields = new Set<string>();
   let interdisciplinary = false;
@@ -195,6 +277,35 @@ function panelFact(state: JsonObject | undefined): PanelFact | undefined {
     removedSeats: 0,
     customSeats: custom,
   };
+}
+
+function panelFact(state: JsonObject | undefined): PanelFact | undefined {
+  return panelMembersFact(arr(obj(state?.panel)?.members));
+}
+
+function panelFactFromJournal(journal: readonly JsonObject[]): PanelFact | undefined {
+  const panel =
+    journalRunOutput(journal, "weave-panel") ?? journalRunOutput(journal, "select-panel");
+  let members = arr(panel?.members);
+  if (members.length === 0) return undefined;
+  // The recorded panel is the woven proposal; the confirmation gate's answer
+  // (shrink and/or custom seats) decides what actually ran.
+  const answer = journalGateAnswer(journal, "confirm-panel");
+  const kept = arr(answer?.members).filter((id): id is string => typeof id === "string");
+  if (str(answer?.action) === "shrink" && kept.length > 0) {
+    const retain = new Set(kept);
+    members = members.filter((member) => {
+      const id = str(obj(member)?.id);
+      return id !== undefined && retain.has(id);
+    });
+  }
+  const added = arr(answer?.addedMembers).flatMap((raw) => {
+    const seat = obj(raw);
+    // Runtime-minted ids are not in the answer; stamp the custom prefix so
+    // the fact counts them exactly as the state-based reader did.
+    return seat ? [{ ...seat, id: "member-user-added" } as JsonValue] : [];
+  });
+  return panelMembersFact([...members, ...added]);
 }
 
 /**
@@ -258,8 +369,77 @@ function reviewFact(state: JsonObject | undefined): ReviewFact | undefined {
   };
 }
 
-function taxonomyFact(state: JsonObject | undefined): TaxonomyFact | undefined {
-  const matches = obj(state?.poolMatches);
+/**
+ * The same review outcomes rebuilt from the journal's agent entries: one
+ * judge decision per (seat, step, round) and one redevelopment entry per
+ * applied revision. Counts only, exactly like the ledger-based reader.
+ */
+function reviewFactFromJournal(journal: readonly JsonObject[]): ReviewFact | undefined {
+  const verdicts: Record<string, number> = {};
+  const roundsHistogram: Record<string, number> = {};
+  let mustAddress = 0;
+  let verified = 0;
+  let authority = 0;
+  let redevelopments = 0;
+  const lastVerdictByStep = new Map<string, { round: number; verdict?: string }>();
+  let anyEntries = false;
+
+  for (const entry of journal) {
+    const key = str(entry.key);
+    if (!key?.includes("/review-members")) continue;
+    const output = agentEntryOutput(entry);
+    if (!output) continue;
+    const at = reviewCoordinates(key);
+    if (at.member === undefined || at.step === undefined || at.round === undefined) continue;
+    if (/\/redevelop-idea(?:\/redevelop-idea-execute)?::result$/.test(key)) {
+      redevelopments += 1;
+      continue;
+    }
+    if (!/\/judge-step(?:\/judge-step-execute)?::result$/.test(key)) continue;
+    anyEntries = true;
+    const verdict = str(output.verdict);
+    if (verdict) verdicts[verdict] = (verdicts[verdict] ?? 0) + 1;
+    for (const rawIssue of arr(output.issues)) {
+      const issue = obj(rawIssue);
+      if (!issue) continue;
+      if (issue.mustAddress === true) mustAddress += 1;
+      if (str(issue.basis) === "verified") verified += 1;
+      else authority += 1;
+    }
+    const stepKey = `${at.member}:${at.step}`;
+    const incumbent = lastVerdictByStep.get(stepKey);
+    if (!incumbent || at.round >= incumbent.round) {
+      lastVerdictByStep.set(stepKey, {
+        round: at.round,
+        ...(verdict !== undefined ? { verdict } : {}),
+      });
+    }
+  }
+  if (!anyEntries) return undefined;
+  let passed = 0;
+  let forcePassed = 0;
+  for (const { round, verdict } of lastVerdictByStep.values()) {
+    if (verdict === "Pass") passed += 1;
+    else forcePassed += 1;
+    const rounds = String(round + 1);
+    roundsHistogram[rounds] = (roundsHistogram[rounds] ?? 0) + 1;
+  }
+  return {
+    stepsPassed: passed,
+    stepsForcePassed: forcePassed,
+    roundsHistogram,
+    verdicts,
+    mustAddressIssues: mustAddress,
+    verifiedIssues: verified,
+    authorityIssues: authority,
+    redevelopments,
+  };
+}
+
+function taxonomyMatchesFact(
+  matches: JsonObject | undefined,
+  receiptQueued: number | undefined,
+): TaxonomyFact | undefined {
   if (!matches) return undefined;
   const ids: string[] = [];
   const matchedOn: Record<string, number> = {};
@@ -276,8 +456,22 @@ function taxonomyFact(state: JsonObject | undefined): TaxonomyFact | undefined {
     resolvedNodeIds: [...new Set(ids)].sort(),
     matchedOn,
     unmatched: arr(matches.unmatched).length,
-    suggested: num(obj(state?.suggestionReceipt)?.queued) ?? 0,
+    suggested: receiptQueued ?? 0,
   };
+}
+
+function taxonomyFact(state: JsonObject | undefined): TaxonomyFact | undefined {
+  return taxonomyMatchesFact(
+    obj(state?.poolMatches),
+    num(obj(state?.suggestionReceipt)?.queued),
+  );
+}
+
+function taxonomyFactFromJournal(journal: readonly JsonObject[]): TaxonomyFact | undefined {
+  return taxonomyMatchesFact(
+    journalRunOutput(journal, "match-taxonomy"),
+    num(journalRunOutput(journal, "submit-decisions")?.queued),
+  );
 }
 
 /** Failures as error CLASSES: a message could echo submission text. */
@@ -301,10 +495,13 @@ export function deriveRunSummary(facts: RunFacts): RunSummary {
   const { events, journal, state } = facts;
   const times = events.map((event) => num(event.at)).filter((at): at is number => at !== undefined);
   const started = events.find((event) => str(event.type) === "run:started");
-  const review = reviewFact(state);
-  const taxonomy = taxonomyFact(state);
-  const classification = classificationFact(state);
-  const panel = panelFact(state);
+  // State-sourced facts come from pre-fold journals (which carried the run
+  // state); format-2 journals carry only outputs, so the same facts are
+  // derived from the recorded entries instead.
+  const review = reviewFact(state) ?? reviewFactFromJournal(journal);
+  const taxonomy = taxonomyFact(state) ?? taxonomyFactFromJournal(journal);
+  const classification = classificationFact(state) ?? classificationFactFromJournal(journal);
+  const panel = panelFact(state) ?? panelFactFromJournal(journal);
   return {
     status: facts.status,
     ...(times.length >= 2

@@ -104,6 +104,16 @@ export interface CompileContentWorkflowOptions {
   readonly disabledCapabilityIds?: ReadonlySet<string>;
   /** Resolves role/technique files on first execution; defaults to bundle.skills. */
   readonly skillResolver?: SkillResolver;
+  /**
+   * Journal layout to compile for. 2 (default): deterministic state folds
+   * are never journaled and content activities journal their HANDLER OUTPUT
+   * under a `<id>-run` child node — the journal stays bounded by the run's
+   * real outputs. 1: the legacy layout (every activity journals its return,
+   * which for the folds is a full state copy) — kept only so tests can
+   * produce format-1 journals and as an emergency escape hatch; it is what
+   * outgrew the engine's maximum string length on real runs.
+   */
+  readonly journalFormat?: 1 | 2;
 }
 
 export interface ResolvedRole {
@@ -965,6 +975,8 @@ class ContentCompiler {
   private readonly enabledHostToolIds: ReadonlySet<string>;
   private readonly disabledCapabilityIds: ReadonlySet<string>;
   private readonly skillResolver: SkillResolver;
+  /** Journal layout being compiled for (see CompileContentWorkflowOptions). */
+  private readonly journalFormat: 1 | 2;
   /**
    * The read-only `bundle.*` reference roots: the content projections every
    * task binds against, resolved straight out of the in-memory bundle. They
@@ -988,6 +1000,7 @@ class ContentCompiler {
     this.disabledCapabilityIds = options.disabledCapabilityIds ?? new Set();
     this.skillResolver =
       options.skillResolver ?? new BundleSkillResolver(this.bundle);
+    this.journalFormat = options.journalFormat ?? 2;
     this.gateMode = options.humanGateMode ?? "manual";
     this.roots = {
       bundle: {
@@ -1022,6 +1035,15 @@ class ContentCompiler {
 
   private temp(nodeId: string, purpose: string): string {
     return `__brainstorm:${nodeId}:${purpose}`;
+  }
+
+  /**
+   * Node options for a deterministic state fold. Format 2 marks the node
+   * non-journaled (re-run on every pass, so no state copy ever reaches the
+   * journal); format 1 keeps the legacy journal-everything behavior.
+   */
+  private foldOptions(): { journal?: boolean } {
+    return this.journalFormat === 1 ? {} : { journal: false };
   }
 
   private jsonSchema(name: string): JsonObject {
@@ -1535,10 +1557,19 @@ class ContentCompiler {
           ? [activity(this.reviewPhaseActivity(node.id, node.reviewPhase), {
               id: `${node.id}-phase`,
               resultKey: BRAINSTORM_STATE,
+              ...this.foldOptions(),
             })]
           : []),
         agent(builderName, { id: `${node.id}-execute`, resultKey }),
-        activity(applyName, { id: `${node.id}-store`, resultKey: BRAINSTORM_STATE }),
+        // The store is a deterministic fold over the journaled agent result:
+        // it validates and writes the output into the run state (and persists
+        // the artifact, idempotently), so it re-runs on replay instead of
+        // journaling a full state copy.
+        activity(applyName, {
+          id: `${node.id}-store`,
+          resultKey: BRAINSTORM_STATE,
+          ...this.foldOptions(),
+        }),
       ],
       { id: node.id, description: node.notes },
     );
@@ -1554,13 +1585,15 @@ class ContentCompiler {
   }
 
   private compileActivity(node: ContentActivityNode): WorkflowNode {
-    const functionName = this.functionName(node.id, "activity");
     const handler = this.activityHandlers[node.handler];
     const declaration = this.bundle.activities.handlers[node.handler];
     if (!handler || !declaration) {
       throw new WorkflowConfigError(`activity node "${node.id}" has no deterministic handler "${node.handler}"`);
     }
-    this.functions.registerActivity(functionName, async (_input, scope, context) => {
+    const runHandler = async (
+      scope: ScopeReader,
+      context: FunctionContext,
+    ): Promise<JsonValue> => {
       const bindings = resolveBindings(node.bind, scope, this.roots);
       const output = await handler(bindings, {
         runId: context.runId,
@@ -1583,21 +1616,67 @@ class ContentCompiler {
           "ACTIVITY_BOUND_VIOLATION",
         );
       }
-      return writeValidatedOutput(
-        scope,
-        node.output.key,
-        node.output.schema,
-        node.id,
-        parsed,
-        context,
-        this.roots,
+      return parsed;
+    };
+
+    if (this.journalFormat === 1) {
+      // Legacy layout: one journaled node whose recorded value is the full
+      // post-apply state. Kept byte-compatible with old journals.
+      const functionName = this.functionName(node.id, "activity");
+      this.functions.registerActivity(functionName, async (_input, scope, context) =>
+        writeValidatedOutput(
+          scope,
+          node.output.key,
+          node.output.schema,
+          node.id,
+          await runHandler(scope, context),
+          context,
+          this.roots,
+        ),
       );
-    });
-    return activity(functionName, {
-      id: node.id,
-      description: node.notes,
-      resultKey: BRAINSTORM_STATE,
-    });
+      return activity(functionName, {
+        id: node.id,
+        description: node.notes,
+        resultKey: BRAINSTORM_STATE,
+      });
+    }
+
+    // Format 2: the handler's bounded output is the journaled effect; the
+    // write into the run state is a deterministic fold recomputed on replay.
+    const runName = this.functionName(node.id, "run");
+    const applyName = this.functionName(node.id, "apply");
+    const outputKey = this.temp(node.id, "output");
+    this.functions
+      .registerActivity(runName, async (_input, scope, context) => runHandler(scope, context))
+      .registerActivity(applyName, async (_input, scope, context) => {
+        const parsed = scope.get(outputKey);
+        if (parsed === undefined) {
+          throw new BrainstormRuntimeError(
+            `activity "${node.id}" produced no output`,
+            "MISSING_OUTPUT",
+          );
+        }
+        return writeValidatedOutput(
+          scope,
+          node.output.key,
+          node.output.schema,
+          node.id,
+          parsed,
+          context,
+          this.roots,
+        );
+      });
+    return sequence(
+      [
+        activity(runName, { id: `${node.id}-run`, resultKey: outputKey }),
+        activity(applyName, {
+          id: `${node.id}-apply`,
+          resultKey: BRAINSTORM_STATE,
+          ...this.foldOptions(),
+        }),
+      ],
+      { id: node.id, description: node.notes },
+    );
   }
 
   private registerCollection(node: ContentForEachNode): string {
@@ -1646,8 +1725,12 @@ class ContentCompiler {
       }
       return mergeParallelStates(stateFrom(scope), branchValues);
     });
+    // Snapshot and merge are deterministic folds over the branch scopes:
+    // each branch's end state (and the merged whole) is rebuilt by replaying
+    // the branches' recorded effects, so neither belongs in the journal —
+    // journaling them once copied the FULL run state per branch per fan-out.
     const branchBody = sequence(
-      [body, activity(SNAPSHOT_ACTIVITY, { id: `${node.id}-snapshot` })],
+      [body, activity(SNAPSHOT_ACTIVITY, { id: `${node.id}-snapshot`, ...this.foldOptions() })],
       { id: `${node.id}-branch` },
     );
     return sequence(
@@ -1662,7 +1745,11 @@ class ContentCompiler {
           concurrency: node.maxConcurrency,
           resultKey: branchesKey,
         }),
-        activity(mergeName, { id: `${node.id}-merge`, resultKey: BRAINSTORM_STATE }),
+        activity(mergeName, {
+          id: `${node.id}-merge`,
+          resultKey: BRAINSTORM_STATE,
+          ...this.foldOptions(),
+        }),
       ],
       { id: node.id, description: node.notes },
     );
@@ -1705,17 +1792,32 @@ class ContentCompiler {
       .registerActivity(finishName, (_input, scope) => finishReviewRound(stateFrom(scope), scope))
       .registerCondition(conditionName, (scope) => evaluateCondition(node.until, scope, this.roots));
 
+    // Round bookkeeping (allowed verdicts, ledger refresh, cursor flags) is
+    // a pure function of the state plus the bundle's verdict catalog — a
+    // fold, recomputed on replay rather than journaled as state copies.
     const iterationBody = sequence(
       [
-        activity(prepareName, { id: `${node.id}-prepare`, resultKey: BRAINSTORM_STATE }),
+        activity(prepareName, {
+          id: `${node.id}-prepare`,
+          resultKey: BRAINSTORM_STATE,
+          ...this.foldOptions(),
+        }),
         this.compileNode(node.body),
-        activity(finishName, { id: `${node.id}-finish`, resultKey: BRAINSTORM_STATE }),
+        activity(finishName, {
+          id: `${node.id}-finish`,
+          resultKey: BRAINSTORM_STATE,
+          ...this.foldOptions(),
+        }),
       ],
       { id: `${node.id}-iteration` },
     );
     return sequence(
       [
-        activity(initializeName, { id: `${node.id}-initialize`, resultKey: BRAINSTORM_STATE }),
+        activity(initializeName, {
+          id: `${node.id}-initialize`,
+          resultKey: BRAINSTORM_STATE,
+          ...this.foldOptions(),
+        }),
         repeatUntil({
           id: `${node.id}-loop`,
           body: iterationBody,
@@ -1792,7 +1894,14 @@ class ContentCompiler {
     return sequence(
       [
         gateNode,
-        activity(applyName, { id: `${node.id}-apply`, resultKey: BRAINSTORM_STATE }),
+        // The gate ANSWER is journaled (response entry, or the auto-approve
+        // activity's decision); applying it to the state is a deterministic
+        // fold over that record.
+        activity(applyName, {
+          id: `${node.id}-apply`,
+          resultKey: BRAINSTORM_STATE,
+          ...this.foldOptions(),
+        }),
       ],
       { id: node.id, description: node.notes },
     );

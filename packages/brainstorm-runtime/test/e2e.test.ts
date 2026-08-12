@@ -562,6 +562,7 @@ function runtime(
   executor: AgentExecutor,
   humanGateMode: "manual" | "autoApproveSkippable" = "autoApproveSkippable",
   stores?: Pick<BrainstormRuntime, "checkpoints" | "artifacts">,
+  journalFormat?: 1 | 2,
 ) {
   return new BrainstormRuntime({
     bundle: loadContent(registryContentDir),
@@ -576,6 +577,7 @@ function runtime(
     hostTools: TEST_HOST_TOOLS,
     enabledHostToolIds: new Set(TEST_HOST_TOOLS.map((manifest) => manifest.toolId)),
     ...(stores ?? {}),
+    ...(journalFormat !== undefined ? { journalFormat } : {}),
   });
 }
 
@@ -1119,6 +1121,173 @@ test("manual panel gate suspends and checkpoint resume does not repeat prior age
   assert.equal(second.status, "completed");
   assert.equal(executor.tasks("processor").length, 1);
   assert.equal(executor.tasks("pool-builder").length, 1);
+});
+
+test("format-2 journals carry outputs only — no run-state copies", async () => {
+  const executor = new FakeBrainstormExecutor();
+  const app = runtime(executor);
+  const result = await app.run({
+    runId: "journal-shape",
+    submission: "Journal shape",
+    params: { panelSize: 2 },
+  });
+  assert.equal(
+    result.status,
+    "completed",
+    result.status === "failed" ? `${result.error.name}: ${result.error.message}` : undefined,
+  );
+  const checkpoint = await app.checkpoints.load("journal-shape");
+  assert.ok(checkpoint);
+  assert.equal(checkpoint.journalFormat, 2);
+  const stateShaped = checkpoint.journal.filter((entry) => {
+    const value = entry.value;
+    return (
+      typeof value === "object" &&
+      value !== null &&
+      !Array.isArray(value) &&
+      "_runtime" in value
+    );
+  });
+  assert.equal(
+    stateShaped.length,
+    0,
+    `no journal entry may carry the run state; found: ${stateShaped
+      .map((entry) => entry.key)
+      .join(", ")}`,
+  );
+  const foldEntries = checkpoint.journal.filter((entry) =>
+    /-(store|phase|snapshot|merge|prepare|finish|initialize|apply)::result$/.test(entry.key),
+  );
+  assert.equal(
+    foldEntries.length,
+    0,
+    `fold nodes must never reach the journal; found: ${foldEntries
+      .map((entry) => entry.key)
+      .join(", ")}`,
+  );
+  // The bounded outputs themselves ARE recorded: agent results and the
+  // content activities' handler outputs under their -run child nodes.
+  assert.ok(checkpoint.journal.some((entry) => entry.kind === "agent"));
+  assert.ok(
+    checkpoint.journal.some((entry) =>
+      entry.key.endsWith("/select-panel/select-panel-run::result"),
+    ),
+  );
+});
+
+test("a format-1 journal migrates on load and resumes without repeating completed agents", async () => {
+  const executor = new FakeBrainstormExecutor();
+  const legacyStores = () => ({
+    checkpoints: legacy.checkpoints,
+    artifacts: legacy.artifacts,
+  });
+  const legacy = runtime(executor, "manual", undefined, 1);
+  let state = await legacy.run({
+    runId: "migrate-resume",
+    submission: "Migration test",
+    params: { panelSize: 2 },
+  });
+  assert.equal(state.status, "suspended");
+  if (state.status !== "suspended") throw new Error("unreachable");
+  if (state.pendingGates[0]?.gateKey === "confirm-classification") {
+    state = await runtime(executor, "manual", legacyStores(), 1).resume("migrate-resume", {
+      responses: { "confirm-classification": { action: "approve" } },
+    });
+    assert.equal(state.status, "suspended");
+    if (state.status !== "suspended") throw new Error("unreachable");
+  }
+  assert.equal(state.pendingGates[0]?.gateKey, "confirm-panel");
+
+  // The legacy layout really is on disk: activity entries carrying the state.
+  const before = await legacy.checkpoints.load("migrate-resume");
+  assert.ok(before);
+  assert.equal(before.journalFormat ?? 1, 1);
+  assert.ok(
+    before.journal.some((entry) => {
+      const value = entry.value;
+      return (
+        typeof value === "object" &&
+        value !== null &&
+        !Array.isArray(value) &&
+        "_runtime" in value
+      );
+    }),
+    "the format-1 fixture carries state copies",
+  );
+
+  const processorTasks = executor.tasks("processor").length;
+  const poolTasks = executor.tasks("pool-builder").length;
+  // A CURRENT runtime over the same stores: the load migrates the journal in
+  // memory, replay reuses every recorded output, and the folds recompute.
+  const modern = runtime(executor, "manual", legacyStores());
+  const second = await modern.resume("migrate-resume", {
+    responses: { "confirm-panel": { action: "approve" } },
+  });
+  assert.equal(
+    second.status,
+    "completed",
+    second.status === "failed" ? `${second.error.name}: ${second.error.message}` : undefined,
+  );
+  assert.equal(executor.tasks("processor").length, processorTasks, "no re-run after migration");
+  assert.equal(executor.tasks("pool-builder").length, poolTasks);
+
+  // The first save after the migrated resume persists format 2, state-free.
+  const after = await legacy.checkpoints.load("migrate-resume");
+  assert.equal(after?.journalFormat, 2);
+  assert.ok(
+    !(after?.journal ?? []).some((entry) => {
+      const value = entry.value;
+      return (
+        typeof value === "object" &&
+        value !== null &&
+        !Array.isArray(value) &&
+        "_runtime" in value
+      );
+    }),
+    "the resumed run's journal no longer carries state copies",
+  );
+
+  // Replayed folds re-persist their artifacts; idempotent puts must not
+  // have duplicated any (name, payload) pair.
+  const refs = await legacy.artifacts.list();
+  const identities = refs.map((ref) => `${ref.name}#${ref.sha256 ?? ""}`);
+  assert.equal(
+    new Set(identities).size,
+    identities.length,
+    "no artifact was duplicated by the replayed folds",
+  );
+});
+
+test("checkpoint resume re-persists no duplicate artifacts", async () => {
+  const executor = new FakeBrainstormExecutor();
+  const app = runtime(executor, "manual");
+  let state = await app.run({
+    runId: "artifact-dedupe",
+    submission: "Artifact dedupe",
+    params: { panelSize: 2 },
+  });
+  assert.equal(state.status, "suspended");
+  if (state.status !== "suspended") throw new Error("unreachable");
+  const stores = { checkpoints: app.checkpoints, artifacts: app.artifacts };
+  if (state.pendingGates[0]?.gateKey === "confirm-classification") {
+    state = await runtime(executor, "manual", stores).resume("artifact-dedupe", {
+      responses: { "confirm-classification": { action: "approve" } },
+    });
+    if (state.status !== "suspended") throw new Error("unreachable");
+  }
+  const suspendedRefs = (await app.artifacts.list()).length;
+  const second = await runtime(executor, "manual", stores).resume("artifact-dedupe", {
+    responses: { "confirm-panel": { action: "approve" } },
+  });
+  assert.equal(second.status, "completed");
+  const refs = await app.artifacts.list();
+  assert.ok(refs.length > suspendedRefs, "the resumed run persisted its own new artifacts");
+  const identities = refs.map((ref) => `${ref.name}#${ref.sha256 ?? ""}`);
+  assert.equal(
+    new Set(identities).size,
+    identities.length,
+    "replaying the pre-gate folds duplicated no artifact",
+  );
 });
 
 test("invalid agent artifacts fail before downstream state updates", async () => {
