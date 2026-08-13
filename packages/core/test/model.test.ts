@@ -11,6 +11,8 @@ import type {
 } from "../src/index.js";
 import {
   addUsage,
+  cacheBoundaryTextBlock,
+  contentCacheBoundaries,
   responseText,
   satisfiesRequirements,
   textBlock,
@@ -90,6 +92,24 @@ test("providers honor AbortSignal in CallOptions", async () => {
   await assert.rejects(
     () => provider.complete({ modelId: "small", messages: [userMessage("hi")] }, { signal: controller.signal }),
     (error: Error) => error.name === "AbortError",
+  );
+});
+
+test("contentCacheBoundaries reports every declared stable prefix, in order", () => {
+  const content = [
+    cacheBoundaryTextBlock("run-level payload"),
+    textBlock("first chain step"),
+    cacheBoundaryTextBlock("last chain step"),
+    textBlock("this round's volatile data"),
+  ];
+  assert.deepEqual(contentCacheBoundaries(content), [0, 2]);
+  // Unmarked content declares nothing, and non-text blocks never do.
+  assert.deepEqual(contentCacheBoundaries([textBlock("plain")]), []);
+  assert.deepEqual(
+    contentCacheBoundaries([
+      { type: "tool_use", id: "call-1", name: "search", input: {} },
+    ]),
+    [],
   );
 });
 

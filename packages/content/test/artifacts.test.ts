@@ -8,8 +8,11 @@ import {
   finalProposalSchema,
   ignoredFilesSchema,
   judgeDecisionSchema,
+  mergeRedevelopment,
   panelSchema,
   processorOutputSchema,
+  redevelopmentPatchSchema,
+  RedevelopmentMergeError,
   redevelopmentSchema,
   usefulFilesSchema,
 } from "../src/index.js";
@@ -761,6 +764,113 @@ test("redevelopment: re-emits the complete chain within the fixed step bounds", 
     redevelopmentSchema.safeParse({ ...good, output: validDevelopedOutput, novelty: undefined }).success,
     false,
     "a paper-shaped output still requires novelty on a redevelopment",
+  );
+});
+
+test("redevelopment patch: rewritten steps only, ascending, at least one", () => {
+  const good = {
+    steps: [{ index: 2, text: para(1) }],
+    outputPatch: { paper: { method: section(3) } },
+  };
+  assert.ok(redevelopmentPatchSchema.safeParse(good).success);
+  assert.ok(
+    redevelopmentPatchSchema.safeParse({ steps: [{ index: 1, text: para(1) }] }).success,
+    "a repair that leaves the body standing patches the chain alone",
+  );
+  assert.equal(
+    redevelopmentPatchSchema.safeParse({ ...good, steps: [] }).success,
+    false,
+    "a revision that rewrites nothing is not a revision",
+  );
+  assert.equal(
+    redevelopmentPatchSchema.safeParse({
+      ...good,
+      steps: [
+        { index: 2, text: para(1) },
+        { index: 2, text: para(1) },
+      ],
+    }).success,
+    false,
+    "one step cannot be rewritten twice in a patch",
+  );
+  assert.equal(
+    redevelopmentPatchSchema.safeParse({
+      ...good,
+      steps: [
+        { index: 3, text: para(1) },
+        { index: 1, text: para(1) },
+      ],
+    }).success,
+    false,
+    "steps are listed in chain order",
+  );
+  assert.equal(
+    redevelopmentPatchSchema.safeParse({ ...good, output: validDevelopedOutput }).success,
+    false,
+    "a patch never carries a whole developed output",
+  );
+});
+
+test("merging a patch reassembles exactly what full re-emission would have produced", () => {
+  const base = {
+    cot: ["step one text", "step two text", "step three text"],
+    output: {
+      type: "research idea",
+      paper: validPaperBody,
+      requested: [{ title: "A benchmark table", response: section(1) }],
+    },
+    novelty: para(1, "Original novelty"),
+  };
+  const merged = mergeRedevelopment(base, {
+    steps: [{ index: 2, text: "rewritten step two" }],
+    outputPatch: { paper: { method: section(3, "Revised method") } },
+  });
+
+  // Untouched steps are byte-identical because the HOST carried them, not
+  // because the model retyped them correctly.
+  assert.deepEqual(merged.steps, [
+    "step one text",
+    "rewritten step two",
+    "step three text",
+  ]);
+  const paper = (merged.output as { paper: Record<string, unknown> }).paper;
+  assert.deepEqual(paper.method, section(3, "Revised method"));
+  assert.deepEqual(paper.abstract, validPaperBody.abstract, "unpatched sections stand");
+  assert.deepEqual(
+    (merged.output as { requested: unknown }).requested,
+    base.output.requested,
+    "requested sections carry through when the patch omits them",
+  );
+  assert.equal(merged.novelty, base.novelty, "novelty stands until a repair moves it");
+  // And the reassembled whole is a valid redevelopment, so nothing downstream
+  // can tell a patch from a re-emission.
+  assert.ok(
+    redevelopmentSchema.safeParse({
+      output: merged.output,
+      steps: merged.steps,
+      ...(merged.novelty !== undefined ? { novelty: merged.novelty } : {}),
+    }).success,
+  );
+});
+
+test("a patch that does not fit the version it revises fails loudly", () => {
+  const base = {
+    cot: ["step one text", "step two text", "step three text"],
+    output: { type: "research idea", paper: validPaperBody },
+  };
+  assert.throws(
+    () => mergeRedevelopment(base, { steps: [{ index: 4, text: "beyond the chain" }] }),
+    RedevelopmentMergeError,
+    "a step index past the chain is a broken patch, never a silent append",
+  );
+  assert.throws(
+    () =>
+      mergeRedevelopment(base, {
+        steps: [{ index: 1, text: "fixed" }],
+        outputPatch: { survey: { openGaps: section(1) } },
+      }),
+    RedevelopmentMergeError,
+    "a patch cannot switch the member's output to another shape",
   );
 });
 

@@ -341,6 +341,14 @@ interface StepwiseSpec {
   readonly tool: string;
   readonly field: string;
   readonly count: number;
+  /**
+   * Sparse delivery: the model submits ONLY the positions it is changing,
+   * ascending, and the host fills the rest from the version being revised.
+   * The collected calls are injected as `{index, text}` records instead of a
+   * flat list, so the host knows what was actually rewritten. Without this,
+   * every position must be submitted and the field is the plain list.
+   */
+  readonly sparse?: boolean;
   readonly inject?: JsonObject;
 }
 
@@ -362,7 +370,7 @@ function stepwiseSpec(task: AgentTask): StepwiseSpec | undefined {
     return undefined;
   }
   const record = raw as { readonly [key: string]: JsonValue };
-  const { tool, field, count, inject } = record;
+  const { tool, field, count, sparse, inject } = record;
   if (typeof tool !== "string" || tool.length === 0) return undefined;
   if (typeof field !== "string" || field.length === 0) return undefined;
   if (typeof count !== "number" || !Number.isSafeInteger(count) || count < 1) {
@@ -372,6 +380,7 @@ function stepwiseSpec(task: AgentTask): StepwiseSpec | undefined {
     tool,
     field,
     count,
+    ...(sparse === true ? { sparse: true } : {}),
     ...(typeof inject === "object" && inject !== null && !Array.isArray(inject)
       ? { inject: inject as JsonObject }
       : {}),
@@ -381,10 +390,15 @@ function stepwiseSpec(task: AgentTask): StepwiseSpec | undefined {
 function stepwiseToolDefinition(spec: StepwiseSpec): ToolDefinition {
   return {
     name: spec.tool,
-    description:
-      `Submit one step of your ${spec.count}-step chain. Call this tool once per step, strictly ` +
-      `in order (index 1 through ${spec.count}), each call carrying exactly one paragraph. All ` +
-      `${spec.count} steps must be submitted before the final structured answer.`,
+    description: spec.sparse
+      ? `Submit one REWRITTEN step of the ${spec.count}-step chain. Call this tool once per step ` +
+        `you are changing, in ascending order of index (1 through ${spec.count}), each call ` +
+        `carrying exactly one paragraph. Submit only the steps you rewrite: every step you do ` +
+        `not submit is carried over unchanged, word for word. At least one step must be ` +
+        `submitted before the final structured answer.`
+      : `Submit one step of your ${spec.count}-step chain. Call this tool once per step, strictly ` +
+        `in order (index 1 through ${spec.count}), each call carrying exactly one paragraph. All ` +
+        `${spec.count} steps must be submitted before the final structured answer.`,
     inputSchema: {
       type: "object",
       properties: {
@@ -392,7 +406,9 @@ function stepwiseToolDefinition(spec: StepwiseSpec): ToolDefinition {
           type: "integer",
           minimum: 1,
           maximum: spec.count,
-          description: "1-based step position.",
+          description: spec.sparse
+            ? "1-based position of the step being rewritten."
+            : "1-based step position.",
         },
         text: {
           type: "string",
@@ -416,6 +432,35 @@ function recordStepwiseCall(
     !Array.isArray(call.input)
       ? (call.input as { readonly [key: string]: JsonValue })
       : undefined;
+  const last = session.steps[session.steps.length - 1];
+  if (session.spec.sparse === true) {
+    // Any subset, but strictly ascending and each position once: the host
+    // applies them positionally, so an out-of-order or repeated index would
+    // make the rewrite ambiguous.
+    const index = input?.index;
+    if (typeof index !== "number" || !Number.isSafeInteger(index) || index < 1 || index > session.spec.count) {
+      return failureToolResult(
+        call,
+        `index must be a step position from 1 to ${session.spec.count}.`,
+      );
+    }
+    if (last !== undefined && index <= last.index) {
+      return failureToolResult(
+        call,
+        `Rewritten steps must be submitted in ascending order; step ${last.index} is already submitted.`,
+      );
+    }
+    if (typeof input?.text !== "string" || input.text.trim().length === 0) {
+      return failureToolResult(
+        call,
+        "text must carry the step as one non-empty paragraph.",
+      );
+    }
+    session.steps.push({ index, text: input.text, turn: session.turn });
+    return toolResultBlock(call, {
+      output: { ok: true, recorded: index, rewritten: session.steps.length },
+    });
+  }
   const expected = session.steps.length + 1;
   if (expected > session.spec.count) {
     return failureToolResult(
@@ -739,11 +784,17 @@ export class ToolLoopAgentExecutor<
         continue;
       }
       if (stepwise !== undefined) {
-        if (steps.length !== stepwise.count) {
+        const delivered =
+          stepwise.sparse === true ? steps.length >= 1 : steps.length === stepwise.count;
+        if (!delivered) {
           const issues = [
-            `Exactly ${stepwise.count} steps must be submitted through the ${stepwise.tool} tool ` +
-              `before the final answer; ${steps.length} have been received. Submit the missing ` +
-              `steps in order, then return the complete final answer again.`,
+            stepwise.sparse === true
+              ? `At least one rewritten step must be submitted through the ${stepwise.tool} tool ` +
+                `before the final answer; none have been received. Submit every step your repair ` +
+                `changes, then return the final answer again.`
+              : `Exactly ${stepwise.count} steps must be submitted through the ${stepwise.tool} tool ` +
+                `before the final answer; ${steps.length} have been received. Submit the missing ` +
+                `steps in order, then return the complete final answer again.`,
           ];
           if (validationRetries >= this.#maxValidationRetries) {
             throw new OutputValidationError(issues);
@@ -767,7 +818,12 @@ export class ToolLoopAgentExecutor<
         ) {
           output = {
             ...(output as JsonObject),
-            [stepwise.field]: steps.map((step) => step.text),
+            // Sparse delivery keeps each step's position: the host applies
+            // them to the version being revised, and carries the rest.
+            [stepwise.field]:
+              stepwise.sparse === true
+                ? steps.map((step) => ({ index: step.index, text: step.text }))
+                : steps.map((step) => step.text),
             ...(stepwise.inject ?? {}),
           };
         }

@@ -511,7 +511,21 @@ test("review nests member -> step -> bounded round, with commentors excluding th
   if (gate.kind !== "condition") return;
   assert.equal(gate.then.kind, "agent", "redevelopment is conditional on the verdict");
   const redev = findAgent(root, "redevelop-idea");
-  assert.equal(redev.output.schema, "redevelopment");
+  // Either delivery contract is shippable: the full re-emission bundles
+  // published before the patch form, and the patch itself. The runtime keeps
+  // both, so a run pinned to an older bundle revises exactly as it always did.
+  assert.ok(
+    redev.output.schema === "redevelopment" ||
+      redev.output.schema === "redevelopmentPatch",
+    `the reviser must produce a revision artifact, got "${redev.output.schema}"`,
+  );
+  if (redev.output.schema === "redevelopmentPatch") {
+    assert.equal(
+      redev.bind?.["previousOutput"],
+      "ideas[member.id].output",
+      "a patching reviser must receive the version it patches",
+    );
+  }
 
   // The guard reads the SAME runtime flag the loop exits on, so the budget can
   // never desync between them — and it carries no literal round count.

@@ -1157,7 +1157,13 @@ export const knownResultSchema = z
   .strict();
 
 /** resolution — an attempt on a formally posed target: prove, disprove, construct, or bound. */
-export const resolutionBodySchema = z
+/**
+ * The sections alone, without the cross-field rule below. A revision patch
+ * names only the sections it changes, so a rule relating two of them cannot
+ * be judged on the patch — it is judged on the merged whole, which is
+ * validated in full before anything is recorded.
+ */
+export const resolutionBodyFields = z
   .object({
     problemStatement: paragraphs(1),
     knownResults: z.array(knownResultSchema).max(30),
@@ -1170,7 +1176,9 @@ export const resolutionBodySchema = z
     remainingGaps: z.array(nonEmpty),
     significance: paragraphs(1),
   })
-  .strict()
+  .strict();
+
+export const resolutionBodySchema = resolutionBodyFields
   .superRefine((body, ctx) => {
     if (body.status === "resolved" && body.remainingGaps.length > 0) {
       ctx.addIssue({ code: "custom", path: ["remainingGaps"], message: "a resolved status leaves no remaining gaps" });
@@ -1187,7 +1195,7 @@ export const resolutionBodySchema = z
 export type ResolutionBody = z.infer<typeof resolutionBodySchema>;
 
 /** verification — one claim adjudicated with evidence and an explicit verdict. */
-export const verificationBodySchema = z
+export const verificationBodyFields = z
   .object({
     claim: nonEmpty,
     /** Where the claim comes from: the submitter's own hypothesis, or a located attachment passage. */
@@ -1197,7 +1205,9 @@ export const verificationBodySchema = z
     reasoning: paragraphs(1),
     confidence: confidenceSchema,
   })
-  .strict()
+  .strict();
+
+export const verificationBodySchema = verificationBodyFields
   .superRefine((body, ctx) => {
     if (body.verdict !== "indeterminate" && body.evidence.kind === "none") {
       ctx.addIssue({
@@ -1220,7 +1230,7 @@ export const soundnessAspectSchema = z
   .strict();
 
 /** feasibility — a Registered-Reports-style soundness review of a not-yet-run plan. */
-export const feasibilityBodySchema = z
+export const feasibilityBodyFields = z
   .object({
     designSummary: paragraphs(1),
     importance: paragraphs(1),
@@ -1231,7 +1241,9 @@ export const feasibilityBodySchema = z
     requiredChanges: z.array(nonEmpty),
     alternativeDesigns: z.array(nonEmpty),
   })
-  .strict()
+  .strict();
+
+export const feasibilityBodySchema = feasibilityBodyFields
   .superRefine((body, ctx) => {
     if (body.feasibilityVerdict === "feasible-as-is" && body.requiredChanges.length > 0) {
       ctx.addIssue({
@@ -1262,7 +1274,7 @@ export const critiqueIssueSchema = z
   .strict();
 
 /** critique — a holistic, itemized review of a finished artifact. */
-export const critiqueBodySchema = z
+export const critiqueBodyFields = z
   .object({
     artifactSummary: paragraphs(1),
     strengths: z.array(nonEmpty).min(1),
@@ -1273,7 +1285,9 @@ export const critiqueBodySchema = z
       .array(z.object({ priority: z.number().int().min(1), action: nonEmpty }).strict())
       .min(1),
   })
-  .strict()
+  .strict();
+
+export const critiqueBodySchema = critiqueBodyFields
   .superRefine((body, ctx) => {
     if (body.recommendation === "sound" && body.issues.some((issue) => issue.severity === "critical")) {
       ctx.addIssue({
@@ -1615,6 +1629,155 @@ export const redevelopmentSchema = z
   });
 
 export type Redevelopment = z.infer<typeof redevelopmentSchema>;
+
+/**
+ * A member's revision expressed as a PATCH rather than a re-emission.
+ *
+ * The full-emission contract above asks the reviser to re-type the entire
+ * chain and the entire developed body every round, even when one confirmed
+ * issue moved one step: the untouched text is copied character for character
+ * at output prices, and the body — which the reviser never even receives — is
+ * regenerated from scratch, so paragraphs nobody faulted drift round after
+ * round. A patch carries only what changed; the HOST fills the rest from the
+ * previous version, which makes an untouched step byte-identical by
+ * construction instead of by the model's diligence.
+ *
+ * Nothing downstream sees a patch: `mergeRedevelopment` reassembles the whole
+ * chain and the whole envelope, and the merged result is validated against
+ * the same schemas the full-emission path uses before anything is recorded.
+ */
+export const redevelopmentPatchSchema = z
+  .object({
+    /**
+     * The rewritten steps only, each at its 1-based position in the chain.
+     * Ascending, no repeats, at least one — a revision exists because the
+     * board confirmed an issue, and every confirmed issue sits at a step.
+     */
+    steps: z
+      .array(
+        z
+          .object({ index: z.number().int().min(1).max(9), text: paragraphs(1) })
+          .strict(),
+      )
+      .min(1)
+      .max(9)
+      .superRefine((steps, ctx) => {
+        steps.forEach((step, position) => {
+          const previous = steps[position - 1];
+          if (previous !== undefined && step.index <= previous.index) {
+            ctx.addIssue({
+              code: "custom",
+              path: [position, "index"],
+              message: "steps must be listed in ascending order, each index once",
+            });
+          }
+        });
+      }),
+    /**
+     * The developed body's changed sections only, under the same shape key
+     * the previous output populated. Omitted when the repair left the body
+     * standing. `requested` is all-or-nothing: omit it to carry the previous
+     * sections, or give the complete ordered list.
+     */
+    outputPatch: z
+      .object({
+        // Built from each shape's SECTIONS, without its cross-field rules: a
+        // rule relating two sections cannot be judged on a patch that names
+        // one of them. Every such rule is enforced on the merged whole.
+        paper: paperBodySchema.partial().optional(),
+        resolution: resolutionBodyFields.partial().optional(),
+        verification: verificationBodyFields.partial().optional(),
+        feasibility: feasibilityBodyFields.partial().optional(),
+        critique: critiqueBodyFields.partial().optional(),
+        interpretation: interpretationBodySchema.partial().optional(),
+        survey: surveyBodySchema.partial().optional(),
+        explanation: explanationBodySchema.partial().optional(),
+        solution: solutionBodySchema.partial().optional(),
+        requested: z.array(requestedSectionSchema).min(1).max(4).optional(),
+      })
+      .strict()
+      .optional(),
+    /** Only when the repair moved it; otherwise the previous one stands. */
+    novelty: paragraphs(1).optional(),
+  })
+  .strict();
+
+export type RedevelopmentPatch = z.infer<typeof redevelopmentPatchSchema>;
+
+/** A patch that cannot be applied to the version it claims to revise. */
+export class RedevelopmentMergeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RedevelopmentMergeError";
+  }
+}
+
+/** The version a patch is applied to: the member's idea as it currently stands. */
+export interface RedevelopmentBase {
+  readonly cot: readonly string[];
+  readonly output: Readonly<Record<string, unknown>>;
+  readonly novelty?: string;
+}
+
+/** The reassembled revision, in the shape the full-emission path produces. */
+export interface MergedRedevelopment {
+  readonly steps: readonly string[];
+  readonly output: Record<string, unknown>;
+  readonly novelty?: string;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Applies a patch to the version it revises, producing the complete chain and
+ * the complete envelope.
+ *
+ * This is the ONE implementation on purpose: the runtime folds the merge into
+ * run state, and the dashboard replays the same patches out of the checkpoint
+ * journal. Two copies would drift, and the review inspector would start
+ * showing a chain no reviewer ever read.
+ */
+export function mergeRedevelopment(
+  base: RedevelopmentBase,
+  patch: RedevelopmentPatch,
+): MergedRedevelopment {
+  const steps = [...base.cot];
+  for (const step of patch.steps) {
+    if (step.index > steps.length) {
+      throw new RedevelopmentMergeError(
+        `the patch rewrites step ${step.index}, but the chain has ${steps.length} steps`,
+      );
+    }
+    steps[step.index - 1] = step.text;
+  }
+
+  const output: Record<string, unknown> = { ...base.output };
+  const populated = OUTPUT_SHAPES.find((shape) => isRecord(base.output[shape]));
+  for (const [key, value] of Object.entries(patch.outputPatch ?? {})) {
+    if (value === undefined) continue;
+    if (key === "requested") {
+      output.requested = value;
+      continue;
+    }
+    if (key !== populated) {
+      throw new RedevelopmentMergeError(
+        `the patch changes the "${key}" body, but this member's output is a "${populated ?? "none"}"`,
+      );
+    }
+    // Section-wise: a patched section replaces its previous text entirely,
+    // every other section of the body rides through untouched.
+    output[key] = { ...(base.output[key] as Record<string, unknown>), ...(value as object) };
+  }
+
+  const novelty = patch.novelty ?? base.novelty;
+  return {
+    steps,
+    output,
+    ...(novelty !== undefined ? { novelty } : {}),
+  };
+}
 
 // ---------------------------------------------------------------------------
 // review: comment, judge decision
@@ -1976,6 +2139,7 @@ export const artifactSchemas = {
   comment: commentSchema,
   judgeDecision: judgeDecisionSchema,
   redevelopment: redevelopmentSchema,
+  redevelopmentPatch: redevelopmentPatchSchema,
   finalProposal: finalProposalSchema,
   bridgeReport: bridgeReportSchema,
 } as const;

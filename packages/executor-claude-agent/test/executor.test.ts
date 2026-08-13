@@ -1142,6 +1142,36 @@ test("reasoning-trace routes get summarized thinking and stepwise tasks get the 
   assert.equal(captured.length, 2);
 });
 
+test("a sparse revision task fails closed when no step is rewritten", async () => {
+  const captured: ClaudeAgentQueryInput[] = [];
+  const executor = new ClaudeAgentExecutor({
+    token: "setup-token-secret",
+    maxValidationAttempts: 2,
+    queryFn: successQuery(captured, { output: { type: "research idea" } }),
+  });
+  const result = await executor.execute(
+    {
+      ...structuredTask,
+      input: { role: "redeveloper", routeTraits: ["extended-reasoning"] },
+      metadata: {
+        stepwise: { tool: "submit_step", field: "steps", count: 6, sparse: true },
+      },
+    },
+    { runId: "run-sparse", nodePath: "root/review/redevelop" },
+  );
+
+  // The chain tool is still the only way a revision reaches the runtime; a
+  // sparse contract relaxes HOW MANY steps must come through it, never
+  // whether the model may skip it and self-report the chain in its JSON.
+  assert.ok((captured[0]!.options.tools as string[]).includes("mcp__steps__submit_step"));
+  assert.equal(result.status, "error");
+  assert.match(
+    result.status === "error" ? result.error.message : "",
+    /At least one rewritten step/,
+  );
+  assert.equal(captured.length, 2, "one corrective attempt before failing closed");
+});
+
 test("tasks without the trace trait keep the omitted thinking display", async () => {
   const captured: ClaudeAgentQueryInput[] = [];
   const executor = new ClaudeAgentExecutor({

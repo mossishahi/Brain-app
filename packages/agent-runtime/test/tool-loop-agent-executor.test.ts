@@ -596,6 +596,106 @@ test("stepwise tasks record ordered submit_step calls, inject the chain, and cap
   ]);
 });
 
+test("a sparse stepwise task submits only rewritten steps, positions and all", async () => {
+  const provider = new FakeProvider((_request, call) =>
+    call === 1
+      ? response([
+          // Ascending, but not consecutive and not starting at 1: exactly
+          // what a repair touching steps 2 and 5 looks like.
+          {
+            type: "tool_use",
+            id: "s-2",
+            name: "submit_step",
+            input: { index: 2, text: "rewritten step two" },
+          },
+          // Backwards: refused without being recorded.
+          {
+            type: "tool_use",
+            id: "s-1-late",
+            name: "submit_step",
+            input: { index: 1, text: "too late for step one" },
+          },
+          {
+            type: "tool_use",
+            id: "s-5",
+            name: "submit_step",
+            input: { index: 5, text: "rewritten step five" },
+          },
+        ])
+      : response([{ type: "text", text: '{"title":"revised"}' }]),
+  );
+  const executor = new ToolLoopAgentExecutor({
+    provider,
+    tools: new ToolRegistry(),
+    modelRouteResolver: new FixedModelRouteResolver({
+      modelId: "fake-model",
+      responseFormat: { type: "json" },
+    }),
+  });
+
+  const result = await executor.execute(
+    task({
+      taskId: "sparse-1",
+      input: "repair please",
+      metadata: {
+        stepwise: { tool: "submit_step", field: "steps", count: 6, sparse: true },
+      },
+    }),
+    context,
+  );
+
+  assert.equal(result.status, "ok");
+  if (result.status !== "ok") throw new Error("unreachable");
+  assert.ok(isJsonObjectValue(result.output));
+  assert.deepEqual(
+    result.output.steps,
+    [
+      { index: 2, text: "rewritten step two" },
+      { index: 5, text: "rewritten step five" },
+    ],
+    "each rewritten step keeps its position; the host carries the rest",
+  );
+  const secondTurn = provider.requests[1]?.messages.at(-1);
+  const refused = secondTurn?.content.find(
+    (block) => block.type === "tool_result" && block.toolUseId === "s-1-late",
+  );
+  assert.ok(
+    refused !== undefined && refused.type === "tool_result" && refused.isError === true,
+    "a backwards index is refused: applying it positionally would be ambiguous",
+  );
+});
+
+test("a sparse revision that rewrites nothing gets corrective feedback, then fails closed", async () => {
+  const provider = new FakeProvider(() =>
+    response([{ type: "text", text: '{"title":"nothing changed"}' }]),
+  );
+  const executor = new ToolLoopAgentExecutor({
+    provider,
+    tools: new ToolRegistry(),
+    modelRouteResolver: new FixedModelRouteResolver({
+      modelId: "fake-model",
+      responseFormat: { type: "json" },
+    }),
+    retry: { maxValidationRetries: 1 },
+  });
+
+  const result = await executor.execute(
+    task({
+      taskId: "sparse-2",
+      input: "repair please",
+      metadata: {
+        stepwise: { tool: "submit_step", field: "steps", count: 4, sparse: true },
+      },
+    }),
+    context,
+  );
+
+  assert.equal(result.status, "error");
+  if (result.status !== "error") throw new Error("unreachable");
+  assert.match(result.error.message, /At least one rewritten step/);
+  assert.equal(provider.requests.length, 2);
+});
+
 test("a stepwise task that skips submissions gets corrective feedback, then fails closed", async () => {
   const provider = new FakeProvider(() =>
     response([{ type: "text", text: '{"title":"no steps"}' }]),

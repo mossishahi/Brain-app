@@ -185,6 +185,12 @@ interface StepwiseSpec {
   readonly tool: string;
   readonly field: string;
   readonly count: number;
+  /**
+   * Sparse delivery: only the positions being changed are submitted, and the
+   * host carries the rest from the version under revision. Collected as
+   * `{index, text}` records rather than a flat list.
+   */
+  readonly sparse?: boolean;
   readonly inject?: JsonObject;
 }
 
@@ -220,7 +226,7 @@ function stepwiseSpecOf(task: AgentTask): StepwiseSpec | undefined {
     return undefined;
   }
   const value = raw as { readonly [key: string]: JsonValue };
-  const { tool, field, count, inject } = value;
+  const { tool, field, count, sparse, inject } = value;
   if (typeof tool !== "string" || tool.length === 0) return undefined;
   if (typeof field !== "string" || field.length === 0) return undefined;
   if (typeof count !== "number" || !Number.isSafeInteger(count) || count < 1) {
@@ -230,6 +236,7 @@ function stepwiseSpecOf(task: AgentTask): StepwiseSpec | undefined {
     tool,
     field,
     count,
+    ...(sparse === true ? { sparse: true } : {}),
     ...(typeof inject === "object" && inject !== null && !Array.isArray(inject)
       ? { inject: inject as JsonObject }
       : {}),
@@ -263,15 +270,49 @@ function stepwiseServer(
     tools: [
       sdkTool(
         spec.tool,
-        `Submit one step of your ${spec.count}-step chain. Call this tool once per step, ` +
-          `strictly in order (index 1 through ${spec.count}), each call carrying exactly one ` +
-          `paragraph. All ${spec.count} steps must be submitted before the final structured answer.`,
+        spec.sparse
+          ? `Submit one REWRITTEN step of the ${spec.count}-step chain. Call this tool once per ` +
+            `step you are changing, in ascending order of index (1 through ${spec.count}), each ` +
+            `call carrying exactly one paragraph. Submit only the steps you rewrite: every step ` +
+            `you do not submit is carried over unchanged, word for word. At least one step must ` +
+            `be submitted before the final structured answer.`
+          : `Submit one step of your ${spec.count}-step chain. Call this tool once per step, ` +
+            `strictly in order (index 1 through ${spec.count}), each call carrying exactly one ` +
+            `paragraph. All ${spec.count} steps must be submitted before the final structured answer.`,
         {
           index: z.number().int().min(1).max(spec.count),
           text: z.string().min(1),
         },
         async (args) => {
           const steps = capture.stepwise!.steps;
+          if (args.text.trim().length === 0) {
+            return stepwiseRefusal(
+              "text must carry the step as one non-empty paragraph.",
+            );
+          }
+          if (spec.sparse === true) {
+            // Any subset, strictly ascending, each position once — the host
+            // applies them positionally to the version under revision.
+            const last = steps[steps.length - 1];
+            if (last !== undefined && args.index <= last.index) {
+              return stepwiseRefusal(
+                `Rewritten steps must be submitted in ascending order; step ${last.index} is already submitted.`,
+              );
+            }
+            steps.push({ index: args.index, text: args.text, turn: capture.turn });
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify({
+                    ok: true,
+                    recorded: args.index,
+                    rewritten: steps.length,
+                  }),
+                },
+              ],
+            };
+          }
           const expected = steps.length + 1;
           if (expected > spec.count) {
             return stepwiseRefusal(
@@ -281,11 +322,6 @@ function stepwiseServer(
           if (args.index !== expected) {
             return stepwiseRefusal(
               `Steps must be submitted strictly in order; expected index ${expected} next.`,
-            );
-          }
-          if (args.text.trim().length === 0) {
-            return stepwiseRefusal(
-              "text must carry the step as one non-empty paragraph.",
             );
           }
           steps.push({ index: expected, text: args.text, turn: capture.turn });
@@ -1750,11 +1786,17 @@ export class ClaudeAgentExecutor implements AgentExecutor {
         let output = result.output;
         if (stepwise !== undefined) {
           const steps = capture.stepwise!.steps;
-          if (steps.length !== stepwise.count) {
+          const delivered =
+            stepwise.sparse === true ? steps.length >= 1 : steps.length === stepwise.count;
+          if (!delivered) {
             validationIssues = [
-              `Exactly ${stepwise.count} steps must be submitted through the ${stepwise.tool} ` +
-                `tool before the final answer; ${steps.length} were received. Submit every step ` +
-                `in order, then return the complete final answer.`,
+              stepwise.sparse === true
+                ? `At least one rewritten step must be submitted through the ${stepwise.tool} ` +
+                  `tool before the final answer; none were received. Submit every step your ` +
+                  `repair changes, then return the final answer.`
+                : `Exactly ${stepwise.count} steps must be submitted through the ${stepwise.tool} ` +
+                  `tool before the final answer; ${steps.length} were received. Submit every step ` +
+                  `in order, then return the complete final answer.`,
             ];
             rejectedOutput = result.output;
             if (attempt < attempts) {
@@ -1784,7 +1826,12 @@ export class ClaudeAgentExecutor implements AgentExecutor {
           ) {
             output = {
               ...(output as JsonObject),
-              [stepwise.field]: steps.map((step) => step.text),
+              // Sparse delivery keeps each step's position: the host applies
+              // them to the version being revised, and carries the rest.
+              [stepwise.field]:
+                stepwise.sparse === true
+                  ? steps.map((step) => ({ index: step.index, text: step.text }))
+                  : steps.map((step) => step.text),
               ...(stepwise.inject ?? {}),
             };
           }

@@ -5,8 +5,14 @@ import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { OUTPUT_SHAPES, loadContent, type ContentBundle } from "@brainstorm-agentic/content";
 import {
+  OUTPUT_SHAPES,
+  loadContent,
+  type ContentBundle,
+  type WorkflowDefinition as ContentWorkflowDefinition,
+} from "@brainstorm-agentic/content";
+import {
+  contentCacheBoundaries,
   systemPromptSegments,
   systemPromptText,
   textContent,
@@ -24,6 +30,7 @@ import type {
   TaxonomyResolveResult,
 } from "@brainstorm-agentic/core";
 
+import { planTaskCaches } from "../src/cache-plan.js";
 import {
   BrainstormRuntime,
   StaticBrainstormRouteResolver,
@@ -137,6 +144,30 @@ const registryContentDir =
 function object(value: JsonValue | undefined, label: string): JsonObject {
   assert.ok(typeof value === "object" && value !== null && !Array.isArray(value), `${label} is not an object`);
   return value as JsonObject;
+}
+
+/**
+ * The verdicts a round permits, however the bound options carry them: content
+ * that renders the verdict catalog into its instructions binds the NAMES
+ * alone, earlier content binds them zipped with their descriptions.
+ */
+function allowedVerdicts(options: JsonValue | undefined): readonly string[] {
+  if (Array.isArray(options)) {
+    return options.filter((name): name is string => typeof name === "string");
+  }
+  return Object.keys(object(options, "verdict options"));
+}
+
+/**
+ * The rounds of the CURRENT walk position, however the bound ledger carries
+ * them: content published before the scoped record binds the flat array, and
+ * the scoped record's `rounds` field is that same list. The suite runs against
+ * whichever content tree is configured, so it reads both.
+ */
+function ledgerRounds(history: JsonValue | undefined): readonly JsonValue[] {
+  if (Array.isArray(history)) return history;
+  const record = object(history, "scoped review record");
+  return Array.isArray(record.rounds) ? record.rounds : [];
 }
 
 function paperBody(label: string): JsonObject {
@@ -366,7 +397,7 @@ class FakeBrainstormExecutor implements AgentExecutor {
         output = this.judge(agentId, bindings);
         break;
       case "redeveloper":
-        output = this.redevelop(agentId, bindings);
+        output = this.redevelop(agentId, bindings, task.outputSchema?.name);
         break;
       case "integrator": {
         const ideas = object(bindings.ideas, "integrator ideas");
@@ -478,10 +509,25 @@ class FakeBrainstormExecutor implements AgentExecutor {
     };
   }
 
-  private redevelop(memberId: string, bindings: JsonObject): JsonValue {
+  private redevelop(
+    memberId: string,
+    bindings: JsonObject,
+    schema: string | undefined,
+  ): JsonValue {
     const step = bindings.currentStep as number;
     const key = `${memberId}:${step}`;
     this.revisionCalls.set(key, (this.revisionCalls.get(key) ?? 0) + 1);
+    if (schema === "redevelopmentPatch") {
+      // Patch delivery: only the rewritten step and only the section the
+      // repair moved. Everything else is the host's to carry.
+      return {
+        steps: [{ index: step, text: `REVISED:${memberId}:${step}` }],
+        outputPatch: {
+          paper: { method: [1, 2, 3].map((i) => `${memberId} revised method paragraph ${i}`) },
+        },
+        novelty: `Revised novelty for ${memberId}`,
+      };
+    }
     // Full-chain re-emission with minimal edits: rewrite the issue's step,
     // copy every other step verbatim from the bound complete chain.
     const chain = Array.isArray(bindings.chain) ? bindings.chain : [];
@@ -563,11 +609,13 @@ function runtime(
   humanGateMode: "manual" | "autoApproveSkippable" = "autoApproveSkippable",
   stores?: Pick<BrainstormRuntime, "checkpoints" | "artifacts">,
   journalFormat?: 1 | 2,
+  workflow?: ContentWorkflowDefinition,
 ) {
   return new BrainstormRuntime({
     bundle: loadContent(registryContentDir),
     agentExecutor: executor,
     humanGateMode,
+    ...(workflow !== undefined ? { workflow } : {}),
     activities: taxonomyActivities(new StubTaxonomy()),
     routeResolver: new StaticBrainstormRouteResolver({
       reasoning: { modelId: "configured-reasoner", providerId: "fake" },
@@ -927,6 +975,288 @@ test("instructions stay in a cacheable system prefix; submitted data rides the t
   );
 });
 
+/**
+ * The published workflow with its four review binds moved from the flat
+ * ledger to the scoped record — exactly the edit the next bundle version
+ * makes, so the runtime side can be proven before any tag exists.
+ */
+function scopedLedgerWorkflow(): ContentWorkflowDefinition {
+  publishedBundle ??= loadContent(registryContentDir);
+  // Content published before the scoped record binds the flat ledger, so the
+  // rebind happens here; a tree that already binds the record passes through.
+  const rebound = JSON.stringify(publishedBundle.workflows.brainstorm!).replaceAll(
+    '"reviews[member.id].history"',
+    '"reviews[member.id].record"',
+  );
+  assert.ok(
+    rebound.includes('"reviews[member.id].record"'),
+    "the review binds must resolve to the scoped record",
+  );
+  return JSON.parse(rebound) as ContentWorkflowDefinition;
+}
+
+test("a bundle binding the scoped record gets closed business collapsed and open business whole", async () => {
+  const executor = new FakeBrainstormExecutor("build-step-2");
+  const result = await runtime(
+    executor,
+    "autoApproveSkippable",
+    undefined,
+    undefined,
+    scopedLedgerWorkflow(),
+  ).run({ submission: "Scoped ledger", params: { panelSize: 2 } });
+  assert.equal(
+    result.status,
+    "completed",
+    result.status === "failed" ? `${result.error.name}: ${result.error.message}` : undefined,
+  );
+
+  // member-1's walk: step 1 passed on sight, step 2 took a Build and a
+  // revision before passing. At step 3 both are closed business.
+  const atStepThree = executor
+    .tasks("commentor")
+    .find(
+      (task) =>
+        task.bindings.currentStep === 3 &&
+        (task.bindings.chain as readonly string[]).includes("REVISED:member-1:2"),
+    );
+  assert.ok(atStepThree, "the walk reached step 3 of the revised chain");
+  const record = object(atStepThree!.bindings.history, "scoped record");
+
+  assert.deepEqual(record.clean, [1], "a position that passed on sight is one number");
+  const settled = record.settled as JsonObject[];
+  assert.deepEqual(settled.map((entry) => entry.step), [2]);
+  assert.equal(settled[0]!.outcome, "passed");
+  assert.deepEqual(settled[0]!.revised, [2], "the change-set survives the collapse");
+  assert.ok(
+    (settled[0]!.objections as string[])[0]?.includes("uncontrolled comparison"),
+    "the objection stays nameable, so nobody re-raises it",
+  );
+  assert.deepEqual(record.standing, [], "nothing was left unanswered on this path");
+  assert.deepEqual(record.rounds, [], "step 3 has not been reviewed yet");
+  assert.ok(
+    !JSON.stringify(record).includes("commentorId"),
+    "the projection carries no reviewer identity, like the ledger it replaces",
+  );
+});
+
+test("objections left standing by a force-passed position ride on, whole", async () => {
+  const executor = new FakeBrainstormExecutor("cap-step-1");
+  const result = await runtime(
+    executor,
+    "autoApproveSkippable",
+    undefined,
+    undefined,
+    scopedLedgerWorkflow(),
+  ).run({ submission: "Capped ledger", params: { panelSize: 2 } });
+  assert.equal(result.status, "completed");
+
+  // member-1's step 1 exhausts the round budget while the judge still faults
+  // it, so its last round's issues are unresolved by construction.
+  const atStepTwo = executor
+    .tasks("commentor")
+    .find(
+      (task) =>
+        task.bindings.currentStep === 2 &&
+        (task.bindings.chain as readonly string[])[0]?.startsWith("REVISED:member-1:1"),
+    );
+  assert.ok(atStepTwo, "the walk moved past the capped position");
+  const record = object(atStepTwo!.bindings.history, "scoped record");
+
+  const settled = record.settled as JsonObject[];
+  assert.equal(settled[0]!.step, 1);
+  assert.equal(settled[0]!.outcome, "force-passed", "a capped position never reads as passed");
+  const standing = record.standing as JsonObject[];
+  assert.equal(standing.length, 1, "the unanswered objection is carried forward");
+  assert.equal(standing[0]!.step, 1);
+  assert.equal(standing[0]!.mustAddress, true, "with the flags a reviewer needs to weigh it");
+  assert.equal(standing[0]!.evidenceKind, "math", "and with its evidence kind intact");
+});
+
+test("verdict definitions ride the instructions, and only the round's names ride the turn", async () => {
+  const executor = new FakeBrainstormExecutor();
+  const result = await runtime(executor).run({
+    submission: "Verdict placement",
+    params: { panelSize: 2 },
+  });
+  assert.equal(result.status, "completed");
+  publishedBundle ??= loadContent(registryContentDir);
+  // Both placements render the catalog as JSON, and the definitions quote the
+  // verdict names, so the text to look for is the escaped form.
+  const passDefinition = JSON.stringify(
+    publishedBundle.catalogs.verdicts.verdicts.Pass!.description,
+  ).slice(1, -1);
+
+  const reviewers = executor.seen.filter(
+    (seen) => seen.role === "judge" || seen.role === "commentor",
+  );
+  assert.ok(reviewers.length > 0, "the run produced review tasks");
+  for (const seen of reviewers) {
+    const system = systemPromptText(seen.task.modelRequest!.system) ?? "";
+    const turn = textContent(seen.task.modelRequest!.messages[0]!.content);
+    if (seen.bindings.verdictCatalog === undefined) {
+      // Content published before the move: the definitions ride the payload,
+      // exactly as its skills describe them. A pinned run must not change.
+      assert.ok(turn.includes(passDefinition), `${seen.role} carries the definitions in its turn`);
+      continue;
+    }
+    // The definitions are bundle prose that never varies within a run, so
+    // they belong in the instruction prefix that is written once and read
+    // back by every later call — not re-sent as task data every round.
+    assert.ok(
+      system.includes(passDefinition),
+      `${seen.role} carries the verdict definitions in its instructions`,
+    );
+    assert.ok(
+      !turn.includes(passDefinition),
+      `${seen.role} must not re-send the verdict definitions as task data`,
+    );
+    assert.ok(
+      Array.isArray(seen.bindings.verdictOptions),
+      `${seen.role} receives this round's verdicts as names`,
+    );
+    // The narrowed answer schema still comes from the round's permitted set.
+    const verdictSchema = object(
+      object(seen.task.outputSchema!.schema.properties, "task properties").verdict,
+      "verdict property",
+    );
+    assert.deepEqual(
+      verdictSchema.enum,
+      seen.bindings.verdictOptions,
+      `${seen.role}'s delivered schema pins exactly the round's verdicts`,
+    );
+  }
+});
+
+test("the cache plan proves stability from the workflow's structure, never from variable names", () => {
+  publishedBundle ??= loadContent(registryContentDir);
+  const plan = planTaskCaches(publishedBundle.workflows.brainstorm!);
+
+  // A review task's run-level material is identical in every call of the run;
+  // everything the walk moves — the chain, the round, the seat's ledger — is
+  // not, and a bind that reads a loop variable can never be marked stable.
+  for (const nodeId of ["comment-step", "comment-step-bridge", "judge-step", "redevelop-idea"]) {
+    const stable = plan.get(nodeId);
+    assert.ok(stable, `${nodeId} is planned`);
+    for (const name of ["input", "files"]) {
+      assert.ok(stable.has(name), `${nodeId} may cache its ${name} payload`);
+    }
+    for (const name of [
+      "chain",
+      "currentStep",
+      "history",
+      "verdictOptions",
+      "comments",
+      "feedback",
+      "department",
+      "umbrella",
+      "subfields",
+    ]) {
+      assert.ok(!stable.has(name), `${nodeId} must never cache ${name}: it varies per call`);
+    }
+  }
+
+  // The first pass is bound entirely to run-level material, so its whole turn
+  // is stable; the deterministic activities have no task turn at all.
+  const firstPass = plan.get("develop-idea")!;
+  assert.ok(firstPass.has("input") && firstPass.has("files"));
+  assert.ok(!firstPass.has("department"), "the seat identity varies per member");
+  assert.equal(plan.get("match-taxonomy"), undefined, "activities are not agent tasks");
+});
+
+test("the task turn declares its stable prefixes without changing a byte the model reads", async () => {
+  const executor = new FakeBrainstormExecutor();
+  const result = await runtime(executor).run({
+    runId: "task-cache",
+    submission: { prompt: "Investigate the mechanism", attachments: [] },
+    params: { panelSize: 2 },
+  });
+  assert.equal(
+    result.status,
+    "completed",
+    result.status === "failed" ? `${result.error.name}: ${result.error.message}` : undefined,
+  );
+
+  const blocksOf = (seen: SeenTask) => seen.task.modelRequest!.messages[0]!.content;
+
+  // 1. Splitting the turn into blocks is a billing change only: the blocks
+  //    concatenate to exactly the single string they replaced.
+  for (const seen of executor.seen) {
+    const sections = payloadVars(seen.role).map((name) => {
+      const value = seen.bindings[name];
+      const rendered =
+        typeof value === "string" ? value : JSON.stringify(value, null, 2);
+      return `## ${name}\n\n${rendered}`;
+    });
+    const legacy = [
+      "# Task",
+      `Execute the ${seen.role} role instructions from the system prompt against the data below. ` +
+        `Return only one JSON value satisfying the "${seen.task.outputSchema!.name}" schema.`,
+      ...(sections.length > 0 ? ["# Task data", ...sections] : []),
+    ].join("\n\n");
+    assert.equal(
+      textContent(blocksOf(seen)),
+      legacy,
+      `${seen.role} reads exactly the text it read before the split`,
+    );
+  }
+
+  // 2. A commentor turn declares two prefixes: the run-level payload, and the
+  //    chain as delivered so far — the second closing on the last STEP, never
+  //    on the closing bracket, which is the byte that moves as the walk grows.
+  for (const seen of executor.seen.filter((entry) => entry.role === "commentor")) {
+    const blocks = blocksOf(seen);
+    const boundaries = contentCacheBoundaries(blocks);
+    assert.equal(boundaries.length, 2, "a commentor turn declares two stable prefixes");
+    const through = (index: number) => textContent(blocks.slice(0, index + 1));
+    assert.ok(
+      through(boundaries[0]!).endsWith(JSON.stringify(seen.bindings.files, null, 2)),
+      "the first prefix closes after the run-level file map",
+    );
+    const chain = seen.bindings.chain as readonly string[];
+    assert.ok(
+      through(boundaries[1]!).endsWith(JSON.stringify(chain[chain.length - 1])),
+      "the second prefix closes after the last delivered chain step",
+    );
+  }
+
+  // 3. What the second prefix buys: one walk position's marked span is a byte
+  //    prefix of the next position's whole turn, so the cache is readable
+  //    instead of merely written.
+  const walks = new Map<string, SeenTask[]>();
+  for (const seen of executor.seen) {
+    if (seen.role !== "commentor") continue;
+    const chain = seen.bindings.chain as readonly string[];
+    const key = `${seen.agentId}|${chain[0]}`;
+    walks.set(key, [...(walks.get(key) ?? []), seen]);
+  }
+  let compared = 0;
+  for (const tasks of walks.values()) {
+    const ordered = [...tasks].sort(
+      (a, b) =>
+        (a.bindings.chain as readonly string[]).length -
+        (b.bindings.chain as readonly string[]).length,
+    );
+    for (let i = 1; i < ordered.length; i += 1) {
+      const shorter = ordered[i - 1]!;
+      const longer = ordered[i]!;
+      const before = shorter.bindings.chain as readonly string[];
+      const after = longer.bindings.chain as readonly string[];
+      if (before.length >= after.length) continue;
+      if (!before.every((step, index) => step === after[index])) continue;
+      const boundaries = contentCacheBoundaries(blocksOf(shorter));
+      const cached = textContent(
+        blocksOf(shorter).slice(0, boundaries[boundaries.length - 1]! + 1),
+      );
+      assert.ok(
+        textContent(blocksOf(longer)).startsWith(cached),
+        "the next step's turn re-reads the previous one's marked prefix byte for byte",
+      );
+      compared += 1;
+    }
+  }
+  assert.ok(compared > 0, "the walk produced consecutive positions to compare");
+});
+
 test("Build redevelops minimally: change-set computed, ledger carried, no immediate repeat", async () => {
   const executor = new FakeBrainstormExecutor("build-step-2");
   const app = runtime(executor);
@@ -959,10 +1289,13 @@ test("Build redevelops minimally: change-set computed, ledger carried, no immedi
       executor.tasks("judge").filter((candidate) =>
         candidate.agentId === "member-1" && candidate.bindings.currentStep === 2,
       ).indexOf(task) === 1)!;
-  const options = object(secondRoundJudge.bindings.verdictOptions, "verdict options");
-  assert.equal(options.Build, undefined, "Build must be removed after a Build verdict");
-  assert.ok(options.Pass);
-  assert.ok(options.Interrupt);
+  // The round's permitted verdicts, however the bundle carries them: names
+  // alone (the descriptions live in the cached instructions) or names zipped
+  // with their descriptions.
+  const options = allowedVerdicts(secondRoundJudge.bindings.verdictOptions);
+  assert.ok(!options.includes("Build"), "Build must be removed after a Build verdict");
+  assert.ok(options.includes("Pass"));
+  assert.ok(options.includes("Interrupt"));
   // The judge is grounded in the chain it rules on, revised text included.
   assert.deepEqual(secondRoundJudge.bindings.chain, [
     "COT:member-1:1",
@@ -981,9 +1314,8 @@ test("Build redevelops minimally: change-set computed, ledger carried, no immedi
   ]);
   // The anonymized ledger reaches the next round: the Build record carries
   // its issues (content only) and the runtime-computed change-set.
-  const history = roundTwoComment!.bindings.history as readonly JsonValue[];
-  assert.ok(Array.isArray(history), "review.history is bound into commentor tasks");
-  const buildRecord = history
+  const history = roundTwoComment!.bindings.history;
+  const buildRecord = ledgerRounds(history)
     .map((entry) => object(entry, "ledger record"))
     .find((entry) => entry.verdict === "Build");
   assert.ok(buildRecord, "the ledger carries the Build round");
@@ -1050,15 +1382,22 @@ test("member task schemas carry only the run's shape body — the other eight ne
   for (const seen of memberTasks) {
     const format = seen.task.modelRequest?.responseFormat;
     if (format?.type !== "jsonSchema") throw new Error(`${seen.role} has no jsonSchema format`);
+    const schemaProperties = object(format.schema.properties, `${seen.role} properties`);
+    // A first pass declares the whole envelope under `output`; a revision
+    // patch declares only the sections it may change, under `outputPatch`.
+    // Both carry exactly one shape body — the run's.
+    const patching = schemaProperties.output === undefined;
     const envelope = object(
-      object(format.schema.properties, `${seen.role} properties`).output,
+      patching ? schemaProperties.outputPatch : schemaProperties.output,
       `${seen.role} output property`,
     );
     const properties = object(envelope.properties, `${seen.role} envelope properties`);
     object(properties.paper, "the run's shape body stays declared");
     assert.ok(
-      Array.isArray(envelope.required) && (envelope.required as JsonValue[]).includes("paper"),
-      "the run's shape body is required",
+      patching ||
+        (Array.isArray(envelope.required) &&
+          (envelope.required as JsonValue[]).includes("paper")),
+      "the run's shape body is required of a full delivery",
     );
     for (const shape of OUTPUT_SHAPES) {
       if (shape === "paper") continue;

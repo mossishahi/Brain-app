@@ -27,12 +27,14 @@ import {
   repeatUntil,
   sequence,
   terminal,
-  userMessage,
   workflow,
+  cacheBoundaryTextBlock,
   resolveCapabilityPlan,
+  textBlock,
   type ArtifactRef,
   type BrokerInput,
   type CapabilityDeclaration,
+  type ContentBlock,
   type FunctionContext,
   type HostToolManifest,
   type JsonArray,
@@ -46,6 +48,7 @@ import {
   type WorkflowNode,
 } from "@brainstorm-agentic/core";
 
+import { planTaskCaches, type TaskCachePlan } from "./cache-plan.js";
 import {
   jsonEqual,
   type ReferenceRoots,
@@ -276,6 +279,75 @@ function isCatalogType(
   );
 }
 
+/**
+ * The run-level contract a developed output must satisfy, beyond its schema:
+ * the type it echoes, the shape the catalog maps that type to, and the
+ * requested-output sections the run recorded. Checked on the FINISHED
+ * envelope — the first pass's, a full re-emission's, or the one the host
+ * assembles from a revision patch — so a patched body cannot slip a wrong
+ * section list past the contract the first pass had to meet.
+ */
+function assertDevelopedOutputFitsRun(
+  developed: JsonObject,
+  nodeId: string,
+  scope: ScopeReader,
+  state: JsonObject,
+  roots: ReferenceRoots,
+): void {
+  // The envelope schema enforces "exactly one shape body"; the catalog owns
+  // which shape that must be for the run's type, so that pairing — and the
+  // type echo itself — is checked here against the loaded bundle.
+  const expectedType = resolveDataReference("input.type", scope, state, { required: true });
+  if (developed.type !== expectedType) {
+    throw new BrainstormRuntimeError(
+      `node "${nodeId}" returned output.type "${String(developed.type)}" but this run works a "${String(expectedType)}"`,
+      "OUTPUT_TYPE_MISMATCH",
+    );
+  }
+  const shape = populatedShape(developed as Parameters<typeof populatedShape>[0]);
+  const expectedShape = resolveDataReference("bundle.inputTypes.shapes[input.type]", scope, state, {
+    required: false,
+    roots,
+  });
+  if (expectedShape !== undefined && shape !== expectedShape) {
+    throw new BrainstormRuntimeError(
+      `node "${nodeId}" produced a "${shape}" body but the catalog maps "${String(expectedType)}" to "${String(expectedShape)}"`,
+      "OUTPUT_SHAPE_MISMATCH",
+    );
+  }
+  // The submitter's explicitly requested outputs are run data: EVERY
+  // member answers each recorded ask with one `requested` section, in the
+  // recorded order, titles echoed verbatim — and no section list at all
+  // when the run recorded none. The task schema is narrowed the same way;
+  // this is the authoritative re-check on write.
+  const asks = requestedOutputsOf(
+    resolveDataReference("input", scope, state, { required: false }),
+  );
+  const sections = developed.requested;
+  if (asks.length === 0) {
+    if (sections !== undefined) {
+      throw new BrainstormRuntimeError(
+        `node "${nodeId}" returned requested-output sections, but this run recorded no requested outputs`,
+        "REQUESTED_SECTION_MISMATCH",
+      );
+    }
+    return;
+  }
+  const titles = (Array.isArray(sections) ? sections : []).map((entry) =>
+    isJsonRecord(entry) ? entry.title : undefined,
+  );
+  const expected = asks.map((entry) => entry.title);
+  if (
+    titles.length !== expected.length ||
+    titles.some((title, index) => title !== expected[index])
+  ) {
+    throw new BrainstormRuntimeError(
+      `node "${nodeId}" must answer exactly the ${expected.length} requested output(s) of this run, in order: ${expected.join(" | ")}`,
+      "REQUESTED_SECTION_MISMATCH",
+    );
+  }
+}
+
 async function writeValidatedOutput(
   scope: ScopeReader,
   target: string,
@@ -318,59 +390,13 @@ async function writeValidatedOutput(
     }
   }
   if (schemaName === "brainIdea" || schemaName === "redevelopment") {
-    // The envelope schema enforces "exactly one shape body"; the catalog owns
-    // which shape that must be for the run's type, so that pairing — and the
-    // type echo itself — is checked here against the loaded bundle.
-    const developed = asObject(asObject(parsed, schemaName).output, `${schemaName}.output`);
-    const expectedType = resolveDataReference("input.type", scope, state, { required: true });
-    if (developed.type !== expectedType) {
-      throw new BrainstormRuntimeError(
-        `node "${nodeId}" returned output.type "${String(developed.type)}" but this run works a "${String(expectedType)}"`,
-        "OUTPUT_TYPE_MISMATCH",
-      );
-    }
-    const shape = populatedShape(developed as Parameters<typeof populatedShape>[0]);
-    const expectedShape = resolveDataReference("bundle.inputTypes.shapes[input.type]", scope, state, {
-      required: false,
+    assertDevelopedOutputFitsRun(
+      asObject(asObject(parsed, schemaName).output, `${schemaName}.output`),
+      nodeId,
+      scope,
+      state,
       roots,
-    });
-    if (expectedShape !== undefined && shape !== expectedShape) {
-      throw new BrainstormRuntimeError(
-        `node "${nodeId}" produced a "${shape}" body but the catalog maps "${String(expectedType)}" to "${String(expectedShape)}"`,
-        "OUTPUT_SHAPE_MISMATCH",
-      );
-    }
-    // The submitter's explicitly requested outputs are run data: EVERY
-    // member answers each recorded ask with one `requested` section, in the
-    // recorded order, titles echoed verbatim — and no section list at all
-    // when the run recorded none. The task schema is narrowed the same way;
-    // this is the authoritative re-check on write.
-    const asks = requestedOutputsOf(
-      resolveDataReference("input", scope, state, { required: false }),
     );
-    const sections = developed.requested;
-    if (asks.length === 0) {
-      if (sections !== undefined) {
-        throw new BrainstormRuntimeError(
-          `node "${nodeId}" returned requested-output sections, but this run recorded no requested outputs`,
-          "REQUESTED_SECTION_MISMATCH",
-        );
-      }
-    } else {
-      const titles = (Array.isArray(sections) ? sections : []).map((entry) =>
-        isJsonRecord(entry) ? entry.title : undefined,
-      );
-      const expected = asks.map((entry) => entry.title);
-      if (
-        titles.length !== expected.length ||
-        titles.some((title, index) => title !== expected[index])
-      ) {
-        throw new BrainstormRuntimeError(
-          `node "${nodeId}" must answer exactly the ${expected.length} requested output(s) of this run, in order: ${expected.join(" | ")}`,
-          "REQUESTED_SECTION_MISMATCH",
-        );
-      }
-    }
   }
   if (schemaName === "brainIdea") {
     const idea = asObject(parsed, "brain idea");
@@ -500,8 +526,14 @@ async function writeValidatedOutput(
   const stored = schemaName === "experts" ? canonicalizeExpertsTree(parsed) : parsed;
   const write = writeDataReference(state, target, stored, scope, roots);
   let next = write.state;
-  if (schemaName === "redevelopment") {
-    next = applyRedevelopment(next, scope, parsed, nodeId);
+  if (schemaName === "redevelopment" || schemaName === "redevelopmentPatch") {
+    next = applyRedevelopment(
+      next,
+      scope,
+      parsed,
+      nodeId,
+      schemaName === "redevelopmentPatch" ? "patch" : "full",
+    );
     // Persist the member's UPDATED idea as its own artifact version under the
     // member's idea path (the same path the first pass wrote). The artifact
     // history then reads first pass -> revision 1 -> revision 2 -> …, so the
@@ -510,12 +542,24 @@ async function writeValidatedOutput(
     // for the dashboard and the session's readable final-output copies.
     const memberId = resolveDataReference("member.id", scope, next, { required: true });
     const revised = resolveDataReference("ideas[member.id]", scope, next, { required: true });
+    const revisedIdea = validateArtifact("brainIdea", nodeId, revised!);
+    if (schemaName === "redevelopmentPatch") {
+      // A patch carries no type and no shape key of its own, so the run-level
+      // contract is checked here, on the envelope the host assembled.
+      assertDevelopedOutputFitsRun(
+        asObject(asObject(revisedIdea, "revised idea").output, "revised idea output"),
+        nodeId,
+        scope,
+        next,
+        roots,
+      );
+    }
     next = await persistArtifact(
       next,
       `ideas.${String(memberId)}`,
       "brainIdea",
       nodeId,
-      validateArtifact("brainIdea", nodeId, revised!),
+      revisedIdea,
       context,
     );
   }
@@ -763,10 +807,11 @@ function stepwiseContract(
       removed: ["cot"],
     };
   }
-  if (schemaName === "redevelopment") {
-    // The reviser re-emits the COMPLETE chain (touched steps rewritten,
-    // untouched steps copied verbatim); the runtime computes the change-set
-    // by comparison, so the model never self-reports what it revised.
+  if (schemaName === "redevelopment" || schemaName === "redevelopmentPatch") {
+    // Full emission: the reviser re-emits the COMPLETE chain (touched steps
+    // rewritten, untouched copied verbatim). Patch: only the rewritten steps,
+    // and the host carries the rest. Either way the runtime — never the
+    // model — computes the change-set, so nothing self-reports its own edits.
     const totalSteps = bindings.totalSteps;
     if (
       typeof totalSteps !== "number" ||
@@ -776,7 +821,12 @@ function stepwiseContract(
       return undefined;
     }
     return {
-      spec: { tool: "submit_step", field: "steps", count: totalSteps },
+      spec: {
+        tool: "submit_step",
+        field: "steps",
+        count: totalSteps,
+        ...(schemaName === "redevelopmentPatch" ? { sparse: true } : {}),
+      },
       removed: ["steps"],
     };
   }
@@ -784,26 +834,104 @@ function stepwiseContract(
 }
 
 /**
+ * Longest collection a payload section is split into per-element blocks for.
+ * Chains are single digits; the ceiling only keeps a pathological binding
+ * from turning one section into hundreds of blocks.
+ */
+const MAX_SPLIT_ELEMENTS = 32;
+
+function renderPayloadValue(value: JsonValue): string {
+  return typeof value === "string" ? value : JSON.stringify(value, null, 2);
+}
+
+/**
+ * The chunks one payload section renders to. Every chunk carries its own
+ * leading separator, so concatenating the whole turn's chunks reproduces the
+ * single string this used to be, byte for byte.
+ *
+ * A section holding a list of strings — the chain of thought under review —
+ * is cut at its element boundaries, with each element's comma leading the
+ * NEXT chunk rather than trailing its own. That placement is what makes one
+ * call's chain a byte-exact prefix of the next call's: at step k the last
+ * element chunk reads `,\n  "step k"`, and at step k+1 the very same bytes
+ * sit at the very same offset, followed by step k+1 instead of the closing
+ * bracket. A redevelopment that rewrites step j only breaks the prefix from
+ * j onward.
+ */
+function payloadSectionChunks(entry: PayloadEntry, splittable: boolean): string[] {
+  const header = `\n\n## ${entry.name}\n\n`;
+  const value = entry.value;
+  const elements =
+    splittable && Array.isArray(value) && value.every((item) => typeof item === "string")
+      ? (value as readonly string[])
+      : undefined;
+  if (
+    elements === undefined ||
+    elements.length === 0 ||
+    elements.length > MAX_SPLIT_ELEMENTS
+  ) {
+    return [`${header}${renderPayloadValue(value)}`];
+  }
+  return [
+    `${header}[`,
+    ...elements.map(
+      (element, index) => `${index === 0 ? "" : ","}\n  ${JSON.stringify(element)}`,
+    ),
+    "\n]",
+  ];
+}
+
+/**
  * The task turn: what to do plus the payload the role's instructions refer to
  * by name. Keeping submission-derived data here rather than in the system
  * prompt holds it at user privilege and leaves the instructions byte-stable
  * across calls.
+ *
+ * The turn is emitted as content blocks rather than one string so the stable
+ * spans can be declared to the provider: the leading run of payload sections
+ * the workflow proves identical for the whole run (see cache-plan), and then
+ * the first varying section when it is a growing list. Everything the model
+ * reads is unchanged — the blocks concatenate to exactly the previous text —
+ * only the billing of the repeated prefix moves.
  */
-function renderTaskMessage(
+function renderTaskBlocks(
   role: string,
   schemaName: string,
   payload: readonly PayloadEntry[],
-): string {
-  const sections = payload.map(({ name, value }) => {
-    const rendered = typeof value === "string" ? value : JSON.stringify(value, null, 2);
-    return `## ${name}\n\n${rendered}`;
-  });
-  return [
-    `# Task`,
+  stableVars: ReadonlySet<string>,
+): ContentBlock[] {
+  const head =
+    `# Task\n\n` +
     `Execute the ${role} role instructions from the system prompt against the data below. ` +
-      `Return only one JSON value satisfying the "${schemaName}" schema.`,
-    ...(sections.length > 0 ? ["# Task data", ...sections] : []),
-  ].join("\n\n");
+    `Return only one JSON value satisfying the "${schemaName}" schema.` +
+    (payload.length > 0 ? `\n\n# Task data` : "");
+
+  let stableRun = 0;
+  while (stableRun < payload.length && stableVars.has(payload[stableRun]!.name)) {
+    stableRun += 1;
+  }
+
+  const chunks: string[] = [head];
+  const boundaries = new Set<number>();
+  payload.forEach((entry, index) => {
+    // Only the first section after the stable run is worth splitting: it is
+    // the one whose earlier elements repeat across calls (the chain), and the
+    // provider's breakpoint budget has room for exactly one more boundary.
+    const sectionChunks = payloadSectionChunks(entry, index === stableRun);
+    chunks.push(...sectionChunks);
+    if (index === stableRun - 1) {
+      boundaries.add(chunks.length - 1);
+    }
+    if (index === stableRun && sectionChunks.length > 1) {
+      // The last ELEMENT chunk, never the closing bracket: the bracket is the
+      // one byte that differs between a chain of k steps and one of k+1.
+      boundaries.add(chunks.length - 2);
+    }
+  });
+
+  return chunks.map((text, index) =>
+    boundaries.has(index) ? cacheBoundaryTextBlock(text) : textBlock(text),
+  );
 }
 
 function concreteWorkflow(
@@ -986,6 +1114,11 @@ class ContentCompiler {
    * activity result or `checkpoint.input`, and nothing can write through them.
    */
   private readonly roots: ReferenceRoots;
+  /**
+   * Per agent node, the bind names this workflow proves identical across
+   * every call of the run — the task turn's cacheable prefix.
+   */
+  private readonly cachePlan: TaskCachePlan;
 
   constructor(
     private readonly bundle: ContentBundle,
@@ -1010,6 +1143,7 @@ class ContentCompiler {
         departments: structuredClone(this.bundle.catalogs.departments) as unknown as JsonObject,
       },
     };
+    this.cachePlan = planTaskCaches(this.content);
     this.functions
       .registerSelector(STATE_SELECTOR, (scope) => scope.get(BRAINSTORM_STATE))
       .registerActivity(SNAPSHOT_ACTIVITY, (_input, scope) => scope.get(BRAINSTORM_STATE));
@@ -1142,36 +1276,56 @@ class ContentCompiler {
         );
       }
       // The seat carries this round's allowed verdicts as NAMES so verdict
-      // prose never enters the journaled state. Zip the descriptions back in
-      // from the bundle here: the model still receives the full contract, and
-      // the rest of the pipeline keeps seeing a record.
+      // prose never enters the journaled state. Whichever name reaches a task
+      // must be one the bundle actually defines — a seat offering an unknown
+      // verdict is a content defect, not something to pass to a model.
       if (
         (node.output.schema === "comment" || node.output.schema === "judgeDecision") &&
         Array.isArray(bindings.verdictOptions)
       ) {
         const catalog = this.bundle.catalogs.verdicts.verdicts;
-        const zipped: Record<string, JsonValue> = {};
         for (const name of bindings.verdictOptions) {
           if (typeof name !== "string" || !Object.prototype.hasOwnProperty.call(catalog, name)) {
             throw new WorkflowConfigError(
               `node "${node.id}" was offered verdict "${String(name)}", which the bundle's verdict catalog does not define`,
             );
           }
-          zipped[name] = structuredClone(catalog[name]) as unknown as JsonValue;
         }
-        (bindings as Record<string, JsonValue>).verdictOptions = zipped;
+        // Where the DESCRIPTIONS travel is the bundle's decision. A bundle
+        // that binds the catalog renders it into the role's instructions,
+        // which are byte-stable across the run and therefore cached: the
+        // task turn then carries only this round's names. A bundle that does
+        // not gets the descriptions zipped into the payload, exactly as
+        // before — its skills describe `verdictOptions` as carrying them,
+        // and a pinned run must read what its own bundle promised.
+        if (node.bind?.verdictCatalog === undefined) {
+          const zipped: Record<string, JsonValue> = {};
+          for (const name of bindings.verdictOptions as string[]) {
+            zipped[name] = structuredClone(catalog[name]) as unknown as JsonValue;
+          }
+          (bindings as Record<string, JsonValue>).verdictOptions = zipped;
+        }
       }
       let taskJsonSchema = jsonSchema;
       if (
-        (node.output.schema === "comment" ||
-          node.output.schema === "judgeDecision") &&
-        isJsonRecord(bindings.verdictOptions)
+        node.output.schema === "comment" ||
+        node.output.schema === "judgeDecision"
       ) {
-        const allowed = Object.keys(bindings.verdictOptions);
-        taskJsonSchema = pinned(patchSchemaProperty(taskJsonSchema, ["verdict"], (verdict) => ({
-            ...verdict,
-            enum: allowed,
-          })), node.id, "the allowed verdicts");
+        // The round's allowed verdicts, however this bundle carries them:
+        // names alone, or names zipped with their descriptions.
+        const allowed = isJsonRecord(bindings.verdictOptions)
+          ? Object.keys(bindings.verdictOptions)
+          : Array.isArray(bindings.verdictOptions)
+            ? bindings.verdictOptions.filter(
+                (name): name is string => typeof name === "string",
+              )
+            : [];
+        if (allowed.length > 0) {
+          taskJsonSchema = pinned(patchSchemaProperty(taskJsonSchema, ["verdict"], (verdict) => ({
+              ...verdict,
+              enum: allowed,
+            })), node.id, "the allowed verdicts");
+        }
       }
       // Step targets are bounded by the live walk position, which only the
       // task knows: narrow the schema maxima so a constrained model cannot
@@ -1299,6 +1453,52 @@ class ContentCompiler {
               required: required.includes("requested") ? required : [...required, "requested"],
             };
           }), node.id, "the required shape body");
+      }
+      // A revision patch names sections of ONE shape body, so the other eight
+      // partial bodies are removed from its task schema the same way the full
+      // envelope's are — they are pure dead weight on every model turn. The
+      // patch's `requested` stays OPTIONAL (omitting it carries the previous
+      // sections), but when the run recorded asks and the reviser does supply
+      // the list, it must be the run's list in the run's order.
+      if (node.output.schema === "redevelopmentPatch") {
+        const shape = typeof bindings.shape === "string" ? bindings.shape : undefined;
+        const asks = requestedOutputsOf(bindings.input);
+        taskJsonSchema = pinned(
+          patchSchemaProperty(taskJsonSchema, ["outputPatch"], (patch) => {
+            const properties = isJsonRecord(patch.properties) ? patch.properties : undefined;
+            if (properties === undefined) return patch;
+            const unusedShapes = new Set<string>(
+              OUTPUT_SHAPES.filter((candidate) => candidate !== shape),
+            );
+            const slimmed: Record<string, JsonValue> = {};
+            for (const [key, value] of Object.entries(properties)) {
+              if (unusedShapes.has(key)) continue;
+              if (key === "requested" && asks.length === 0) continue;
+              slimmed[key] = value;
+            }
+            if (asks.length > 0 && isJsonRecord(slimmed.requested)) {
+              const requestedProperty = slimmed.requested;
+              const items = isJsonRecord(requestedProperty.items) ? requestedProperty.items : {};
+              const itemProperties = isJsonRecord(items.properties) ? items.properties : {};
+              const titleProperty = isJsonRecord(itemProperties.title) ? itemProperties.title : {};
+              slimmed.requested = {
+                ...requestedProperty,
+                minItems: asks.length,
+                maxItems: asks.length,
+                items: {
+                  ...items,
+                  properties: {
+                    ...itemProperties,
+                    title: { ...titleProperty, enum: asks.map((ask) => ask.title) },
+                  },
+                },
+              };
+            }
+            return { ...patch, properties: slimmed };
+          }),
+          node.id,
+          "the revision patch's shape body",
+        );
       }
       if (
         node.output.schema === "processorOutput" &&
@@ -1493,9 +1693,15 @@ class ContentCompiler {
         }
       }
       const messages = [
-        userMessage(
-          renderTaskMessage(node.skill, node.output.schema, prompt.payload),
-        ),
+        {
+          role: "user" as const,
+          content: renderTaskBlocks(
+            node.skill,
+            node.output.schema,
+            prompt.payload,
+            this.cachePlan.get(node.id) ?? new Set<string>(),
+          ),
+        },
       ];
       // Capability availability depends on the host's settings, not on the
       // bundle, so it trails the cacheable instruction segments.

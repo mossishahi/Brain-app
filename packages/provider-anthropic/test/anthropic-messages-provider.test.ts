@@ -875,6 +875,98 @@ test("tool-carrying requests mark the conversation tail; tool-less requests stay
   );
 });
 
+test("declared stable prefixes become breakpoints, capped so the request stays within budget", async () => {
+  const bodies: Record<string, unknown>[] = [];
+  const provider = new AnthropicMessagesProvider({
+    model: "claude-test",
+    client: {
+      messages: {
+        async create(body) {
+          bodies.push(body);
+          return {
+            model: "claude-test",
+            content: [{ type: "text", text: "ok" }],
+            stop_reason: "end_turn",
+            usage: {},
+          };
+        },
+      },
+    },
+  });
+  const lookupTool = {
+    name: "lookup",
+    inputSchema: { type: "object", properties: { query: { type: "string" } } },
+  };
+
+  await provider.complete({
+    modelId: "claude-test",
+    system: [
+      { text: "Role instructions.", cacheable: true },
+      { text: "Per-run capability note." },
+    ],
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "run-level payload", cacheBoundary: true },
+          { type: "text", text: "chain step one" },
+          { type: "text", text: "chain step two", cacheBoundary: true },
+          { type: "text", text: "this round's data" },
+        ],
+      },
+    ],
+    tools: [lookupTool],
+  });
+
+  const messages = bodies[0]!.messages as Array<{
+    content: Array<Record<string, unknown>>;
+  }>;
+  const blocks = messages[0]!.content;
+  assert.deepEqual(
+    blocks.map((block) => block.cache_control !== undefined),
+    [true, false, true, true],
+    "both declared boundaries are marked; the tail marker closes the turn",
+  );
+  const systemBlocks = bodies[0]!.system as Array<Record<string, unknown>>;
+  assert.equal(
+    systemBlocks.filter((block) => block.cache_control !== undefined).length +
+      cacheMarkedBlocks(messages).length,
+    4,
+    "system boundary + two declared prefixes + moving tail exhaust the API budget exactly",
+  );
+
+  // A caller declaring more than the budget allows must not have the whole
+  // request rejected: the surplus is dropped, the prompt is unchanged.
+  await provider.complete({
+    modelId: "claude-test",
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "a", cacheBoundary: true },
+          { type: "text", text: "b", cacheBoundary: true },
+          { type: "text", text: "c", cacheBoundary: true },
+          { type: "text", text: "d", cacheBoundary: true },
+        ],
+      },
+    ],
+    tools: [lookupTool],
+  });
+  const capped = bodies[1]!.messages as Array<{
+    content: Array<Record<string, unknown>>;
+  }>;
+  assert.deepEqual(
+    capped[0]!.content.map((block) => block.cache_control !== undefined),
+    [true, true, false, true],
+    "only the first two declared boundaries survive, plus the tail marker",
+  );
+  assert.deepEqual(
+    capped[0]!.content.map((block) => block.text),
+    ["a", "b", "c", "d"],
+    "dropping a surplus boundary never changes what the model reads",
+  );
+});
+
 test("pause_turn continuations re-derive one tail breakpoint, skipping unmarkable server blocks", async () => {
   const bodies: Record<string, unknown>[] = [];
   const provider = new AnthropicMessagesProvider({

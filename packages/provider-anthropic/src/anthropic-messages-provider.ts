@@ -24,6 +24,7 @@ import type {
   ToolDefinition,
 } from "./core-adapter.js";
 import {
+  contentCacheBoundaries,
   systemPromptBoundary,
   systemPromptSegments,
 } from "./core-adapter.js";
@@ -294,15 +295,49 @@ function mapRequestBlock(block: ContentBlock): WireRecord | undefined {
   }
 }
 
+/**
+ * Message-level cache breakpoints honored per request.
+ *
+ * The API accepts four in total and the other two are spoken for: the system
+ * prompt's instruction boundary and the moving conversation tail. Dropping
+ * the surplus keeps a caller that declares more from having the whole request
+ * rejected — the declared prefixes are a cost optimization, never semantics.
+ */
+const MAX_MESSAGE_CACHE_BOUNDARIES = 2;
+
+/**
+ * Maps one message's content, carrying the caller's declared cache
+ * boundaries onto the wire blocks they became. A source block can vanish in
+ * mapping (unsigned thinking with no text), so the marker follows the block
+ * itself rather than its index.
+ */
+function mapMessageContent(
+  message: ModelMessage,
+  budget: { remaining: number },
+): WireRecord[] {
+  const boundaries = new Set(contentCacheBoundaries(message.content));
+  const content: WireRecord[] = [];
+  message.content.forEach((block, index) => {
+    const wire = mapRequestBlock(block);
+    if (wire === undefined) return;
+    if (boundaries.has(index) && budget.remaining > 0) {
+      budget.remaining -= 1;
+      content.push({ ...wire, cache_control: { type: "ephemeral" } });
+      return;
+    }
+    content.push(wire);
+  });
+  return content;
+}
+
 function mapMessages(messages: readonly ModelMessage[]): WireMessage[] {
   const mapped: Array<{
     role: "user" | "assistant";
     content: WireRecord[];
   }> = [];
+  const budget = { remaining: MAX_MESSAGE_CACHE_BOUNDARIES };
   for (const message of messages) {
-    const content = message.content
-      .map(mapRequestBlock)
-      .filter((block): block is WireRecord => block !== undefined);
+    const content = mapMessageContent(message, budget);
     if (content.length === 0) {
       continue;
     }
@@ -504,6 +539,10 @@ const CACHE_MARKABLE_BLOCK_TYPES: ReadonlySet<string> = new Set([
  * pause_turn continuation loop reuses and appends to the caller's array, so
  * a mutated block would accumulate one stale breakpoint per continuation
  * and overrun the API's four-breakpoint budget.
+ *
+ * Any static boundaries the caller declared (see mapMessageContent) are
+ * already on the mapped blocks and survive this pass untouched; together
+ * with the system prompt's boundary the total stays within the budget.
  */
 function withMessageCacheBreakpoint(
   messages: readonly WireMessage[],

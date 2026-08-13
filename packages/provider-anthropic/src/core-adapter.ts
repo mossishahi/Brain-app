@@ -31,6 +31,7 @@ export type {
 } from "@brainstorm-agentic/core";
 
 export {
+  contentCacheBoundaries,
   systemPromptBoundary,
   systemPromptSegments,
 } from "@brainstorm-agentic/core";

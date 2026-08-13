@@ -1,5 +1,7 @@
 import {
   artifactSchemas,
+  mergeRedevelopment,
+  type RedevelopmentPatch,
   type ReviewPhaseName,
   type VerdictsCatalog,
   type WorkflowDefinition as ContentWorkflowDefinition,
@@ -116,21 +118,29 @@ export function validateArtifact(
 }
 
 /**
- * Applies a full-chain redevelopment: the reviser re-emitted the COMPLETE
- * chain (touched steps rewritten, unaffected steps copied verbatim), and the
- * runtime — never the model — computes the change-set by exact per-step
- * comparison against the previous chain. Chain length is invariant. The
- * change-set is stashed on the seat's `current` so finishReviewRound can fold
- * it into the member's review-ledger record, and the previous idea's
- * `literature` rides
+ * Applies a redevelopment, in either delivery form.
+ *
+ * FULL: the reviser re-emitted the COMPLETE chain and body (rewritten steps
+ * changed, unaffected steps copied verbatim). PATCH: it submitted only the
+ * steps it rewrote and only the body sections it changed, and the host
+ * carries everything else over from the version being revised — which makes
+ * an untouched step byte-identical by construction rather than by the
+ * model's diligence.
+ *
+ * Either way the runtime — never the model — computes the change-set by exact
+ * per-step comparison against the previous chain, chain length is invariant,
+ * the change-set is stashed on the seat's `current` so finishReviewRound can
+ * fold it into the review ledger, and the previous idea's `literature` rides
  * through unchanged (the reviser reworks reasoning, not its grounding
- * record).
+ * record). What lands in state is the same shape in both cases, so nothing
+ * downstream can tell which form produced it.
  */
 export function applyRedevelopment(
   state: JsonObject,
   scope: ScopeReader,
   revisionValue: JsonValue,
   nodeId: string,
+  delivery: "full" | "patch" = "full",
 ): JsonObject {
   const revision = object(revisionValue, "redevelopment");
   const totalSteps = resolveDataReference("input.cotSteps", scope, state, { required: true });
@@ -138,13 +148,6 @@ export function applyRedevelopment(
   if (typeof totalSteps !== "number" || typeof memberId !== "string") {
     throw new BrainstormRuntimeError(
       `node "${nodeId}" cannot apply redevelopment without member.id and input.cotSteps`,
-      "INVALID_REDEVELOPMENT",
-    );
-  }
-  const steps = revision.steps;
-  if (!Array.isArray(steps) || steps.length !== totalSteps) {
-    throw new BrainstormRuntimeError(
-      `node "${nodeId}" redevelopment must carry the complete ${totalSteps}-step chain`,
       "INVALID_REDEVELOPMENT",
     );
   }
@@ -159,15 +162,51 @@ export function applyRedevelopment(
       "INVALID_REDEVELOPMENT",
     );
   }
+  let steps: JsonValue[];
+  let output: JsonValue;
+  let novelty: JsonValue | undefined;
+  if (delivery === "patch") {
+    let merged;
+    try {
+      merged = mergeRedevelopment(
+        {
+          cot: previousCot as string[],
+          output: object(previous.output, `idea for ${memberId}: output`),
+          ...(typeof previous.novelty === "string" ? { novelty: previous.novelty } : {}),
+        },
+        revision as unknown as RedevelopmentPatch,
+      );
+    } catch (error) {
+      throw new BrainstormRuntimeError(
+        `node "${nodeId}" produced a revision that does not fit the version it revises: ` +
+          (error instanceof Error ? error.message : String(error)),
+        "INVALID_REDEVELOPMENT",
+      );
+    }
+    steps = [...merged.steps];
+    output = merged.output as JsonValue;
+    novelty = merged.novelty;
+  } else {
+    const emitted = revision.steps;
+    if (!Array.isArray(emitted) || emitted.length !== totalSteps) {
+      throw new BrainstormRuntimeError(
+        `node "${nodeId}" redevelopment must carry the complete ${totalSteps}-step chain`,
+        "INVALID_REDEVELOPMENT",
+      );
+    }
+    steps = emitted;
+    output = revision.output!;
+    novelty = revision.novelty;
+  }
   const touched: number[] = [];
   const untouched: number[] = [];
   steps.forEach((step, index) => {
     (step === previousCot[index] ? untouched : touched).push(index + 1);
   });
   const revisedIdea: JsonObject = {
-    output: revision.output!,
+    output,
     cot: structuredClone(steps),
-    ...(revision.novelty !== undefined ? { novelty: revision.novelty } : {}),
+    ...(novelty !== undefined ? { novelty } : {}),
     ...(previous.literature !== undefined
       ? { literature: structuredClone(previous.literature) }
       : {}),
@@ -283,6 +322,116 @@ function memberHistory(state: JsonObject, memberId: string): JsonValue[] {
   return Array.isArray(entries) ? (structuredClone(entries) as JsonValue[]) : [];
 }
 
+/** The ledger's rounds for one walk position, in the order they were recorded. */
+function roundsByStep(entries: readonly JsonValue[]): Map<number, JsonObject[]> {
+  const byStep = new Map<number, JsonObject[]>();
+  for (const raw of entries) {
+    if (!isObject(raw)) continue;
+    const step = raw.step;
+    if (typeof step !== "number") continue;
+    byStep.set(step, [...(byStep.get(step) ?? []), raw]);
+  }
+  return byStep;
+}
+
+function issuePoints(rounds: readonly JsonObject[]): string[] {
+  const points: string[] = [];
+  for (const round of rounds) {
+    for (const raw of Array.isArray(round.issues) ? round.issues : []) {
+      const point = isObject(raw) ? raw.point : undefined;
+      if (typeof point === "string" && point.length > 0 && !points.includes(point)) {
+        points.push(point);
+      }
+    }
+  }
+  return points;
+}
+
+/** Every step any revision at this position rewrote, ascending. */
+function revisedSteps(rounds: readonly JsonObject[]): number[] {
+  const steps = new Set<number>();
+  for (const round of rounds) {
+    for (const step of Array.isArray(round.touched) ? round.touched : []) {
+      if (typeof step === "number") steps.add(step);
+    }
+  }
+  return [...steps].sort((a, b) => a - b);
+}
+
+/**
+ * The member's ledger SCOPED to what the current walk position can still act
+ * on. The flat ledger carried every round of every earlier position into every
+ * later call, so a seat's context grew with its own walk — and most of that
+ * text was closed business nobody may reopen.
+ *
+ * The projection keeps every load-bearing signal and drops the prose around
+ * it. Four fields, each computed from the ledger alone — no model, no
+ * summarization, so it is identical on every replay:
+ *
+ * - `clean`: earlier positions that passed in one round without an objection,
+ *   as step numbers. The common case, and nothing more needs saying about it.
+ * - `settled`: earlier positions that took work — the objections raised there
+ *   (so nobody re-raises them), the steps their revisions rewrote, the number
+ *   of rounds, and the reason that closed the position (so nobody re-runs a
+ *   check that was already made).
+ * - `standing`: issues nobody answered. A position that ended force-passed hit
+ *   the round cap while the judge still faulted it, so its LAST round's issues
+ *   are unresolved by construction — the one thing the flat ledger left every
+ *   reader to infer for itself.
+ * - `rounds`: this position's own rounds, verbatim, exactly as before.
+ */
+function scopedRecord(
+  state: JsonObject,
+  memberId: string,
+  currentStep: number,
+): JsonObject {
+  const byStep = roundsByStep(memberHistory(state, memberId));
+  const clean: number[] = [];
+  const settled: JsonObject[] = [];
+  const standing: JsonValue[] = [];
+  for (const step of [...byStep.keys()].sort((a, b) => a - b)) {
+    if (step === currentStep) continue;
+    const rounds = byStep.get(step)!;
+    const last = rounds[rounds.length - 1]!;
+    const passed = last.verdict === "Pass";
+    const objections = issuePoints(rounds);
+    if (rounds.length === 1 && passed && objections.length === 0) {
+      clean.push(step);
+      continue;
+    }
+    settled.push({
+      step,
+      rounds: rounds.length,
+      outcome: passed ? "passed" : "force-passed",
+      objections,
+      revised: revisedSteps(rounds),
+      closingReason: typeof last.reason === "string" ? last.reason : "",
+    });
+    if (!passed) {
+      for (const issue of Array.isArray(last.issues) ? last.issues : []) {
+        standing.push(structuredClone(issue));
+      }
+    }
+  }
+  return {
+    clean,
+    settled,
+    standing,
+    rounds: structuredClone(byStep.get(currentStep) ?? []) as JsonValue[],
+  };
+}
+
+/**
+ * The walk position the seat is being reviewed at. Resolved leniently: the
+ * scoped record is a projection, and a position the loop cannot name is
+ * treated as "before the first step", which yields the empty first-round view
+ * rather than failing a fold.
+ */
+function reviewStepIndex(state: JsonObject, scope: ScopeReader): number {
+  const stepIndex = resolveDataReference("stepIndex", scope, state, { required: false });
+  return typeof stepIndex === "number" ? stepIndex : 0;
+}
+
 /**
  * What a seat is doing at its current walk position. Aliased from the content
  * schema rather than restated, so the vocabulary has exactly one definition
@@ -376,6 +525,7 @@ export function initializeReview(
     round: 0,
     allowedVerdicts: allowedVerdictNames(verdicts, undefined),
     history: memberHistory(next, memberId),
+    record: scopedRecord(next, memberId, reviewStepIndex(next, scope)),
     phase: "commenting",
     current: { comments: {} },
   });
@@ -398,6 +548,7 @@ export function prepareReviewRound(
     round,
     allowedVerdicts: allowedVerdictNames(verdicts, seat.lastVerdict),
     history: memberHistory(next, memberId),
+    record: scopedRecord(next, memberId, reviewStepIndex(next, scope)),
     // The single derived expression of the round budget: the loop's exit
     // condition and the redevelop guard both read this flag, so no literal
     // round count appears in content or in the dashboard.

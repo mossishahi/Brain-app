@@ -65,6 +65,11 @@ import {
   type StageView,
 } from "@brainstorm-agentic/protocol";
 
+import {
+  mergeRedevelopment,
+  type RedevelopmentPatch,
+} from "@brainstorm-agentic/content";
+
 import { readJsonCached, readJsonlCached } from "./read-cache.js";
 import type { JobRecord } from "./model.js";
 
@@ -1662,6 +1667,60 @@ function activePaths(events: readonly RunEvent[]): Set<string> {
   return active;
 }
 
+/**
+ * One redevelopment, normalized to what it left standing: the complete chain
+ * and the complete developed envelope, whichever delivery form produced it.
+ *
+ * A full re-emission carries both outright. A patch carries only the
+ * rewritten steps and the changed sections, and is applied through
+ * `mergeRedevelopment` — the same function the runtime used when it folded
+ * this revision into the run — so the dashboard's replay and the recorded
+ * artifact can never disagree. A patch that does not fit the version it
+ * revises returns undefined and the round is skipped, exactly as a malformed
+ * entry always was: this reconstruction renders history, it never fails a run.
+ */
+function applyRevision(
+  revision: Record<string, unknown>,
+  chain: readonly string[],
+  previousOutput: Record<string, unknown>,
+):
+  | {
+      replacement: string[];
+      envelope: Record<string, unknown>;
+      novelty: string | undefined;
+    }
+  | undefined {
+  const steps = Array.isArray(revision.steps) ? revision.steps : [];
+  const novelty = typeof revision.novelty === "string" ? revision.novelty : undefined;
+  if (steps.every((step) => typeof step === "string")) {
+    const envelope = object(revision.output);
+    return {
+      replacement: steps as string[],
+      envelope: envelope ?? previousOutput,
+      novelty,
+    };
+  }
+  try {
+    const merged = mergeRedevelopment(
+      {
+        cot: chain,
+        output: previousOutput,
+        ...(typeof previousOutput.novelty === "string"
+          ? { novelty: previousOutput.novelty }
+          : {}),
+      },
+      revision as unknown as RedevelopmentPatch,
+    );
+    return {
+      replacement: [...merged.steps],
+      envelope: merged.output,
+      novelty: novelty ?? merged.novelty,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 function buildReviews(
   panel: readonly PanelMemberView[],
   ideas: ReadonlyMap<string, BrainIdeaView>,
@@ -1707,8 +1766,9 @@ function buildReviews(
     key.endsWith(`/${nodeId}::result`) || key.endsWith(`/${nodeId}-execute::result`);
 
   // Working chain per member, replayed in journal order: it starts as the
-  // first-pass chain and every redevelopment re-emits the complete chain, so
-  // each round can snapshot the step text exactly as its reviewers saw it.
+  // first-pass chain, and each redevelopment moves it — by re-emission or by
+  // patch — so every round can snapshot the step text exactly as its
+  // reviewers saw it.
   const workingCot = new Map<number, string[]>();
   const cotFor = (memberIndex: number): string[] => {
     let chain = workingCot.get(memberIndex);
@@ -1718,6 +1778,25 @@ function buildReviews(
       workingCot.set(memberIndex, chain);
     }
     return chain;
+  };
+
+  // Working developed output per member, replayed the same way: a patch
+  // names only the sections it changes, so the envelope this stage reports
+  // as the member's current output is assembled here exactly as the runtime
+  // assembled the one it recorded.
+  const workingOutput = new Map<number, Record<string, unknown>>();
+  const outputFor = (memberIndex: number): Record<string, unknown> => {
+    let current = workingOutput.get(memberIndex);
+    if (!current) {
+      const member = panel[memberIndex];
+      const envelope = object(member ? rawIdeas.get(member.id) : undefined)?.output;
+      current =
+        typeof envelope === "object" && envelope !== null && !Array.isArray(envelope)
+          ? { ...(envelope as Record<string, unknown>) }
+          : {};
+      workingOutput.set(memberIndex, current);
+    }
+    return current;
   };
 
   for (const entry of entries) {
@@ -1747,12 +1826,16 @@ function buildReviews(
     } else if (agentResultOf(entry.key, "redevelop-idea")) {
       const revision = object(output);
       if (Array.isArray(revision?.steps)) {
-        const replacement = revision.steps.filter(
-          (step): step is string => typeof step === "string",
-        );
-        // The change-set mirrors the runtime's own diff: exact per-step
-        // comparison of the re-emitted chain against the working chain.
+        // A revision arrives in one of two forms: the complete re-emitted
+        // chain and body, or a patch naming only what changed. The patch is
+        // applied through the SAME merge the runtime folded into the run, so
+        // this replay can never show a chain no reviewer read.
         const chain = cotFor(at.member);
+        const applied = applyRevision(revision, chain, outputFor(at.member));
+        if (!applied) continue;
+        const { replacement, envelope, novelty } = applied;
+        // The change-set mirrors the runtime's own diff: exact per-step
+        // comparison of the resulting chain against the working chain.
         const touchedSteps = replacement
           .map((step, index) => (step === chain[index] ? 0 : index + 1))
           .filter((index) => index > 0);
@@ -1771,10 +1854,14 @@ function buildReviews(
             : {}),
         };
         chain.splice(0, chain.length, ...replacement);
+        workingOutput.set(at.member, envelope);
         const state = memberRevisions.get(at.member);
         memberRevisions.set(at.member, {
           count: (state?.count ?? 0) + 1,
-          last: revision,
+          last: {
+            output: envelope,
+            ...(novelty !== undefined ? { novelty } : {}),
+          },
         });
       }
     }

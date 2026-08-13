@@ -110,7 +110,10 @@ function memberIdea(stage: FirstPassStage) {
  * live forever: old runs are pinned to sequential bundles, new bundles review
  * the seats in parallel.
  */
-function assertReviewReconstruction(memberPathPrefix: string): void {
+function assertReviewReconstruction(
+  memberPathPrefix: string,
+  delivery: "full" | "patch" = "full",
+): void {
   const workspace = mkdtempSync(join(tmpdir(), "stage-mapper-test-"));
   try {
     const sessionDir = join(workspace, "session");
@@ -175,11 +178,23 @@ function assertReviewReconstruction(memberPathPrefix: string): void {
       value: {
         taskId: "t-revision",
         status: "ok",
-        output: {
-          output: revisedEnvelope,
-          steps: revisedIdea.cot,
-          novelty: "Revised novelty claim.",
-        },
+        // The two delivery forms a revision can arrive in. Every assertion
+        // below is shared: the dashboard must not be able to tell which one
+        // produced the round it renders.
+        output:
+          delivery === "patch"
+            ? {
+                steps: [{ index: 2, text: "REVISED step two." }],
+                outputPatch: {
+                  paper: { method: ["The repaired mechanism.", paragraph, paragraph] },
+                },
+                novelty: "Revised novelty claim.",
+              }
+            : {
+                output: revisedEnvelope,
+                steps: revisedIdea.cot,
+                novelty: "Revised novelty claim.",
+              },
       },
     };
     writeFileSync(
@@ -299,6 +314,16 @@ test("review view surfaces each member's final version; the first pass stays the
 test("a parallel review's fan-out paths reconstruct the same review view", () => {
   assertReviewReconstruction(
     "brainstorm-root/review-members/review-members-fanout/member[0]",
+  );
+});
+
+test("a revision delivered as a patch replays into exactly the same review view", () => {
+  // Same assertions, different delivery: the dashboard applies the patch
+  // through the runtime's own merge, so the chain it shows and the final
+  // envelope it composes are the ones the run actually recorded.
+  assertReviewReconstruction(
+    "brainstorm-root/review-members/review-members-fanout/member[0]",
+    "patch",
   );
 });
 

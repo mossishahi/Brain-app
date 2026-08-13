@@ -35,11 +35,17 @@ const SESSION_ROOT = "session";
 const BUNDLE_ROOT = "bundle";
 /** Per-seat review state; only addressable inside a repeatUntil review round. */
 const REVIEWS_ROOT = "reviews";
-/** The fields a seat carries under `reviews[<seat>]`. */
+/**
+ * The fields a seat carries under `reviews[<seat>]`. `history` is the flat
+ * ledger every round of the walk appends to; `record` is that ledger scoped to
+ * what the current position can still act on. Both are written on every seat,
+ * so a bundle published against either one keeps running.
+ */
 const REVIEW_FIELDS = new Set([
   "allowedVerdicts",
   "round",
   "history",
+  "record",
   "lastVerdict",
   "phase",
   "finalRound",

@@ -7,6 +7,19 @@ import type { JsonObject, JsonValue } from "../types/json.js";
 export interface TextBlock {
   readonly type: "text";
   readonly text: string;
+  /**
+   * Declares that the prompt prefix through this block is stable across the
+   * calls a pipeline makes, so providers that support prefix caching may
+   * place a cache breakpoint right after it. Unlike a system prompt's
+   * `cacheable` (a leading RUN with one boundary at its end), this is an
+   * explicit per-block marker: one message may carry several, because a task
+   * turn can hold several nested stable prefixes — the run-level payload, and
+   * then a growing collection whose earlier elements never change.
+   *
+   * Marking a block whose prefix actually varies per call only wastes cache
+   * writes, so the flag is opt-in and never inferred.
+   */
+  readonly cacheBoundary?: boolean;
   readonly metadata?: JsonObject;
 }
 
@@ -72,6 +85,28 @@ export type ContentBlock =
 
 export function textBlock(text: string): TextBlock {
   return { type: "text", text };
+}
+
+/** A text block that closes a stable prefix (see TextBlock.cacheBoundary). */
+export function cacheBoundaryTextBlock(text: string): TextBlock {
+  return { type: "text", text, cacheBoundary: true };
+}
+
+/**
+ * Indices of the blocks that close a stable prefix, ascending. Providers
+ * without prefix caching ignore them; providers with a breakpoint budget
+ * apply their own ceiling.
+ */
+export function contentCacheBoundaries(
+  content: readonly ContentBlock[],
+): readonly number[] {
+  const boundaries: number[] = [];
+  content.forEach((block, index) => {
+    if (block.type === "text" && block.cacheBoundary === true) {
+      boundaries.push(index);
+    }
+  });
+  return boundaries;
 }
 
 /** Concatenates all text blocks in a content list. */
