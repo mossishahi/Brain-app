@@ -473,6 +473,61 @@ function mapSystem(system: SystemPrompt): WireRecord[] | string {
   }));
 }
 
+/**
+ * Block types cache_control may be attached to. Thinking blocks are
+ * documented as unmarkable, and raw server-tool passthrough blocks
+ * (server_tool_use, web_search_tool_result, …) are excluded defensively —
+ * a breakpoint on an earlier block still caches everything before it.
+ */
+const CACHE_MARKABLE_BLOCK_TYPES: ReadonlySet<string> = new Set([
+  "text",
+  "image",
+  "document",
+  "tool_use",
+  "tool_result",
+]);
+
+/**
+ * The conversation with ONE moving cache breakpoint on its last markable
+ * block.
+ *
+ * A tool-looping task re-sends its entire conversation — task payload,
+ * output schema context, every prior turn, every tool result — on every
+ * turn, at full input price. Marking the tail makes the next turn read the
+ * whole shared prefix from cache (the API reuses the longest previously
+ * cached prefix automatically, so a single moving marker caches the
+ * conversation incrementally turn by turn). The caller gates this on the
+ * request actually offering tools: a request that cannot loop would pay the
+ * one-time cache-write premium with nothing to read it back.
+ *
+ * Pure: the marked message and block are cloned, never mutated — the
+ * pause_turn continuation loop reuses and appends to the caller's array, so
+ * a mutated block would accumulate one stale breakpoint per continuation
+ * and overrun the API's four-breakpoint budget.
+ */
+function withMessageCacheBreakpoint(
+  messages: readonly WireMessage[],
+): WireMessage[] {
+  for (let m = messages.length - 1; m >= 0; m -= 1) {
+    const message = messages[m]!;
+    for (let b = message.content.length - 1; b >= 0; b -= 1) {
+      const block = message.content[b]!;
+      if (
+        typeof block.type !== "string" ||
+        !CACHE_MARKABLE_BLOCK_TYPES.has(block.type)
+      ) {
+        continue;
+      }
+      const content = [...message.content];
+      content[b] = { ...block, cache_control: { type: "ephemeral" } };
+      const marked = [...messages];
+      marked[m] = { ...message, content };
+      return marked;
+    }
+  }
+  return [...messages];
+}
+
 function schemaForFormat(format: ResponseFormat): JsonObject | undefined {
   switch (format.type) {
     case "text":
@@ -910,13 +965,22 @@ export class AnthropicMessagesProvider implements ModelProvider {
         request.metadata?.dispatchPriority === "high" ? "high" : "normal";
       let raw: WireRecord;
       let continuations = 0;
+      // Requests that offer tools (client tools or server tools) can loop —
+      // the tool loop's next turn and a pause_turn continuation both resend
+      // this whole conversation. Mark the tail so that resend reads the
+      // prefix from cache instead of paying full price again; the marker is
+      // re-derived per wire call so a continuation's grown conversation
+      // carries exactly one current breakpoint, never stale ones.
+      const cacheConversation = wireTools.length > 0;
       for (;;) {
         // Every wire call — pause_turn continuations included — takes a
         // dispatch slot, so a blocked queue holds ALL traffic.
         if (this.#coordinator !== undefined) {
           await this.#coordinator.acquire(priority, signal);
         }
-        params.messages = requestMessages;
+        params.messages = cacheConversation
+          ? withMessageCacheBreakpoint(requestMessages)
+          : requestMessages;
         const rawResponse = await this.#createObservingHeaders(params, signal);
         throwIfAborted(signal);
         raw = asWireRecord(rawResponse);

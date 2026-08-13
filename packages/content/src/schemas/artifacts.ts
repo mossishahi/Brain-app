@@ -708,6 +708,16 @@ export const poolMatchesSchema = z
       })
       .strict()
       .optional(),
+    /**
+     * The pruned taxonomy outline the placer reads instead of the whole
+     * tree: the full domain/field skeleton plus the branches around the
+     * unmatched members' candidate landings, with every cut marked inline
+     * ("(N subfields — not shown)"). Rendered deterministically from the
+     * run's pinned taxonomy, so a resume rebuilds the identical text.
+     * Absent on artifacts from before the outline existed (old runs keep
+     * fetching the full tree through the taxonomy-access tools).
+     */
+    placerOutline: nonEmpty.max(120_000).optional(),
   })
   .strict()
   .superRefine((matches, ctx) => {

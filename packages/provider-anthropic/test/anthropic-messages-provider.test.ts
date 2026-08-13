@@ -177,6 +177,9 @@ test("maps exact core requests and native JSON-schema responses", async () => {
       },
     ],
     is_error: false,
+    // Tool-carrying requests can loop, so the conversation tail carries the
+    // moving cache breakpoint that lets the next turn read this prefix back.
+    cache_control: { type: "ephemeral" },
   });
 
   const tools = capturedBody?.tools as Array<Record<string, unknown>>;
@@ -796,6 +799,143 @@ test("pause_turn responses continue automatically and concatenate the full turn"
     .map((block) => (block as { text: string }).text)
     .join("");
   assert.equal(visibleText, "done", "the caller sees one concatenated turn");
+});
+
+/** Every block across the conversation that carries a cache breakpoint. */
+function cacheMarkedBlocks(
+  messages: ReadonlyArray<{ content: Array<Record<string, unknown>> }>,
+): Array<Record<string, unknown>> {
+  return messages.flatMap((message) =>
+    message.content.filter((block) => block.cache_control !== undefined),
+  );
+}
+
+test("tool-carrying requests mark the conversation tail; tool-less requests stay unmarked", async () => {
+  const bodies: Record<string, unknown>[] = [];
+  const provider = new AnthropicMessagesProvider({
+    model: "claude-test",
+    client: {
+      messages: {
+        async create(body) {
+          bodies.push(body);
+          return {
+            model: "claude-test",
+            content: [{ type: "text", text: "ok" }],
+            stop_reason: "end_turn",
+            usage: {},
+          };
+        },
+      },
+    },
+  });
+  const conversation = [
+    { role: "user" as const, content: [{ type: "text" as const, text: "Task payload." }] },
+    {
+      role: "assistant" as const,
+      content: [
+        { type: "tool_use" as const, id: "call-1", name: "lookup", input: { query: "x" } },
+      ],
+    },
+    {
+      role: "user" as const,
+      content: [
+        {
+          type: "tool_result" as const,
+          toolUseId: "call-1",
+          content: [{ type: "text" as const, text: "result" }],
+        },
+      ],
+    },
+  ];
+  const lookupTool = {
+    name: "lookup",
+    inputSchema: { type: "object", properties: { query: { type: "string" } } },
+  };
+
+  await provider.complete({
+    modelId: "claude-test",
+    messages: conversation,
+    tools: [lookupTool],
+  });
+  const marked = cacheMarkedBlocks(
+    bodies[0]!.messages as Array<{ content: Array<Record<string, unknown>> }>,
+  );
+  assert.equal(marked.length, 1, "exactly one moving breakpoint per wire call");
+  assert.equal(marked[0]!.type, "tool_result", "the marker sits on the conversation tail");
+
+  // The same conversation without tools cannot loop: marking it would pay
+  // the cache-write premium with nothing to read it back.
+  await provider.complete({ modelId: "claude-test", messages: conversation });
+  assert.equal(
+    cacheMarkedBlocks(
+      bodies[1]!.messages as Array<{ content: Array<Record<string, unknown>> }>,
+    ).length,
+    0,
+    "tool-less requests carry no message breakpoints",
+  );
+});
+
+test("pause_turn continuations re-derive one tail breakpoint, skipping unmarkable server blocks", async () => {
+  const bodies: Record<string, unknown>[] = [];
+  const provider = new AnthropicMessagesProvider({
+    apiKey: "not-used-by-mock",
+    model: "claude-default",
+    client: {
+      messages: {
+        async create(body) {
+          bodies.push(body);
+          if (bodies.length === 1) {
+            return {
+              id: "msg_paused",
+              model: "claude-response",
+              content: [
+                { type: "server_tool_use", id: "srvtoolu_9", name: "web_search", input: { query: "q" } },
+              ],
+              stop_reason: "pause_turn",
+              usage: { input_tokens: 4, output_tokens: 1 },
+            };
+          }
+          return {
+            id: "msg_final",
+            model: "claude-response",
+            content: [{ type: "text", text: "done" }],
+            stop_reason: "end_turn",
+            usage: { input_tokens: 6, output_tokens: 2 },
+          };
+        },
+      },
+    },
+  });
+  await provider.complete({
+    modelId: "claude-request",
+    messages: [{ role: "user", content: [{ type: "text", text: "Go." }] }],
+    nativeOperations: ["web_search"],
+  });
+
+  assert.equal(bodies.length, 2, "the paused turn is resent once");
+  for (const body of bodies) {
+    const messages = body.messages as Array<{
+      role: string;
+      content: Array<Record<string, unknown>>;
+    }>;
+    const marked = cacheMarkedBlocks(messages);
+    assert.equal(marked.length, 1, "each wire call carries exactly one current breakpoint");
+    assert.equal(
+      marked[0]!.type,
+      "text",
+      "the marker lands on the last MARKABLE block — never on a server-tool block",
+    );
+  }
+  const continuation = bodies[1]!.messages as Array<{
+    role: string;
+    content: Array<Record<string, unknown>>;
+  }>;
+  const assistantTail = continuation[continuation.length - 1]!;
+  assert.equal(assistantTail.role, "assistant");
+  assert.ok(
+    assistantTail.content.every((block) => block.cache_control === undefined),
+    "the resent server-tool content stays byte-identical, without markers",
+  );
 });
 
 // ---------------------------------------------------------------------------

@@ -1,4 +1,5 @@
 import {
+  OUTPUT_SHAPES,
   artifactSchemas,
   populatedShape,
   validateResolvedRole,
@@ -1203,6 +1204,14 @@ class ContentCompiler {
       // leave `type` as an open string; each task narrows it to what is
       // actually legal for THIS run, so a schema-constrained model cannot
       // write the shape id (or any other invention) into the label field.
+      // The run's shape body becomes required, and the eight OTHER shape
+      // bodies are REMOVED from the task schema entirely: the strict
+      // envelope already forbids populating them, so all they did was ride
+      // the wire as ~2k tokens of dead schema on EVERY model turn of every
+      // first-pass and redevelopment task. Removal also closes the last
+      // constrained-decoding escape (additionalProperties is false, so an
+      // absent property cannot be emitted at all). The full envelope still
+      // validates the artifact on write, so nothing observable changes.
       if (
         (node.output.schema === "brainIdea" || node.output.schema === "redevelopment") &&
         typeof bindings.type === "string" &&
@@ -1215,9 +1224,31 @@ class ContentCompiler {
               patchSchemaProperty(output, ["type"], (type) => ({ ...type, enum: [label] })) ??
               output;
             const required = Array.isArray(envelope.required) ? envelope.required : [];
-            return shape !== undefined && !required.includes(shape)
-              ? { ...envelope, required: [...required, shape] }
-              : envelope;
+            const withShape: JsonObject =
+              shape !== undefined && !required.includes(shape)
+                ? { ...envelope, required: [...required, shape] }
+                : envelope;
+            const properties = isJsonRecord(withShape.properties)
+              ? withShape.properties
+              : undefined;
+            // Slim only when the bound shape is a real declared body — an
+            // unknown or missing shape keeps the full envelope, and the
+            // write-time cross-check fails the task instead of this patch.
+            if (
+              shape === undefined ||
+              properties === undefined ||
+              !isJsonRecord(properties[shape])
+            ) {
+              return withShape;
+            }
+            const unusedShapes = new Set<string>(
+              OUTPUT_SHAPES.filter((candidate) => candidate !== shape),
+            );
+            const slimmed: Record<string, JsonValue> = {};
+            for (const [key, value] of Object.entries(properties)) {
+              if (!unusedShapes.has(key)) slimmed[key] = value;
+            }
+            return { ...withShape, properties: slimmed };
           }), node.id, "the output type label");
       }
       // The submitter's explicitly requested outputs are run data the static

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { loadContent, type ContentBundle } from "@brainstorm-agentic/content";
+import { OUTPUT_SHAPES, loadContent, type ContentBundle } from "@brainstorm-agentic/content";
 import {
   systemPromptSegments,
   systemPromptText,
@@ -897,7 +897,10 @@ test("instructions stay in a cacheable system prefix; submitted data rides the t
     const turn = request.messages.map((message) => textContent(message.content)).join("\n");
     for (const name of payloadVars(seen.role)) {
       const value = seen.bindings[name];
-      const rendered = JSON.stringify(value, null, 2);
+      // Mirrors renderTaskMessage: string payloads (e.g. the placer's
+      // taxonomy outline) ride raw; structures ride as JSON.
+      const rendered =
+        typeof value === "string" ? value : JSON.stringify(value, null, 2);
       assert.ok(turn.includes(`## ${name}`), `${seen.role} task turn carries ${name}`);
       assert.ok(turn.includes(rendered), `${seen.role} task turn carries the ${name} value`);
       // A bare scalar such as a step index collides with ordinary prose, so
@@ -1024,6 +1027,48 @@ test("Build redevelops minimally: change-set computed, ledger carried, no immedi
     (ref) => ref.metadata?.schema === "brainIdea" && ref.metadata.path === "ideas.member-2",
   );
   assert.equal(untouched.length, 1, "an unrevised member keeps its single first-pass version");
+});
+
+test("member task schemas carry only the run's shape body — the other eight never ride the wire", async () => {
+  // The build path exercises BOTH chain-producing schemas: brainIdea (first
+  // pass) and redevelopment (revision). The fixture submission classifies as
+  // "research idea", which the catalog maps to the paper shape.
+  const executor = new FakeBrainstormExecutor("build-step-2");
+  const result = await runtime(executor).run({
+    submission: "Slim-schema test",
+    params: { panelSize: 2 },
+  });
+  assert.equal(
+    result.status,
+    "completed",
+    result.status === "failed" ? `${result.error.name}: ${result.error.message}` : undefined,
+  );
+
+  const memberTasks = [...executor.tasks("brain"), ...executor.tasks("redeveloper")];
+  assert.ok(executor.tasks("brain").length > 0, "the run produced first-pass tasks");
+  assert.ok(executor.tasks("redeveloper").length > 0, "the build path produced a redevelopment");
+  for (const seen of memberTasks) {
+    const format = seen.task.modelRequest?.responseFormat;
+    if (format?.type !== "jsonSchema") throw new Error(`${seen.role} has no jsonSchema format`);
+    const envelope = object(
+      object(format.schema.properties, `${seen.role} properties`).output,
+      `${seen.role} output property`,
+    );
+    const properties = object(envelope.properties, `${seen.role} envelope properties`);
+    object(properties.paper, "the run's shape body stays declared");
+    assert.ok(
+      Array.isArray(envelope.required) && (envelope.required as JsonValue[]).includes("paper"),
+      "the run's shape body is required",
+    );
+    for (const shape of OUTPUT_SHAPES) {
+      if (shape === "paper") continue;
+      assert.equal(
+        properties[shape],
+        undefined,
+        `the unused "${shape}" body must be removed from the delivered ${seen.role} schema`,
+      );
+    }
+  }
 });
 
 test("a verdict targeting a step beyond the review position fails the run with a named error", async () => {

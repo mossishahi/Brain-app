@@ -240,6 +240,174 @@ class SemanticIndex {
   }
 }
 
+/** How many subfield branches the placer outline may expand in full. */
+const MAX_OUTLINE_BRANCHES = 60;
+/** Options resolved per member (and in total) when candidates are absent. */
+const MAX_OPTION_ANCHORS_PER_MEMBER = 8;
+const MAX_OPTION_ANCHORS_TOTAL = 80;
+
+/** One parsed line of the registry's indented tree outline. */
+interface ParsedOutlineNode {
+  readonly name: string;
+  readonly children: ParsedOutlineNode[];
+}
+
+/** Parses the tree outline ("  " per depth level) into a node forest. */
+function parseTreeOutline(outline: string): ParsedOutlineNode[] {
+  const roots: ParsedOutlineNode[] = [];
+  const stack: ParsedOutlineNode[] = [];
+  for (const line of outline.split("\n")) {
+    if (line.trim().length === 0) continue;
+    const indent = line.length - line.trimStart().length;
+    const depth = Math.floor(indent / 2);
+    const node: ParsedOutlineNode = { name: line.trim(), children: [] };
+    stack.length = Math.min(stack.length, depth);
+    if (stack.length === 0) roots.push(node);
+    else stack[stack.length - 1]!.children.push(node);
+    stack.push(node);
+  }
+  return roots;
+}
+
+/** The anchor set the outline expands: field names and field|subfield pairs. */
+interface OutlineAnchors {
+  readonly fields: ReadonlySet<string>;
+  readonly branches: ReadonlySet<string>;
+}
+
+function anchorsFromPaths(paths: ReadonlyArray<readonly string[]>): OutlineAnchors {
+  const fields = new Set<string>();
+  const branches = new Set<string>();
+  for (const path of paths) {
+    const field = path[1];
+    const subfield = path[2];
+    if (typeof field !== "string") continue;
+    fields.add(field);
+    if (typeof subfield !== "string") continue;
+    if (branches.size >= MAX_OUTLINE_BRANCHES) continue;
+    branches.add(`${field}|${subfield}`);
+  }
+  return { fields, branches };
+}
+
+/** The candidate landing paths of the unmatched members, in given order. */
+function candidatePaths(unmatched: readonly JsonValue[]): ReadonlyArray<readonly string[]> {
+  const paths: Array<readonly string[]> = [];
+  for (const raw of unmatched) {
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) continue;
+    const candidates = (raw as JsonObject).candidates;
+    if (!Array.isArray(candidates)) continue;
+    for (const candidate of candidates) {
+      if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) continue;
+      const path = (candidate as JsonObject).path;
+      if (Array.isArray(path) && path.every((name) => typeof name === "string")) {
+        paths.push(path as readonly string[]);
+      }
+    }
+  }
+  return paths;
+}
+
+/**
+ * Fallback anchors when the semantic lane was off: the word-overlap `options`
+ * are existing node NAMES, so a bounded number of deterministic resolve
+ * round-trips recovers their positions.
+ */
+async function optionPaths(
+  taxonomy: TaxonomyAccess,
+  unmatched: readonly JsonValue[],
+): Promise<ReadonlyArray<readonly string[]>> {
+  const paths: Array<readonly string[]> = [];
+  let resolved = 0;
+  for (const raw of unmatched) {
+    if (resolved >= MAX_OPTION_ANCHORS_TOTAL) break;
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) continue;
+    const options = (raw as JsonObject).options;
+    if (!Array.isArray(options)) continue;
+    for (const option of options.slice(0, MAX_OPTION_ANCHORS_PER_MEMBER)) {
+      if (resolved >= MAX_OPTION_ANCHORS_TOTAL) break;
+      if (typeof option !== "string") continue;
+      resolved += 1;
+      try {
+        const result = await taxonomy.resolve(option);
+        if (result.found) paths.push(result.position.path);
+      } catch {
+        // A failed option lookup contributes no anchor; the skeleton stands.
+      }
+    }
+  }
+  return paths;
+}
+
+/**
+ * The pruned taxonomy outline the placer reads instead of the whole tree
+ * (~50k tokens): always the complete domain/field skeleton, plus — around
+ * the unmatched members' candidate landings — the touched fields' subfield
+ * lists and the touched subfields' full topic lists (the sibling context the
+ * placer's own rules demand). Every cut is marked inline with the count and
+ * the fact that the branch can be fetched by name, so the honest-exit and
+ * "attach higher" moves stay possible. Deterministic over the run's pinned
+ * taxonomy: a resume or retry rebuilds the identical text.
+ */
+export async function buildPlacerOutline(
+  taxonomy: TaxonomyAccess,
+  unmatched: readonly JsonValue[],
+): Promise<string> {
+  let tree: { revision: number; nodeCount: number; outline: string };
+  try {
+    tree = await taxonomy.tree();
+  } catch {
+    // Fail open: the placer then falls back to reading the tree itself
+    // through its taxonomy-access capability, exactly as before the outline.
+    return (
+      "Shared taxonomy — outline unavailable for this run; fetch the tree " +
+      "through your taxonomy-access capability instead."
+    );
+  }
+  const fromCandidates = candidatePaths(unmatched);
+  const anchorPaths =
+    fromCandidates.length > 0 ? fromCandidates : await optionPaths(taxonomy, unmatched);
+  const anchors = anchorsFromPaths(anchorPaths);
+
+  const lines: string[] = [
+    `Shared taxonomy — revision ${tree.revision}, ${tree.nodeCount} nodes. ` +
+      'Branches marked "not shown" are cut for brevity: fetch any of them by ' +
+      "name through your taxonomy-access capability (subtree fetch), or " +
+      "resolve a name directly.",
+  ];
+  const count = (n: number, unit: string): string =>
+    `${n} ${unit}${n === 1 ? "" : "s"}`;
+  for (const domain of parseTreeOutline(tree.outline)) {
+    lines.push(domain.name);
+    for (const field of domain.children) {
+      if (!anchors.fields.has(field.name)) {
+        lines.push(
+          field.children.length > 0
+            ? `  ${field.name} (${count(field.children.length, "subfield")} — not shown)`
+            : `  ${field.name}`,
+        );
+        continue;
+      }
+      lines.push(`  ${field.name}`);
+      for (const subfield of field.children) {
+        if (!anchors.branches.has(`${field.name}|${subfield.name}`)) {
+          lines.push(
+            subfield.children.length > 0
+              ? `    ${subfield.name} (${count(subfield.children.length, "topic")} — not shown)`
+              : `    ${subfield.name}`,
+          );
+          continue;
+        }
+        lines.push(`    ${subfield.name}`);
+        for (const topic of subfield.children) {
+          lines.push(`      ${topic.name}`);
+        }
+      }
+    }
+  }
+  return lines.join("\n");
+}
+
 /** The classifier's facets out of an optionally bound classification. */
 function facetsOf(
   classification: JsonValue | undefined,
@@ -375,6 +543,12 @@ export function taxonomyActivities(
       unmatched.push(enriched);
     }
 
+    // The placer's pruned reading of the tree, anchored on the unmatched
+    // members' candidate landings. Always emitted (the skeleton at minimum),
+    // so a workflow that binds it never fails to resolve; bundles that do
+    // not bind it simply carry a field nothing reads.
+    const placerOutline = await buildPlacerOutline(taxonomy, unmatched);
+
     return {
       revision,
       members: annotated as JsonValue[],
@@ -382,6 +556,7 @@ export function taxonomyActivities(
       embedding: semantic
         ? { enabled: true, embedderId: served!.embedder.id }
         : { enabled: false, ...(laneReason ? { reason: laneReason } : {}) },
+      placerOutline,
     } as unknown as JsonValue;
   };
 
