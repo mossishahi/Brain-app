@@ -139,7 +139,7 @@ export class StaggeredLaunchAgentExecutor implements AgentExecutor {
  * local, used by the test suites — never wait.
  */
 export function launchIntervalFor(config: {
-  readonly provider: "anthropic" | "claude-agent" | "offline";
+  readonly provider: "anthropic" | "claude-agent" | "cursor-agent" | "offline";
   readonly launchIntervalMs?: number;
 }): number {
   if (config.launchIntervalMs !== undefined) return config.launchIntervalMs;

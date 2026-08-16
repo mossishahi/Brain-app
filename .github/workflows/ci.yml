@@ -81,7 +81,7 @@ jobs:
                      packages/content packages/telemetry packages/registry-client \
                      packages/agent-runtime packages/host-tools \
                      packages/provider-anthropic packages/executor-claude-agent \
-                     packages/brainstorm-runtime; do
+                     packages/executor-cursor-agent packages/brainstorm-runtime; do
             echo "=== $dir"
             (cd "$dir" && node --test dist/test/*.test.js) || FAST_RC=1
           done

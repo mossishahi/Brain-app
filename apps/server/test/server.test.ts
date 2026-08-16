@@ -871,6 +871,7 @@ test("failed required readiness checks re-probe on their cooldown; passing check
       probes: defaultReadinessProbes({
         validateAnthropic: async () => undefined,
         validateClaudeAgent: async () => undefined,
+        validateCursorAgent: async () => undefined,
       }),
       now: () => clock,
       probeOverrides: {
@@ -946,6 +947,7 @@ test("the SLURM readiness check validates the pilot pool on pilot deployments", 
     const probes = defaultReadinessProbes({
       validateAnthropic: async () => undefined,
       validateClaudeAgent: async () => undefined,
+      validateCursorAgent: async () => undefined,
       pilotPoolDir: pool,
     });
     const base = defaultServerSettings();
@@ -978,6 +980,7 @@ test("llm and internet probes retry once, so a launch-time flicker never paints 
   // the probes carry the registry probe's one-immediate-retry doctrine.
   let anthropicCalls = 0;
   let claudeCalls = 0;
+  let cursorCalls = 0;
   let fetchCalls = 0;
   const probes = defaultReadinessProbes({
     validateAnthropic: async () => {
@@ -987,6 +990,10 @@ test("llm and internet probes retry once, so a launch-time flicker never paints 
     validateClaudeAgent: async () => {
       claudeCalls += 1;
       if (claudeCalls === 1) throw new Error("cold first spawn overran its timeout");
+    },
+    validateCursorAgent: async () => {
+      cursorCalls += 1;
+      if (cursorCalls === 1) throw new Error("cold first runtime spawn overran its timeout");
     },
     fetchImpl: (async () => {
       fetchCalls += 1;
@@ -1027,6 +1034,16 @@ test("llm and internet probes retry once, so a launch-time flicker never paints 
   assert.equal(claudeCalls, 2);
   assert.match(claude.message ?? "", /Claude Agent SDK responds/);
 
+  // Cursor SDK path: same doctrine.
+  const cursor = await probes.llm(
+    context(
+      { ...base.llm, provider: "cursor-agent" },
+      { cursorApiKey: "cursor-key" },
+    ),
+  );
+  assert.equal(cursorCalls, 2);
+  assert.match(cursor.message ?? "", /Cursor SDK responds/);
+
   // Internet: first fetch dies, the immediate retry lands.
   const internet = await probes.internet(
     context({ ...base.llm, provider: "anthropic", model: "m" }, {}),
@@ -1045,6 +1062,7 @@ test("llm and internet probes retry once, so a launch-time flicker never paints 
   const failing = defaultReadinessProbes({
     validateAnthropic: async () => undefined,
     validateClaudeAgent: async () => undefined,
+    validateCursorAgent: async () => undefined,
     fetchImpl: (async () => {
       fetchCalls += 1;
       throw new Error("network unreachable");

@@ -29,6 +29,7 @@
     "@brainstorm-agentic/core": "0.1.0",
     "@brainstorm-agentic/credit-recovery": "0.1.0",
     "@brainstorm-agentic/executor-claude-agent": "0.1.0",
+    "@brainstorm-agentic/executor-cursor-agent": "0.1.0",
     "@brainstorm-agentic/host-tools": "0.1.0",
     "@brainstorm-agentic/provider-anthropic": "0.1.0",
     "@brainstorm-agentic/registry-client": "0.1.0",

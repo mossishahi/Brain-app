@@ -25,6 +25,7 @@ import process from "node:process";
 import {
   ANTHROPIC_ADAPTER,
   CLAUDE_AGENT_ADAPTER,
+  CURSOR_AGENT_ADAPTER,
   resolveCapabilityPlan,
   type CapabilityDeclaration,
 } from "@brainstorm-agentic/core";
@@ -51,6 +52,7 @@ import type { ContentRegistryRuntimeStatus } from "./model.js";
 import type {
   AnthropicConnectionValidator,
   ClaudeAgentConnectionValidator,
+  CursorAgentConnectionValidator,
   SettingsStore,
 } from "./settings.js";
 
@@ -108,6 +110,7 @@ export interface ReadinessProbeContext {
   readonly credentials: {
     readonly anthropicApiKey?: string;
     readonly claudeSetupToken?: string;
+    readonly cursorApiKey?: string;
   };
   /** Live progress line for long checks (queued SLURM probe). */
   readonly onProgress: (message: string) => void;
@@ -208,6 +211,7 @@ function tailOfFile(path: string, maxChars = 2000): string | undefined {
 export interface DefaultReadinessProbeOptions {
   readonly validateAnthropic: AnthropicConnectionValidator;
   readonly validateClaudeAgent: ClaudeAgentConnectionValidator;
+  readonly validateCursorAgent: CursorAgentConnectionValidator;
   /** Ceiling for the whole SLURM probe (submission + queue wait). */
   readonly slurmProbeTimeoutMs?: number;
   /**
@@ -304,6 +308,23 @@ export function defaultReadinessProbes(
           message: `Claude Agent SDK responds${llm.model ? ` · ${llm.model}` : ""}`,
         };
       }
+      if (llm.provider === "cursor-agent") {
+        const apiKey = context.credentials.cursorApiKey;
+        if (!apiKey) {
+          throw new ReadinessProbeError(
+            "Configure and verify the Cursor API key in Settings",
+          );
+        }
+        await attemptTwice(context.signal, () =>
+          options.validateCursorAgent({
+            apiKey,
+            ...(llm.model !== undefined ? { model: llm.model } : {}),
+          }),
+        );
+        return {
+          message: `Cursor SDK responds${llm.model ? ` · ${llm.model}` : ""}`,
+        };
+      }
       return { message: "offline provider — no model connection needed" };
     },
 
@@ -322,7 +343,9 @@ export function defaultReadinessProbes(
           ? ANTHROPIC_ADAPTER.staticOffers
           : provider === "claude-agent"
             ? CLAUDE_AGENT_ADAPTER.staticOffers
-            : [];
+            : provider === "cursor-agent"
+              ? CURSOR_AGENT_ADAPTER.staticOffers
+              : [];
       const hostTools = [...ATTACHMENT_MANIFESTS, ...TAXONOMY_MANIFESTS];
       const enabledHostToolIds = new Set<string>(
         context.settings.hostTools?.enabledToolIds ??
@@ -389,7 +412,10 @@ export function defaultReadinessProbes(
       // Any HTTP response (401 included) proves DNS + TLS + outbound routing;
       // only transport failures reject. The model API host doubles as the
       // most meaningful target: it is the connection the pipeline needs.
-      const target = "https://api.anthropic.com/v1/models";
+      const target =
+        context.settings.llm.provider === "cursor-agent"
+          ? "https://api.cursor.com/v0/models"
+          : "https://api.anthropic.com/v1/models";
       try {
         await attemptTwice(context.signal, async () => {
           await fetchImpl(target, {
@@ -608,7 +634,9 @@ function staticAdvice(id: ReadinessCheckId, settings: ServerSettings): string {
     case "llm":
       return settings.llm.provider === "claude-agent"
         ? "Run `claude setup-token` in any terminal where Claude Code is signed in, copy the printed token, then open Settings → Model connection and paste it. The token stays on this server."
-        : "Create an API key at https://console.anthropic.com (API Keys), then open Settings → Model connection, paste it, and Save. It is verified with one small request and stored only on this server.";
+        : settings.llm.provider === "cursor-agent"
+          ? "Create an API key at https://cursor.com/dashboard (Integrations → API keys, or a team service account), then open Settings → Model connection, paste it, and Save. It is verified with one small request and stored only on this server."
+          : "Create an API key at https://console.anthropic.com (API Keys), then open Settings → Model connection, paste it, and Save. It is verified with one small request and stored only on this server.";
     case "internet":
       return "This host cannot reach the public internet over HTTPS. Note this check tests api.anthropic.com with the app's own HTTP stack — curl reaching google.com does not prove it. On HPC clusters compute nodes are often offline: launch the server on a node with outbound access, or export https_proxy/HTTPS_PROXY (your cluster's proxy) before `brain launch` — the app routes its own requests through it (NO_PROXY honored).";
     case "code":
@@ -864,6 +892,9 @@ export class ReadinessService {
             : {}),
           ...(this.options.settings.getClaudeSetupToken() !== undefined
             ? { claudeSetupToken: this.options.settings.getClaudeSetupToken() }
+            : {}),
+          ...(this.options.settings.getCursorApiKey() !== undefined
+            ? { cursorApiKey: this.options.settings.getCursorApiKey() }
             : {}),
         },
         onProgress: (message) => {

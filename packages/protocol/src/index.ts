@@ -913,20 +913,28 @@ export interface LlmSettings {
   /**
    * "anthropic": developer Messages API + API key.
    * "claude-agent": Claude Agent SDK + token from `claude setup-token`.
+   * "cursor-agent": Cursor SDK + API key from cursor.com/dashboard.
    * "offline": deterministic executor (no network, for testing).
    */
-  readonly provider: "anthropic" | "claude-agent" | "offline";
-  /** Required for developer API; optional Agent SDK alias/full model id. */
+  readonly provider: "anthropic" | "claude-agent" | "cursor-agent" | "offline";
+  /** Required for developer API; optional agent-SDK alias/full model id. */
   readonly model?: string;
-  /** Optional developer-API endpoint override (not used by Claude Agent SDK). */
+  /** Optional developer-API endpoint override (not used by the agent SDKs). */
   readonly baseUrl?: string;
   readonly modelsByRoute?: Readonly<Record<string, string>>;
-  /** Agent SDK execution controls; used only by the claude-agent backend. */
+  /**
+   * Agent SDK execution controls, shared VERBATIM by the claude-agent and
+   * cursor-agent backends: both read the same maxTurns / effort / thinking /
+   * budget / fallback settings, so switching SDKs never changes the knobs —
+   * only the transport. Ignored by the other providers.
+   */
   readonly agentSdk?: ClaudeAgentSettings;
   /** Public status only. The API key itself is never returned by the server. */
   readonly apiKeyConfigured?: boolean;
   /** Public status only. The setup token itself is never returned by the server. */
   readonly setupTokenConfigured?: boolean;
+  /** Public status only. The Cursor API key itself is never returned by the server. */
+  readonly cursorApiKeyConfigured?: boolean;
 }
 
 export interface ServerSettings {
@@ -1042,6 +1050,15 @@ export const DEFAULT_MODEL_CATALOG: ProviderModelCatalog = {
     { id: "sonnet", label: "Sonnet (alias)" },
     { id: "haiku", label: "Haiku (alias)" },
   ],
+  // Cursor serves many vendors' models under one API key; ids here mirror
+  // the Anthropic ids where both providers offer the same model, so a
+  // per-task-type selection stays comparable when the SDK is switched.
+  "cursor-agent": [
+    { id: "auto", label: "Auto (server picks)" },
+    { id: "composer-2.5", label: "Composer 2.5" },
+    { id: "claude-opus-5", label: "Claude Opus 5" },
+    { id: "claude-sonnet-5", label: "Claude Sonnet 5" },
+  ],
   offline: [],
 };
 
@@ -1076,8 +1093,8 @@ export interface ModelsByRouteUpdate {
 /* ---------------------------------------------------------------- api shapes */
 
 /**
- * Settings accepted by PUT /api/settings. `llm.apiKey` and `llm.setupToken`
- * are write-only:
+ * Settings accepted by PUT /api/settings. `llm.apiKey`, `llm.setupToken`,
+ * and `llm.cursorApiKey` are write-only:
  * - omitted/blank: retain the corresponding configured secret;
  * - non-empty: verify through the selected backend, then replace that secret;
  * - clear flags: remove the corresponding secret when its provider is not selected.
@@ -1118,7 +1135,7 @@ export interface ServerSettingsUpdate {
     readonly autoResume: boolean;
   };
   readonly llm: {
-    readonly provider: "anthropic" | "claude-agent" | "offline";
+    readonly provider: "anthropic" | "claude-agent" | "cursor-agent" | "offline";
     readonly model?: string;
     readonly baseUrl?: string;
     readonly modelsByRoute?: Readonly<Record<string, string>>;
@@ -1127,6 +1144,8 @@ export interface ServerSettingsUpdate {
     readonly clearApiKey?: boolean;
     readonly setupToken?: string;
     readonly clearSetupToken?: boolean;
+    readonly cursorApiKey?: string;
+    readonly clearCursorApiKey?: boolean;
   };
   /** Host tools the user wants enabled. Absent = keep current. */
   readonly hostTools?: {

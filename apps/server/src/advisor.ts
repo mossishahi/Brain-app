@@ -13,6 +13,7 @@ import {
   userMessage,
 } from "@brainstorm-agentic/core";
 import { ClaudeAgentExecutor } from "@brainstorm-agentic/executor-claude-agent";
+import { CursorAgentExecutor } from "@brainstorm-agentic/executor-cursor-agent";
 import { AnthropicMessagesProvider } from "@brainstorm-agentic/provider-anthropic";
 
 import type { ReadinessAdviceRequest, ReadinessAdvisor } from "./readiness.js";
@@ -106,16 +107,35 @@ export function createReadinessAdvisor(
       );
       advice = textContent(response.content).trim() || undefined;
     } else {
-      const token = options.settings.getClaudeSetupToken();
-      if (!token) return undefined;
-      const executor = new ClaudeAgentExecutor({
-        token,
-        ...(settings.llm.model ? { model: settings.llm.model } : {}),
-        maxTurns: 4,
-        effort: "max",
-        thinking: "adaptive",
-        ...(options.env ? { env: options.env } : {}),
-      });
+      // Both agent-SDK backends advise at max effort with adaptive thinking,
+      // per deployment policy — the same knobs, whichever SDK is connected.
+      const executor = (():
+        | ClaudeAgentExecutor
+        | CursorAgentExecutor
+        | undefined => {
+        if (provider === "cursor-agent") {
+          const apiKey = options.settings.getCursorApiKey();
+          if (!apiKey) return undefined;
+          return new CursorAgentExecutor({
+            apiKey,
+            ...(settings.llm.model ? { model: settings.llm.model } : {}),
+            maxTurns: 4,
+            effort: "max",
+            thinking: "adaptive",
+          });
+        }
+        const token = options.settings.getClaudeSetupToken();
+        if (!token) return undefined;
+        return new ClaudeAgentExecutor({
+          token,
+          ...(settings.llm.model ? { model: settings.llm.model } : {}),
+          maxTurns: 4,
+          effort: "max",
+          thinking: "adaptive",
+          ...(options.env ? { env: options.env } : {}),
+        });
+      })();
+      if (!executor) return undefined;
       const controller = new AbortController();
       const timer = setTimeout(
         () => controller.abort("readiness advice timed out"),

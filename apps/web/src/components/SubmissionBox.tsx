@@ -169,6 +169,8 @@ function providerLabel(
       return "Anthropic API";
     case "claude-agent":
       return "Claude Agent SDK";
+    case "cursor-agent":
+      return "Cursor SDK";
     case "offline":
       return "Offline (deterministic)";
     default:
@@ -190,7 +192,9 @@ function modelDisplay(settings: ServerSettings | null): {
       ? formatModelName(configured)
       : settings.llm.provider === "claude-agent"
         ? "Claude default"
-        : "Anthropic";
+        : settings.llm.provider === "cursor-agent"
+          ? "Cursor auto"
+          : "Anthropic";
   const effort = settings.llm.agentSdk?.effort;
   return {
     model,

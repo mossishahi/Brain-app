@@ -5,6 +5,9 @@ import { userMessage } from "@brainstorm-agentic/core";
 import {
   validateClaudeSetupToken,
 } from "@brainstorm-agentic/executor-claude-agent";
+import {
+  validateCursorApiKey,
+} from "@brainstorm-agentic/executor-cursor-agent";
 import { AnthropicMessagesProvider } from "@brainstorm-agentic/provider-anthropic";
 import { ContentRegistryClient } from "@brainstorm-agentic/registry-client";
 import {
@@ -57,6 +60,7 @@ type StoredServerSettings = Omit<
 interface StoredCredentials {
   readonly anthropicApiKey?: string;
   readonly claudeSetupToken?: string;
+  readonly cursorApiKey?: string;
   readonly openRouterApiKey?: string;
 }
 
@@ -79,9 +83,19 @@ export type ClaudeAgentConnectionValidator = (
   input: ClaudeAgentConnectionInput,
 ) => Promise<void>;
 
+export interface CursorAgentConnectionInput {
+  readonly apiKey: string;
+  readonly model?: string;
+}
+
+export type CursorAgentConnectionValidator = (
+  input: CursorAgentConnectionInput,
+) => Promise<void>;
+
 export interface SettingsStoreOptions {
   readonly validateAnthropic?: AnthropicConnectionValidator;
   readonly validateClaudeAgent?: ClaudeAgentConnectionValidator;
+  readonly validateCursorAgent?: CursorAgentConnectionValidator;
   readonly validateOpenRouter?: (
     apiKey: string,
     model: string,
@@ -230,10 +244,11 @@ function validateCommonSettings(value: unknown): {
   if (
     llm.provider !== "anthropic" &&
     llm.provider !== "claude-agent" &&
+    llm.provider !== "cursor-agent" &&
     llm.provider !== "offline"
   ) {
     throw new Error(
-      'llm.provider must be "anthropic", "claude-agent", or "offline"',
+      'llm.provider must be "anthropic", "claude-agent", "cursor-agent", or "offline"',
     );
   }
   const hostTools =
@@ -501,6 +516,7 @@ function validateStoredSettings(value: unknown): StoredServerSettings {
   const provider = common.llm.provider as
     | "anthropic"
     | "claude-agent"
+    | "cursor-agent"
     | "offline";
   const model =
     optionalNonEmptyString(common.llm.model, "llm.model") ??
@@ -541,8 +557,10 @@ interface ValidatedUpdate {
   readonly settings: Omit<StoredServerSettings, "contentRegistry">;
   readonly submittedApiKey?: string;
   readonly submittedSetupToken?: string;
+  readonly submittedCursorApiKey?: string;
   readonly clearApiKey: boolean;
   readonly clearSetupToken: boolean;
+  readonly clearCursorApiKey: boolean;
   readonly submittedOpenRouterApiKey?: string;
   readonly clearOpenRouterApiKey: boolean;
 }
@@ -552,6 +570,7 @@ function validateSettingsUpdate(value: unknown): ValidatedUpdate {
   const provider = common.llm.provider as
     | "anthropic"
     | "claude-agent"
+    | "cursor-agent"
     | "offline";
   const model = optionalNonEmptyString(common.llm.model, "llm.model");
   if (provider === "anthropic" && model === undefined) {
@@ -565,6 +584,10 @@ function validateSettingsUpdate(value: unknown): ValidatedUpdate {
   const submittedSetupToken = optionalNonEmptyString(
     common.llm.setupToken,
     "llm.setupToken",
+  );
+  const submittedCursorApiKey = optionalNonEmptyString(
+    common.llm.cursorApiKey,
+    "llm.cursorApiKey",
   );
   if (
     common.llm.clearApiKey !== undefined &&
@@ -580,6 +603,13 @@ function validateSettingsUpdate(value: unknown): ValidatedUpdate {
     throw new Error("llm.clearSetupToken must be a boolean");
   }
   const clearSetupToken = common.llm.clearSetupToken === true;
+  if (
+    common.llm.clearCursorApiKey !== undefined &&
+    typeof common.llm.clearCursorApiKey !== "boolean"
+  ) {
+    throw new Error("llm.clearCursorApiKey must be a boolean");
+  }
+  const clearCursorApiKey = common.llm.clearCursorApiKey === true;
   if (provider !== "anthropic" && submittedApiKey !== undefined) {
     throw new Error("select Anthropic before setting an API key");
   }
@@ -587,6 +617,9 @@ function validateSettingsUpdate(value: unknown): ValidatedUpdate {
     throw new Error(
       "select Claude Agent SDK before setting a setup token",
     );
+  }
+  if (provider !== "cursor-agent" && submittedCursorApiKey !== undefined) {
+    throw new Error("select Cursor SDK before setting a Cursor API key");
   }
   if (provider === "anthropic" && clearApiKey) {
     throw new Error("cannot clear the API key while Anthropic is selected");
@@ -596,7 +629,15 @@ function validateSettingsUpdate(value: unknown): ValidatedUpdate {
       "cannot clear the setup token while Claude Agent SDK is selected",
     );
   }
-  if (provider === "claude-agent" && baseUrl !== undefined) {
+  if (provider === "cursor-agent" && clearCursorApiKey) {
+    throw new Error(
+      "cannot clear the Cursor API key while Cursor SDK is selected",
+    );
+  }
+  if (
+    (provider === "claude-agent" || provider === "cursor-agent") &&
+    baseUrl !== undefined
+  ) {
     throw new Error("llm.baseUrl is only supported by the developer API");
   }
   const modelsByRoute = validateModelsByRoute(common.llm.modelsByRoute);
@@ -640,8 +681,10 @@ function validateSettingsUpdate(value: unknown): ValidatedUpdate {
     },
     ...(submittedApiKey !== undefined ? { submittedApiKey } : {}),
     ...(submittedSetupToken !== undefined ? { submittedSetupToken } : {}),
+    ...(submittedCursorApiKey !== undefined ? { submittedCursorApiKey } : {}),
     clearApiKey,
     clearSetupToken,
+    clearCursorApiKey,
     ...(submittedOpenRouterApiKey !== undefined
       ? { submittedOpenRouterApiKey }
       : {}),
@@ -693,6 +736,23 @@ export async function validateClaudeAgentConnection(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`Could not connect with the Claude setup token: ${message}`, {
+      cause: error,
+    });
+  }
+}
+
+export async function validateCursorAgentConnection(
+  input: CursorAgentConnectionInput,
+): Promise<void> {
+  try {
+    await validateCursorApiKey({
+      apiKey: input.apiKey,
+      ...(input.model !== undefined ? { model: input.model } : {}),
+      timeoutMs: CONNECTION_TIMEOUT_MS,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Could not connect with the Cursor API key: ${message}`, {
       cause: error,
     });
   }
@@ -763,6 +823,7 @@ export class SettingsStore {
   private readonly deploymentRegistryUrl: string;
   private readonly connectionValidator: AnthropicConnectionValidator;
   private readonly claudeAgentValidator: ClaudeAgentConnectionValidator;
+  private readonly cursorAgentValidator: CursorAgentConnectionValidator;
   private readonly openRouterValidator: (
     apiKey: string,
     model: string,
@@ -780,6 +841,8 @@ export class SettingsStore {
       options.validateAnthropic ?? validateAnthropicConnection;
     this.claudeAgentValidator =
       options.validateClaudeAgent ?? validateClaudeAgentConnection;
+    this.cursorAgentValidator =
+      options.validateCursorAgent ?? validateCursorAgentConnection;
     this.openRouterValidator =
       options.validateOpenRouter ?? validateOpenRouterConnection;
     mkdirSync(join(workspace, "workspace", "jobs"), { recursive: true });
@@ -825,6 +888,7 @@ export class SettingsStore {
         ...settings.llm,
         apiKeyConfigured: this.getAnthropicApiKey() !== undefined,
         setupTokenConfigured: this.getClaudeSetupToken() !== undefined,
+        cursorApiKeyConfigured: this.getCursorApiKey() !== undefined,
       },
       creditRecovery: {
         ...settings.creditRecovery,
@@ -855,6 +919,13 @@ export class SettingsStore {
       this.credentialsPath,
     )?.claudeSetupToken;
     return typeof token === "string" && token.length > 0 ? token : undefined;
+  }
+
+  getCursorApiKey(): string | undefined {
+    const key = readJsonCached<StoredCredentials>(
+      this.credentialsPath,
+    )?.cursorApiKey;
+    return typeof key === "string" && key.length > 0 ? key : undefined;
   }
 
   getOpenRouterApiKey(): string | undefined {
@@ -905,6 +976,29 @@ export class SettingsStore {
       // Avoid the Agent SDK silently choosing an inherited developer API key.
       delete env.ANTHROPIC_API_KEY;
       delete env.ANTHROPIC_AUTH_TOKEN;
+      const agent = settings.llm.agentSdk ?? DEFAULT_CLAUDE_AGENT_SETTINGS;
+      env.BRAINSTORM_AGENTIC_AGENT_MAX_TURNS = String(agent.maxTurns);
+      env.BRAINSTORM_AGENTIC_AGENT_EFFORT = agent.effort;
+      env.BRAINSTORM_AGENTIC_AGENT_THINKING = agent.thinking;
+      if (agent.maxBudgetUsd !== undefined) {
+        env.BRAINSTORM_AGENTIC_AGENT_MAX_BUDGET_USD = String(
+          agent.maxBudgetUsd,
+        );
+      }
+      if (agent.fallbackModel) {
+        env.BRAINSTORM_AGENTIC_AGENT_FALLBACK_MODEL = agent.fallbackModel;
+      }
+    } else if (settings.llm.provider === "cursor-agent") {
+      const cursorKey = this.getCursorApiKey();
+      if (!cursorKey) {
+        throw new Error(
+          "Cursor SDK is selected but no verified API key is configured",
+        );
+      }
+      env.BRAINSTORM_AGENTIC_PROVIDER = "cursor-agent";
+      env.CURSOR_API_KEY = cursorKey;
+      // The SAME agent-SDK settings travel to the worker under the SAME
+      // variables the claude-agent path uses — one settings shape, two SDKs.
       const agent = settings.llm.agentSdk ?? DEFAULT_CLAUDE_AGENT_SETTINGS;
       env.BRAINSTORM_AGENTIC_AGENT_MAX_TURNS = String(agent.maxTurns);
       env.BRAINSTORM_AGENTIC_AGENT_EFFORT = agent.effort;
@@ -1001,10 +1095,13 @@ export class SettingsStore {
     const currentSettings = this.get();
     const currentKey = this.getAnthropicApiKey();
     const currentSetupToken = this.getClaudeSetupToken();
+    const currentCursorKey = this.getCursorApiKey();
     const currentOpenRouterKey = this.getOpenRouterApiKey();
     const candidateKey = update.submittedApiKey ?? currentKey;
     const candidateSetupToken =
       update.submittedSetupToken ?? currentSetupToken;
+    const candidateCursorKey =
+      update.submittedCursorApiKey ?? currentCursorKey;
     if (update.settings.llm.provider === "anthropic") {
       if (!candidateKey) {
         throw new Error("An Anthropic API key is required");
@@ -1023,6 +1120,17 @@ export class SettingsStore {
       }
       await this.claudeAgentValidator({
         token: candidateSetupToken,
+        ...(update.settings.llm.model !== undefined
+          ? { model: update.settings.llm.model }
+          : {}),
+      });
+    }
+    if (update.settings.llm.provider === "cursor-agent") {
+      if (!candidateCursorKey) {
+        throw new Error("A Cursor API key is required");
+      }
+      await this.cursorAgentValidator({
+        apiKey: candidateCursorKey,
         ...(update.settings.llm.model !== undefined
           ? { model: update.settings.llm.model }
           : {}),
@@ -1058,10 +1166,12 @@ export class SettingsStore {
     const nextCredentials: {
       anthropicApiKey?: string;
       claudeSetupToken?: string;
+      cursorApiKey?: string;
       openRouterApiKey?: string;
     } = { ...previousCredentials };
     if (update.clearApiKey) delete nextCredentials.anthropicApiKey;
     if (update.clearSetupToken) delete nextCredentials.claudeSetupToken;
+    if (update.clearCursorApiKey) delete nextCredentials.cursorApiKey;
     if (update.clearOpenRouterApiKey) {
       delete nextCredentials.openRouterApiKey;
     }
@@ -1070,6 +1180,9 @@ export class SettingsStore {
     }
     if (update.submittedSetupToken !== undefined) {
       nextCredentials.claudeSetupToken = update.submittedSetupToken;
+    }
+    if (update.submittedCursorApiKey !== undefined) {
+      nextCredentials.cursorApiKey = update.submittedCursorApiKey;
     }
     if (update.submittedOpenRouterApiKey !== undefined) {
       nextCredentials.openRouterApiKey =

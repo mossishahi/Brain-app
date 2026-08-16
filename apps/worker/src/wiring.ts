@@ -23,6 +23,7 @@ import {
 import {
   ANTHROPIC_ADAPTER,
   CLAUDE_AGENT_ADAPTER,
+  CURSOR_AGENT_ADAPTER,
   CreditBlockedError,
   InMemoryToolRegistry,
   isCreditBlocked,
@@ -47,6 +48,7 @@ import {
 } from "@brainstorm-agentic/credit-recovery";
 import type { ContentBundle, LoadedInputTypes } from "@brainstorm-agentic/content";
 import { ClaudeAgentExecutor } from "@brainstorm-agentic/executor-claude-agent";
+import { CursorAgentExecutor } from "@brainstorm-agentic/executor-cursor-agent";
 import { AnthropicMessagesProvider } from "@brainstorm-agentic/provider-anthropic";
 
 import { attachmentTools, ATTACHMENT_TOOL_NAMES } from "./attachment-tools.js";
@@ -71,14 +73,15 @@ import {
 import { OfflineBrainstormExecutor } from "./offline-executor.js";
 
 export interface ProviderConfig {
-  /** Developer API, Claude Agent SDK setup-token, or deterministic offline. */
-  readonly provider: "anthropic" | "claude-agent" | "offline";
+  /** Developer API, Claude Agent SDK, Cursor SDK, or deterministic offline. */
+  readonly provider: "anthropic" | "claude-agent" | "cursor-agent" | "offline";
   /** Model id per logical content route (reasoning/writing/balanced). */
   readonly models?: Readonly<Record<string, string>>;
   /** Fallback model id when a route has no explicit entry. */
   readonly defaultModel?: string;
   readonly apiKey?: string;
   readonly setupToken?: string;
+  readonly cursorApiKey?: string;
   readonly agentSdk?: {
     readonly maxTurns?: number;
     readonly maxBudgetUsd?: number;
@@ -200,6 +203,45 @@ export function buildAgentExecutor(
   if (config.provider === "offline") {
     return new OfflineBrainstormExecutor({ ...(inputTypes ? { inputTypes } : {}) });
   }
+  if (config.provider === "cursor-agent") {
+    if (!config.cursorApiKey) {
+      throw new Error("Cursor SDK wiring needs a verified API key.");
+    }
+    const model = config.defaultModel ?? config.models?.reasoning;
+    // The SAME agentSdk settings drive both agent-executor backends: turns,
+    // effort, thinking, budget, and fallback model are read verbatim, so
+    // switching SDKs changes the transport, never the knobs.
+    return new CursorAgentExecutor({
+      apiKey: config.cursorApiKey,
+      ...(attachmentRoots.length > 0
+        ? { attachmentRoots: [...attachmentRoots] }
+        : {}),
+      // The Cursor SDK has no built-in taxonomy tool, so the shared-taxonomy
+      // read tools reach the placer as in-process custom tools.
+      ...(taxonomy ? { taxonomy } : {}),
+      // Same for GPU runs: no built-in submits cluster jobs.
+      ...(gpuRun ? { gpuRun } : {}),
+      outputValidator: new ContentArtifactOutputValidator(),
+      maxValidationAttempts: 3,
+      ...(model ? { model } : {}),
+      ...(config.agentSdk?.maxTurns !== undefined
+        ? { maxTurns: config.agentSdk.maxTurns }
+        : {}),
+      ...(config.agentSdk?.maxBudgetUsd !== undefined
+        ? { maxBudgetUsd: config.agentSdk.maxBudgetUsd }
+        : {}),
+      ...(config.agentSdk?.effort ? { effort: config.agentSdk.effort } : {}),
+      ...(config.agentSdk?.thinking
+        ? { thinking: config.agentSdk.thinking }
+        : {}),
+      ...(config.agentSdk?.fallbackModel
+        ? { fallbackModel: config.agentSdk.fallbackModel }
+        : {}),
+      ...(config.creditRecovery
+        ? { creditRecovery: config.creditRecovery }
+        : {}),
+    });
+  }
   if (config.provider === "claude-agent") {
     if (!config.setupToken) {
       throw new Error(
@@ -316,7 +358,11 @@ function contentRouteResolver(config: ProviderConfig): BrainstormRouteResolver {
           : {};
       return {
         providerId:
-          config.provider === "claude-agent" ? "claude-agent" : "anthropic",
+          config.provider === "claude-agent"
+            ? "claude-agent"
+            : config.provider === "cursor-agent"
+              ? "cursor-agent"
+              : "anthropic",
         ...(modelId ? { modelId } : {}),
         ...thinking,
       };
@@ -506,7 +552,9 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
       ? ANTHROPIC_ADAPTER.staticOffers
       : options.providerConfig.provider === "claude-agent"
         ? CLAUDE_AGENT_ADAPTER.staticOffers
-        : [];
+        : options.providerConfig.provider === "cursor-agent"
+          ? CURSOR_AGENT_ADAPTER.staticOffers
+          : [];
 
   const executorStack = new ThinkingArtifactAgentExecutor(
     new CreditBlockDetectingAgentExecutor(
@@ -630,6 +678,7 @@ function launchIntervalFromEnv(env: NodeJS.ProcessEnv): number | undefined {
 function credentialsFromFile(env: NodeJS.ProcessEnv): {
   anthropicApiKey?: string;
   claudeSetupToken?: string;
+  cursorApiKey?: string;
   openRouterApiKey?: string;
 } {
   const path = env.BRAINSTORM_AGENTIC_CREDENTIALS_FILE?.trim();
@@ -638,6 +687,7 @@ function credentialsFromFile(env: NodeJS.ProcessEnv): {
     const parsed = JSON.parse(readFileSync(path, "utf8")) as {
       anthropicApiKey?: unknown;
       claudeSetupToken?: unknown;
+      cursorApiKey?: unknown;
       openRouterApiKey?: unknown;
     };
     return {
@@ -646,6 +696,9 @@ function credentialsFromFile(env: NodeJS.ProcessEnv): {
         : {}),
       ...(typeof parsed.claudeSetupToken === "string" && parsed.claudeSetupToken
         ? { claudeSetupToken: parsed.claudeSetupToken }
+        : {}),
+      ...(typeof parsed.cursorApiKey === "string" && parsed.cursorApiKey
+        ? { cursorApiKey: parsed.cursorApiKey }
         : {}),
       ...(typeof parsed.openRouterApiKey === "string" && parsed.openRouterApiKey
         ? { openRouterApiKey: parsed.openRouterApiKey }
@@ -668,7 +721,9 @@ export function providerConfigFromEnv(env: NodeJS.ProcessEnv, offline: boolean):
   const selectedProvider =
     env.BRAINSTORM_AGENTIC_PROVIDER === "claude-agent"
       ? "claude-agent"
-      : "anthropic";
+      : env.BRAINSTORM_AGENTIC_PROVIDER === "cursor-agent"
+        ? "cursor-agent"
+        : "anthropic";
   const defaultModel = env.BRAINSTORM_AGENTIC_MODEL?.trim();
   const models = modelsByRouteFromEnv(env);
   const maxTurns = Number(env.BRAINSTORM_AGENTIC_AGENT_MAX_TURNS);
@@ -723,6 +778,9 @@ export function providerConfigFromEnv(env: NodeJS.ProcessEnv, offline: boolean):
       : {}),
     ...(env.CLAUDE_CODE_OAUTH_TOKEN ?? fileCredentials.claudeSetupToken
       ? { setupToken: (env.CLAUDE_CODE_OAUTH_TOKEN ?? fileCredentials.claudeSetupToken)! }
+      : {}),
+    ...(env.CURSOR_API_KEY ?? fileCredentials.cursorApiKey
+      ? { cursorApiKey: (env.CURSOR_API_KEY ?? fileCredentials.cursorApiKey)! }
       : {}),
     ...(Object.keys(agentSdk).length > 0 ? { agentSdk } : {}),
     ...(Object.keys(creditRecovery).length > 0

@@ -163,6 +163,9 @@ export function buildOrchestrationCommand(
   if (options.settings.llm.provider === "claude-agent") {
     return `# The verified CLAUDE_CODE_OAUTH_TOKEN is injected into the scheduler environment by the brain server.\n${command}`;
   }
+  if (options.settings.llm.provider === "cursor-agent") {
+    return `# The verified CURSOR_API_KEY is injected into the scheduler environment by the brain server.\n${command}`;
+  }
   return command;
 }
 

@@ -46,11 +46,14 @@ export {
   defaultServerSettings,
   validateAnthropicConnection,
   validateClaudeAgentConnection,
+  validateCursorAgentConnection,
   validateOpenRouterConnection,
   type AnthropicConnectionInput,
   type AnthropicConnectionValidator,
   type ClaudeAgentConnectionInput,
   type ClaudeAgentConnectionValidator,
+  type CursorAgentConnectionInput,
+  type CursorAgentConnectionValidator,
   type SettingsStoreOptions,
 } from "./settings.js";
 export type {

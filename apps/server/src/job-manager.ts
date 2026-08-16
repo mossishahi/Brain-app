@@ -55,6 +55,7 @@ import {
   SettingsStore,
   type AnthropicConnectionValidator,
   type ClaudeAgentConnectionValidator,
+  type CursorAgentConnectionValidator,
 } from "./settings.js";
 import { buildJobDetail, compactJobDetail } from "./stage-mapper.js";
 
@@ -67,6 +68,7 @@ export interface JobManagerOptions {
   readonly onChange?: () => void;
   readonly validateAnthropic?: AnthropicConnectionValidator;
   readonly validateClaudeAgent?: ClaudeAgentConnectionValidator;
+  readonly validateCursorAgent?: CursorAgentConnectionValidator;
   readonly validateOpenRouter?: (
     apiKey: string,
     model: string,
@@ -240,6 +242,9 @@ export class JobManager {
         : {}),
       ...(options.validateClaudeAgent
         ? { validateClaudeAgent: options.validateClaudeAgent }
+        : {}),
+      ...(options.validateCursorAgent
+        ? { validateCursorAgent: options.validateCursorAgent }
         : {}),
       ...(options.validateOpenRouter
         ? { validateOpenRouter: options.validateOpenRouter }
@@ -546,6 +551,14 @@ export class JobManager {
     ) {
       throw new Error(
         "Configure and verify the Claude setup token in Settings before submitting a job",
+      );
+    }
+    if (
+      settings.llm.provider === "cursor-agent" &&
+      !settings.llm.cursorApiKeyConfigured
+    ) {
+      throw new Error(
+        "Configure and verify the Cursor API key in Settings before submitting a job",
       );
     }
     let jobId = createJobId(new Date(this.now()));

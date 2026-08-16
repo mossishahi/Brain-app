@@ -55,4 +55,20 @@ export const CLAUDE_AGENT_ADAPTER: ProviderAdapterDescriptor = {
   ],
 };
 
+export const CURSOR_AGENT_ADAPTER: ProviderAdapterDescriptor = {
+  providerId: "cursor-agent",
+  displayName: "Cursor SDK",
+  kind: "agent-executor",
+  // Cursor's local agent ships the same operation families as built-in
+  // tools (public tool vocabulary names). Attachment search stays host-side
+  // by design, exactly like the Claude Agent SDK path.
+  staticOffers: [
+    { operationId: "web.search", nativeKey: "webSearch" },
+    { operationId: "web.fetch", nativeKey: "webFetch" },
+    { operationId: "code.execute", nativeKey: "shell" },
+    { operationId: "attachment.list", nativeKey: "glob" },
+    { operationId: "attachment.read", nativeKey: "read" },
+  ],
+};
+
 

@@ -23,7 +23,7 @@ export interface ToolCallDetail {
 }
 
 /** Content-bearing tools whose inputs must never reach the event log. */
-const EXCLUDED_TOOLS = new Set(["submit_step", "StructuredOutput"]);
+const EXCLUDED_TOOLS = new Set(["submit_step", "submit_result", "StructuredOutput"]);
 
 /** Script/command payloads stay readable in a scrollable hover window. */
 const MAX_CODE_CHARS = 6_000;

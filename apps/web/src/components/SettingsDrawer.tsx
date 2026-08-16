@@ -13,7 +13,7 @@ import type {
 import { errorMessage, getHealth, getSettings, postUpdateCheck, putSettings } from "../api";
 import { TrashIcon, XIcon } from "./Icons";
 
-type Provider = "anthropic" | "claude-agent" | "offline";
+type Provider = "anthropic" | "claude-agent" | "cursor-agent" | "offline";
 
 export function SettingsDrawer({ onClose }: { onClose: () => void }) {
   const [loaded, setLoaded] = useState<ServerSettings | null>(null);
@@ -64,6 +64,7 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
   const [model, setModel] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [setupToken, setSetupToken] = useState("");
+  const [cursorApiKey, setCursorApiKey] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [agentMaxTurns, setAgentMaxTurns] = useState("100");
   const [agentMaxBudgetUsd, setAgentMaxBudgetUsd] = useState("");
@@ -87,6 +88,13 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
   ]);
 
   const drawerRef = useRef<HTMLDivElement>(null);
+
+  /**
+   * The two agent-SDK backends (Claude Agent SDK, Cursor SDK) share ONE
+   * settings shape: the same turns/budget/effort/thinking/fallback controls
+   * apply verbatim to whichever SDK is selected.
+   */
+  const isAgentSdk = provider === "claude-agent" || provider === "cursor-agent";
 
   useEffect(() => {
     let live = true;
@@ -184,9 +192,16 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
           "Enter the token printed by `claude setup-token` before saving.",
         );
       }
+      if (
+        provider === "cursor-agent" &&
+        cursorApiKey.trim() === "" &&
+        !loaded?.llm.cursorApiKeyConfigured
+      ) {
+        throw new Error("Enter a Cursor API key before saving.");
+      }
       const maxTurns = Number(agentMaxTurns);
       if (
-        provider === "claude-agent" &&
+        isAgentSdk &&
         (!Number.isSafeInteger(maxTurns) || maxTurns < 1 || maxTurns > 500)
       ) {
         throw new Error("Max turns must be an integer from 1 to 500.");
@@ -196,7 +211,7 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
           ? undefined
           : Number(agentMaxBudgetUsd);
       if (
-        provider === "claude-agent" &&
+        isAgentSdk &&
         maxBudgetUsd !== undefined &&
         (!Number.isFinite(maxBudgetUsd) || maxBudgetUsd <= 0)
       ) {
@@ -249,20 +264,16 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
             : {}),
           modelsByRoute: loaded?.llm.modelsByRoute,
           agentSdk: {
-            maxTurns:
-              provider === "claude-agent"
-                ? maxTurns
-                : (loaded?.llm.agentSdk?.maxTurns ?? 100),
-            effort:
-              provider === "claude-agent"
-                ? agentEffort
-                : (loaded?.llm.agentSdk?.effort ?? "high"),
-            thinking:
-              provider === "claude-agent"
-                ? agentThinking
-                : (loaded?.llm.agentSdk?.thinking ?? "adaptive"),
-            ...(provider === "claude-agent" &&
-            maxBudgetUsd !== undefined
+            maxTurns: isAgentSdk
+              ? maxTurns
+              : (loaded?.llm.agentSdk?.maxTurns ?? 100),
+            effort: isAgentSdk
+              ? agentEffort
+              : (loaded?.llm.agentSdk?.effort ?? "high"),
+            thinking: isAgentSdk
+              ? agentThinking
+              : (loaded?.llm.agentSdk?.thinking ?? "adaptive"),
+            ...(isAgentSdk && maxBudgetUsd !== undefined
               ? { maxBudgetUsd }
               : loaded?.llm.agentSdk?.maxBudgetUsd !== undefined
                 ? {
@@ -270,8 +281,7 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                       loaded.llm.agentSdk.maxBudgetUsd,
                   }
                 : {}),
-            ...(provider === "claude-agent" &&
-            agentFallbackModel.trim()
+            ...(isAgentSdk && agentFallbackModel.trim()
               ? { fallbackModel: agentFallbackModel.trim() }
               : loaded?.llm.agentSdk?.fallbackModel
                 ? {
@@ -285,6 +295,9 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
             : {}),
           ...(provider === "claude-agent" && setupToken.trim()
             ? { setupToken: setupToken.trim() }
+            : {}),
+          ...(provider === "cursor-agent" && cursorApiKey.trim()
+            ? { cursorApiKey: cursorApiKey.trim() }
             : {}),
         },
         panelConfirmation: confirmation,
@@ -312,13 +325,16 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
       );
       setApiKey("");
       setSetupToken("");
+      setCursorApiKey("");
       setOpenRouterApiKey("");
       setConnectionMessage(
         provider === "anthropic"
           ? `Connected to ${saved.llm.model} and saved.`
           : provider === "claude-agent"
             ? `Claude Agent SDK token verified${saved.llm.model ? ` with ${saved.llm.model}` : ""} and saved.`
-          : "Settings saved.",
+            : provider === "cursor-agent"
+              ? `Cursor API key verified${saved.llm.model ? ` with ${saved.llm.model}` : ""} and saved.`
+              : "Settings saved.",
       );
     } catch (e) {
       setSaveError(errorMessage(e));
@@ -532,7 +548,10 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                   value={provider}
                   onChange={(e) => {
                     const next = e.target.value as Provider;
-                    if (next === "claude-agent" && provider !== "claude-agent") {
+                    if (
+                      (next === "claude-agent" || next === "cursor-agent") &&
+                      next !== provider
+                    ) {
                       setModel("");
                       setBaseUrl("");
                     } else if (
@@ -552,6 +571,9 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                   </option>
                   <option value="claude-agent">
                     Claude Agent SDK (setup token)
+                  </option>
+                  <option value="cursor-agent">
+                    Cursor SDK (API key)
                   </option>
                   <option value="offline">Offline (deterministic, no key)</option>
                 </select>
@@ -623,33 +645,63 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                 </>
               )}
               {provider === "claude-agent" && (
+                <div className="field">
+                  <label className="field-label" htmlFor="settings-setup-token">
+                    Setup token
+                  </label>
+                  <input
+                    id="settings-setup-token"
+                    type="password"
+                    value={setupToken}
+                    autoComplete="new-password"
+                    placeholder={
+                      loaded.llm.setupTokenConfigured
+                        ? "Verified token saved — enter a new token to replace it"
+                        : "Run `claude setup-token`, then paste its token"
+                    }
+                    onChange={(e) => {
+                      setSetupToken(e.target.value);
+                      setConnectionMessage(null);
+                      setSaveError(null);
+                    }}
+                  />
+                  <span className="field-note">
+                    Run <code>claude setup-token</code> in a terminal, complete the
+                    browser flow, and paste the printed token here. The server tests it
+                    before saving and never returns it to the browser.
+                  </span>
+                </div>
+              )}
+              {provider === "cursor-agent" && (
+                <div className="field">
+                  <label className="field-label" htmlFor="settings-cursor-key">
+                    Cursor API key
+                  </label>
+                  <input
+                    id="settings-cursor-key"
+                    type="password"
+                    value={cursorApiKey}
+                    autoComplete="new-password"
+                    placeholder={
+                      loaded.llm.cursorApiKeyConfigured
+                        ? "Verified key saved — enter a new key to replace it"
+                        : "cursor_…"
+                    }
+                    onChange={(e) => {
+                      setCursorApiKey(e.target.value);
+                      setConnectionMessage(null);
+                      setSaveError(null);
+                    }}
+                  />
+                  <span className="field-note">
+                    Create a key at cursor.com/dashboard (Integrations → API keys, or a
+                    team service account) and paste it here. The server tests it before
+                    saving and never returns it to the browser.
+                  </span>
+                </div>
+              )}
+              {isAgentSdk && (
                 <>
-                  <div className="field">
-                    <label className="field-label" htmlFor="settings-setup-token">
-                      Setup token
-                    </label>
-                    <input
-                      id="settings-setup-token"
-                      type="password"
-                      value={setupToken}
-                      autoComplete="new-password"
-                      placeholder={
-                        loaded.llm.setupTokenConfigured
-                          ? "Verified token saved — enter a new token to replace it"
-                          : "Run `claude setup-token`, then paste its token"
-                      }
-                      onChange={(e) => {
-                        setSetupToken(e.target.value);
-                        setConnectionMessage(null);
-                        setSaveError(null);
-                      }}
-                    />
-                    <span className="field-note">
-                      Run <code>claude setup-token</code> in a terminal, complete the
-                      browser flow, and paste the printed token here. The server tests it
-                      before saving and never returns it to the browser.
-                    </span>
-                  </div>
                   <div className="field">
                     <label className="field-label" htmlFor="settings-agent-model">
                       Model <span className="dim">(optional)</span>
@@ -658,7 +710,11 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                       id="settings-agent-model"
                       type="text"
                       value={model}
-                      placeholder="Claude Code default (or sonnet / opus / haiku)"
+                      placeholder={
+                        provider === "cursor-agent"
+                          ? "auto (server picks; or composer-2.5 / claude-sonnet-5 …)"
+                          : "Claude Code default (or sonnet / opus / haiku)"
+                      }
                       onChange={(e) => {
                         setModel(e.target.value);
                         setConnectionMessage(null);
@@ -667,7 +723,9 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                     />
                     <span className="field-note">
                       Save performs a real one-turn Agent SDK request. Nothing is
-                      persisted if the token or model is rejected.
+                      persisted if the credential or model is rejected. The same
+                      execution settings below apply to both agent SDKs, so
+                      switching SDKs never changes how tasks run.
                     </span>
                   </div>
                   <div className="field-grid-two">

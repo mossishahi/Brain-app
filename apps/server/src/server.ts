@@ -58,8 +58,10 @@ import {
 import {
   validateAnthropicConnection,
   validateClaudeAgentConnection,
+  validateCursorAgentConnection,
   type AnthropicConnectionValidator,
   type ClaudeAgentConnectionValidator,
+  type CursorAgentConnectionValidator,
 } from "./settings.js";
 
 const VERSION = "0.2.29";
@@ -170,6 +172,8 @@ export interface StartBrainServerOptions {
   readonly validateAnthropic?: AnthropicConnectionValidator;
   /** Test/integration seam; production performs a real Agent SDK request. */
   readonly validateClaudeAgent?: ClaudeAgentConnectionValidator;
+  /** Test/integration seam; production performs a real Cursor SDK request. */
+  readonly validateCursorAgent?: CursorAgentConnectionValidator;
   /** How long one live registry verification stays cached. Default 60s. */
   readonly registryProbeTtlMs?: number;
   readonly validateOpenRouter?: (
@@ -603,6 +607,9 @@ export async function startBrainServer(
     ...(options.validateClaudeAgent
       ? { validateClaudeAgent: options.validateClaudeAgent }
       : {}),
+    ...(options.validateCursorAgent
+      ? { validateCursorAgent: options.validateCursorAgent }
+      : {}),
     ...(options.validateOpenRouter
       ? { validateOpenRouter: options.validateOpenRouter }
       : {}),
@@ -625,6 +632,8 @@ export async function startBrainServer(
       validateAnthropic: options.validateAnthropic ?? validateAnthropicConnection,
       validateClaudeAgent:
         options.validateClaudeAgent ?? validateClaudeAgentConnection,
+      validateCursorAgent:
+        options.validateCursorAgent ?? validateCursorAgentConnection,
       ...(options.slurmProbeTimeoutMs !== undefined
         ? { slurmProbeTimeoutMs: options.slurmProbeTimeoutMs }
         : {}),

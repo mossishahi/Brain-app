@@ -18,7 +18,7 @@ import {
 } from "@brainstorm-agentic/protocol";
 import { errorMessage, putSettings } from "../api";
 
-type Provider = "claude-agent" | "anthropic";
+type Provider = "claude-agent" | "anthropic" | "cursor-agent";
 
 const DISMISS_KEY = "brain-onboarding-dismissed";
 
@@ -27,6 +27,9 @@ export function onboardingNeeded(settings: ServerSettings | null): boolean {
   if (settings.llm.provider === "offline") return false;
   if (settings.llm.provider === "anthropic") {
     return settings.llm.apiKeyConfigured !== true;
+  }
+  if (settings.llm.provider === "cursor-agent") {
+    return settings.llm.cursorApiKeyConfigured !== true;
   }
   return settings.llm.setupTokenConfigured !== true;
 }
@@ -57,7 +60,11 @@ export function ProviderOnboarding({
   readonly onDismiss: () => void;
 }) {
   const [provider, setProvider] = useState<Provider>(
-    settings.llm.provider === "anthropic" ? "anthropic" : "claude-agent",
+    settings.llm.provider === "anthropic"
+      ? "anthropic"
+      : settings.llm.provider === "cursor-agent"
+        ? "cursor-agent"
+        : "claude-agent",
   );
   const [runner, setRunner] = useState<"slurm" | "local">(settings.runner);
   const [secret, setSecret] = useState("");
@@ -100,7 +107,9 @@ export function ProviderOnboarding({
       setError(
         provider === "claude-agent"
           ? "Paste the token printed by `claude setup-token` first."
-          : "Paste an Anthropic API key first.",
+          : provider === "cursor-agent"
+            ? "Paste a Cursor API key first."
+            : "Paste an Anthropic API key first.",
       );
       return;
     }
@@ -122,16 +131,29 @@ export function ProviderOnboarding({
                   ? { modelsByRoute: settings.llm.modelsByRoute }
                   : {}),
               }
-            : {
-                provider: "claude-agent",
-                setupToken: secret.trim(),
-                ...(settings.llm.agentSdk
-                  ? { agentSdk: settings.llm.agentSdk }
-                  : {}),
-                ...(settings.llm.modelsByRoute
-                  ? { modelsByRoute: settings.llm.modelsByRoute }
-                  : {}),
-              },
+            : provider === "cursor-agent"
+              ? {
+                  provider: "cursor-agent",
+                  cursorApiKey: secret.trim(),
+                  // The agent-SDK execution settings are shared verbatim
+                  // between the Claude and Cursor backends.
+                  ...(settings.llm.agentSdk
+                    ? { agentSdk: settings.llm.agentSdk }
+                    : {}),
+                  ...(settings.llm.modelsByRoute
+                    ? { modelsByRoute: settings.llm.modelsByRoute }
+                    : {}),
+                }
+              : {
+                  provider: "claude-agent",
+                  setupToken: secret.trim(),
+                  ...(settings.llm.agentSdk
+                    ? { agentSdk: settings.llm.agentSdk }
+                    : {}),
+                  ...(settings.llm.modelsByRoute
+                    ? { modelsByRoute: settings.llm.modelsByRoute }
+                    : {}),
+                },
       });
       onSaved(updated);
     } catch (cause) {
@@ -237,6 +259,19 @@ export function ProviderOnboarding({
             <span className="onboard-provider-name">Anthropic API key</span>
             <span className="onboard-provider-hint">developer Messages API</span>
           </button>
+          <button
+            type="button"
+            role="radio"
+            aria-checked={provider === "cursor-agent"}
+            className={`onboard-provider${provider === "cursor-agent" ? " selected" : ""}`}
+            onClick={() => {
+              setProvider("cursor-agent");
+              setError(null);
+            }}
+          >
+            <span className="onboard-provider-name">Cursor API key</span>
+            <span className="onboard-provider-hint">Cursor SDK</span>
+          </button>
         </div>
 
         <label className="onboard-field">
@@ -247,7 +282,11 @@ export function ProviderOnboarding({
             type="password"
             value={secret}
             placeholder={
-              provider === "claude-agent" ? "paste the token…" : "sk-ant-…"
+              provider === "claude-agent"
+                ? "paste the token…"
+                : provider === "cursor-agent"
+                  ? "cursor_…"
+                  : "sk-ant-…"
             }
             autoFocus
             onChange={(event) => setSecret(event.target.value)}
@@ -280,6 +319,18 @@ export function ProviderOnboarding({
             <>
               Run <code>claude setup-token</code> in any terminal where Claude
               Code is signed in, then paste the printed token here.
+            </>
+          ) : provider === "cursor-agent" ? (
+            <>
+              Create a key at{" "}
+              <a
+                href="https://cursor.com/dashboard"
+                target="_blank"
+                rel="noreferrer"
+              >
+                cursor.com/dashboard
+              </a>{" "}
+              → Integrations → API keys, then paste it here.
             </>
           ) : (
             <>

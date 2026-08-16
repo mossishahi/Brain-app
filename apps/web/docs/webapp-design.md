@@ -112,6 +112,9 @@ A right-side drawer, 420px, `--surface`, hairline left border. Sections:
      `claude setup-token`, optional model (omitted uses Claude Code's default), plus advanced
      controls for max turns per pipeline task (default 100, range 1–500), optional per-task USD
      budget, reasoning effort, adaptive/disabled thinking, and fallback model.
+   - `Cursor SDK (API key)`: password input for a key from cursor.com/dashboard, optional model
+     (omitted lets the server pick), and the SAME advanced agent-SDK controls as the Claude Agent
+     SDK — the two backends share one settings shape, so switching SDKs never changes the knobs.
    - `Offline (deterministic, no key)`.
    Saving makes a small live request through the selected backend first; invalid credentials/model
    leave the previous settings and secrets untouched. Secrets are write-only — the browser receives
