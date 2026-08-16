@@ -567,6 +567,119 @@ test("provider usage-limit messages become a credit block", async () => {
   );
 });
 
+test("a silent stream trips the stall watchdog and restarts the attempt", async () => {
+  // The production wedge this pins down: Azure's NAT silently dropped the
+  // idle upstream connection mid-run; the SDK's next write hit a black hole
+  // and the run froze for the kernel's ~15-minute retransmission window
+  // (observed as bytes stuck in Send-Q and a dashboard quiet for 10+
+  // minutes). The watchdog cancels locally after the configured silence and
+  // routes through the bounded infrastructure-retry lane.
+  const state = newState();
+  let attempts = 0;
+  const factory: CursorAgentFactory = async (options) => {
+    state.options.push(options);
+    attempts += 1;
+    const wedged = attempts === 1;
+    let cancelled = false;
+    return {
+      agentId: `agent-${attempts}`,
+      async send(message: string) {
+        state.prompts.push(message);
+        return {
+          id: `run-${attempts}`,
+          async *stream() {
+            yield { type: "thinking", text: "one healthy fragment" };
+            if (wedged) {
+              // The dead connection: no further messages, no end-of-stream,
+              // and cancel() cannot end the read either.
+              await new Promise(() => undefined);
+            }
+          },
+          async wait() {
+            if (wedged) await new Promise(() => undefined);
+            return {
+              status: "finished",
+              result: "",
+              usage: { inputTokens: 1, outputTokens: 1 },
+            } as CursorSdkRunResult;
+          },
+          supports: () => true,
+          async cancel() {
+            cancelled = true;
+            state.cancelled += 1;
+            void cancelled;
+          },
+        };
+      },
+      close() {
+        // nothing held by the fake
+      },
+    };
+  };
+  const executor = new CursorAgentExecutor({
+    apiKey: "cursor-key",
+    listModels: async () => CATALOG,
+    maxValidationAttempts: 1,
+    stallTimeoutMs: 60,
+    agentFactory: factory,
+  });
+  const events: AgentProgress[] = [];
+  const result = await executor.execute(
+    {
+      ...structuredTask,
+      outputSchema: undefined,
+      modelRequest: structuredTask.modelRequest,
+    },
+    {
+      runId: "run-1",
+      nodePath: "root/brain",
+      reportProgress: (progress) => events.push(progress),
+    },
+  );
+  assert.equal(result.status, "ok");
+  assert.equal(attempts, 2, "the wedged attempt restarted in a fresh session");
+  assert.ok(
+    events.some(
+      (event) =>
+        event.kind === "retry" && /restarting the task/.test(event.message),
+    ),
+    "the restart is narrated in the activity feed",
+  );
+});
+
+test("a stall on every attempt fails the task with the stall diagnosis", async () => {
+  const state = newState();
+  const executor = new CursorAgentExecutor({
+    apiKey: "cursor-key",
+    listModels: async () => CATALOG,
+    maxValidationAttempts: 1,
+    stallTimeoutMs: 40,
+    agentFactory: fakeFactory(
+      [
+        {
+          // send() itself wedges — the initial POST can hit the same dead
+          // connection.
+          sendError: undefined,
+          result: finished(""),
+          callTools: async () => {
+            await new Promise(() => undefined);
+          },
+        },
+      ],
+      state,
+    ),
+  });
+  const result = await executor.execute(structuredTask, {
+    runId: "run-1",
+    nodePath: "root/brain",
+  });
+  assert.equal(result.status, "error");
+  assert.match(
+    result.status === "error" ? result.error.message : "",
+    /no activity for \d+s/,
+  );
+});
+
 test("retryable infrastructure errors restart without consuming attempts", async () => {
   const state = newState();
   const transportError = Object.assign(new Error("transport closed"), {

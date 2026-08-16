@@ -225,6 +225,18 @@ export interface CursorAgentExecutorConfig {
    * (tests only).
    */
   readonly progressHeartbeatMs?: number;
+  /**
+   * Stall watchdog: when the SDK stream produces NOTHING for this long, the
+   * attempt is cancelled locally and restarted through the bounded
+   * infrastructure-retry path. Exists because a NAT can silently drop the
+   * long-lived upstream connection (Azure's idle timeout is ~4 minutes):
+   * the SDK's next write lands in a black hole and the kernel retransmits
+   * for ~15 minutes before anything errors — observed in production as a
+   * run frozen mid-turn with bytes stuck in Send-Q. A healthy turn streams
+   * deltas continuously, so minutes of TOTAL silence is a dead connection,
+   * not a thinking model. Default 6 minutes; 0 disables.
+   */
+  readonly stallTimeoutMs?: number;
   readonly creditRecovery?: {
     readonly safetyBufferSeconds?: number;
     readonly openRouterApiKey?: string;
@@ -1437,8 +1449,8 @@ async function executeAttempt(
 
   const maxTurns = config.maxTurns ?? 100;
   let run: CursorSdkRun | undefined;
-  let cancelled: "signal" | "turns" | undefined;
-  const cancelRun = (why: "signal" | "turns"): void => {
+  let cancelled: "signal" | "turns" | "stall" | undefined;
+  const cancelRun = (why: "signal" | "turns" | "stall"): void => {
     cancelled ??= why;
     if (run && (run.supports?.("cancel") ?? true)) {
       void run.cancel?.().catch(() => undefined);
@@ -1446,8 +1458,41 @@ async function executeAttempt(
   };
   const onAbort = (): void => cancelRun("signal");
   context.signal?.addEventListener("abort", onAbort, { once: true });
+
+  // The stall watchdog: cancel locally when the stream goes silent for the
+  // configured window, and REJECT the awaits that a dead connection can
+  // wedge (send, wait) so the attempt always reaches the retry path. The
+  // stall error is marked retryable, which routes it into the bounded
+  // infrastructure-restart lane rather than failing the task.
+  const stallMs = config.stallTimeoutMs ?? 6 * 60_000;
+  let lastStreamActivityAt = Date.now();
+  let stallTimer: NodeJS.Timeout | undefined;
+  let rejectOnStall: ((error: Error) => void) | undefined;
+  const stallSignal = new Promise<never>((_, reject) => {
+    rejectOnStall = reject;
+  });
+  // A raced-out promise must never surface as an unhandled rejection.
+  stallSignal.catch(() => undefined);
+  const stallError = (): Error =>
+    Object.assign(
+      new Error(
+        `Cursor SDK stream produced no activity for ${Math.round(
+          (Date.now() - lastStreamActivityAt) / 1000,
+        )}s — a half-dead upstream connection (NAT idle drop); restarting the task`,
+      ),
+      { isRetryable: true },
+    );
+  if (stallMs > 0) {
+    stallTimer = setInterval(() => {
+      if (cancelled !== undefined) return;
+      if (Date.now() - lastStreamActivityAt <= stallMs) return;
+      cancelRun("stall");
+      rejectOnStall?.(stallError());
+    }, Math.min(30_000, stallMs));
+    stallTimer.unref();
+  }
   try {
-    run = await agent.send(promptParts.join("\n"));
+    run = await Promise.race([agent.send(promptParts.join("\n")), stallSignal]);
     if (context.signal?.aborted) cancelRun("signal");
     const progressState = newProgressState(config);
     // Turn accounting. The stream is FRAGMENTS: one model turn arrives as
@@ -1469,7 +1514,18 @@ async function executeAttempt(
         cancelRun("turns");
       }
     };
-    for await (const rawMessage of run.stream()) {
+    // Manual iteration so the stall signal can interrupt a read blocked on a
+    // dead connection: run.cancel() cannot be relied on to end a generator
+    // whose upstream socket is a black hole.
+    const stream = run.stream();
+    const iterator = (
+      stream as AsyncIterable<UnknownRecord>
+    )[Symbol.asyncIterator]();
+    while (true) {
+      const step = await Promise.race([iterator.next(), stallSignal]);
+      if (step.done === true) break;
+      const rawMessage = step.value;
+      lastStreamActivityAt = Date.now();
       const message = record(rawMessage);
       if (message.type === "tool_call" && message.status === "running") {
         const callId =
@@ -1510,9 +1566,12 @@ async function executeAttempt(
       reportSdkMessage(message, context, progressState);
     }
     const turns = toolRounds + usageTurns;
-    const finalResult = await run.wait();
+    const finalResult = await Promise.race([run.wait(), stallSignal]);
     if (cancelled === "signal" || context.signal?.aborted) {
       throw abortError(context.signal?.reason);
+    }
+    if (cancelled === "stall") {
+      throw stallError();
     }
     if (cancelled === "turns") {
       throw new Error(
@@ -1591,6 +1650,7 @@ async function executeAttempt(
       ...(costUsd !== undefined ? { costUsd } : {}),
     };
   } finally {
+    if (stallTimer !== undefined) clearInterval(stallTimer);
     context.signal?.removeEventListener("abort", onAbort);
     try {
       await agent[Symbol.asyncDispose]?.();
