@@ -1467,6 +1467,7 @@ async function executeAttempt(
   const stallMs = config.stallTimeoutMs ?? 6 * 60_000;
   let lastStreamActivityAt = Date.now();
   let stallTimer: NodeJS.Timeout | undefined;
+  let stallArmedAt = 0;
   let rejectOnStall: ((error: Error) => void) | undefined;
   const stallSignal = new Promise<never>((_, reject) => {
     rejectOnStall = reject;
@@ -1482,15 +1483,32 @@ async function executeAttempt(
       ),
       { isRetryable: true },
     );
-  if (stallMs > 0) {
-    stallTimer = setInterval(() => {
+  // One REFERENCED deadline timer, re-armed on stream activity and cleared
+  // in the finally below. Referenced deliberately: in a fully wedged state
+  // this timer can be the only live handle, and an unref'd watchdog lets
+  // the event loop drain mid-race instead of firing (caught by CI). It
+  // cannot outlive the attempt — cleanup always clears it.
+  const armStallTimer = (): void => {
+    if (stallMs <= 0 || cancelled !== undefined) return;
+    const now = Date.now();
+    // Re-arming per streamed fragment would churn a timer per delta; a
+    // 1-second arming granularity costs at most that much deadline drift.
+    if (stallTimer !== undefined && now - stallArmedAt < 1_000) return;
+    stallArmedAt = now;
+    if (stallTimer !== undefined) clearTimeout(stallTimer);
+    stallTimer = setTimeout(() => {
       if (cancelled !== undefined) return;
-      if (Date.now() - lastStreamActivityAt <= stallMs) return;
+      if (Date.now() - lastStreamActivityAt <= stallMs) {
+        // Activity arrived since the last (throttled) re-arm; extend.
+        stallTimer = undefined;
+        armStallTimer();
+        return;
+      }
       cancelRun("stall");
       rejectOnStall?.(stallError());
-    }, Math.min(30_000, stallMs));
-    stallTimer.unref();
-  }
+    }, stallMs);
+  };
+  armStallTimer();
   try {
     run = await Promise.race([agent.send(promptParts.join("\n")), stallSignal]);
     if (context.signal?.aborted) cancelRun("signal");
@@ -1526,6 +1544,7 @@ async function executeAttempt(
       if (step.done === true) break;
       const rawMessage = step.value;
       lastStreamActivityAt = Date.now();
+      armStallTimer();
       const message = record(rawMessage);
       if (message.type === "tool_call" && message.status === "running") {
         const callId =
@@ -1650,7 +1669,7 @@ async function executeAttempt(
       ...(costUsd !== undefined ? { costUsd } : {}),
     };
   } finally {
-    if (stallTimer !== undefined) clearInterval(stallTimer);
+    if (stallTimer !== undefined) clearTimeout(stallTimer);
     context.signal?.removeEventListener("abort", onAbort);
     try {
       await agent[Symbol.asyncDispose]?.();
