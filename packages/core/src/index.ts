@@ -48,3 +48,6 @@ export * from "./workflow/runner.js";
 
 // Concurrency utility (used by custom fan-out executors)
 export * from "./util/concurrency.js";
+
+// Runtime Node.js floor (enforced by every process entry point)
+export * from "./util/node-version.js";

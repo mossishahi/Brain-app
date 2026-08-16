@@ -34,6 +34,12 @@ npm run build
 npm test
 ```
 
+Node.js **22.13 or newer** is required (the Cursor SDK's floor; `deploy/` scripts install
+v22.13.0). The floor is enforced: `engine-strict` fails installs on an older Node, and the
+server and worker entry points refuse to start on one with a clear message — a worker on a
+cluster compute node checks its own Node too, so a wrong job environment fails loudly in the
+job log instead of crashing mid-run.
+
 While this directory is inside the umbrella, integration tests materialize `../brain`'s serving
 store from its release tags, so they need that repository checked out with its tags. After the
 repositories are split, point tests at a checked-out/pinned registry fixture with

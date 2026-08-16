@@ -7,6 +7,8 @@ import {
   type ChildProcess,
 } from "node:child_process";
 
+import { assertSupportedNodeVersion } from "@brainstorm-agentic/core";
+
 import type { ContentRegistryRuntimeStatus } from "./model.js";
 import { configureOutboundHttp } from "./proxy.js";
 import { startBrainServer } from "./server.js";
@@ -185,6 +187,9 @@ function help(): void {
 }
 
 async function main(): Promise<void> {
+  // First thing, before any work: an unsupported Node must fail with one
+  // clear sentence, never as a cryptic dependency crash minutes later.
+  assertSupportedNodeVersion();
   const args = parseArgs(process.argv.slice(2));
   if (
     args.command === "help" ||

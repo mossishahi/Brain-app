@@ -16,6 +16,6 @@
     "dev:web": "npm run dev -w brainstorm-agentic-web"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.13"
   }
 }

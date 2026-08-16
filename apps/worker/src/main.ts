@@ -25,6 +25,7 @@ import process from "node:process";
 
 import { scoreExpertiseTree } from "@brainstorm-agentic/brainstorm-runtime";
 import { loadContent } from "@brainstorm-agentic/content";
+import { assertSupportedNodeVersion } from "@brainstorm-agentic/core";
 import type {
   ArtifactStore,
   JsonObject,
@@ -609,6 +610,11 @@ function parseGateJsonFlag(raw: string): { gateKey: string; response: JsonValue 
 }
 
 async function main(): Promise<void> {
+  // First thing: a worker on a compute node can carry a DIFFERENT Node than
+  // the login node that installed the app — an unsupported one must fail
+  // with one clear sentence in the job log (and the events file, via the
+  // worker:fatal handler), never as a cryptic SDK crash mid-run.
+  assertSupportedNodeVersion();
   loadDotEnv(process.cwd());
   console.error(`[worker] outbound HTTP: ${configureOutboundHttp()}`);
   const args = parseArgs(process.argv.slice(2));
