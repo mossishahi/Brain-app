@@ -1488,7 +1488,7 @@ async function executeAttempt(
   // this timer can be the only live handle, and an unref'd watchdog lets
   // the event loop drain mid-race instead of firing (caught by CI). It
   // cannot outlive the attempt — cleanup always clears it.
-  const armStallTimer = (): void => {
+  const armStallTimer = (delayMs: number = stallMs): void => {
     if (stallMs <= 0 || cancelled !== undefined) return;
     const now = Date.now();
     // Re-arming per streamed fragment would churn a timer per delta; a
@@ -1498,15 +1498,21 @@ async function executeAttempt(
     if (stallTimer !== undefined) clearTimeout(stallTimer);
     stallTimer = setTimeout(() => {
       if (cancelled !== undefined) return;
-      if (Date.now() - lastStreamActivityAt <= stallMs) {
-        // Activity arrived since the last (throttled) re-arm; extend.
+      const quietForMs = Date.now() - lastStreamActivityAt;
+      if (quietForMs <= stallMs) {
+        // Activity arrived since the last (throttled) re-arm. Sleep only the
+        // REMAINDER of the quiet window — re-arming for a full window here
+        // would let detection latency drift toward 2x stallMs when the wedge
+        // begins right after a re-arm (observed in production: a 6-minute
+        // watchdog firing ~12 minutes after the last delta).
         stallTimer = undefined;
-        armStallTimer();
+        stallArmedAt = 0; // bypass the arming throttle for this re-arm
+        armStallTimer(stallMs - quietForMs + 50);
         return;
       }
       cancelRun("stall");
       rejectOnStall?.(stallError());
-    }, stallMs);
+    }, delayMs);
   };
   armStallTimer();
   try {

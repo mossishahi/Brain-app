@@ -31,6 +31,15 @@ RestartSec=5
 # relaunched server adopts them from workspace files). The default
 # control-group mode would kill them with the service.
 KillMode=process
+# STRONGLY RECOMMENDED behind a cloud NAT (Azure drops flows idle >4 min
+# without a reset, wedging long model calls into ~15-minute retransmission
+# black holes). The shim forces TCP keepalive on every socket of the server
+# and its workers so flows never look idle. Build once, then uncomment:
+#
+#   gcc -shared -fPIC -O2 -o /home/mossi/opt/libkeepalive.so \
+#       deploy/systemd/tcp-keepalive.c -ldl
+#
+#Environment=LD_PRELOAD=/home/mossi/opt/libkeepalive.so
 
 [Install]
 WantedBy=multi-user.target

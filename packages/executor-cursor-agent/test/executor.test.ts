@@ -647,6 +647,87 @@ test("a silent stream trips the stall watchdog and restarts the attempt", async 
   );
 });
 
+test("a fragment right after a re-arm does not double the stall deadline", async () => {
+  // Regression: the watchdog re-arms at most once per second, so a fragment
+  // landing just AFTER a re-arm leaves the timer pointing at the old
+  // deadline. On fire the old code extended by a FULL window instead of the
+  // remainder, letting detection drift toward 2x stallTimeoutMs (a 6-minute
+  // watchdog observed firing ~12 minutes after the last delta). With the
+  // remainder fix, detection stays ~stallTimeoutMs after the last activity.
+  const state = newState();
+  let attempts = 0;
+  const factory: CursorAgentFactory = async (options) => {
+    state.options.push(options);
+    attempts += 1;
+    const wedged = attempts === 1;
+    return {
+      agentId: `agent-${attempts}`,
+      async send(message: string) {
+        state.prompts.push(message);
+        return {
+          id: `run-${attempts}`,
+          async *stream() {
+            yield { type: "thinking", text: "fragment at arm time" };
+            if (wedged) {
+              // Trailing fragment inside the 1s arming throttle: activity
+              // advances but the deadline timer does not move.
+              await new Promise((resolve) => setTimeout(resolve, 100));
+              yield { type: "thinking", text: "trailing fragment" };
+              await new Promise(() => undefined); // the wedge
+            }
+          },
+          async wait() {
+            if (wedged) await new Promise(() => undefined);
+            return {
+              status: "finished",
+              result: "",
+              usage: { inputTokens: 1, outputTokens: 1 },
+            } as CursorSdkRunResult;
+          },
+          supports: () => true,
+          async cancel() {
+            state.cancelled += 1;
+          },
+        };
+      },
+      close() {
+        // nothing held by the fake
+      },
+    };
+  };
+  const executor = new CursorAgentExecutor({
+    apiKey: "cursor-key",
+    listModels: async () => CATALOG,
+    maxValidationAttempts: 1,
+    stallTimeoutMs: 1_000,
+    agentFactory: factory,
+  });
+  const startedAt = Date.now();
+  let retryAfterMs: number | undefined;
+  const result = await executor.execute(
+    { ...structuredTask, outputSchema: undefined },
+    {
+      runId: "run-1",
+      nodePath: "root/brain",
+      reportProgress: (progress) => {
+        if (progress.kind === "retry" && retryAfterMs === undefined) {
+          retryAfterMs = Date.now() - startedAt;
+        }
+      },
+    },
+  );
+  assert.equal(result.status, "ok");
+  assert.equal(attempts, 2, "the wedged attempt restarted in a fresh session");
+  assert.ok(retryAfterMs !== undefined, "the stall retry was narrated");
+  // Remainder-based deadline: ~1150ms (wedge at 100ms + 1000ms window + 50ms
+  // slack). The old full-window extension fired at ~2000ms; 1600ms splits the
+  // two with wide margins on both sides.
+  assert.ok(
+    retryAfterMs < 1_600,
+    `stall detected after ${retryAfterMs}ms; the deadline drifted toward 2x the window`,
+  );
+});
+
 test("a stall on every attempt fails the task with the stall diagnosis", async () => {
   const state = newState();
   const executor = new CursorAgentExecutor({
