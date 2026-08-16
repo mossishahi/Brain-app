@@ -64,7 +64,7 @@ import {
   type CursorAgentConnectionValidator,
 } from "./settings.js";
 
-const VERSION = "0.2.29";
+const VERSION = "0.2.30";
 const SNAPSHOT_THROTTLE_MS = 500;
 const HEARTBEAT_MS = 15_000;
 const POLL_MS = 2_000;
