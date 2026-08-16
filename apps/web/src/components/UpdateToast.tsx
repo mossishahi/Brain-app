@@ -105,8 +105,30 @@ export function UpdateToast() {
   const [updateSuccess, setUpdateSuccess] = useState<{
     readonly to?: string;
   } | null>(takeUpdateSuccess);
+  /**
+   * The server version this PAGE LOAD first saw. A later health answer with
+   * a different version means the server was updated (or rolled back) under
+   * a living tab — manually, by a supervisor restart, by another browser's
+   * one-click update — and this tab is still running the old interface. A
+   * single-page app never re-fetches its own code, so without this check a
+   * long-lived tab silently survives upgrades and shows stale UI (observed
+   * as a settings drawer missing a provider three releases after it
+   * shipped). Self-initiated updates are not affected: their overlay polls
+   * and reloads on its own, and this poll pauses while it runs.
+   */
+  const firstSeenVersion = useRef<string | null>(null);
+  const [serverChangedTo, setServerChangedTo] = useState<string | null>(null);
   const phaseRef = useRef(phase);
   phaseRef.current = phase;
+
+  const recordHealth = (response: HealthResponse): void => {
+    if (firstSeenVersion.current === null) {
+      firstSeenVersion.current = response.version;
+    } else if (response.version !== firstSeenVersion.current) {
+      setServerChangedTo(response.version);
+    }
+    setHealth(response);
+  };
 
   // "Click on the main page and it disappears": any click anywhere dismisses
   // the success confirmation.
@@ -123,7 +145,7 @@ export function UpdateToast() {
       if (phaseRef.current.kind === "updating") return;
       getHealth()
         .then((response) => {
-          if (live) setHealth(response);
+          if (live) recordHealth(response);
         })
         .catch(() => undefined);
     };
@@ -229,7 +251,7 @@ export function UpdateToast() {
     const onCheck = (): void => {
       setSnoozedAppVersion(null);
       getHealth()
-        .then((response) => setHealth(response))
+        .then((response) => recordHealth(response))
         .catch(() => undefined);
     };
     window.addEventListener("brain-check-updates", onCheck);
@@ -273,6 +295,7 @@ export function UpdateToast() {
   if (
     phase.kind === "idle" &&
     updateSuccess === null &&
+    serverChangedTo === null &&
     !appUpdate &&
     !skillsUpdated &&
     !bundleBehind
@@ -282,6 +305,25 @@ export function UpdateToast() {
 
   return (
     <div className="update-toast-stack" role="status">
+      {serverChangedTo !== null && (
+        <div className="update-toast update-toast-actionable">
+          <strong>The server now runs v{serverChangedTo}</strong>
+          <p>
+            This tab still shows the interface it loaded from v
+            {firstSeenVersion.current ?? "an older version"} — reload to get
+            the matching one. Runs live on the server; nothing is lost.
+          </p>
+          <div className="update-toast-actions">
+            <button
+              type="button"
+              className="btn btn-small btn-primary"
+              onClick={() => window.location.reload()}
+            >
+              Reload now
+            </button>
+          </div>
+        </div>
+      )}
       {updateSuccess !== null && (
         <div className="update-toast update-toast-success">
           <strong>
