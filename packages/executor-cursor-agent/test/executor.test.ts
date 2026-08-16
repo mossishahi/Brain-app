@@ -373,7 +373,7 @@ test("authoritative validation feeds issues into a fresh attempt", async () => {
   assert.match(state.prompts[1]!, /answer must be good/);
 });
 
-test("exceeding maxTurns cancels the run and fails the task", async () => {
+test("exceeding maxTurns (tool rounds + completed sends) cancels the run and fails the task", async () => {
   const state = newState();
   const executor = new CursorAgentExecutor({
     apiKey: "cursor-key",
@@ -384,9 +384,11 @@ test("exceeding maxTurns cancels the run and fails the task", async () => {
       [
         {
           messages: [
-            { type: "assistant", message: { role: "assistant", content: [] } },
-            { type: "assistant", message: { role: "assistant", content: [] } },
-            { type: "assistant", message: { role: "assistant", content: [] } },
+            { type: "tool_call", call_id: "c1", name: "read", status: "running" },
+            { type: "tool_call", call_id: "c1", name: "read", status: "completed" },
+            { type: "tool_call", call_id: "c2", name: "grep", status: "running" },
+            { type: "tool_call", call_id: "c2", name: "grep", status: "completed" },
+            { type: "tool_call", call_id: "c3", name: "shell", status: "running" },
           ],
           result: finished(""),
         },
@@ -404,6 +406,131 @@ test("exceeding maxTurns cancels the run and fails the task", async () => {
     /exceeded the configured maximum of 2 turns/,
   );
   assert.equal(state.cancelled, 1);
+});
+
+test("streamed assistant/thinking FRAGMENTS never count as turns", async () => {
+  // The production incident this pins down: one real model turn arrives as
+  // many assistant and thinking delta messages (a probed single-turn run
+  // carried 8 and 14), so counting messages cancelled a one-minute
+  // preprocessing task as "100 turns exceeded".
+  const state = newState();
+  const fragments = Array.from({ length: 60 }, (_, index) =>
+    index % 2 === 0
+      ? { type: "assistant", message: { role: "assistant", content: [] } }
+      : { type: "thinking", text: `fragment ${index} ` },
+  );
+  const executor = new CursorAgentExecutor({
+    apiKey: "cursor-key",
+    listModels: async () => CATALOG,
+    maxTurns: 2,
+    maxValidationAttempts: 1,
+    agentFactory: fakeFactory(
+      [
+        {
+          messages: [
+            ...fragments,
+            { type: "usage", usage: { inputTokens: 1, outputTokens: 1 } },
+          ],
+          callTools: async (tools) => {
+            await tools.submit_result!.execute({ answer: "ok" }, {});
+          },
+          result: finished(""),
+        },
+      ],
+      state,
+    ),
+  });
+  const result = await executor.execute(structuredTask, {
+    runId: "run-1",
+    nodePath: "root/brain",
+  });
+  assert.equal(result.status, "ok");
+  assert.equal(state.cancelled, 0);
+  assert.equal(result.status === "ok" ? result.metadata?.turns : undefined, 1);
+});
+
+test("thinking deltas merge into readable trace segments; empty deltas split blocks", async () => {
+  const state = newState();
+  const traceTask: AgentTask = {
+    ...structuredTask,
+    input: { role: "brain", routeTraits: ["extended-reasoning"] },
+  };
+  const executor = new CursorAgentExecutor({
+    apiKey: "cursor-key",
+    listModels: async () => CATALOG,
+    agentFactory: fakeFactory(
+      [
+        {
+          messages: [
+            { type: "thinking", text: "I" },
+            { type: "thinking", text: "'ll check the file" },
+            { type: "thinking", text: "" },
+            { type: "thinking", text: "The" },
+            { type: "thinking", text: " answer is clear" },
+          ],
+          callTools: async (tools) => {
+            await tools.submit_result!.execute({ answer: "ok" }, {});
+          },
+          result: finished(""),
+        },
+      ],
+      state,
+    ),
+  });
+  const result = await executor.execute(traceTask, {
+    runId: "run-1",
+    nodePath: "root/brain",
+  });
+  assert.equal(result.status, "ok");
+  const segments =
+    result.status === "ok"
+      ? (result.metadata?.thinkingSegments as { text: string }[])
+      : [];
+  assert.deepEqual(
+    segments.map((segment) => segment.text),
+    ["I'll check the file", "The answer is clear"],
+  );
+});
+
+test("stream tool_call events named mcp are not double-reported; wrappers own custom-tool progress", async () => {
+  const state = newState();
+  const events: AgentProgress[] = [];
+  const executor = new CursorAgentExecutor({
+    apiKey: "cursor-key",
+    listModels: async () => CATALOG,
+    agentFactory: fakeFactory(
+      [
+        {
+          messages: [
+            { type: "tool_call", call_id: "m1", name: "mcp", status: "running" },
+            { type: "tool_call", call_id: "m1", name: "mcp", status: "completed" },
+          ],
+          callTools: async (tools) => {
+            await tools.submit_result!.execute({ answer: "ok" }, {});
+          },
+          result: finished(""),
+        },
+      ],
+      state,
+    ),
+  });
+  const result = await executor.execute(structuredTask, {
+    runId: "run-1",
+    nodePath: "root/brain",
+    reportProgress: (progress) => events.push(progress),
+  });
+  assert.equal(result.status, "ok");
+  const toolEvents = events.filter(
+    (event) => event.kind === "tool_start" || event.kind === "tool_end",
+  );
+  // Exactly one start and one end — from the submit_result wrapper — and
+  // no anonymous "mcp" rows from the stream.
+  assert.deepEqual(
+    toolEvents.map((event) => `${event.kind}:${event.toolName}`),
+    ["tool_start:submit_result", "tool_end:submit_result"],
+  );
+  // The mcp round still counts toward the turn budget.
+  assert.equal(result.status === "ok" ? result.metadata?.turns : undefined, 1);
 });
 
 test("provider usage-limit messages become a credit block", async () => {
@@ -613,6 +740,30 @@ test("resolveModelParams degrades along the effort ladder and honors thinking of
   ]);
   // An unknown model (auto) carries no parameters.
   assert.deepEqual(resolveModelParams(undefined, "high", "adaptive"), []);
+
+  // GPT/Kimi/GLM-family models fold effort AND thinking into one
+  // `reasoning` parameter (live catalog shape); `context`/`fast` params are
+  // never touched.
+  const gpt = {
+    id: "gpt-5.6-sol",
+    parameters: [
+      { id: "context", values: [{ value: "272k" }, { value: "1m" }] },
+      {
+        id: "reasoning",
+        values: ["none", "low", "medium", "high", "xhigh", "max"].map(
+          (value) => ({ value }),
+        ),
+      },
+      { id: "fast", values: [{ value: "false" }, { value: "true" }] },
+    ],
+  };
+  assert.deepEqual(resolveModelParams(gpt, "max", "adaptive"), [
+    { id: "reasoning", value: "max" },
+  ]);
+  // "no extended thinking" wins over effort where reasoning is both knobs.
+  assert.deepEqual(resolveModelParams(gpt, "high", "disabled"), [
+    { id: "reasoning", value: "none" },
+  ]);
 });
 
 test("salvageJsonText finds fenced and embedded objects, never invents one", () => {

@@ -20,6 +20,7 @@ import {
   type AttachmentSelectionKind,
   type GateAnswerRequest,
   type HealthResponse,
+  type ModelOption,
   type ModelOptionsResponse,
   type ReadinessCheckId,
   type ServerEvent,
@@ -63,6 +64,7 @@ import {
   type ClaudeAgentConnectionValidator,
   type CursorAgentConnectionValidator,
 } from "./settings.js";
+import { listCursorModels } from "@brainstorm-agentic/executor-cursor-agent";
 
 const VERSION = "0.2.31";
 const SNAPSHOT_THROTTLE_MS = 500;
@@ -174,6 +176,10 @@ export interface StartBrainServerOptions {
   readonly validateClaudeAgent?: ClaudeAgentConnectionValidator;
   /** Test/integration seam; production performs a real Cursor SDK request. */
   readonly validateCursorAgent?: CursorAgentConnectionValidator;
+  /** Test seam; production lists the account's live Cursor model catalog. */
+  readonly listCursorModels?: (
+    apiKey: string,
+  ) => Promise<readonly { id: string; displayName?: string }[]>;
   /** How long one live registry verification stays cached. Default 60s. */
   readonly registryProbeTtlMs?: number;
   readonly validateOpenRouter?: (
@@ -569,6 +575,36 @@ export async function startBrainServer(
   const detailStreams = new Map<string, Set<SseConnection>>();
   const routeCatalog = new RouteCatalog();
   const capabilityCatalog = new CapabilityCatalog();
+
+  // The account's live Cursor model catalog, TTL-cached: new models appear
+  // in the picker without an app release, but a settings render never pays
+  // more than one network round-trip per window.
+  const CURSOR_MODELS_TTL_MS = 5 * 60_000;
+  let cursorModelsCache:
+    | { at: number; models: readonly ModelOption[] }
+    | undefined;
+  const cursorModelOptions = async (): Promise<readonly ModelOption[]> => {
+    if (
+      cursorModelsCache &&
+      Date.now() - cursorModelsCache.at < CURSOR_MODELS_TTL_MS
+    ) {
+      return cursorModelsCache.models;
+    }
+    const apiKey = manager.settings.getCursorApiKey();
+    if (!apiKey) return [];
+    try {
+      const listed = await (options.listCursorModels ?? listCursorModels)(apiKey);
+      const models = listed.map((entry) => ({
+        id: entry.id,
+        label: entry.displayName ?? entry.id,
+      }));
+      cursorModelsCache = { at: Date.now(), models };
+      return models;
+    } catch {
+      // Unreachable API or a revoked key: the static catalog still serves.
+      return [];
+    }
+  };
   let manager!: JobManager;
   let readiness!: ReadinessService;
   const broadcastJobs = (): void => {
@@ -928,10 +964,19 @@ export async function startBrainServer(
           settings.contentRegistry.bundle,
           settings.contentRegistry.version,
         );
+        let models = catalog[settings.llm.provider] ?? [];
+        if (settings.llm.provider === "cursor-agent") {
+          // Cursor serves many vendors' models per account, so the picker
+          // offers the LIVE catalog (every Sonnet/Opus version, GPT,
+          // Composer, …) instead of a hardcoded excerpt. Failure or a
+          // missing key falls back to the static list.
+          const live = await cursorModelOptions();
+          if (live.length > 0) models = live;
+        }
         const response: ModelOptionsResponse = {
           provider: settings.llm.provider,
           taskTypes,
-          models: catalog[settings.llm.provider] ?? [],
+          models,
           modelsByRoute: settings.llm.modelsByRoute ?? {},
           ...(settings.llm.model ? { defaultModel: settings.llm.model } : {}),
         };

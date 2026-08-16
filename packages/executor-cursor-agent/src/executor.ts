@@ -136,6 +136,7 @@ export type CursorAgentFactory = (
 /** One entry of `Cursor.models.list()`, reduced to what the mapper reads. */
 export interface CursorModelListEntry {
   readonly id: string;
+  readonly displayName?: string;
   readonly aliases?: readonly string[];
   readonly parameters?: readonly {
     readonly id: string;
@@ -145,6 +146,18 @@ export interface CursorModelListEntry {
 }
 
 export type CursorModelLister = () => Promise<readonly CursorModelListEntry[]>;
+
+/**
+ * The account's live model catalog, for consumers beyond the executor (the
+ * server's model picker serves it so users choose from what their key can
+ * actually run — every Sonnet/Opus version, GPT, Composer, … — instead of a
+ * hardcoded list).
+ */
+export async function listCursorModels(
+  apiKey: string,
+): Promise<readonly CursorModelListEntry[]> {
+  return defaultListModels(apiKey);
+}
 
 /* ------------------------------------------------------------------------ */
 
@@ -607,6 +620,11 @@ const THINKING_ON_VALUES = ["adaptive", "auto", "on", "enabled", "true", "thinki
  * declare is skipped, and a value the parameter does not offer degrades
  * along the ladder — the same "apply what the model supports" contract the
  * Claude Agent SDK follows for these settings.
+ *
+ * Live catalog shapes (probed): Claude-family models declare
+ * `effort: low…max` and `thinking: false|true`; GPT/Kimi/GLM-family models
+ * carry the effort knob under a parameter literally named `reasoning`
+ * (`none…max` / `extra-high`); Gemini/Grok declare `effort` only.
  */
 export function resolveModelParams(
   entry: CursorModelListEntry | undefined,
@@ -628,23 +646,39 @@ export function resolveModelParams(
     }
     return undefined;
   };
-  for (const definition of entry.parameters) {
-    const label = normalizeParamText(`${definition.id} ${definition.displayName ?? ""}`);
-    if (effort !== undefined && label.includes("effort")) {
-      const value = pick(definition, EFFORT_LADDER[effort] ?? []);
-      if (value !== undefined) params.push({ id: definition.id, value });
-      continue;
-    }
-    if (thinking !== undefined && label.includes("thinking")) {
-      // "adaptive" only pins a value when the model offers an adaptive/auto
-      // tier; otherwise the model's own default stands (the Claude SDK's
-      // adaptive behavior). "disabled" pins the off tier when one exists.
-      const value = pick(
-        definition,
-        thinking === "disabled" ? THINKING_OFF_VALUES : THINKING_ON_VALUES,
-      );
-      if (value !== undefined) params.push({ id: definition.id, value });
-    }
+  const labelOf = (
+    definition: NonNullable<CursorModelListEntry["parameters"]>[number],
+  ): string => normalizeParamText(`${definition.id} ${definition.displayName ?? ""}`);
+  const thinkingDefinition = entry.parameters.find((definition) =>
+    labelOf(definition).includes("thinking"),
+  );
+  const effortDefinition = entry.parameters.find(
+    (definition) =>
+      definition !== thinkingDefinition &&
+      (labelOf(definition).includes("effort") ||
+        labelOf(definition).includes("reasoning")),
+  );
+  if (thinking !== undefined && thinkingDefinition !== undefined) {
+    // "adaptive" pins the on/true tier when the model offers one (the
+    // boolean `thinking` parameter of Claude-family models); otherwise the
+    // model's own default stands. "disabled" pins the off tier.
+    const value = pick(
+      thinkingDefinition,
+      thinking === "disabled" ? THINKING_OFF_VALUES : THINKING_ON_VALUES,
+    );
+    if (value !== undefined) params.push({ id: thinkingDefinition.id, value });
+  }
+  if (effort !== undefined && effortDefinition !== undefined) {
+    // GPT/Kimi/GLM-family models fold BOTH knobs into one `reasoning`
+    // parameter. An explicit "no extended thinking" wins over effort there:
+    // reasoning "none" IS thinking off for those models.
+    const wantsOff =
+      thinking === "disabled" && thinkingDefinition === undefined;
+    const value = wantsOff
+      ? (pick(effortDefinition, THINKING_OFF_VALUES) ??
+        pick(effortDefinition, EFFORT_LADDER[effort] ?? []))
+      : pick(effortDefinition, EFFORT_LADDER[effort] ?? []);
+    if (value !== undefined) params.push({ id: effortDefinition.id, value });
   }
   return params;
 }
@@ -803,6 +837,11 @@ function reportSdkMessage(
     return;
   }
   if (message.type === "tool_call" && typeof message.name === "string") {
+    // Custom in-process tools surface in the stream under the generic name
+    // "mcp"; their wrappers already report start/end under their REAL names
+    // (submit_step, taxonomy_resolve, …), so the stream event would be a
+    // duplicate, anonymous activity row.
+    if (message.name === "mcp") return;
     const callId = typeof message.call_id === "string" ? message.call_id : message.name;
     if (message.status === "running") {
       if (state.pendingTools.has(callId)) return; // repeated running updates
@@ -1411,32 +1450,66 @@ async function executeAttempt(
     run = await agent.send(promptParts.join("\n"));
     if (context.signal?.aborted) cancelRun("signal");
     const progressState = newProgressState(config);
-    let turns = 0;
+    // Turn accounting. The stream is FRAGMENTS: one model turn arrives as
+    // many `assistant` and `thinking` delta messages (a single probed turn
+    // carried 8 and 14 of them), so counting those exploded a one-minute
+    // task into "100 turns" and cancelled it. The real round markers are
+    // `tool_call` starts (one per tool round — each is a model API
+    // round-trip) and `usage` (one per completed send), which together
+    // approximate the same "tool/API round-trips" the shared maxTurns
+    // setting means on the Claude Agent SDK.
+    let toolRounds = 0;
+    const countedToolCalls = new Set<string>();
+    let usageTurns = 0;
     let usage = emptyUsage();
+    /** Whether the current thinking block is still streaming deltas. */
+    let thinkingOpen = false;
+    const enforceTurnCap = (): void => {
+      if (toolRounds + usageTurns > maxTurns && cancelled === undefined) {
+        cancelRun("turns");
+      }
+    };
     for await (const rawMessage of run.stream()) {
       const message = record(rawMessage);
-      if (message.type === "assistant") {
-        turns += 1;
-        capture.turn = turns;
-        // The SDK has no turn ceiling of its own; enforce the shared
-        // settings knob here so every loop stays bounded.
-        if (turns > maxTurns && cancelled === undefined) {
-          cancelRun("turns");
+      if (message.type === "tool_call" && message.status === "running") {
+        const callId =
+          typeof message.call_id === "string"
+            ? message.call_id
+            : `round-${toolRounds}`;
+        if (!countedToolCalls.has(callId)) {
+          countedToolCalls.add(callId);
+          toolRounds += 1;
+          enforceTurnCap();
         }
       }
-      if (
-        capture.wantsTrace &&
-        message.type === "thinking" &&
-        typeof message.text === "string" &&
-        message.text.trim().length > 0
-      ) {
-        capture.thinking.push({ turn: turns, text: message.text });
-      }
       if (message.type === "usage") {
+        usageTurns += 1;
         usage = addUsage(usage, coreUsage(message.usage as CursorSdkTokenUsage));
+        enforceTurnCap();
+      }
+      capture.turn = toolRounds + usageTurns + 1;
+      if (message.type === "thinking") {
+        // Thinking arrives as DELTAS; an empty delta separates blocks.
+        // Consecutive fragments concatenate into one trace segment so the
+        // captured reasoning summary reads as prose, not confetti.
+        const text = typeof message.text === "string" ? message.text : "";
+        if (text.length === 0) {
+          thinkingOpen = false;
+        } else if (capture.wantsTrace) {
+          const last = capture.thinking[capture.thinking.length - 1];
+          if (thinkingOpen && last !== undefined) {
+            last.text += text;
+          } else {
+            capture.thinking.push({ turn: capture.turn, text });
+            thinkingOpen = true;
+          }
+        }
+      } else {
+        thinkingOpen = false;
       }
       reportSdkMessage(message, context, progressState);
     }
+    const turns = toolRounds + usageTurns;
     const finalResult = await run.wait();
     if (cancelled === "signal" || context.signal?.aborted) {
       throw abortError(context.signal?.reason);

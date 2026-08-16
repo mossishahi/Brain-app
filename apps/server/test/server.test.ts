@@ -1342,6 +1342,60 @@ test("with self-update disabled, update-check says NOTHING WAS CHECKED instead o
   }
 });
 
+test("model options serve the account's LIVE Cursor catalog when cursor-agent is selected", async () => {
+  // Cursor serves many vendors' models per account (every Sonnet/Opus
+  // version, GPT, Composer, …); a hardcoded excerpt is what left the picker
+  // with a single Sonnet and no versions. The live list is fetched with the
+  // configured key and mapped to id + display label.
+  const workspace = tempRoot();
+  let listedWith: string | undefined;
+  const server = await startTestBrainServer({
+    workspace,
+    port: 0,
+    validateCursorAgent: async () => undefined,
+    listCursorModels: async (apiKey) => {
+      listedWith = apiKey;
+      return [
+        { id: "default", displayName: "Auto" },
+        { id: "claude-sonnet-5", displayName: "Sonnet 5" },
+        { id: "claude-sonnet-4-5", displayName: "Sonnet 4.5" },
+        { id: "gpt-5.6-sol", displayName: "GPT-5.6 Sol" },
+      ];
+    },
+  });
+  try {
+    const current = await requestJson<{ llm: Record<string, unknown> }>(
+      server,
+      "/api/settings",
+    );
+    const put = await requestJson(server, "/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({
+        ...current.value,
+        llm: {
+          provider: "cursor-agent",
+          cursorApiKey: "cursor-test-key",
+        },
+      }),
+    });
+    assert.equal(put.status, 200);
+    const options = await requestJson<{
+      provider: string;
+      models: readonly { id: string; label: string }[];
+    }>(server, "/api/model-options");
+    assert.equal(options.value.provider, "cursor-agent");
+    assert.equal(listedWith, "cursor-test-key");
+    assert.deepEqual(
+      options.value.models.map((model) => model.id),
+      ["default", "claude-sonnet-5", "claude-sonnet-4-5", "gpt-5.6-sol"],
+    );
+    assert.equal(options.value.models[1]!.label, "Sonnet 5");
+  } finally {
+    await server.close();
+    await removeWorkspace(workspace);
+  }
+});
+
 test("under systemd the update applies the checkout IN-PROCESS, before the server exits", async () => {
   // The systemd twin of the SLURM path: the unit's cgroup kills a detached
   // updater the moment the server exits, and Restart=on-failure never

@@ -2,6 +2,7 @@ export {
   CursorAgentExecutor,
   cursorOutputSchema,
   findModelEntry,
+  listCursorModels,
   resolveModelParams,
   salvageJsonText,
   validateCursorApiKey,
