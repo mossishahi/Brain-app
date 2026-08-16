@@ -66,7 +66,7 @@ import {
 } from "./settings.js";
 import { listCursorModels } from "@brainstorm-agentic/executor-cursor-agent";
 
-const VERSION = "0.2.31";
+const VERSION = "0.2.32";
 const SNAPSHOT_THROTTLE_MS = 500;
 const HEARTBEAT_MS = 15_000;
 const POLL_MS = 2_000;
