@@ -37,7 +37,9 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
       setUpdateStatus(
         result.appUpdate
           ? "Update available — use the notification at the lower left to install it."
-          : `You are on the latest version (v${result.version}).`,
+          : result.selfUpdateEnabled === false
+            ? `Update checks are switched off on this deployment (launched with --no-self-update), so nothing was checked — v${result.version} is running, but a newer release may exist. Update it the way it was installed.`
+            : `You are on the latest version (v${result.version}).`,
       );
     } catch (error) {
       setUpdateStatus(errorMessage(error));

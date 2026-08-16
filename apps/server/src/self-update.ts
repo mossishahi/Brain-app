@@ -116,7 +116,7 @@ export interface ApplyAppUpdateOptions {
 export interface StartedAppUpdate {
   /** Where the updater logs every step (fetch, checkout, build, relaunch). */
   readonly logFile: string;
-  /** The detached updater script; absent on the in-process SLURM path. */
+  /** The detached updater script; absent on the in-process supervised (SLURM/systemd) path. */
   readonly scriptFile?: string;
 }
 
@@ -211,23 +211,57 @@ echo "[updater] done — now running ${tag}"
 }
 
 /**
- * Applies the checkout for a SLURM deployment, in-process, BEFORE the server
- * exits. Nothing here relies on a detached process surviving the server:
- * inside a SLURM job the updater's process dies with the job's cgroup the
- * moment the server (the job's task) exits — observed in production as a
- * two-line updater log, a dead dashboard, and an update that never landed.
- * Ordering fixes it: stash, fetch, and check out the release while the
- * server is still alive (dist/ is gitignored, so the running build is
- * untouched), answer the browser, and only then exit; the launch wrapper's
- * loop rebuilds the already-checked-out release and relaunches it. A
+ * The supervised deployments whose update checkout must happen IN-PROCESS,
+ * before the server exits. Both supervise the whole process tree as one
+ * cgroup, so a detached updater dies the moment the server does:
+ *
+ * - SLURM: the job's cgroup ends with the batch task; the launch wrapper's
+ *   loop owns rebuild + relaunch.
+ * - systemd: the unit's cgroup is cleaned when the main process exits
+ *   (default KillMode=control-group), and the unit owns rebuild + relaunch —
+ *   `Restart=always` plus the deploy/systemd wrapper script, which rebuilds
+ *   the (new) checkout on every start.
+ */
+interface InPlaceSupervisor {
+  /** Who supervises this process, for the updater log. */
+  readonly name: string;
+  /** Who rebuilds and relaunches after this server exits. */
+  readonly rebuilder: string;
+}
+
+function inPlaceSupervisor(env: NodeJS.ProcessEnv): InPlaceSupervisor | undefined {
+  const jobId = env.SLURM_JOB_ID;
+  if (jobId !== undefined && jobId !== "") {
+    return { name: `SLURM job ${jobId}`, rebuilder: "the launch wrapper" };
+  }
+  // systemd sets INVOCATION_ID for every process it starts directly (and
+  // their children). Login shells do not carry it, so a hand-launched
+  // server keeps the detached-updater path.
+  const invocationId = env.INVOCATION_ID;
+  if (invocationId !== undefined && invocationId !== "") {
+    return { name: `systemd unit (invocation ${invocationId})`, rebuilder: "the service unit" };
+  }
+  return undefined;
+}
+
+/**
+ * Applies the checkout for a supervised (SLURM/systemd) deployment,
+ * in-process, BEFORE the server exits. Nothing here relies on a detached
+ * process surviving the server: inside a supervised cgroup the updater's
+ * process dies the moment the server (the main task) exits — observed in
+ * production as a two-line updater log, a dead dashboard, and an update
+ * that never landed. Ordering fixes it: stash, fetch, and check out the
+ * release while the server is still alive (dist/ is gitignored, so the
+ * running build is untouched), answer the browser, and only then exit; the
+ * supervisor rebuilds the already-checked-out release and relaunches it. A
  * failure restores the previous checkout and throws — the endpoint answers
  * 409 and the server keeps running, which is strictly better than dying
  * over a broken tree.
  */
-async function applySlurmCheckout(
+async function applyInPlaceCheckout(
   repoRoot: string,
   targetVersion: string,
-  jobId: string,
+  supervisor: InPlaceSupervisor,
   logFile: string,
 ): Promise<void> {
   const tag = `app/v${targetVersion}`;
@@ -238,8 +272,8 @@ async function applySlurmCheckout(
   };
   log(`[updater] target ${tag}`);
   log(
-    `[updater] SLURM job ${jobId}: applying the checkout in-process before the server exits ` +
-      "(a detached updater would die with the job's cgroup)",
+    `[updater] ${supervisor.name}: applying the checkout in-process before the server exits ` +
+      "(a detached updater would die with the supervised cgroup)",
   );
   const previous = await git(repoRoot, ["rev-parse", "HEAD"]);
   log(`[updater] previous checkout: ${previous}`);
@@ -279,9 +313,9 @@ async function applySlurmCheckout(
     rollback(`checking out ${tag} failed`),
   );
   log(
-    `[updater] ${tag} checked out — the launch wrapper rebuilds and relaunches it after this server exits`,
+    `[updater] ${tag} checked out — ${supervisor.rebuilder} rebuilds and relaunches it after this server exits`,
   );
-  log("[updater] done — the waiting wrapper builds the new checkout");
+  log(`[updater] done — ${supervisor.rebuilder} builds the new checkout`);
 }
 
 /**
@@ -291,9 +325,11 @@ async function applySlurmCheckout(
  * and are never destroyed: the updater sets them aside with `git stash`
  * (bootstrap installs routinely carry an npm-rewritten package-lock).
  *
- * Under SLURM there is no detached updater at all: the checkout is applied
- * in-process before the server exits (see applySlurmCheckout), and the
- * launch wrapper's loop owns rebuild + relaunch.
+ * Under a supervisor (SLURM, systemd) there is no detached updater at all:
+ * the checkout is applied in-process before the server exits (see
+ * applyInPlaceCheckout), and the supervisor owns rebuild + relaunch — the
+ * SLURM launch wrapper's loop, or the systemd unit's Restart policy running
+ * the deploy/systemd wrapper.
  */
 export async function applyAppUpdate(
   options: ApplyAppUpdateOptions,
@@ -306,9 +342,9 @@ export async function applyAppUpdate(
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const scriptFile = join(options.stateDir, `update-${stamp}.sh`);
   const logFile = join(options.stateDir, `update-${stamp}.log`);
-  const jobId = (options.env ?? process.env).SLURM_JOB_ID;
-  if (jobId !== undefined && jobId !== "") {
-    await applySlurmCheckout(repoRoot, options.targetVersion, jobId, logFile);
+  const supervisor = inPlaceSupervisor(options.env ?? process.env);
+  if (supervisor !== undefined) {
+    await applyInPlaceCheckout(repoRoot, options.targetVersion, supervisor, logFile);
     return { logFile };
   }
   writeFileSync(

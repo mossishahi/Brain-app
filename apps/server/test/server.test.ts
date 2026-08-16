@@ -1284,9 +1284,11 @@ test("POST /api/update-check re-probes on demand and throttles rapid retriggers"
     // Opening the dashboard re-probes NOW and surfaces the new release.
     const checked = await requestJson<{
       version: string;
+      selfUpdateEnabled: boolean;
       appUpdate?: { version: string };
     }>(server, "/api/update-check", { method: "POST", body: "{}" });
     assert.equal(checked.status, 200);
+    assert.equal(checked.value.selfUpdateEnabled, true);
     assert.equal(checked.value.appUpdate?.version, "9.9.9");
     assert.equal(probes, 2);
 
@@ -1309,6 +1311,69 @@ test("POST /api/update-check re-probes on demand and throttles rapid retriggers"
     await server.close();
     await removeWorkspace(workspace);
   }
+});
+
+test("with self-update disabled, update-check says NOTHING WAS CHECKED instead of claiming the latest version", async () => {
+  // The Azure incident this pins down: a --no-self-update systemd host three
+  // releases behind answered the "check for updates" button with "you are on
+  // the latest version". The response must carry selfUpdateEnabled: false so
+  // the UI can say checking is off — and no probe may run at all.
+  const workspace = tempRoot();
+  const server = await startTestBrainServer({
+    workspace,
+    port: 0,
+    // selfUpdateCheck deliberately absent (the --no-self-update launch).
+    appUpdateProbe: async () => {
+      throw new Error("a disabled deployment must never probe release tags");
+    },
+  });
+  try {
+    const checked = await requestJson<{
+      version: string;
+      selfUpdateEnabled: boolean;
+      appUpdate?: unknown;
+    }>(server, "/api/update-check", { method: "POST", body: "{}" });
+    assert.equal(checked.status, 200);
+    assert.equal(checked.value.selfUpdateEnabled, false);
+    assert.equal(checked.value.appUpdate, undefined);
+  } finally {
+    await server.close();
+    await removeWorkspace(workspace);
+  }
+});
+
+test("under systemd the update applies the checkout IN-PROCESS, before the server exits", async () => {
+  // The systemd twin of the SLURM path: the unit's cgroup kills a detached
+  // updater the moment the server exits, and Restart=on-failure never
+  // restarts a clean exit — so the checkout must land while the server
+  // still runs; the unit (Restart=always + the deploy/systemd wrapper)
+  // owns rebuild and relaunch.
+  const root = tempRoot();
+  const { repo, git } = updateFixtureRepo(root);
+  writeFileSync(join(repo, "f.txt"), "local dirt\n");
+
+  const started = await applyAppUpdate({
+    targetVersion: "9.9.9",
+    stateDir: join(root, "self-update"),
+    relaunch: { command: "node", args: ["main.js"], cwd: repo },
+    env: { INVOCATION_ID: "0123abcd" },
+    repoRoot: repo,
+  });
+
+  assert.equal(
+    git("rev-parse", "HEAD"),
+    git("rev-parse", "app/v9.9.9^{commit}"),
+    "the release tag is checked out synchronously",
+  );
+  assert.ok(
+    git("stash", "list").includes("brainstorm self-update"),
+    "the local modification is preserved in the stash",
+  );
+  assert.equal(started.scriptFile, undefined, "no detached updater exists to die");
+  const log = readFileSync(started.logFile, "utf8");
+  assert.ok(log.includes("systemd unit (invocation 0123abcd)"));
+  assert.ok(log.includes("applying the checkout in-process"));
+  assert.ok(log.includes("checked out — the service unit rebuilds"));
 });
 
 test("POST /api/update hands over to the updater; without a known release it refuses", async () => {

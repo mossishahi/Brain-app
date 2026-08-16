@@ -1606,6 +1606,13 @@ export interface UpdateAppResponse {
 export interface UpdateCheckResponse {
   /** The running app version. */
   readonly version: string;
+  /**
+   * Whether this deployment checks for updates at all. False when the
+   * server was launched with --no-self-update: no probe ran, so the absence
+   * of `appUpdate` means "nothing was checked", never "you are current" —
+   * and the UI must say so instead of claiming the latest version.
+   */
+  readonly selfUpdateEnabled: boolean;
   /** A newer release, when one exists. */
   readonly appUpdate?: {
     readonly version: string;

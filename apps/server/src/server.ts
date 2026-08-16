@@ -64,7 +64,7 @@ import {
   type CursorAgentConnectionValidator,
 } from "./settings.js";
 
-const VERSION = "0.2.30";
+const VERSION = "0.2.31";
 const SNAPSHOT_THROTTLE_MS = 500;
 const HEARTBEAT_MS = 15_000;
 const POLL_MS = 2_000;
@@ -724,11 +724,16 @@ export async function startBrainServer(
       if (req.method === "POST" && path === "/api/update-check") {
         // "The beginning of a pipeline session": the dashboard calls this on
         // load so a just-published release surfaces immediately instead of
-        // on the next half-hourly tick. Throttled server-side; when
-        // self-update is disabled it simply reports the running version.
+        // on the next half-hourly tick. Throttled server-side. When
+        // self-update is disabled, `selfUpdateEnabled: false` tells the UI
+        // that NOTHING was checked — answering with just the running version
+        // let the settings drawer claim "you are on the latest version" on
+        // deployments that never looked (observed on a --no-self-update
+        // systemd host sitting three releases behind).
         const found = await probeAppUpdate();
         sendJson(res, 200, {
           version: VERSION,
+          selfUpdateEnabled: options.selfUpdateCheck === true,
           ...(found ? { appUpdate: found } : {}),
         });
         return;

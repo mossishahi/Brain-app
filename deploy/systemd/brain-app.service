@@ -1,0 +1,36 @@
+# Reference unit for running the Brain app under systemd WITH working
+# in-app updates. Install:
+#
+#   sudo cp deploy/systemd/brain-app.service /etc/systemd/system/
+#   # adjust User=, WorkingDirectory=, ExecStart= paths and flags
+#   sudo systemctl daemon-reload && sudo systemctl enable --now brain-app
+#
+# How updating works here: the update card and the "check for updates"
+# button need the server launched WITHOUT --no-self-update. On "Update now"
+# the server checks out the new release in-process (a detached updater would
+# die with this unit's cgroup) and exits cleanly; Restart=always brings it
+# back through the wrapper script, which rebuilds the new checkout and
+# launches it.
+[Unit]
+Description=Brain app server (panel pipeline client, loopback only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mossi
+WorkingDirectory=/home/mossi/Brain-app
+ExecStart=/home/mossi/Brain-app/deploy/systemd/brain-app-run.sh --ip 127.0.0.1 --port 8790 --no-open
+# Restart=always is LOAD-BEARING for self-update: the updater's clean exit
+# is what hands rebuild + relaunch to this unit. (systemctl stop still
+# stops; systemd never restarts an explicitly stopped unit.)
+Restart=always
+RestartSec=5
+# KillMode=process is LOAD-BEARING for the app's job model: submitted runs
+# are detached worker processes that must survive a server restart (the
+# relaunched server adopts them from workspace files). The default
+# control-group mode would kill them with the service.
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
