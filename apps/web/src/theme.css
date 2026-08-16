@@ -401,6 +401,20 @@ textarea,
   color: var(--accent);
 }
 
+/* Token-spend chip: quiet, monospaced, hover for the exact numbers. */
+.token-chip {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-family: var(--mono, ui-monospace, monospace);
+  color: var(--text-dim);
+  white-space: nowrap;
+  cursor: default;
+}
+
 .chip-dim {
   color: var(--text-dim);
 }

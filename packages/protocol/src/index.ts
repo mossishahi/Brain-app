@@ -45,6 +45,20 @@ export type StageActivityKind =
   | "retry"
   | "validation";
 
+/**
+ * Token spend of one agent task (or a sum of tasks), as the provider
+ * reported it. Mirrors the runtime's TokenUsage shape field-for-field —
+ * protocol keeps zero dependencies by design, so the shape is restated here.
+ */
+export interface TokenUsageView {
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly totalTokens?: number;
+  readonly cacheReadInputTokens?: number;
+  readonly cacheWriteInputTokens?: number;
+  readonly reasoningTokens?: number;
+}
+
 /** The capability a logged tool call resolved through (drives the row icon). */
 export type ActivityCapability =
   | "attachment-access"
@@ -75,6 +89,8 @@ export interface StageActivityEntry {
   readonly capability?: ActivityCapability;
   /** Present when the executor attached the call's operational detail. */
   readonly detail?: ActivityDetailView;
+  /** Present on task-completion rows: what the finished task spent. */
+  readonly usage?: TokenUsageView;
 }
 
 /**
@@ -110,6 +126,8 @@ export interface StageBase {
   readonly errors?: readonly StageErrorView[];
   /** Sanitized operational events, oldest to newest (never chain-of-thought). */
   readonly activity?: readonly StageActivityEntry[];
+  /** Total token spend of the stage's agent tasks (all fan-out branches). */
+  readonly usage?: TokenUsageView;
 }
 
 /* --------------------------------------------------- per-stage artifact views */
@@ -473,6 +491,8 @@ export interface CommentView {
   readonly reason: string;
   readonly suggestion?: string;
   readonly evidence?: EvidenceView;
+  /** What this commentor's task spent producing the comment. */
+  readonly usage?: TokenUsageView;
 }
 
 /** One confirmed problem in the judge's repair signal, pinned to a step. */
@@ -725,6 +745,8 @@ export interface FirstPassMemberView {
   /** "paused": the task was mid-flight when the run credit-blocked. */
   readonly status: "pending" | "thinking" | "paused" | "completed" | "failed";
   readonly idea?: BrainIdeaView;
+  /** What this member's first-pass task(s) spent. */
+  readonly usage?: TokenUsageView;
 }
 
 export interface FirstPassStage extends StageBase {

@@ -1,6 +1,7 @@
 import type { SerializedError } from "../errors.js";
 import type { AgentProgress } from "../agent/contracts.js";
 import type { JsonValue } from "../types/json.js";
+import type { TokenUsage } from "../model/response.js";
 import type { PendingGate, RunStatus } from "./checkpoint.js";
 
 /** Fields the runner stamps onto every event. */
@@ -43,6 +44,12 @@ export type RunEventBody =
       readonly taskId: string;
       readonly taskKind: string;
       readonly status: "ok" | "error";
+      /**
+       * The attempt's token spend, straight off the AgentResult. On the
+       * event (not only in the journal) so FAILED attempts' spend is
+       * recorded too — failures are never journaled.
+       */
+      readonly usage?: TokenUsage;
     }
   | {
       readonly type: "agent:progress";

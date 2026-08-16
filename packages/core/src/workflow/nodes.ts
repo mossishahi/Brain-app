@@ -122,6 +122,7 @@ const executeAgent: NodeExecutor = async (node, context) => {
       taskId: task.taskId,
       taskKind: task.kind,
       status: result.status,
+      ...(result.usage !== undefined ? { usage: result.usage } : {}),
     });
     if (result.status === "error") {
       // Failures are never journaled: a resumed run re-executes the task.

@@ -10,6 +10,7 @@ import type {
   StageId,
   StageStatus,
   StageView,
+  TokenUsageView,
 } from "@brainstorm-agentic/protocol";
 import {
   answerGate,
@@ -34,7 +35,7 @@ import {
   stageDot,
   STAGE_TITLES,
 } from "../format";
-import { ActivityFeed, Dot, SkeletonLines } from "./common";
+import { ActivityFeed, Dot, SkeletonLines, TokenChip } from "./common";
 import { BackIcon, ChevronIcon, ForwardIcon } from "./Icons";
 import { PipelineGraph } from "./PipelineGraph";
 import { SendDiagnostics } from "./SendDiagnostics";
@@ -116,6 +117,7 @@ function StageFrame({
   error,
   errors,
   activity,
+  usage,
   selected,
   expanded,
   onToggle,
@@ -134,6 +136,7 @@ function StageFrame({
   error?: string;
   errors?: readonly StageErrorView[];
   activity?: readonly StageActivityEntry[];
+  usage?: TokenUsageView;
   selected: boolean;
   expanded: boolean;
   onToggle: () => void;
@@ -183,6 +186,7 @@ function StageFrame({
           {startedAt !== undefined && `started ${formatClock(startedAt)}`}
           {elapsed !== undefined && ` · ${formatDuration(elapsed)}`}
         </span>
+        {usage && <TokenChip usage={usage} />}
         {actions && <span className="stage-actions">{actions}</span>}
       </header>
       <div id={bodyId}>
@@ -673,6 +677,7 @@ export function Dashboard({
             error={stage?.error}
             errors={stage?.errors}
             activity={stage?.activity}
+            usage={stage?.usage}
             selected={false}
             expanded={!collapsed.has(selected)}
             onToggle={() => toggleStage(selected)}

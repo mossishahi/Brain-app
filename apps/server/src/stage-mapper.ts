@@ -1,11 +1,13 @@
 import { join } from "node:path";
 
-import type {
-  AgentResult,
-  JournalEntry,
-  JsonObject,
-  RunEvent,
-  WorkflowCheckpoint,
+import {
+  addUsage,
+  type AgentResult,
+  type JournalEntry,
+  type JsonObject,
+  type RunEvent,
+  type TokenUsage,
+  type WorkflowCheckpoint,
 } from "@brainstorm-agentic/core";
 import {
   OUTPUT_SHAPES,
@@ -63,6 +65,7 @@ import {
   type StageStatus,
   type DecomposeStepView,
   type StageView,
+  type TokenUsageView,
 } from "@brainstorm-agentic/protocol";
 
 import {
@@ -110,6 +113,8 @@ interface StageTiming {
    */
   errors: StageErrorView[];
   activity: StageActivityEntry[];
+  /** Total token spend of the stage's agent tasks; stamped after timings(). */
+  usage?: TokenUsageView;
 }
 
 /** Failures kept per stage and attempt; older ones roll off first. */
@@ -250,6 +255,84 @@ function agentOutput(entry: JournalEntry): unknown {
   const value = object(entry.value);
   if (value?.status !== "ok") return undefined;
   return value.output;
+}
+
+/** The token-usage record of a journaled or evented value, when well-formed. */
+function usageView(value: unknown): TokenUsageView | undefined {
+  const raw = object(value);
+  if (
+    typeof raw?.inputTokens !== "number" ||
+    typeof raw.outputTokens !== "number"
+  ) {
+    return undefined;
+  }
+  const opt = (candidate: unknown): candidate is number =>
+    typeof candidate === "number";
+  return {
+    inputTokens: raw.inputTokens,
+    outputTokens: raw.outputTokens,
+    ...(opt(raw.totalTokens) ? { totalTokens: raw.totalTokens } : {}),
+    ...(opt(raw.cacheReadInputTokens)
+      ? { cacheReadInputTokens: raw.cacheReadInputTokens }
+      : {}),
+    ...(opt(raw.cacheWriteInputTokens)
+      ? { cacheWriteInputTokens: raw.cacheWriteInputTokens }
+      : {}),
+    ...(opt(raw.reasoningTokens)
+      ? { reasoningTokens: raw.reasoningTokens }
+      : {}),
+  };
+}
+
+/**
+ * Per-task token spend, joined from both records of it:
+ * - `agent:completed` events carry each ATTEMPT's spend (including failed
+ *   attempts, which are never journaled) — summed per task, they are the
+ *   task's true total;
+ * - runs recorded before events carried usage fall back to the journaled
+ *   AgentResult's total (the successful attempt only).
+ */
+function taskUsageIndex(
+  entries: readonly JournalEntry[],
+  events: readonly RunEvent[],
+): Map<string, TokenUsageView> {
+  const index = new Map<string, TokenUsageView>();
+  for (const event of events) {
+    if (event.type !== "agent:completed" || event.usage === undefined) continue;
+    const seen = index.get(event.taskId);
+    index.set(
+      event.taskId,
+      seen ? addUsage(seen as TokenUsage, event.usage) : event.usage,
+    );
+  }
+  for (const entry of entries) {
+    if (entry.kind !== "agent") continue;
+    const value = object(entry.value);
+    const taskId = typeof value?.taskId === "string" ? value.taskId : undefined;
+    if (taskId === undefined || index.has(taskId)) continue;
+    const usage = usageView(value?.usage);
+    if (usage) index.set(taskId, usage);
+  }
+  return index;
+}
+
+/** The task's workflow path — taskIds are `${runId}:${path}` by contract. */
+function taskPath(taskId: string): string {
+  return taskId.slice(taskId.indexOf(":") + 1);
+}
+
+/** Token totals per dashboard stage, from the per-task index. */
+function stageUsageTotals(
+  taskUsage: ReadonlyMap<string, TokenUsageView>,
+): Map<StageId, TokenUsageView> {
+  const totals = new Map<StageId, TokenUsageView>();
+  for (const [taskId, usage] of taskUsage) {
+    const stage = stageForPath(taskPath(taskId));
+    if (!stage) continue;
+    const seen = totals.get(stage);
+    totals.set(stage, seen ? addUsage(seen as TokenUsage, usage as TokenUsage) : usage);
+  }
+  return totals;
 }
 
 function journalAgent(
@@ -418,7 +501,10 @@ function activityDetail(progress: {
   return { kind: kind as ActivityDetailView["kind"], value };
 }
 
-function timings(events: readonly RunEvent[]): Map<StageId, StageTiming> {
+function timings(
+  events: readonly RunEvent[],
+  taskUsage: ReadonlyMap<string, TokenUsageView>,
+): Map<StageId, StageTiming> {
   const result = new Map<StageId, StageTiming>(
     STAGE_IDS.map((id) => [id, { active: false, errors: [], activity: [] }]),
   );
@@ -455,6 +541,13 @@ function timings(events: readonly RunEvent[]): Map<StageId, StageTiming> {
         });
       } else {
         const role = event.taskKind.replace(/^brainstorm\./, "");
+        // Completion rows carry the spend: the event's own usage is THIS
+        // attempt's; older runs whose events predate usage stamping fall
+        // back to the journaled task total.
+        const usage =
+          event.type === "agent:completed"
+            ? (event.usage ?? taskUsage.get(event.taskId))
+            : undefined;
         timing.activity.push({
           id: String(event.seq),
           at: event.at,
@@ -463,6 +556,7 @@ function timings(events: readonly RunEvent[]): Map<StageId, StageTiming> {
             event.type === "agent:started"
               ? `${role} agent started`
               : `${role} agent ${event.status === "ok" ? "completed" : "failed"}`,
+          ...(usage !== undefined ? { usage } : {}),
         });
       }
       if (timing.activity.length > 200) {
@@ -1730,6 +1824,7 @@ function buildReviews(
   events: readonly RunEvent[],
   stageActive: boolean,
   maxRounds: number,
+  taskUsage: ReadonlyMap<string, TokenUsageView> = new Map(),
 ): { members: ReviewMemberView[]; maxRounds: number; complete: boolean } {
   const rounds = new Map<string, {
     cot?: string;
@@ -1819,7 +1914,16 @@ function buildReviews(
       const author = commentors[at.commentor];
       if (author) {
         const view = comment(output, author, seatLabel(panel.indexOf(author)));
-        if (view) round.comments.set(at.commentor, view);
+        if (view) {
+          // The commentor task's spend rides its comment: the index covers
+          // retried attempts; the journaled result is the fallback.
+          const result = object(entry.value);
+          const usage =
+            (typeof result?.taskId === "string"
+              ? taskUsage.get(result.taskId)
+              : undefined) ?? usageView(result?.usage);
+          round.comments.set(at.commentor, usage ? { ...view, usage } : view);
+        }
       }
     } else if (agentResultOf(entry.key, "judge-step")) {
       round.decision = decision(output);
@@ -2117,6 +2221,7 @@ function base(
     ...(timing.error ? { error: timing.error } : {}),
     ...(timing.errors.length > 0 ? { errors: timing.errors } : {}),
     ...(timing.activity.length > 0 ? { activity: timing.activity } : {}),
+    ...(timing.usage !== undefined ? { usage: timing.usage } : {}),
   };
 }
 
@@ -2153,7 +2258,11 @@ export function buildJobDetail(input: MapperInput): JobDetail {
   const events = readEvents(input.jobDir);
   const artifacts = readArtifacts(input.sessionDir);
   const entries = checkpoint?.journal ?? [];
-  const stageTimings = timings(events);
+  const taskUsage = taskUsageIndex(entries, events);
+  const stageTimings = timings(events, taskUsage);
+  for (const [stage, usage] of stageUsageTotals(taskUsage)) {
+    stageTimings.get(stage)!.usage = usage;
+  }
 
   // Latest-wins: on split-classification bundles the merge re-writes the
   // structured input with type/cotSteps/requestedOutputs filled in.
@@ -2272,8 +2381,22 @@ export function buildJobDetail(input: MapperInput): JobDetail {
   // thinking: nothing is executing until the auto-resume fires.
   const creditBlocked =
     checkpoint?.status === "credit_blocked" || input.status === "credit-blocked";
+  // What each seat's first-pass task(s) spent, summed over the member's
+  // branch of the fan-out (develop-idea today; robust to added sub-tasks).
+  const firstPassUsage = (index: number): TokenUsageView | undefined => {
+    let total: TokenUsageView | undefined;
+    for (const [taskId, usage] of taskUsage) {
+      const path = taskPath(taskId);
+      if (!path.includes("/first-pass/") || !path.includes(`/member[${index}]/`)) {
+        continue;
+      }
+      total = total ? addUsage(total as TokenUsage, usage as TokenUsage) : usage;
+    }
+    return total;
+  };
   const firstPassMembers: FirstPassMemberView[] = finalPanel.map((member, index) => {
     const idea = ideas.get(member.id);
+    const usage = firstPassUsage(index);
     // Only the LAST lifecycle event decides failure: a member whose task
     // failed and then started again (auto-resume) is running, not failed.
     const lastLifecycle = [...events].reverse().find(
@@ -2305,6 +2428,7 @@ export function buildJobDetail(input: MapperInput): JobDetail {
               : "thinking"
             : "pending",
       ...(idea ? { idea } : {}),
+      ...(usage !== undefined ? { usage } : {}),
     };
   });
 
@@ -2345,6 +2469,7 @@ export function buildJobDetail(input: MapperInput): JobDetail {
     reviewTiming.active ||
       (checkpoint?.status === "running" && reviewJournalPresent),
     reviewRoundBudget(checkpoint),
+    taskUsage,
   );
   const bridgeOutput =
     bridgeReport(artifact(artifacts, "bridgeReport")) ??

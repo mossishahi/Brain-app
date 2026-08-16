@@ -670,6 +670,233 @@ test("the activity cap evicts plain progress ticks before capability rows", () =
   }
 });
 
+test("token spend surfaces at every level: activity rows, seats, comments, stages", () => {
+  const workspace = mkdtempSync(join(tmpdir(), "stage-mapper-test-"));
+  try {
+    const sessionDir = join(workspace, "session");
+    const jobDir = join(workspace, "job");
+    mkdirSync(join(sessionDir, "artifacts"), { recursive: true });
+    mkdirSync(jobDir, { recursive: true });
+
+    const processPath = "brainstorm-root/process-input/process-input-execute";
+    const devPath = (member: number) =>
+      `brainstorm-root/first-pass/first-pass-fanout/member[${member}]/develop-idea/develop-idea-execute`;
+    const commentPath =
+      "brainstorm-root/review-members/review-members-fanout/member[0]/review-steps/" +
+      "cotStep[0]/review-round-loop/iter[0]/review-round-body/gather-comments/" +
+      "gather-comments-fanout/commentor[0]/dispatch-comment/else/comment-step-execute";
+
+    // The journal carries each successful task's total (the only record OLD
+    // runs have). member[0]'s journal total deliberately disagrees with the
+    // event-borne attempts below: events must win, because only they see
+    // failed attempts.
+    const journal = [
+      {
+        key: `${processPath}::result`,
+        kind: "agent",
+        value: {
+          taskId: `job-1:${processPath}`,
+          status: "ok",
+          output: {},
+          usage: { inputTokens: 100, outputTokens: 10 },
+        },
+      },
+      {
+        key: `${devPath(0)}::result`,
+        kind: "agent",
+        value: {
+          taskId: `job-1:${devPath(0)}`,
+          status: "ok",
+          output: {},
+          usage: { inputTokens: 999_999, outputTokens: 999 },
+        },
+      },
+      {
+        key: `${devPath(1)}::result`,
+        kind: "agent",
+        value: {
+          taskId: `job-1:${devPath(1)}`,
+          status: "ok",
+          output: {},
+          usage: { inputTokens: 2000, outputTokens: 80, cacheReadInputTokens: 111 },
+        },
+      },
+      {
+        key: `${commentPath}::result`,
+        kind: "agent",
+        value: {
+          taskId: `job-1:${commentPath}`,
+          status: "ok",
+          output: {
+            verdict: "Build",
+            step: 1,
+            reason: "The framing skips the calibration step.",
+            suggestion: "",
+            evidence: noEvidence,
+          },
+          usage: { inputTokens: 500, outputTokens: 25 },
+        },
+      },
+    ];
+    writeFileSync(
+      join(sessionDir, "checkpoint.json"),
+      JSON.stringify({
+        runId: "job-1",
+        workflowId: "brainstorm",
+        status: "completed",
+        input: {},
+        journal,
+        pendingGates: [],
+        seq: 1,
+        updatedAt: Date.now(),
+      }),
+    );
+    writeFileSync(
+      join(sessionDir, "artifacts", "index.json"),
+      JSON.stringify({
+        refs: [
+          { id: "a-panel", metadata: { schema: "panel", path: "panel" } },
+          { id: "a-idea", metadata: { schema: "brainIdea", path: "ideas.member-1" } },
+        ],
+      }),
+    );
+    writeFileSync(
+      join(sessionDir, "artifacts", "a-panel"),
+      JSON.stringify({
+        members: [
+          { id: "member-1", department: "Physics", umbrella: "Quantum Optics", subfields: [] },
+          { id: "member-2", department: "Biology", umbrella: "Systems Biology", subfields: [] },
+        ],
+      }),
+    );
+    // member-1 needs an idea on record: the review walk sizes its steps from
+    // the chain, and a chain-less member reconstructs no rounds to hang the
+    // comment (and its spend) on.
+    writeFileSync(
+      join(sessionDir, "artifacts", "a-idea"),
+      JSON.stringify({
+        output: {
+          type: "research idea",
+          paper: {
+            abstract: [paragraph],
+            introduction: [paragraph],
+            method: [paragraph],
+            discussion: [paragraph],
+            conclusion: [paragraph],
+          },
+        },
+        cot: ["Step one."],
+      }),
+    );
+
+    // member[0]'s task ran twice: a failed attempt, then the success. Each
+    // agent:completed event carries that attempt's own spend.
+    const events = [
+      {
+        type: "agent:completed",
+        runId: "job-1",
+        seq: 1,
+        at: 1000,
+        path: devPath(0),
+        taskId: `job-1:${devPath(0)}`,
+        taskKind: "brainstorm.brain",
+        status: "error",
+        usage: { inputTokens: 400, outputTokens: 5 },
+      },
+      {
+        type: "agent:completed",
+        runId: "job-1",
+        seq: 2,
+        at: 2000,
+        path: devPath(0),
+        taskId: `job-1:${devPath(0)}`,
+        taskKind: "brainstorm.brain",
+        status: "ok",
+        usage: { inputTokens: 700, outputTokens: 45 },
+      },
+    ];
+    writeFileSync(
+      join(jobDir, "events.jsonl"),
+      events.map((event) => JSON.stringify(event)).join("\n") + "\n",
+    );
+
+    const record: JobRecord = {
+      jobId: "job-1",
+      topic: "topic",
+      status: "completed",
+      runner: "local",
+      createdAt: 1,
+      updatedAt: 2,
+    };
+    const detail = buildJobDetail({
+      record,
+      status: "completed",
+      sessionDir,
+      jobDir,
+      settings,
+    });
+
+    // 1. Activity rows: each completion row shows THAT attempt's spend —
+    //    the failed attempt's included.
+    const firstPassStage = detail.stages.find((stage) => stage.id === "first-pass");
+    assert.ok(firstPassStage && firstPassStage.id === "first-pass");
+    const completionRows = (firstPassStage.activity ?? []).filter(
+      (entry) => entry.usage !== undefined,
+    );
+    assert.deepEqual(
+      completionRows.map((entry) => entry.usage),
+      [
+        { inputTokens: 400, outputTokens: 5 },
+        { inputTokens: 700, outputTokens: 45 },
+      ],
+      "completion rows carry per-attempt usage",
+    );
+
+    // 2. Per seat in the first pass: events (which saw both attempts) win
+    //    over the journal total; a seat without evented usage falls back to
+    //    its journaled total, cache split included.
+    const seatUsage = new Map(
+      firstPassStage.members.map((member) => [member.memberId, member.usage]),
+    );
+    assert.deepEqual(seatUsage.get("member-1"), {
+      inputTokens: 1100,
+      outputTokens: 50,
+    });
+    assert.deepEqual(seatUsage.get("member-2"), {
+      inputTokens: 2000,
+      outputTokens: 80,
+      cacheReadInputTokens: 111,
+    });
+
+    // 3. Per commentor per review round: the comment carries its task's spend.
+    const reviewStage = detail.stages.find((stage) => stage.id === "review-members");
+    assert.ok(reviewStage && reviewStage.id === "review-members");
+    const reviewed = reviewStage.members.find((member) => member.memberId === "member-1");
+    const round = reviewed?.steps[0]?.rounds[0];
+    assert.ok(round, "the comment's round reconstructs");
+    assert.deepEqual(round.comments[0]?.usage, { inputTokens: 500, outputTokens: 25 });
+
+    // 4. Per stage: totals across every task of the stage, fan-outs included.
+    const stageUsage = new Map(detail.stages.map((stage) => [stage.id, stage.usage]));
+    assert.deepEqual(stageUsage.get("process-input"), {
+      inputTokens: 100,
+      outputTokens: 10,
+    });
+    assert.deepEqual(stageUsage.get("first-pass"), {
+      inputTokens: 3100,
+      outputTokens: 130,
+      cacheReadInputTokens: 111,
+    });
+    assert.deepEqual(stageUsage.get("review-members"), {
+      inputTokens: 500,
+      outputTokens: 25,
+    });
+    assert.equal(stageUsage.get("select-panel"), undefined, "no tasks, no chip");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("the woven interdisciplinary seat surfaces in every panel view (latest panel artifact wins)", () => {
   const workspace = mkdtempSync(join(tmpdir(), "stage-mapper-test-"));
   try {

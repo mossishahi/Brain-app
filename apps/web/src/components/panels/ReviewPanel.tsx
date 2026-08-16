@@ -24,7 +24,7 @@ import type {
   ReviewStepView,
 } from "@brainstorm-agentic/protocol";
 import { prefersReducedMotion } from "../../format";
-import { EvidenceBlock } from "../common";
+import { EvidenceBlock, TokenChip } from "../common";
 import { BackIcon, CopyIcon, ForwardIcon } from "../Icons";
 import { IdeaTabs } from "./FirstPassPanel";
 import {
@@ -216,9 +216,12 @@ function CommentContent({ comment }: { comment: CommentView }) {
   // No verdict chip here: the colored name on the summary row IS the verdict.
   return (
     <div className="comment-content">
-      {comment.step !== undefined && (
+      {(comment.step !== undefined || comment.usage !== undefined) && (
         <div className="assessment-row">
-          <span className="badge">step {comment.step}</span>
+          {comment.step !== undefined && (
+            <span className="badge">step {comment.step}</span>
+          )}
+          {comment.usage && <TokenChip usage={comment.usage} />}
         </div>
       )}
       <div>

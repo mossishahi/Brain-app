@@ -6,9 +6,48 @@ import type {
   EvidenceView,
   PanelMemberView,
   StageActivityEntry,
+  TokenUsageView,
   Verdict,
 } from "@brainstorm-agentic/protocol";
 import type { DotState } from "../format";
+
+/** 1234 -> "1.2k", 1230000 -> "1.2M": token counts at chip scale. */
+export function formatTokens(count: number): string {
+  if (count >= 1_000_000) {
+    const millions = count / 1_000_000;
+    return `${millions >= 10 ? Math.round(millions) : millions.toFixed(1)}M`;
+  }
+  if (count >= 1_000) {
+    const thousands = count / 1_000;
+    return `${thousands >= 10 ? Math.round(thousands) : thousands.toFixed(1)}k`;
+  }
+  return String(count);
+}
+
+/**
+ * A compact "tokens in / out" chip. The title carries the exact numbers and
+ * the cache/reasoning split, so hovering answers what the rounding hides.
+ */
+export function TokenChip({ usage }: { usage: TokenUsageView }) {
+  const parts = [
+    `input ${usage.inputTokens.toLocaleString()}`,
+    `output ${usage.outputTokens.toLocaleString()}`,
+    ...(usage.cacheReadInputTokens !== undefined
+      ? [`cache read ${usage.cacheReadInputTokens.toLocaleString()}`]
+      : []),
+    ...(usage.cacheWriteInputTokens !== undefined
+      ? [`cache write ${usage.cacheWriteInputTokens.toLocaleString()}`]
+      : []),
+    ...(usage.reasoningTokens !== undefined
+      ? [`reasoning ${usage.reasoningTokens.toLocaleString()}`]
+      : []),
+  ];
+  return (
+    <span className="token-chip" title={`tokens: ${parts.join(" · ")}`}>
+      {formatTokens(usage.inputTokens)} in · {formatTokens(usage.outputTokens)} out
+    </span>
+  );
+}
 
 export function Dot({ state }: { state: DotState }) {
   return <span className={`dot dot-${state.tone}${state.pulse ? " pulse" : ""}`} aria-hidden />;
@@ -244,6 +283,11 @@ export function ActivityFeed({
             {entry.elapsedMs !== undefined && (
               <span className="activity-meta">
                 {(entry.elapsedMs / 1000).toFixed(0)}s
+              </span>
+            )}
+            {entry.usage && (
+              <span className="activity-meta">
+                <TokenChip usage={entry.usage} />
               </span>
             )}
             {entry.capability && (

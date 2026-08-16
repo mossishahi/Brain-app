@@ -22,7 +22,7 @@ import type {
   VerifyOutputView,
 } from "@brainstorm-agentic/protocol";
 import type { DotState } from "../../format";
-import { Clamp, Dot, EvidenceBlock } from "../common";
+import { Clamp, Dot, EvidenceBlock, TokenChip } from "../common";
 
 type TabId = "primary" | "requested" | "chain" | "novelty" | "papers";
 
@@ -641,6 +641,7 @@ function MemberCard({ member }: { member: FirstPassMemberView }) {
       <div className="member-head">
         <span className="member-umbrella">{member.umbrella}</span>
         <span className="member-dept">{member.department}</span>
+        {member.usage && <TokenChip usage={member.usage} />}
         <span className="member-status">
           <Dot state={status.dot} />
           {status.text}
