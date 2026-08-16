@@ -296,6 +296,15 @@ test("the registry endpoint is deployment-owned: PUT ignores it and health repor
       }>(server, "/api/health")
     ).value;
     assert.match(health.version, /^\d+\.\d+\.\d+$/);
+    // The announced version must BE the app-root package.json version. It was
+    // once a hand-bumped constant; the release that forgot the bump made a
+    // successful update announce the old version, and the web app declared a
+    // rollback that never happened.
+    const appRootPackage = JSON.parse(
+      readFileSync(new URL("../../../../package.json", import.meta.url), "utf8"),
+    ) as { name?: string; version?: string };
+    assert.equal(appRootPackage.name, "brainstorm-agentic-app");
+    assert.equal(health.version, appRootPackage.version);
     assert.equal(health.contentRegistry.bundle, "brainstorm");
     assert.equal(health.contentRegistry.latest, latestPublishedVersion());
     assert.equal(health.contentRegistry.effectiveVersion, latestPublishedVersion());

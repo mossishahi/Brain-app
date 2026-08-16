@@ -1,6 +1,7 @@
 import {
   createReadStream,
   existsSync,
+  readFileSync,
   statSync,
   watch,
   type FSWatcher,
@@ -66,7 +67,48 @@ import {
 } from "./settings.js";
 import { listCursorModels } from "@brainstorm-agentic/executor-cursor-agent";
 
-const VERSION = "0.2.34";
+/**
+ * The announced app version, read from the app-root package.json at startup.
+ * This must never be a hard-coded constant again: every release bumped one by
+ * hand until v0.2.35 forgot to, and the freshly updated server then announced
+ * the OLD version — the web app compared versions, concluded the update had
+ * rolled back, and told the user so, all while the new code ran fine.
+ */
+const VERSION = readAppVersion();
+
+function readAppVersion(): string {
+  // Walk up from this module (dist/src/server.js at runtime) to the app root,
+  // identified by its package name rather than a fixed depth so a build
+  // layout change cannot silently break version reporting.
+  let dir = fileURLToPath(new URL(".", import.meta.url));
+  for (let hop = 0; hop < 8; hop += 1) {
+    const candidate = join(dir, "package.json");
+    if (existsSync(candidate)) {
+      try {
+        const parsed = JSON.parse(readFileSync(candidate, "utf8")) as {
+          name?: string;
+          version?: string;
+        };
+        if (
+          parsed.name === "brainstorm-agentic-app" &&
+          typeof parsed.version === "string"
+        ) {
+          return parsed.version;
+        }
+      } catch {
+        // Unreadable candidate; keep walking up.
+      }
+    }
+    const parent = resolve(dir, "..");
+    if (parent === dir) break;
+    dir = parent;
+  }
+  throw new Error(
+    "could not resolve the app version: no package.json named " +
+      "brainstorm-agentic-app above " +
+      fileURLToPath(import.meta.url),
+  );
+}
 const SNAPSHOT_THROTTLE_MS = 500;
 const HEARTBEAT_MS = 15_000;
 const POLL_MS = 2_000;
