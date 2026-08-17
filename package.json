@@ -1,7 +1,7 @@
 {
   "name": "brainstorm-agentic-app",
   "private": true,
-  "version": "0.2.37",
+  "version": "0.2.38",
   "description": "Brainstorm product application: frontend, host server, isolated worker, and runtime libraries.",
   "workspaces": [
     "packages/*",
