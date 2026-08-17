@@ -1304,6 +1304,36 @@ function usageFromResult(value: unknown): TokenUsage {
 }
 
 /**
+ * Rides an attempt's already-billed usage on an error about to be thrown, so
+ * the retry ladder can fold it into the task's accounting even though the
+ * attempt produced no result: the SDK reports usage on its result message
+ * even for non-success ends and for finals whose output does not parse.
+ * The property never leaves the process — serializeError keeps only
+ * name/message/stack — so nothing extra reaches checkpoints or events.
+ */
+function attachTaskUsage<T>(error: T, usage: TokenUsage): T {
+  if (typeof error === "object" && error !== null) {
+    (error as { taskUsage?: TokenUsage }).taskUsage = usage;
+  }
+  return error;
+}
+
+/** The usage a thrown attempt carried, when one was attached. */
+function takeTaskUsage(error: unknown): TokenUsage | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  const carried = (error as { taskUsage?: unknown }).taskUsage;
+  if (
+    typeof carried !== "object" ||
+    carried === null ||
+    typeof (carried as { inputTokens?: unknown }).inputTokens !== "number" ||
+    typeof (carried as { outputTokens?: unknown }).outputTokens !== "number"
+  ) {
+    return undefined;
+  }
+  return carried as TokenUsage;
+}
+
+/**
  * Best-effort extraction of one JSON value from a model's final TEXT message
  * (the raw-JSON fallback path when native structured output is exhausted).
  * Models under that instruction still occasionally wrap the object in prose
@@ -1824,13 +1854,24 @@ async function executeQuery(
     if (!finalResult) {
       throw new Error("Claude Agent SDK ended without a result message");
     }
+    // The result message carries the session's cumulative usage even when
+    // the session did not succeed; from here on every throw rides it out,
+    // so the retry ladder records what the failed attempt already spent.
+    const queryUsage = usageFromResult(finalResult.usage);
     if (finalResult.subtype !== "success" || finalResult.is_error === true) {
       const errors = Array.isArray(finalResult.errors)
         ? finalResult.errors.map(String).join("; ")
         : `Claude Agent SDK ended with ${String(finalResult.subtype)}`;
-      throw new Error(errors);
+      throw attachTaskUsage(new Error(errors), queryUsage);
     }
-    const output = parseResultOutput(finalResult, task);
+    let output: JsonValue;
+    try {
+      output = parseResultOutput(finalResult, task);
+    } catch (error) {
+      // An unparseable final message spends a validation attempt in a fresh
+      // session; the tokens this one billed must not vanish with it.
+      throw attachTaskUsage(error, queryUsage);
+    }
     const metadata: JsonObject = {
       executor: "claude-agent-sdk",
       ...(typeof finalResult.session_id === "string"
@@ -1856,7 +1897,7 @@ async function executeQuery(
       taskId: task.taskId,
       status: "ok",
       output,
-      usage: usageFromResult(finalResult.usage),
+      usage: queryUsage,
       metadata,
     };
   } finally {
@@ -2040,6 +2081,11 @@ export class ClaudeAgentExecutor implements AgentExecutor {
           usage,
         };
       } catch (error) {
+        // A thrown attempt may still carry the usage its session already
+        // billed (a non-success end, an unparseable final message); fold it
+        // in so retries and final failures account for it.
+        const lostUsage = takeTaskUsage(error);
+        if (lostUsage !== undefined) usage = addUsage(usage, lostUsage);
         if (
           context.signal?.aborted ||
           (error instanceof Error && error.name === "AbortError")

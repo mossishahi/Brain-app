@@ -80,6 +80,16 @@ export interface CursorSdkRunResult {
   readonly usage?: CursorSdkTokenUsage;
 }
 
+/**
+ * Token usage as the Cursor SDK reports it. `inputTokens` is the WHOLE
+ * prompt context: the cache reads and cache writes are counted INSIDE it,
+ * with `cacheReadTokens`/`cacheWriteTokens` restating those two subsets.
+ * `totalTokens` re-adds the cache fields on top of `inputTokens`, so it
+ * double-counts them. Verified against provider billing exports: on every
+ * request of a 576-request run, inputTokens == (uncached input) +
+ * (cache write) + (cache read). coreUsage() normalizes this shape to the
+ * core contract, where the three input parts are disjoint.
+ */
 export interface CursorSdkTokenUsage {
   readonly inputTokens: number;
   readonly outputTokens: number;
@@ -326,6 +336,15 @@ interface AttemptCapture {
   /** The payload of the LAST submit_result call, when the tool exists. */
   submittedResult?: JsonValue;
   turn: number;
+  /**
+   * The attempt's usage as captured so far. Mirrors executeAttempt's local
+   * accumulator so an attempt that THROWS — a parse failure or turn-cap
+   * cancel (both after the stream completed), a crash or stall (after part
+   * of it) — still hands the tokens it spent to the retry ladder instead of
+   * discarding them with the exception. Cleared by the caller once the
+   * attempt returns a result (the result then owns the numbers).
+   */
+  usage?: TokenUsage;
 }
 
 function record(value: unknown): UnknownRecord {
@@ -1259,24 +1278,56 @@ function allowedBuiltinTools(task: AgentTask): string[] {
 
 function coreUsage(value: CursorSdkTokenUsage | undefined): TokenUsage {
   if (!value) return emptyUsage();
-  const inputTokens = typeof value.inputTokens === "number" ? value.inputTokens : 0;
+  const rawInput = typeof value.inputTokens === "number" ? value.inputTokens : 0;
   const outputTokens = typeof value.outputTokens === "number" ? value.outputTokens : 0;
+  const cacheRead =
+    typeof value.cacheReadTokens === "number" ? value.cacheReadTokens : undefined;
+  const cacheWrite =
+    typeof value.cacheWriteTokens === "number" ? value.cacheWriteTokens : undefined;
+  // Normalize to the core contract, which every other backend follows
+  // (the Anthropic Messages and Claude Agent mappings both take the API's
+  // cache-EXCLUSIVE input_tokens): the SDK counts cache reads and writes
+  // inside inputTokens, so they are subtracted back out here, leaving the
+  // three input parts disjoint. The SDK's totalTokens is ignored for the
+  // same reason — it re-adds the cache fields inputTokens already carried,
+  // which inflated recorded totals to ~1.8x what the provider billed.
+  const inputTokens = Math.max(0, rawInput - (cacheRead ?? 0) - (cacheWrite ?? 0));
   return {
     inputTokens,
     outputTokens,
-    totalTokens:
-      typeof value.totalTokens === "number"
-        ? value.totalTokens
-        : inputTokens + outputTokens,
-    ...(typeof value.cacheReadTokens === "number"
-      ? { cacheReadInputTokens: value.cacheReadTokens }
-      : {}),
-    ...(typeof value.cacheWriteTokens === "number"
-      ? { cacheWriteInputTokens: value.cacheWriteTokens }
-      : {}),
+    totalTokens: inputTokens + outputTokens,
+    ...(cacheRead !== undefined ? { cacheReadInputTokens: cacheRead } : {}),
+    ...(cacheWrite !== undefined ? { cacheWriteInputTokens: cacheWrite } : {}),
     ...(typeof value.reasoningTokens === "number"
       ? { reasoningTokens: value.reasoningTokens }
       : {}),
+  };
+}
+
+/**
+ * The best estimate from two partial views of one attempt's usage: the sum
+ * of the streamed `usage` messages, and the terminal result's cumulative
+ * report. Some runtimes omit one or the other, and either can miss the tail
+ * of a session (observed against provider billing: a final API call absent
+ * from both). Component-wise max never double-counts and never drops the
+ * larger view of a component; totalTokens is recomputed from the disjoint
+ * parts, matching coreUsage().
+ */
+function mergeUsageEstimates(a: TokenUsage, b: TokenUsage): TokenUsage {
+  const opt = (x?: number, y?: number): number | undefined =>
+    x === undefined && y === undefined ? undefined : Math.max(x ?? 0, y ?? 0);
+  const inputTokens = Math.max(a.inputTokens, b.inputTokens);
+  const outputTokens = Math.max(a.outputTokens, b.outputTokens);
+  const cacheRead = opt(a.cacheReadInputTokens, b.cacheReadInputTokens);
+  const cacheWrite = opt(a.cacheWriteInputTokens, b.cacheWriteInputTokens);
+  const reasoning = opt(a.reasoningTokens, b.reasoningTokens);
+  return {
+    inputTokens,
+    outputTokens,
+    totalTokens: inputTokens + outputTokens,
+    ...(cacheRead !== undefined ? { cacheReadInputTokens: cacheRead } : {}),
+    ...(cacheWrite !== undefined ? { cacheWriteInputTokens: cacheWrite } : {}),
+    ...(reasoning !== undefined ? { reasoningTokens: reasoning } : {}),
   };
 }
 
@@ -1566,6 +1617,7 @@ async function executeAttempt(
       if (message.type === "usage") {
         usageTurns += 1;
         usage = addUsage(usage, coreUsage(message.usage as CursorSdkTokenUsage));
+        capture.usage = usage;
         enforceTurnCap();
       }
       capture.turn = toolRounds + usageTurns + 1;
@@ -1592,6 +1644,16 @@ async function executeAttempt(
     }
     const turns = toolRounds + usageTurns;
     const finalResult = await Promise.race([run.wait(), stallSignal]);
+    if (finalResult.usage) {
+      // The terminal result's usage is cumulative when reported, and some
+      // runtimes emit only it (or only the streamed messages, or miss a
+      // session's tail in both): take the component-wise best estimate.
+      // Merged BEFORE the throw checks below, so a cancelled or errored run
+      // that still reported usage hands its spend to the retry ladder
+      // through the capture instead of losing it with the exception.
+      usage = mergeUsageEstimates(usage, coreUsage(finalResult.usage));
+      capture.usage = usage;
+    }
     if (cancelled === "signal" || context.signal?.aborted) {
       throw abortError(context.signal?.reason);
     }
@@ -1610,12 +1672,6 @@ async function executeAttempt(
       throw new Error(
         finalResult.error?.message ?? "Cursor SDK run ended with an error",
       );
-    }
-    if (finalResult.usage) {
-      // The terminal result's usage is cumulative when reported; prefer it
-      // over the per-turn sum, which some runtimes do not emit.
-      const total = coreUsage(finalResult.usage);
-      if ((total.totalTokens ?? 0) >= (usage.totalTokens ?? 0)) usage = total;
     }
 
     let output: JsonValue;
@@ -1821,6 +1877,10 @@ export class CursorAgentExecutor implements AgentExecutor {
           nativeStructuredOutput,
           rejectedOutput,
         );
+        // The attempt returned: result.usage owns its numbers now, so the
+        // in-flight capture must not be harvested again by the catch below
+        // (a later throw in validation would otherwise double-count).
+        capture.usage = undefined;
         if (costUsd !== undefined) spentUsd += costUsd;
         if (result.usage) usage = addUsage(usage, result.usage);
         if (result.status === "error") {
@@ -1925,6 +1985,17 @@ export class CursorAgentExecutor implements AgentExecutor {
           usage,
         };
       } catch (error) {
+        // An attempt that THROWS still spent tokens — a parse failure or a
+        // turn-cap cancel happens after the whole stream was consumed, a
+        // crash or stall after part of it. The capture carries what was
+        // seen; fold it in so retries and final failures account for every
+        // session the provider billed instead of discarding it with the
+        // exception. (Verified against a provider billing export: thrown
+        // attempts were ~4% of a real run's billed tokens.)
+        if (capture.usage !== undefined) {
+          usage = addUsage(usage, capture.usage);
+          capture.usage = undefined;
+        }
         if (
           context.signal?.aborted ||
           (error instanceof Error && error.name === "AbortError")

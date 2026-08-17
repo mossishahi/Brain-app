@@ -183,6 +183,44 @@ test("executes a structured task with setup-token auth and capability tools", as
   });
 });
 
+test("a non-success SDK end still records the usage its session billed", async () => {
+  const executor = new ClaudeAgentExecutor({
+    token: "setup-token-secret",
+    queryFn: () => ({
+      async *[Symbol.asyncIterator]() {
+        yield {
+          type: "result",
+          subtype: "error_during_execution",
+          is_error: true,
+          errors: ["the session died mid-flight"],
+          usage: {
+            input_tokens: 9,
+            output_tokens: 3,
+            cache_read_input_tokens: 5,
+          },
+        };
+      },
+    }),
+  });
+  const result = await executor.execute(structuredTask, {
+    runId: "run-1",
+    nodePath: "root/brain",
+  });
+  assert.equal(result.status, "error");
+  assert.match(
+    result.status === "error" ? result.error.message : "",
+    /died mid-flight/,
+  );
+  // The failed session's tokens were already billed; the error carries them
+  // into the task's accounting instead of discarding them with the throw.
+  assert.deepEqual(result.usage, {
+    inputTokens: 9,
+    outputTokens: 3,
+    totalTokens: 12,
+    cacheReadInputTokens: 5,
+  });
+});
+
 test("passes customized Agent SDK execution controls", async () => {
   const captured: ClaudeAgentQueryInput[] = [];
   const executor = new ClaudeAgentExecutor({

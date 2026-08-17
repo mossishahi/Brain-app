@@ -149,19 +149,23 @@ function finished(result?: string): CursorSdkRunResult {
   return {
     status: "finished",
     ...(result !== undefined ? { result } : {}),
+    // The real SDK's shape (verified against provider billing exports):
+    // inputTokens is the WHOLE context — cache read and cache write are
+    // counted inside it — and totalTokens re-adds both (double-counting).
+    // coreUsage() must undo both: 15 - 2 - 1 = 12 disjoint input tokens.
     usage: {
-      inputTokens: 12,
+      inputTokens: 15,
       outputTokens: 4,
       cacheReadTokens: 2,
       cacheWriteTokens: 1,
-      totalTokens: 16,
+      totalTokens: 22,
     },
   };
 }
 
 /* ------------------------------------------------------------------ tests */
 
-test("structured output rides the submit_result tool and maps usage", async () => {
+test("structured output rides the submit_result tool; cache-inclusive usage is normalized", async () => {
   const state = newState();
   const executor = new CursorAgentExecutor({
     apiKey: "cursor-key",
@@ -189,6 +193,8 @@ test("structured output rides the submit_result tool and maps usage", async () =
   assert.deepEqual(result.status === "ok" ? result.output : undefined, {
     answer: "structured",
   });
+  // Disjoint fields: input excludes the cache parts, and totalTokens is
+  // in + out — never the SDK's double-counted figure (22 in the fixture).
   assert.deepEqual(result.usage, {
     inputTokens: 12,
     outputTokens: 4,
@@ -371,6 +377,149 @@ test("authoritative validation feeds issues into a fresh attempt", async () => {
   );
   assert.match(state.prompts[1]!, /failed authoritative validation/);
   assert.match(state.prompts[1]!, /answer must be good/);
+});
+
+test("a thrown attempt's streamed usage reaches the final failure result", async () => {
+  const state = newState();
+  const executor = new CursorAgentExecutor({
+    apiKey: "cursor-key",
+    listModels: async () => CATALOG,
+    agentFactory: fakeFactory(
+      [
+        {
+          messages: [
+            {
+              type: "usage",
+              usage: {
+                inputTokens: 103, // 100 cache write + 3 cache read inside
+                outputTokens: 7,
+                cacheReadTokens: 3,
+                cacheWriteTokens: 100,
+                totalTokens: 213,
+              },
+            },
+          ],
+          result: {
+            status: "error",
+            error: { message: "backend exploded mid-run" },
+          },
+        },
+      ],
+      state,
+    ),
+  });
+  const result = await executor.execute(structuredTask, {
+    runId: "run-1",
+    nodePath: "root/brain",
+  });
+  assert.equal(result.status, "error");
+  assert.match(
+    result.status === "error" ? result.error.message : "",
+    /backend exploded/,
+  );
+  // The session was billed before it died; the tokens must not vanish with
+  // the exception that reports the death.
+  assert.deepEqual(result.usage, {
+    inputTokens: 0,
+    outputTokens: 7,
+    totalTokens: 7,
+    cacheReadInputTokens: 3,
+    cacheWriteInputTokens: 100,
+  });
+});
+
+test("a parse-failure attempt's usage carries into the eventual success", async () => {
+  const state = newState();
+  const executor = new CursorAgentExecutor({
+    apiKey: "cursor-key",
+    listModels: async () => CATALOG,
+    agentFactory: fakeFactory(
+      [
+        {
+          // Attempt 1 completes but its final message is not JSON: the
+          // executor throws, spends a validation attempt on a fresh
+          // session — and must keep the tokens this session billed.
+          messages: [
+            { type: "usage", usage: { inputTokens: 10, outputTokens: 5 } },
+          ],
+          result: { status: "finished", result: "not json at all" },
+        },
+        {
+          // The retry runs with the raw-JSON fallback (no submit_result
+          // tool), so the final message itself carries the object.
+          result: {
+            status: "finished",
+            result: '{"answer":"recovered"}',
+            usage: {
+              inputTokens: 15,
+              outputTokens: 4,
+              cacheReadTokens: 2,
+              cacheWriteTokens: 1,
+              totalTokens: 22,
+            },
+          },
+        },
+      ],
+      state,
+    ),
+  });
+  const result = await executor.execute(structuredTask, {
+    runId: "run-1",
+    nodePath: "root/brain",
+  });
+  assert.equal(result.status, "ok");
+  assert.deepEqual(result.status === "ok" ? result.output : undefined, {
+    answer: "recovered",
+  });
+  // Attempt 1 (10 in, 5 out) plus attempt 2 (12 in, 4 out, 2 read, 1 write).
+  assert.deepEqual(result.usage, {
+    inputTokens: 22,
+    outputTokens: 9,
+    totalTokens: 31,
+    cacheReadInputTokens: 2,
+    cacheWriteInputTokens: 1,
+  });
+  assert.match(state.prompts[1]!, /not parseable JSON/);
+});
+
+test("terminal usage merges component-wise with the streamed sum", async () => {
+  const state = newState();
+  const executor = new CursorAgentExecutor({
+    apiKey: "cursor-key",
+    listModels: async () => CATALOG,
+    agentFactory: fakeFactory(
+      [
+        {
+          // The stream saw more input than the terminal report; the terminal
+          // saw more output (a tail the stream missed — observed against
+          // provider billing). Neither view alone is complete, so the
+          // estimate takes the larger of each component.
+          messages: [
+            { type: "usage", usage: { inputTokens: 100, outputTokens: 2 } },
+          ],
+          callTools: async (tools) => {
+            await tools.submit_result!.execute({ answer: "merged" }, {});
+          },
+          result: {
+            status: "finished",
+            result: "",
+            usage: { inputTokens: 40, outputTokens: 60 },
+          },
+        },
+      ],
+      state,
+    ),
+  });
+  const result = await executor.execute(structuredTask, {
+    runId: "run-1",
+    nodePath: "root/brain",
+  });
+  assert.equal(result.status, "ok");
+  assert.deepEqual(result.usage, {
+    inputTokens: 100,
+    outputTokens: 60,
+    totalTokens: 160,
+  });
 });
 
 test("exceeding maxTurns (tool rounds + completed sends) cancels the run and fails the task", async () => {
