@@ -88,6 +88,8 @@ export interface ProviderConfig {
     readonly effort?: "low" | "medium" | "high" | "xhigh" | "max";
     readonly thinking?: "adaptive" | "disabled";
     readonly fallbackModel?: string;
+    /** Session inactivity ceiling (ms); 0 disables the stall watchdog. */
+    readonly stallTimeoutMs?: number;
   };
   readonly creditRecovery?: {
     readonly safetyBufferSeconds?: number;
@@ -237,6 +239,11 @@ export function buildAgentExecutor(
       ...(config.agentSdk?.fallbackModel
         ? { fallbackModel: config.agentSdk.fallbackModel }
         : {}),
+      // One knob for both SDK backends: the same stall window governs the
+      // Cursor and Claude Code watchdogs (each keeps its own default).
+      ...(config.agentSdk?.stallTimeoutMs !== undefined
+        ? { stallTimeoutMs: config.agentSdk.stallTimeoutMs }
+        : {}),
       ...(config.creditRecovery
         ? { creditRecovery: config.creditRecovery }
         : {}),
@@ -278,6 +285,9 @@ export function buildAgentExecutor(
         : {}),
       ...(config.agentSdk?.fallbackModel
         ? { fallbackModel: config.agentSdk.fallbackModel }
+        : {}),
+      ...(config.agentSdk?.stallTimeoutMs !== undefined
+        ? { stallTimeoutMs: config.agentSdk.stallTimeoutMs }
         : {}),
       ...(config.creditRecovery
         ? { creditRecovery: config.creditRecovery }
@@ -732,6 +742,8 @@ export function providerConfigFromEnv(env: NodeJS.ProcessEnv, offline: boolean):
   );
   const effort = env.BRAINSTORM_AGENTIC_AGENT_EFFORT;
   const thinking = env.BRAINSTORM_AGENTIC_AGENT_THINKING;
+  // Deployment tuning for the session stall watchdog; 0 disables it.
+  const stallTimeoutMs = Number(env.BRAINSTORM_AGENTIC_AGENT_STALL_TIMEOUT_MS);
   const agentSdk: NonNullable<ProviderConfig["agentSdk"]> = {
     ...(Number.isSafeInteger(maxTurns) && maxTurns > 0 ? { maxTurns } : {}),
     ...(Number.isFinite(maxBudgetUsd) && maxBudgetUsd > 0
@@ -752,6 +764,9 @@ export function providerConfigFromEnv(env: NodeJS.ProcessEnv, offline: boolean):
           fallbackModel:
             env.BRAINSTORM_AGENTIC_AGENT_FALLBACK_MODEL,
         }
+      : {}),
+    ...(Number.isSafeInteger(stallTimeoutMs) && stallTimeoutMs >= 0
+      ? { stallTimeoutMs }
       : {}),
   };
   const safetyBufferSeconds = Number(

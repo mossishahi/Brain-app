@@ -11,15 +11,8 @@
  */
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
-import {
-  appendFileSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { appendFile, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import process from "node:process";
 
@@ -44,7 +37,13 @@ import {
 
 import { defaultSessionRoot, loadDotEnv, workspaceRootFromSessionRoot } from "./env.js";
 import { configureOutboundHttp } from "./proxy.js";
-import { FsArtifactStore, FsCheckpointStore } from "./fs-stores.js";
+import {
+  atomicWriteFile,
+  FsArtifactStore,
+  FsCheckpointStore,
+  readFileIfExists,
+  withFsDeadline,
+} from "./fs-stores.js";
 import {
   deriveRunSummary,
   installId,
@@ -223,6 +222,18 @@ function newRunId(): string {
   return `bsa_${stamp}_${randomUUID().slice(0, 8)}`;
 }
 
+/**
+ * Deployment override for the per-operation filesystem deadline of the
+ * checkpoint/artifact stores (ms; 0 disables). Invalid values keep the
+ * default rather than silently disabling the bound.
+ */
+function fsStoreOptions(env: NodeJS.ProcessEnv): { deadlineMs?: number } {
+  const raw = env.BRAINSTORM_AGENTIC_FS_TIMEOUT_MS?.trim();
+  if (raw === undefined || raw === "") return {};
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value >= 0 ? { deadlineMs: value } : {};
+}
+
 interface AttachmentsManifestFile {
   readonly baseDir: string;
   readonly attachments: readonly JsonValue[];
@@ -273,11 +284,9 @@ async function writeExpertiseTrees(
   const stored = await artifacts.get(ref.id);
   if (!stored) return [];
 
-  const writeAtomic = (name: string, body: string): string => {
+  const writeAtomic = async (name: string, body: string): Promise<string> => {
     const path = join(sessionRoot, runId, name);
-    const tmp = `${path}.tmp-${process.pid}`;
-    writeFileSync(tmp, body, "utf8");
-    renameSync(tmp, path);
+    await atomicWriteFile(path, body);
     return path;
   };
 
@@ -286,15 +295,15 @@ async function writeExpertiseTrees(
     tree = JSON.parse(stored.data);
   } catch {
     // A payload that does not parse is still worth copying verbatim.
-    return [writeAtomic("raw_expertise.json", stored.data)];
+    return [await writeAtomic("raw_expertise.json", stored.data)];
   }
   const written = [
-    writeAtomic("raw_expertise.json", `${JSON.stringify(tree, null, 2)}\n`),
+    await writeAtomic("raw_expertise.json", `${JSON.stringify(tree, null, 2)}\n`),
   ];
   try {
     const scored = scoreExpertiseTree(tree as Parameters<typeof scoreExpertiseTree>[0]);
     written.push(
-      writeAtomic("mul_expertise.json", `${JSON.stringify(scored, null, 2)}\n`),
+      await writeAtomic("mul_expertise.json", `${JSON.stringify(scored, null, 2)}\n`),
     );
   } catch {
     // A pre-relevance tree (dead history) cannot be scored; raw copy only.
@@ -335,12 +344,9 @@ async function writeFinalOutputs(
   if (latestByMember.size === 0 && proposalId === undefined) return [];
 
   const directory = join(sessionRoot, runId, "final");
-  mkdirSync(directory, { recursive: true });
-  const writeAtomic = (name: string, body: string): string => {
+  const writeAtomic = async (name: string, body: string): Promise<string> => {
     const path = join(directory, name);
-    const tmp = `${path}.tmp-${process.pid}`;
-    writeFileSync(tmp, body, "utf8");
-    renameSync(tmp, path);
+    await atomicWriteFile(path, body);
     return path;
   };
   const pretty = (raw: string): string => {
@@ -358,11 +364,11 @@ async function writeFinalOutputs(
     // Member ids are runtime-minted (`member-N`, `member-user-N`) and safe as
     // file names; anything unexpected is skipped rather than sanitized.
     if (!/^[A-Za-z0-9_-]+$/.test(memberId)) continue;
-    written.push(writeAtomic(`${memberId}.json`, pretty(stored.data)));
+    written.push(await writeAtomic(`${memberId}.json`, pretty(stored.data)));
   }
   if (proposalId !== undefined) {
     const stored = await artifacts.get(proposalId);
-    if (stored) written.push(writeAtomic("proposal.json", pretty(stored.data)));
+    if (stored) written.push(await writeAtomic("proposal.json", pretty(stored.data)));
   }
   return written;
 }
@@ -398,29 +404,74 @@ function logEvent(event: RunEvent): void {
   }
 }
 
-function eventListener(verbose: boolean, eventsFile: string | undefined): RunEventListener | undefined {
-  if (!verbose && eventsFile === undefined) return undefined;
-  if (eventsFile !== undefined) mkdirSync(dirname(eventsFile), { recursive: true });
-  // The event log is observability, never load-bearing: a failed append (a
-  // shared-filesystem blip mid-run) must not ride up into the emitting node
-  // and fail the task that happened to emit. Warned once, not per event.
-  let appendFailed = false;
-  return (event) => {
-    if (verbose) logEvent(event);
-    if (eventsFile === undefined) return;
-    try {
-      appendFileSync(eventsFile, `${JSON.stringify(event)}\n`, "utf8");
-    } catch (error) {
-      if (!appendFailed) {
-        appendFailed = true;
-        console.error(
-          `[events] append to ${eventsFile} failed; the run continues without ` +
-            `event-log updates until writes recover: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
+/** Ceiling for one event-log append; far above any healthy shared-FS write. */
+const EVENT_APPEND_DEADLINE_MS = 60_000;
+
+/**
+ * Ordered, non-blocking appender for events.jsonl. Appends chain so their
+ * order is preserved, run ASYNC so a wedged shared filesystem can never
+ * freeze the event loop (the previous synchronous append did exactly that:
+ * one in-kernel block silenced the whole worker while it kept answering
+ * liveness probes), and each attempt is deadline-bounded so it fails instead
+ * of hanging. The event log is observability, never load-bearing: a failed
+ * append warns once and the run continues; appends keep being attempted so
+ * recovered storage resumes logging.
+ */
+class EventLogAppender {
+  private chain: Promise<void> = Promise.resolve();
+  private warned = false;
+
+  constructor(private readonly file: string) {}
+
+  append(line: string): void {
+    this.chain = this.chain.then(async () => {
+      try {
+        await withFsDeadline(
+          appendFile(this.file, line, "utf8"),
+          EVENT_APPEND_DEADLINE_MS,
+          `event append to ${this.file}`,
         );
+      } catch (error) {
+        if (!this.warned) {
+          this.warned = true;
+          console.error(
+            `[events] append to ${this.file} failed; the run continues without ` +
+              `event-log updates until writes recover: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+          );
+        }
       }
-    }
+    });
+  }
+
+  /** Settles once every append enqueued so far has been attempted. */
+  flush(): Promise<void> {
+    return this.chain;
+  }
+}
+
+interface EventLog {
+  readonly onEvent?: RunEventListener;
+  /** Awaited before the event log is read back (run summary, reporting). */
+  flush(): Promise<void>;
+}
+
+function eventListener(verbose: boolean, eventsFile: string | undefined): EventLog {
+  if (!verbose && eventsFile === undefined) {
+    return { flush: () => Promise.resolve() };
+  }
+  let appender: EventLogAppender | undefined;
+  if (eventsFile !== undefined) {
+    mkdirSync(dirname(eventsFile), { recursive: true });
+    appender = new EventLogAppender(eventsFile);
+  }
+  return {
+    onEvent: (event) => {
+      if (verbose) logEvent(event);
+      appender?.append(`${JSON.stringify(event)}\n`);
+    },
+    flush: () => appender?.flush() ?? Promise.resolve(),
   };
 }
 
@@ -434,7 +485,7 @@ function eventListener(verbose: boolean, eventsFile: string | undefined): RunEve
  * user who has switched telemetry off produces no record at all rather than one
  * that is written and then withheld.
  */
-function recordRunSummary(options: {
+async function recordRunSummary(options: {
   readonly workspace: string;
   readonly sessionRoot: string;
   readonly runId: string;
@@ -444,11 +495,15 @@ function recordRunSummary(options: {
   readonly provider: string;
   readonly runner: "local" | "slurm";
   readonly modelsByRoute: Readonly<Record<string, string>> | undefined;
-}): void {
+}): Promise<void> {
   try {
     const events: JsonObject[] = [];
-    if (options.eventsFile !== undefined && existsSync(options.eventsFile)) {
-      for (const line of readFileSync(options.eventsFile, "utf8").split("\n")) {
+    const rawEvents =
+      options.eventsFile !== undefined
+        ? await readFileIfExists(options.eventsFile, EVENT_APPEND_DEADLINE_MS)
+        : undefined;
+    if (rawEvents !== undefined) {
+      for (const line of rawEvents.split("\n")) {
         if (line.trim().length === 0) continue;
         try {
           events.push(JSON.parse(line) as JsonObject);
@@ -460,8 +515,9 @@ function recordRunSummary(options: {
     const checkpointPath = join(options.sessionRoot, options.runId, "checkpoint.json");
     let journal: JsonObject[] = [];
     let state: JsonObject | undefined;
-    if (existsSync(checkpointPath)) {
-      const checkpoint = JSON.parse(readFileSync(checkpointPath, "utf8")) as JsonObject;
+    const rawCheckpoint = await readFileIfExists(checkpointPath, EVENT_APPEND_DEADLINE_MS);
+    if (rawCheckpoint !== undefined) {
+      const checkpoint = JSON.parse(rawCheckpoint) as JsonObject;
       journal = Array.isArray(checkpoint.journal) ? (checkpoint.journal as JsonObject[]) : [];
       // The last journaled activity result is the run's final state.
       for (const entry of journal) {
@@ -628,7 +684,7 @@ async function main(): Promise<void> {
     stringFlag(args, "content-registry-url") ??
     process.env.BRAIN_CONTENT_REGISTRY_URL?.trim();
   const contentRegistryVersion = stringFlag(args, "content-registry-version");
-  const onEvent = eventListener(verbose, eventsFile);
+  const eventLog = eventListener(verbose, eventsFile);
 
   if (args.command === "list") {
     const store = new FsCheckpointStore(sessionRoot);
@@ -673,7 +729,7 @@ async function main(): Promise<void> {
             : {}),
         })
       : undefined;
-    const artifacts = new FsArtifactStore(sessionRoot, runId);
+    const artifacts = new FsArtifactStore(sessionRoot, runId, fsStoreOptions(process.env));
     const taxonomy = taxonomyForRun(lazy, contentDir!, sessionRoot, runId);
     const codeEnvironment = await prepareRunCodeEnvironment(
       sessionRoot,
@@ -683,7 +739,7 @@ async function main(): Promise<void> {
     const gpuRun = gpuRunForRun(sessionRoot, runId, offline);
     const runtime = buildRuntime({
       providerConfig: providerConfigFromEnv(process.env, offline),
-      checkpoints: new FsCheckpointStore(sessionRoot),
+      checkpoints: new FsCheckpointStore(sessionRoot, fsStoreOptions(process.env)),
       artifacts,
       autoApproveGates: autoApprove,
       ...(manifest ? { attachmentRoots: [manifest.baseDir] } : {}),
@@ -692,7 +748,7 @@ async function main(): Promise<void> {
       ...(gpuRun ? { gpuRun } : {}),
       bundle: lazy?.bundle ?? loadContent(contentDir!),
       ...(lazy ? { skillResolver: lazy.skillResolver } : {}),
-      ...(onEvent !== undefined ? { onEvent } : {}),
+      ...(eventLog.onEvent !== undefined ? { onEvent: eventLog.onEvent } : {}),
     });
     try {
       const result = await runtime.run({
@@ -704,10 +760,12 @@ async function main(): Promise<void> {
       });
       const trees = await writeExpertiseTrees(artifacts, sessionRoot, runId);
       const finals = await writeFinalOutputs(artifacts, sessionRoot, runId);
+      // Queued event appends must land before the log is read back.
+      await eventLog.flush();
       // Opt-out is honored here: with telemetry off, no record is produced at
       // all rather than one written and then withheld.
       if (process.env.BRAINSTORM_AGENTIC_TELEMETRY !== "off") {
-        recordRunSummary({
+        await recordRunSummary({
           workspace: workspaceRootFromSessionRoot(sessionRoot),
           sessionRoot,
           runId,
@@ -759,7 +817,7 @@ async function main(): Promise<void> {
     // shrink. The run only suspends on gates in manual mode anyway, so a
     // gate-answering resume is by definition a manual-mode continuation.
     const resumeAutoApprove = autoApprove && Object.keys(responses).length === 0;
-    const artifacts = new FsArtifactStore(sessionRoot, runId);
+    const artifacts = new FsArtifactStore(sessionRoot, runId, fsStoreOptions(process.env));
     const taxonomy = taxonomyForRun(lazy, contentDir!, sessionRoot, runId);
     const codeEnvironment = await prepareRunCodeEnvironment(
       sessionRoot,
@@ -769,7 +827,7 @@ async function main(): Promise<void> {
     const gpuRun = gpuRunForRun(sessionRoot, runId, offline);
     const runtime = buildRuntime({
       providerConfig: providerConfigFromEnv(process.env, offline),
-      checkpoints: new FsCheckpointStore(sessionRoot),
+      checkpoints: new FsCheckpointStore(sessionRoot, fsStoreOptions(process.env)),
       artifacts,
       autoApproveGates: resumeAutoApprove,
       ...(taxonomy ? { taxonomy } : {}),
@@ -777,7 +835,7 @@ async function main(): Promise<void> {
       ...(gpuRun ? { gpuRun } : {}),
       bundle: lazy?.bundle ?? loadContent(contentDir!),
       ...(lazy ? { skillResolver: lazy.skillResolver } : {}),
-      ...(onEvent !== undefined ? { onEvent } : {}),
+      ...(eventLog.onEvent !== undefined ? { onEvent: eventLog.onEvent } : {}),
     });
     try {
       const result = await runtime.resume(runId, {
@@ -785,10 +843,12 @@ async function main(): Promise<void> {
       });
       const trees = await writeExpertiseTrees(artifacts, sessionRoot, runId);
       const finals = await writeFinalOutputs(artifacts, sessionRoot, runId);
+      // Queued event appends must land before the log is read back.
+      await eventLog.flush();
       // Opt-out is honored here: with telemetry off, no record is produced at
       // all rather than one written and then withheld.
       if (process.env.BRAINSTORM_AGENTIC_TELEMETRY !== "off") {
-        recordRunSummary({
+        await recordRunSummary({
           workspace: workspaceRootFromSessionRoot(sessionRoot),
           sessionRoot,
           runId,
@@ -824,29 +884,44 @@ async function main(): Promise<void> {
  * a missing or retired pin, an unreachable registry) leaves NO trace the
  * dashboard can show — the job card silently keeps its previous state. Leave
  * one: a worker:fatal line in the events log, which the server folds into
- * the job's error when it notices the submission died.
+ * the job's error when it notices the submission died. Bounded like every
+ * other write: when the filesystem itself is the failure, this must not
+ * hang the very exit that makes the failure visible.
  */
-function appendFatalEvent(error: unknown): void {
+async function appendFatalEvent(error: unknown): Promise<void> {
   try {
     const eventsFile = stringFlag(parseArgs(process.argv.slice(2)), "events-file");
     if (!eventsFile) return;
-    mkdirSync(dirname(eventsFile), { recursive: true });
-    appendFileSync(
-      eventsFile,
-      `${JSON.stringify({
-        type: "worker:fatal",
-        at: Date.now(),
-        message: error instanceof Error ? error.message : String(error),
-      })}\n`,
-      "utf8",
+    await withFsDeadline(
+      mkdir(dirname(eventsFile), { recursive: true }),
+      10_000,
+      `creating the directory of ${eventsFile}`,
+    );
+    await withFsDeadline(
+      appendFile(
+        eventsFile,
+        `${JSON.stringify({
+          type: "worker:fatal",
+          at: Date.now(),
+          message: error instanceof Error ? error.message : String(error),
+        })}\n`,
+        "utf8",
+      ),
+      10_000,
+      `fatal-event append to ${eventsFile}`,
     );
   } catch {
     // Reporting must never mask the real failure.
   }
 }
 
-main().catch((error: unknown) => {
+main().catch(async (error: unknown) => {
   console.error(error instanceof Error ? error.message : String(error));
-  appendFatalEvent(error);
-  process.exitCode = 1;
+  await appendFatalEvent(error);
+  // Exit decisively: a worker that failed because storage or a subprocess
+  // wedged may hold abandoned handles that would keep the process alive —
+  // and an alive-but-dead worker is exactly the state the server cannot
+  // distinguish from a healthy one. A DEAD process is detected within one
+  // scan and resumed from its checkpoint.
+  process.exit(1);
 });

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdir, readFile, rename } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -78,6 +79,39 @@ test("refs written before hashes existed are backfilled and dedupe correctly", a
     const refs = await store.list();
     assert.equal(refs.length, 1);
     assert.ok(refs[0]!.sha256, "the legacy ref gained its hash");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a save on an unresponsive filesystem fails within its deadline instead of hanging", async () => {
+  const root = workspace();
+  try {
+    const store = new FsCheckpointStore(root, {
+      deadlineMs: 25,
+      fs: {
+        mkdir,
+        readFile,
+        rename,
+        // The wedged mount: the write blocks in the kernel and never settles.
+        // A synchronous write here froze the whole event loop; the bounded
+        // async write must turn the same condition into a rejection.
+        writeFile: () => new Promise<never>(() => undefined),
+      },
+    });
+    await assert.rejects(
+      store.save({
+        runId: "run-wedged",
+        workflowId: "brainstorm",
+        status: "running",
+        journalFormat: 2,
+        journal: [],
+        pendingGates: [],
+        seq: 1,
+        updatedAt: 1,
+      }),
+      /not responding/,
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

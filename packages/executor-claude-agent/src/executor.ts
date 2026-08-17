@@ -100,6 +100,17 @@ export interface ClaudeAgentExecutorConfig {
    * stream delta (tests only).
    */
   readonly progressHeartbeatMs?: number;
+  /**
+   * Session inactivity watchdog: when NO SDK message arrives for this long —
+   * and no in-process MCP tool call is running (a gpu_run may legitimately
+   * wait on the cluster queue for an hour) — the session is treated as hung
+   * and restarted in a fresh session, exactly like a crashed subprocess.
+   * A healthy session cannot be this quiet: partial messages stream during
+   * generation and every tool call produces messages, so a long silent gap
+   * means a wedged subprocess or a dead network connection that no socket
+   * timeout will ever clear. 0 disables. Default 15 minutes.
+   */
+  readonly stallTimeoutMs?: number;
   readonly creditRecovery?: {
     readonly safetyBufferSeconds?: number;
     readonly openRouterApiKey?: string;
@@ -177,6 +188,86 @@ const TRACE_TRAIT = "extended-reasoning";
  * to validate.
  */
 const MAX_CRASH_RETRIES = 2;
+
+/** Default session inactivity ceiling; see ClaudeAgentExecutorConfig.stallTimeoutMs. */
+const DEFAULT_SESSION_STALL_MS = 15 * 60_000;
+
+/** How long the stall path waits for query.interrupt() before giving up on it. */
+const STALL_INTERRUPT_GRACE_MS = 5_000;
+
+/** A session that produced no SDK message within the inactivity ceiling. */
+export class SessionStalledError extends Error {
+  constructor(readonly quietMs: number) {
+    super(
+      `Claude Code session stalled: no output for ${Math.round(quietMs / 1000)}s — ` +
+        "the subprocess or its network connection is hung",
+    );
+    this.name = "SessionStalledError";
+  }
+}
+
+/**
+ * Inactivity watchdog for one SDK session. `touch()` restarts the countdown
+ * (called on every SDK message); `hold()`/`release()` suspend it while an
+ * in-process MCP tool runs, because a tool that legitimately blocks (gpu_run
+ * waiting on the cluster queue) produces no SDK messages while it works.
+ * On expiry the `expiry` promise rejects with SessionStalledError; racing it
+ * against the stream's next() turns a silent forever-hang into an error the
+ * executor's crash-restart machinery already knows how to retry.
+ */
+class SessionWatchdog {
+  private timer: NodeJS.Timeout | undefined;
+  private holds = 0;
+  private expire!: (error: SessionStalledError) => void;
+  readonly expiry: Promise<never>;
+
+  constructor(private readonly ms: number) {
+    this.expiry = new Promise<never>((_resolve, reject) => {
+      this.expire = reject;
+    });
+    // The expiry of a healthy session is never observed; that must not
+    // surface as an unhandled rejection when the race has already settled.
+    this.expiry.catch(() => undefined);
+  }
+
+  touch(): void {
+    if (this.ms <= 0 || this.holds > 0) return;
+    clearTimeout(this.timer);
+    // Deliberately NOT unref'd: when the SDK stream wedges, this timer can be
+    // the only live handle, and an unref'd watchdog lets the process die (or
+    // never fire) instead of reporting the stall — the exact failure the
+    // Cursor path's watchdog shipped with and had to fix. stop() clears it,
+    // so a healthy completion is never held open.
+    this.timer = setTimeout(() => this.expire(new SessionStalledError(this.ms)), this.ms);
+  }
+
+  private hold(): void {
+    this.holds += 1;
+    clearTimeout(this.timer);
+  }
+
+  private release(): void {
+    this.holds = Math.max(0, this.holds - 1);
+    if (this.holds === 0) this.touch();
+  }
+
+  /** Wraps an in-process MCP tool handler so its runtime never counts as silence. */
+  held<A, R>(handler: (args: A) => Promise<R>): (args: A) => Promise<R> {
+    return async (args: A) => {
+      this.hold();
+      try {
+        return await handler(args);
+      } finally {
+        this.release();
+      }
+    };
+  }
+
+  stop(): void {
+    clearTimeout(this.timer);
+    this.timer = undefined;
+  }
+}
 /** In-process MCP server name carrying the stepwise chain tool. */
 const STEPWISE_SERVER = "steps";
 
@@ -263,6 +354,7 @@ function stepwiseRefusal(message: string): {
 function stepwiseServer(
   spec: StepwiseSpec,
   capture: TraceCapture,
+  watchdog: SessionWatchdog,
 ): ReturnType<typeof createSdkMcpServer> {
   return createSdkMcpServer({
     name: STEPWISE_SERVER,
@@ -283,7 +375,7 @@ function stepwiseServer(
           index: z.number().int().min(1).max(spec.count),
           text: z.string().min(1),
         },
-        async (args) => {
+        watchdog.held(async (args) => {
           const steps = capture.stepwise!.steps;
           if (args.text.trim().length === 0) {
             return stepwiseRefusal(
@@ -337,7 +429,7 @@ function stepwiseServer(
               },
             ],
           };
-        },
+        }),
       ),
     ],
   });
@@ -389,6 +481,7 @@ function taskUsesTaxonomy(task: AgentTask): boolean {
  */
 function taxonomyServer(
   taxonomy: TaxonomyAccess,
+  watchdog: SessionWatchdog,
 ): ReturnType<typeof createSdkMcpServer> {
   const errorResult = (error: unknown) => ({
     content: [
@@ -414,7 +507,7 @@ function taxonomyServer(
           "Optionally pass `root` (an exact node name) to fetch one branch. " +
           "Read it in full before deciding any placement.",
         { root: z.string().optional() },
-        async (args) => {
+        watchdog.held(async (args) => {
           try {
             const root =
               typeof args.root === "string" && args.root.trim() !== ""
@@ -428,7 +521,7 @@ function taxonomyServer(
           } catch (error) {
             return errorResult(error);
           }
-        },
+        }),
       ),
       sdkTool(
         "taxonomy_resolve",
@@ -441,7 +534,7 @@ function taxonomyServer(
           query: z.string().min(1),
           optionLimit: z.number().int().min(1).max(100).optional(),
         },
-        async (args) => {
+        watchdog.held(async (args) => {
           try {
             const result = await taxonomy.resolve(
               args.query,
@@ -453,7 +546,7 @@ function taxonomyServer(
           } catch (error) {
             return errorResult(error);
           }
-        },
+        }),
       ),
     ],
   });
@@ -481,6 +574,7 @@ function attachmentsSdkToolNames(): readonly string[] {
  */
 function attachmentsServer(
   roots: readonly string[],
+  watchdog: SessionWatchdog,
 ): ReturnType<typeof createSdkMcpServer> {
   const tools = new Map(
     attachmentTools(roots).map((tool) => [tool.definition.name, tool]),
@@ -534,7 +628,7 @@ function attachmentsServer(
           prefix: z.string().optional(),
           shape: z.enum(["flat", "tree"]).optional(),
         },
-        async (args) => call("attachment_list", args),
+        watchdog.held(async (args) => call("attachment_list", args)),
       ),
       sdkTool(
         "attachment_search",
@@ -547,7 +641,7 @@ function attachmentsServer(
           filesOnly: z.boolean().optional(),
           maxResults: z.number().int().min(1).max(500).optional(),
         },
-        async (args) => call("attachment_search", args),
+        watchdog.held(async (args) => call("attachment_search", args)),
       ),
     ],
   });
@@ -575,6 +669,7 @@ function taskUsesGpu(task: AgentTask): boolean {
  */
 function gpuServer(
   config: GpuRunConfig,
+  watchdog: SessionWatchdog,
 ): ReturnType<typeof createSdkMcpServer> {
   const [tool] = gpuRunTools(config);
   return createSdkMcpServer({
@@ -589,7 +684,9 @@ function gpuServer(
           time_limit_minutes: z.number().int().min(1).optional(),
           job_name: z.string().optional(),
         },
-        async (args) => {
+        // The hold matters most here: a queued cluster job legitimately
+        // produces no SDK messages for up to its whole time ceiling.
+        watchdog.held(async (args) => {
           try {
             const result = await tool!.execute(args as JsonValue, {
               runId: "claude-agent-sdk",
@@ -617,7 +714,7 @@ function gpuServer(
               isError: true as const,
             };
           }
-        },
+        }),
       ),
     ],
   });
@@ -1471,6 +1568,7 @@ function queryOptions(
   controller: AbortController,
   nativeStructuredOutput: boolean,
   capture: TraceCapture,
+  watchdog: SessionWatchdog,
 ): UnknownRecord {
   const builtinTools = allowedTools(task);
   const wantsTaxonomy =
@@ -1521,15 +1619,15 @@ function queryOptions(
   };
   const mcpServers: UnknownRecord = {
     ...(capture.stepwise !== undefined
-      ? { [STEPWISE_SERVER]: stepwiseServer(capture.stepwise.spec, capture) }
+      ? { [STEPWISE_SERVER]: stepwiseServer(capture.stepwise.spec, capture, watchdog) }
       : {}),
     ...(wantsTaxonomy
-      ? { [TAXONOMY_SERVER]: taxonomyServer(config.taxonomy!) }
+      ? { [TAXONOMY_SERVER]: taxonomyServer(config.taxonomy!, watchdog) }
       : {}),
     ...(wantsAttachments
-      ? { [ATTACHMENTS_SERVER]: attachmentsServer(config.attachmentRoots!) }
+      ? { [ATTACHMENTS_SERVER]: attachmentsServer(config.attachmentRoots!, watchdog) }
       : {}),
-    ...(wantsGpu ? { [GPU_SERVER]: gpuServer(config.gpuRun!) } : {}),
+    ...(wantsGpu ? { [GPU_SERVER]: gpuServer(config.gpuRun!, watchdog) } : {}),
   };
   if (Object.keys(mcpServers).length > 0) {
     options.mcpServers = mcpServers;
@@ -1600,7 +1698,16 @@ async function executeQuery(
     const wantsAttachments =
       (config.attachmentRoots?.length ?? 0) > 0 &&
       taskUsesCapability(task, "attachment-access");
-    for await (const message of queryFn({
+    // The inactivity watchdog: without it, a wedged Claude Code subprocess
+    // (or a dead network connection that no socket timeout ever clears)
+    // leaves this loop awaiting the next message FOREVER — a silent hang
+    // that writes no events and no checkpoints while the process stays
+    // alive. Racing every next() against the watchdog turns that hang into
+    // a SessionStalledError the crash-restart machinery retries.
+    const watchdog = new SessionWatchdog(
+      config.stallTimeoutMs ?? DEFAULT_SESSION_STALL_MS,
+    );
+    const stream = queryFn({
       prompt: [
         messagePrompt(task.modelRequest.messages),
         ...(task.outputSchema
@@ -1645,32 +1752,71 @@ async function executeQuery(
         controller,
         nativeStructuredOutput,
         capture,
+        watchdog,
       ),
-    })) {
-      const current = record(message);
-      // Stream deltas are progress signals, not conversation turns.
-      if (current.type !== "stream_event") messageCount += 1;
-      capture.turn = messageCount;
-      if (capture.wantsTrace && current.type === "assistant") {
-        const content = record(current.message).content;
-        if (Array.isArray(content)) {
-          for (const candidate of content) {
-            const block = record(candidate);
-            if (
-              block.type === "thinking" &&
-              typeof block.thinking === "string" &&
-              block.thinking.trim().length > 0
-            ) {
-              capture.thinking.push({
-                turn: messageCount,
-                text: block.thinking,
-              });
+    });
+    const iterator = stream[Symbol.asyncIterator]();
+    watchdog.touch();
+    try {
+      for (;;) {
+        const step = iterator.next();
+        // A stall abandons this promise mid-flight; its later settlement
+        // (usually a rejection after the abort below) must not surface as
+        // an unhandled rejection.
+        void step.then(undefined, () => undefined);
+        const settled = await Promise.race([step, watchdog.expiry]);
+        if (settled.done === true) break;
+        watchdog.touch();
+        const current = record(settled.value);
+        // Stream deltas are progress signals, not conversation turns.
+        if (current.type !== "stream_event") messageCount += 1;
+        capture.turn = messageCount;
+        if (capture.wantsTrace && current.type === "assistant") {
+          const content = record(current.message).content;
+          if (Array.isArray(content)) {
+            for (const candidate of content) {
+              const block = record(candidate);
+              if (
+                block.type === "thinking" &&
+                typeof block.thinking === "string" &&
+                block.thinking.trim().length > 0
+              ) {
+                capture.thinking.push({
+                  turn: messageCount,
+                  text: block.thinking,
+                });
+              }
             }
           }
         }
+        reportSdkMessage(current, context, progressState);
+        if (current.type === "result") finalResult = current;
       }
-      reportSdkMessage(current, context, progressState);
-      if (current.type === "result") finalResult = current;
+    } catch (error) {
+      if (error instanceof SessionStalledError) {
+        // Best-effort release of the wedged subprocess before reporting:
+        // a hung session may not answer the interrupt, so it is bounded
+        // and its own failure is irrelevant next to the stall itself.
+        let grace: NodeJS.Timeout | undefined;
+        try {
+          await Promise.race([
+            stream.interrupt?.() ?? Promise.resolve(),
+            new Promise<void>((resolve) => {
+              // Ref'd for the same reason as the watchdog timer: it may be
+              // the only handle standing between this wait and a dead loop.
+              grace = setTimeout(resolve, STALL_INTERRUPT_GRACE_MS);
+            }),
+          ]);
+        } catch {
+          // The stall error below carries the real failure.
+        } finally {
+          clearTimeout(grace);
+        }
+        controller.abort(error.message);
+      }
+      throw error;
+    } finally {
+      watchdog.stop();
     }
     if (context.signal?.aborted || controller.signal.aborted) {
       throw abortError(context.signal?.reason);
@@ -1987,6 +2133,21 @@ export class ClaudeAgentExecutor implements AgentExecutor {
           progress(context, {
             kind: "retry",
             message: `Claude Code process crashed; restarting the task, retry ${crashRetries}/${MAX_CRASH_RETRIES}`,
+          });
+          continue;
+        }
+        // A stalled session is the same class of failure as a crash — dead
+        // infrastructure under a healthy task — detected by silence instead
+        // of an exit. Same bounded fresh-session restarts, same budget; when
+        // they run out, the task fails with the stall named as the cause.
+        if (error instanceof SessionStalledError && crashRetries < MAX_CRASH_RETRIES) {
+          crashRetries += 1;
+          attempt -= 1;
+          progress(context, {
+            kind: "retry",
+            message:
+              `Claude Code session stalled (${Math.round(error.quietMs / 1000)}s without output); ` +
+              `restarting in a fresh session, retry ${crashRetries}/${MAX_CRASH_RETRIES}`,
           });
           continue;
         }

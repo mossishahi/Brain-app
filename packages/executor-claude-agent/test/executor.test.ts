@@ -1188,3 +1188,35 @@ test("tasks without the trace trait keep the omitted thinking display", async ()
   });
   assert.equal(captured[0]!.options.mcpServers, undefined);
 });
+
+test("a session that goes silent is restarted fresh, then fails with the stall named", async () => {
+  const captured: ClaudeAgentQueryInput[] = [];
+  // The wedged subprocess: one message, then never another and never an end —
+  // exactly what a dead network connection under Claude Code looks like.
+  const stalledQuery: ClaudeAgentQueryFn = (input) => ({
+    async *[Symbol.asyncIterator]() {
+      captured.push(input);
+      yield { type: "system", subtype: "init" };
+      await new Promise<never>(() => undefined);
+    },
+  });
+  const executor = new ClaudeAgentExecutor({
+    token: "setup-token-secret",
+    queryFn: stalledQuery,
+    stallTimeoutMs: 40,
+  });
+  const result = await executor.execute(structuredTask, {
+    runId: "run-stalled",
+    nodePath: "root/brain",
+  });
+  assert.equal(result.status, "error");
+  assert.match(
+    result.status === "error" ? result.error.message : "",
+    /session stalled/i,
+  );
+  assert.equal(
+    captured.length,
+    3,
+    "the initial session plus two fresh-session restarts before failing",
+  );
+});
