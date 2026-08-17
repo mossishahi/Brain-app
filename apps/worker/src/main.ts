@@ -187,6 +187,29 @@ function gpuRunForRun(
   }
 }
 
+/**
+ * Per-run workflow-param overrides from the server's settings snapshot (the
+ * environment is the submission channel). Read only by `run`: a resume
+ * replays the params its checkpoint recorded at start, so the variable is
+ * ignored there. The pinned bundle's declared bounds validate the value
+ * authoritatively when the run starts; an unparsable value is ignored with
+ * a loud line rather than guessed at.
+ */
+function workflowParamsFromEnv(
+  env: NodeJS.ProcessEnv,
+): Record<string, number> | undefined {
+  const raw = env.BRAINSTORM_AGENTIC_MAX_REVIEW_ROUNDS?.trim();
+  if (raw === undefined || raw === "") return undefined;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 1) {
+    console.error(
+      `[config] ignoring invalid BRAINSTORM_AGENTIC_MAX_REVIEW_ROUNDS="${raw}"`,
+    );
+    return undefined;
+  }
+  return { maxReviewRounds: value };
+}
+
 interface CliArgs {
   readonly command: string;
   readonly flags: Map<string, string | boolean>;
@@ -750,6 +773,7 @@ async function main(): Promise<void> {
       ...(lazy ? { skillResolver: lazy.skillResolver } : {}),
       ...(eventLog.onEvent !== undefined ? { onEvent: eventLog.onEvent } : {}),
     });
+    const params = workflowParamsFromEnv(process.env);
     try {
       const result = await runtime.run({
         runId,
@@ -757,6 +781,7 @@ async function main(): Promise<void> {
           prompt: topic,
           attachments: (manifest?.attachments ?? []) as unknown as JsonValue,
         },
+        ...(params !== undefined ? { params } : {}),
       });
       const trees = await writeExpertiseTrees(artifacts, sessionRoot, runId);
       const finals = await writeFinalOutputs(artifacts, sessionRoot, runId);

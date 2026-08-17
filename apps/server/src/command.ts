@@ -145,9 +145,20 @@ export function buildOrchestrationCommand(
     options.credentialsFile !== undefined && options.settings.llm.provider !== "offline"
       ? [`BRAINSTORM_AGENTIC_CREDENTIALS_FILE=${shellQuote(options.credentialsFile)}`]
       : [];
+  // Per-run workflow-param override (provider-independent): the worker maps
+  // it onto the pinned workflow's maxReviewRounds param at run start.
+  const reviewEnv =
+    options.settings.review?.maxRounds !== undefined
+      ? [
+          `BRAINSTORM_AGENTIC_MAX_REVIEW_ROUNDS=${shellQuote(
+            String(options.settings.review.maxRounds),
+          )}`,
+        ]
+      : [];
   const command = [
     ...credentialsEnv,
     ...modelEnvironment(options.settings),
+    ...reviewEnv,
     ...args,
   ].join(" ");
   if (options.credentialsFile !== undefined && options.settings.llm.provider !== "offline") {

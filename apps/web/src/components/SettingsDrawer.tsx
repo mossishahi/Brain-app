@@ -79,6 +79,8 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
   const [agentFallbackModel, setAgentFallbackModel] = useState("");
   const [connectionMessage, setConnectionMessage] = useState<string | null>(null);
   const [confirmation, setConfirmation] = useState<"manual" | "auto">("manual");
+  /** "" = follow the bundle's default; otherwise the override as a string. */
+  const [reviewMaxRounds, setReviewMaxRounds] = useState<string>("");
   const [autoResume, setAutoResume] = useState(true);
   const [resumeInterrupted, setResumeInterrupted] = useState(true);
   const [safetyBufferSeconds, setSafetyBufferSeconds] = useState("60");
@@ -121,6 +123,9 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
         setAgentThinking(s.llm.agentSdk?.thinking ?? "adaptive");
         setAgentFallbackModel(s.llm.agentSdk?.fallbackModel ?? "");
         setConfirmation(s.panelConfirmation);
+        setReviewMaxRounds(
+          s.review?.maxRounds !== undefined ? String(s.review.maxRounds) : "",
+        );
         setAutoResume(s.creditRecovery.autoResume);
         setResumeInterrupted(s.interruptedRecovery?.autoResume ?? true);
         setSafetyBufferSeconds(String(s.creditRecovery.safetyBufferSeconds));
@@ -303,6 +308,11 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
             : {}),
         },
         panelConfirmation: confirmation,
+        // "" = follow the bundle default ({} clears a stored override).
+        review:
+          reviewMaxRounds === ""
+            ? {}
+            : { maxRounds: Number(reviewMaxRounds) },
         creditRecovery: {
           autoResume,
           safetyBufferSeconds: parsedSafetyBuffer,
@@ -843,6 +853,33 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                 />
                 Approve automatically
               </label>
+            </details>
+
+            <details className="drawer-section">
+              <summary>Review rounds</summary>
+              <div className="field">
+                <label className="field-label" htmlFor="settings-review-rounds">
+                  Rounds one chain step may take
+                </label>
+                <select
+                  id="settings-review-rounds"
+                  value={reviewMaxRounds}
+                  onChange={(e) => setReviewMaxRounds(e.target.value)}
+                >
+                  <option value="">Bundle default</option>
+                  {Array.from({ length: 10 }, (_, i) => i + 1).map((n) => (
+                    <option key={n} value={String(n)}>
+                      {n} round{n === 1 ? "" : "s"}
+                    </option>
+                  ))}
+                </select>
+                <span className="field-note">
+                  The first review plus up to N−1 revisions per chain step. Applies
+                  to every NEW run (running and finished runs keep the budget they
+                  started with). Higher values review more strictly and spend more;
+                  &quot;Bundle default&quot; follows the published workflow.
+                </span>
+              </div>
             </details>
 
             <details className="drawer-section">

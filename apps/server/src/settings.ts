@@ -202,6 +202,7 @@ function validateCommonSettings(value: unknown): {
   readonly gpu?: GpuRunSettings;
   readonly runner: "slurm" | "local";
   readonly panelConfirmation: "manual" | "auto";
+  readonly review?: { readonly maxRounds?: number };
   readonly llm: Record<string, unknown>;
   readonly creditRecovery: Record<string, unknown>;
   readonly interruptedRecovery?: Record<string, unknown>;
@@ -216,6 +217,8 @@ function validateCommonSettings(value: unknown): {
     throw new Error(`slurmTemplate must contain ${SLURM_COMMAND_TAG}`);
   }
   const gpu = input.gpu !== undefined ? validateGpuSettings(input.gpu) : undefined;
+  const review =
+    input.review !== undefined ? validateReviewSettings(input.review) : undefined;
   if (input.runner !== "slurm" && input.runner !== "local") {
     throw new Error('runner must be "slurm" or "local"');
   }
@@ -277,6 +280,7 @@ function validateCommonSettings(value: unknown): {
     ...(gpu !== undefined ? { gpu } : {}),
     runner: input.runner,
     panelConfirmation: input.panelConfirmation,
+    ...(review !== undefined ? { review } : {}),
     llm,
     creditRecovery,
     ...(interruptedRecovery !== undefined ? { interruptedRecovery } : {}),
@@ -285,6 +289,32 @@ function validateCommonSettings(value: unknown): {
     hostTools,
     ...(updateCheck !== undefined ? { updateCheck } : {}),
   };
+}
+
+/**
+ * Mirrors the shipped workflow's declared maxReviewRounds range so a bad
+ * value fails at save time, in the drawer. The pinned bundle re-validates
+ * authoritatively when a run starts, so a future bundle with a narrower
+ * range still has the final say.
+ */
+const REVIEW_ROUNDS_BOUNDS = { min: 1, max: 10 } as const;
+
+/** `{}` is valid and means "follow the bundle's default". */
+function validateReviewSettings(value: unknown): { maxRounds?: number } {
+  const input = object(value, "review");
+  const maxRounds = input.maxRounds;
+  if (maxRounds === undefined) return {};
+  if (
+    typeof maxRounds !== "number" ||
+    !Number.isInteger(maxRounds) ||
+    maxRounds < REVIEW_ROUNDS_BOUNDS.min ||
+    maxRounds > REVIEW_ROUNDS_BOUNDS.max
+  ) {
+    throw new Error(
+      `review.maxRounds must be an integer between ${REVIEW_ROUNDS_BOUNDS.min} and ${REVIEW_ROUNDS_BOUNDS.max}`,
+    );
+  }
+  return { maxRounds };
 }
 
 /** One GPU job's runtime ceiling can be at most a day. */
@@ -533,6 +563,10 @@ function validateStoredSettings(value: unknown): StoredServerSettings {
     ...(common.gpu !== undefined ? { gpu: common.gpu } : {}),
     runner: common.runner,
     panelConfirmation: common.panelConfirmation,
+    // Stored only when it actually overrides; `{}` normalizes to absent.
+    ...(common.review?.maxRounds !== undefined
+      ? { review: { maxRounds: common.review.maxRounds } }
+      : {}),
     contentRegistry,
     creditRecovery,
     interruptedRecovery,
@@ -563,6 +597,13 @@ interface ValidatedUpdate {
   readonly clearCursorApiKey: boolean;
   readonly submittedOpenRouterApiKey?: string;
   readonly clearOpenRouterApiKey: boolean;
+  /**
+   * As submitted, so put() can tell the three cases apart: absent = keep
+   * the stored policy, `{}` = back to the bundle default, `{maxRounds}` =
+   * override. Deliberately not part of `settings` (a spread would erase
+   * the distinction).
+   */
+  readonly review?: { readonly maxRounds?: number };
 }
 
 function validateSettingsUpdate(value: unknown): ValidatedUpdate {
@@ -690,6 +731,7 @@ function validateSettingsUpdate(value: unknown): ValidatedUpdate {
       : {}),
     clearOpenRouterApiKey:
       common.creditRecovery.clearOpenRouterApiKey === true,
+    ...(common.review !== undefined ? { review: common.review } : {}),
   };
 }
 
@@ -1152,6 +1194,14 @@ export class SettingsStore {
       readJsonFile<unknown>(this.path),
     ).contentRegistry;
     const carriedGpu = update.settings.gpu ?? currentSettings.gpu;
+    // Review policy: absent in the update keeps the stored value; a
+    // submitted `{}` clears the override (back to the bundle default).
+    const carriedReview =
+      update.review !== undefined
+        ? update.review.maxRounds !== undefined
+          ? { maxRounds: update.review.maxRounds }
+          : undefined
+        : currentSettings.review;
     atomicWriteJson(this.path, {
       ...update.settings,
       contentRegistry: { ...storedRegistry, url: this.deploymentRegistryUrl },
@@ -1160,6 +1210,7 @@ export class SettingsStore {
         currentSettings.interruptedRecovery ?? { autoResume: true },
       // An update that omitted the GPU section keeps the stored setup.
       ...(carriedGpu !== undefined ? { gpu: carriedGpu } : {}),
+      ...(carriedReview !== undefined ? { review: carriedReview } : {}),
     });
     const previousCredentials =
       readJsonFile<StoredCredentials>(this.credentialsPath) ?? {};

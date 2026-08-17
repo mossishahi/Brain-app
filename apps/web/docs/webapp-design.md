@@ -120,7 +120,12 @@ A right-side drawer, 420px, `--surface`, hairline left border. Sections:
    leave the previous settings and secrets untouched. Secrets are write-only — the browser receives
    only `apiKeyConfigured` / `setupTokenConfigured`, never their values.
 3. **Panel confirmation** — radio: `Ask me on the dashboard` (default) / `Approve automatically`.
-4. **Credit recovery** — auto-resume toggle (default on), safety-buffer seconds, OpenRouter parser
+4. **Review rounds** — select: `Bundle default` (follows the published workflow) or 1–10. The
+   budget one chain step may take during review: the first review plus up to N−1 revisions.
+   Applies to every NEW run — the value is snapshotted into the job at submit, so resumes replay
+   it and older runs keep the budget they started with; the pinned bundle's declared bounds stay
+   authoritative at run start.
+5. **Credit recovery** — auto-resume toggle (default on), safety-buffer seconds, OpenRouter parser
    model (`openrouter/free`), and optional write-only OpenRouter API key. Known reset messages are
    parsed locally; the free router is used only for unknown formats.
 

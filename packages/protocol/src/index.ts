@@ -968,6 +968,17 @@ export interface ServerSettings {
   /** "manual": jobs pause at the panel gate for dashboard confirmation. */
   readonly panelConfirmation: "manual" | "auto";
   /**
+   * Review-round budget for NEW runs: one chain step may take at most
+   * `maxRounds` rounds (the first review plus revisions). Absent = the
+   * pinned bundle's own default. The value is snapshotted into each job's
+   * execution settings at submit time, so a resume replays the run's own
+   * budget; the pinned bundle's declared bounds stay authoritative when
+   * the run starts.
+   */
+  readonly review?: {
+    readonly maxRounds?: number;
+  };
+  /**
    * DEPLOYMENT-OWNED, read-only for users. The registry endpoint is baked
    * into the app (DEFAULT_CONTENT_REGISTRY_URL in the server's settings
    * module; developers override with --content-registry-url or
@@ -1129,6 +1140,13 @@ export interface ServerSettingsUpdate {
   readonly gpu?: GpuRunSettings;
   readonly runner: RunnerKind;
   readonly panelConfirmation: "manual" | "auto";
+  /**
+   * Absent = keep the stored review policy. `{}` = follow the bundle's
+   * default again. `{ maxRounds: n }` = override the budget for new runs.
+   */
+  readonly review?: {
+    readonly maxRounds?: number;
+  };
   /** Anonymous usage reporting; omitted leaves the stored value unchanged. */
   readonly telemetry?: {
     readonly enabled: boolean;

@@ -230,6 +230,25 @@ test("settings roundtrip and template validation", async () => {
     });
     assert.equal(invalid.status, 400);
     assert.match(invalid.value.message, new RegExp(SLURM_COMMAND_TAG.replace(/[{}]/g, "\\$&")));
+
+    // Review-round override: set, keep when the update omits it, clear via {}.
+    const withRounds = await putSettings(server, { review: { maxRounds: 6 } });
+    assert.equal(withRounds.review?.maxRounds, 6);
+    const { review: _omitted, ...withoutReview } = withRounds;
+    const kept = await requestJson<ServerSettings>(server, "/api/settings", {
+      method: "PUT",
+      body: JSON.stringify(withoutReview),
+    });
+    assert.equal(kept.status, 200);
+    assert.equal(kept.value.review?.maxRounds, 6);
+    const cleared = await putSettings(server, { review: {} });
+    assert.equal(cleared.review, undefined);
+    const outOfRange = await requestJson<{ message: string }>(server, "/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({ ...changed, review: { maxRounds: 11 } }),
+    });
+    assert.equal(outOfRange.status, 400);
+    assert.match(outOfRange.value.message, /review\.maxRounds/);
   } finally {
     await server.close();
     await removeWorkspace(workspace);
@@ -1708,6 +1727,26 @@ test("template rendering replaces one tag and preserves shell-quoted topics", ()
   assert.equal(rendered.includes(SLURM_COMMAND_TAG), false);
   assert.ok(rendered.includes(shellQuote(topic)));
   assert.equal(rendered.split(command).length - 1, 1);
+});
+
+test("a review-round override rides the command as its own env variable", () => {
+  const base = { ...defaultServerSettings(), llm: { provider: "offline" as const } };
+  const fixture = {
+    workerPath: "/tmp/worker/main.js",
+    mode: "run" as const,
+    runId: "bsa_rounds",
+    topic: "Review budget",
+    sessionRoot: "/tmp/sessions",
+    eventsFile: "/tmp/events.jsonl",
+    contentDir: "/tmp/content",
+  };
+  const overridden = buildOrchestrationCommand({
+    ...fixture,
+    settings: { ...base, review: { maxRounds: 6 } },
+  });
+  assert.match(overridden, /BRAINSTORM_AGENTIC_MAX_REVIEW_ROUNDS='6'/);
+  const unset = buildOrchestrationCommand({ ...fixture, settings: base });
+  assert.equal(unset.includes("BRAINSTORM_AGENTIC_MAX_REVIEW_ROUNDS"), false);
 });
 
 test("Claude Agent command selects its executor without embedding the setup token", () => {
