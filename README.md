@@ -26,7 +26,21 @@ The independently deployed Brain Registry is deliberately not part of this appli
 worker connects over MCP, pins an immutable version, and retrieves only the current role and its
 declared techniques. Files are hash-verified and cached for resume.
 
-## Install, build, and test
+## Quick start (no Node setup needed)
+
+```bash
+git clone https://github.com/mossishahi/Brain-app.git
+cd Brain-app && ./setup.sh
+```
+
+`setup.sh` takes care of everything a fresh machine is missing: when no Node 22.13+ is on the
+PATH it downloads the pinned Node v22.13.0 for this OS/CPU into `~/opt` (no root, no package
+manager — the same convention the SLURM wrapper uses), then installs, builds, and launches.
+Arguments pass through to the server (`./setup.sh --port 9000 --no-open`); `--build-only`
+prepares the machine without launching. Linux and macOS; on Windows use WSL. Re-running it is
+cheap — an already-built checkout skips straight to the launch.
+
+## Install, build, and test (manual)
 
 ```bash
 npm install
@@ -34,8 +48,8 @@ npm run build
 npm test
 ```
 
-Node.js **22.13 or newer** is required (the Cursor SDK's floor; `deploy/` scripts install
-v22.13.0). The floor is enforced: `engine-strict` fails installs on an older Node, and the
+Node.js **22.13 or newer** is required (the Cursor SDK's floor; `setup.sh` and the `deploy/`
+scripts install v22.13.0). The floor is enforced: `engine-strict` fails installs on an older Node, and the
 server and worker entry points refuse to start on one with a clear message — a worker on a
 cluster compute node checks its own Node too, so a wrong job environment fails loudly in the
 job log instead of crashing mid-run.
@@ -52,8 +66,9 @@ has one.
 
 ## Launch
 
-Cloning and installing is all a user needs — the shared Brain Registry endpoint is baked into
-the app, and every new run automatically fetches the latest published skills:
+Cloning and running `./setup.sh` is all a user needs — the shared Brain Registry endpoint is
+baked into the app, and every new run automatically fetches the latest published skills. The
+manual equivalent:
 
 ```bash
 npm install && npm run build

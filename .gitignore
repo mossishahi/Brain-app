@@ -2,6 +2,8 @@ node_modules/
 packages/*/dist/
 apps/*/dist/
 *.tsbuildinfo
+# written by setup.sh and deploy/slurm-launch.sh after a successful build
+.build-stamp
 .DS_Store
 .env
 .env.*
