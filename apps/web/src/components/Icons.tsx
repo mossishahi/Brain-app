@@ -91,6 +91,16 @@ export function CopyIcon({ size = 14 }: IconProps) {
   );
 }
 
+export function DownloadIcon({ size = 14 }: IconProps) {
+  return (
+    <svg {...frame(size)}>
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <path d="m7 10 5 5 5-5" />
+      <path d="M12 15V3" />
+    </svg>
+  );
+}
+
 export function ForwardIcon({ size = 18 }: IconProps) {
   return (
     <svg {...frame(size)}>

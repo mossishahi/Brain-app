@@ -707,6 +707,7 @@ export function Dashboard({
                   firstPass={stageOf(job, "first-pass")}
                   expanded={!collapsed.has(selected)}
                   frame={frame}
+                  topic={job.topic}
                 />
               ) : (
                 frame(renderBody(selected))

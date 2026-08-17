@@ -322,7 +322,13 @@ activity feed, fold), and the *walk inspector* sits below in its own panel.
   it — the first pass with every redevelopment applied, rendered with the same tabs as a
   first-pass card. Chip-marked "final version" (`--ok`) once every step of the member's walk has
   passed or force-passed, "in progress" until then, with a meta line "revised ×k during review" /
-  "unchanged from the first pass". The first-pass panel keeps showing the original version — the
+  "unchanged from the first pass". Once the walk is complete, the fold's top-right corner gains a
+  ghost download button (download glyph): it saves the seat's whole output — the shape body's
+  sections, requested outputs, novelty, chain of thought, and collected literature — as
+  `seat_<N>.tex`, a self-contained LaTeX file (client-side generated, titled by the submission
+  topic, authored as the seat) that embeds the repo's shared `latex_style.sty` via
+  `filecontents*`, so the one downloaded file compiles anywhere in the app's style. The first-pass
+  panel keeps showing the original version — the
   history is never rewritten. The same final versions are saved as readable copies under the
   session's `final/` directory (one JSON per member, plus the proposal), which is what the CLI
   names when a run finishes.

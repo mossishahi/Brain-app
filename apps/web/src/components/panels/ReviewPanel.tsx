@@ -29,8 +29,15 @@ import type {
   ReviewStepView,
 } from "@brainstorm-agentic/protocol";
 import { prefersReducedMotion } from "../../format";
+import {
+  downloadTextFile,
+  seatNumberOf,
+  seatOutputToLatex,
+  seatTexFileName,
+} from "../../latex";
+import { LATEX_STYLE } from "../../latex-style";
 import { EvidenceBlock, TokenChip } from "../common";
-import { BackIcon, CopyIcon, ForwardIcon } from "../Icons";
+import { BackIcon, CopyIcon, DownloadIcon, ForwardIcon } from "../Icons";
 import { IdeaTabs } from "./FirstPassPanel";
 import {
   computeSeatTimeline,
@@ -730,6 +737,7 @@ export function ReviewStagePanels({
   firstPass,
   frame,
   expanded,
+  topic,
 }: {
   stage: ReviewStage;
   firstPass?: FirstPassStage;
@@ -737,6 +745,8 @@ export function ReviewStagePanels({
   frame: (gridPanel: ReactNode) => ReactNode;
   /** The stage frame's fold state — the walk panel folds with it. */
   expanded: boolean;
+  /** The run's submission topic; titles the seat's LaTeX export. */
+  topic?: string;
 }) {
   // No global cursor: each seat carries its own progress, so several seats can
   // be under review at once.
@@ -1032,6 +1042,54 @@ export function ReviewStagePanels({
                               ? `revised ×${revisions} during review`
                               : "unchanged from the first pass"}
                           </span>
+                          {finalized &&
+                            (() => {
+                              const fileName = seatTexFileName(
+                                seatNumberOf(seat.label, seatIndex),
+                              );
+                              return (
+                                <button
+                                  type="button"
+                                  className="ghost-btn copy-btn review-download-btn"
+                                  aria-label={`download ${fileName} — this seat's final output as LaTeX`}
+                                  title={`Download ${fileName} (LaTeX, latex_style)`}
+                                  onClick={(event) => {
+                                    // A click inside <summary> would also toggle the fold.
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                    downloadTextFile(
+                                      fileName,
+                                      seatOutputToLatex(
+                                        {
+                                          idea: seat.finalIdea!,
+                                          seatNumber: seatNumberOf(seat.label, seatIndex),
+                                          topic: topic ?? seat.label,
+                                          ...(seat.department !== undefined
+                                            ? { department: seat.department }
+                                            : {}),
+                                          ...(seat.umbrella !== undefined
+                                            ? { umbrella: seat.umbrella }
+                                            : {}),
+                                          ...(firstPassMember(seat.memberId)?.subfields !==
+                                          undefined
+                                            ? {
+                                                subfields: firstPassMember(seat.memberId)!
+                                                  .subfields,
+                                              }
+                                            : {}),
+                                          ...(seat.revisionCount !== undefined
+                                            ? { revisionCount: seat.revisionCount }
+                                            : {}),
+                                        },
+                                        LATEX_STYLE,
+                                      ),
+                                    );
+                                  }}
+                                >
+                                  <DownloadIcon />
+                                </button>
+                              );
+                            })()}
                         </summary>
                         <div className="review-fold-body">
                           <IdeaTabs idea={seat.finalIdea} />

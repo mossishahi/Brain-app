@@ -4138,6 +4138,11 @@ details.drawer-section[open] > summary::before {
   font-size: 13px;
 }
 
+/* The seat's LaTeX download sits at the head's right edge ("top right"). */
+.review-download-btn {
+  margin-left: auto;
+}
+
 /* ------------------------------------------------------------------------- *
  * Environment status icons (LLM / code / internet / SLURM) + readiness UI
  * ------------------------------------------------------------------------- */
