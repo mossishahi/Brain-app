@@ -1193,15 +1193,6 @@ select:disabled {
   color: var(--text-dim);
 }
 
-/* Cross-step retro changes rendered inside the affected step's own text:
-   red, with the origin (step · round) on hover. */
-.retro-change {
-  cursor: help;
-  text-decoration: underline dotted;
-  text-underline-offset: 3px;
-  text-decoration-color: color-mix(in srgb, var(--bad) 55%, transparent);
-}
-
 .badge-accent {
   color: var(--accent);
   border-color: var(--accent);
@@ -3730,19 +3721,20 @@ details.drawer-section[open] > summary::before {
   color: var(--bad);
 }
 
-/* Rewrites this round applied to OTHER steps: red, because they moved text
-   the reader is not currently looking at. */
-.round-cross-list {
+/* One-line notes on the ORIGIN round card: the rewritten text itself is
+   recorded as its own card in the affected step's round deck. */
+.round-cross-note {
+  margin-top: 6px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 2px;
 }
 
-.round-cross {
-  border-left: 2px solid var(--bad);
-  background: color-mix(in srgb, var(--bad) 6%, transparent);
-  border-radius: 0 var(--radius) var(--radius) 0;
-  padding: 8px 12px;
+/* The affected-side card label naming the walk position that rewrote this
+   step. Plain red text — the color is the whole signal, never a background
+   tint or an underline. */
+.round-cross-origin {
+  color: var(--bad);
 }
 
 .detail-label-bad {

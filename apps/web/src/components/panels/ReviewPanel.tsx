@@ -9,9 +9,12 @@
  *  - ROUNDS sit inside each step card as a deck of sub-cards, newest on top,
  *    paged with prev/next buttons (never scrolled). A round card shows the
  *    text that came OUT of that round — words carried from earlier rounds
- *    dimmed, this round's changes at full weight, and rewrites the round
- *    applied to OTHER steps in red — plus a collapsed comments panel whose
- *    tags switch between the judge (default) and each commentor.
+ *    dimmed, this round's changes at full weight — plus a collapsed comments
+ *    panel whose tags switch between the judge (default) and each commentor.
+ *    A rewrite another walk position applied to this step is ITS OWN card in
+ *    the deck, in chronological position, labeled "changed by step N", its
+ *    changed words in plain red; the originating round keeps only a one-line
+ *    note naming the step it rewrote.
  */
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import type {
@@ -29,10 +32,9 @@ import { BackIcon, CopyIcon, ForwardIcon } from "../Icons";
 import { IdeaTabs } from "./FirstPassPanel";
 import {
   computeSeatTimeline,
-  diffWords,
   roundViewKey,
+  type CrossRewriteView,
   type DiffSegment,
-  type RetroNote,
   type RoundComputedView,
   type SeatTimeline,
 } from "./review-diff";
@@ -420,26 +422,74 @@ function bugReportText(
 }
 
 /**
- * The round deck inside one step card: newest round on top, older rounds
+ * One entry of a step's round deck: a real review round, or a rewrite that
+ * ANOTHER walk position's round applied to this step — shown as its own
+ * card so paging the deck reads the step's full text history in the order
+ * it happened.
+ */
+type DeckEntry =
+  | { readonly kind: "round"; readonly key: string; readonly round: ReviewRoundView }
+  | { readonly kind: "cross"; readonly key: string; readonly cross: CrossRewriteView };
+
+/**
+ * The deck in chronological order. Walk order IS the chronology: a rewrite
+ * from an EARLIER position landed before this step's own review began, one
+ * from a LATER position landed after it finished, and within each side the
+ * timeline replay already ordered them.
+ */
+function deckEntries(step: ReviewStepView, timeline: SeatTimeline): DeckEntry[] {
+  const crosses = timeline.crossRewrites.get(step.index) ?? [];
+  const crossEntry = (view: CrossRewriteView): DeckEntry => ({
+    kind: "cross",
+    key: `x${view.byStep}:${view.byRound}`,
+    cross: view,
+  });
+  const rounds = [...step.rounds]
+    .sort((a, b) => a.round - b.round)
+    .map((round): DeckEntry => ({ kind: "round", key: `r${round.round}`, round }));
+  return [
+    ...crosses.filter((view) => view.byStep < step.index).map(crossEntry),
+    ...rounds,
+    ...crosses.filter((view) => view.byStep > step.index).map(crossEntry),
+  ];
+}
+
+function crossOriginText(cross: CrossRewriteView): string {
+  return `rewritten during step ${cross.byStep} · round ${cross.byRound} — not by this step's own review`;
+}
+
+function crossReportText(
+  member: ReviewMemberView,
+  step: ReviewStepView,
+  cross: CrossRewriteView,
+): string {
+  return [
+    `${member.label}${member.umbrella ? ` (${member.umbrella})` : ""} — step ${step.index}`,
+    crossOriginText(cross),
+    cross.after,
+  ].join("\n");
+}
+
+/**
+ * The round deck inside one step card: newest entry on top, older ones
  * behind it, paged with buttons. The visible card's text is never clamped or
- * scrolled — the card takes the height of the full text.
+ * scrolled — the card takes the height of the full text. Cross-step rewrites
+ * are their own cards, labeled with the walk position that caused them; the
+ * step's own "Round k / K" numbering never shifts around them.
  */
 function RoundDeck({
   member,
   step,
   timeline,
-  retroNotes,
-  selectedRound,
-  onSelectRound,
+  selectedEntry,
+  onSelectEntry,
   commentState,
 }: {
   member: ReviewMemberView;
   step: ReviewStepView;
   timeline: SeatTimeline;
-  /** Rewrites applied to THIS step by other walk positions' rounds. */
-  retroNotes: readonly RetroNote[];
-  selectedRound: number | undefined;
-  onSelectRound: (round: number) => void;
+  selectedEntry: string | undefined;
+  onSelectEntry: (key: string) => void;
   commentState: {
     open: (key: string) => boolean;
     toggle: (key: string) => void;
@@ -447,9 +497,8 @@ function RoundDeck({
     select: (key: string, tag: string) => void;
   };
 }) {
-  // Newest first: round k sits on top of round k-1.
-  const rounds = [...step.rounds].sort((a, b) => b.round - a.round);
-  if (rounds.length === 0) {
+  const deck = deckEntries(step, timeline);
+  if (deck.length === 0) {
     const text = timeline.chain.get(step.index);
     return (
       <div className="round-card round-card-pending">
@@ -462,43 +511,76 @@ function RoundDeck({
       </div>
     );
   }
-  const latest = rounds[0]!.round;
-  const shown =
-    selectedRound !== undefined && rounds.some((r) => r.round === selectedRound)
-      ? selectedRound
-      : latest;
-  const position = rounds.findIndex((r) => r.round === shown);
-  const computed = timeline.rounds.get(roundViewKey(step.index, shown));
-  const round = rounds[position]!;
-  const commentKey = `${member.memberId}:${step.index}:${shown}`;
-  // When a LATER walk position's redevelopment rewrote this step, the step's
-  // standing text is no longer what its own review left. The latest card
-  // shows the UPDATED text, with the cross-step changes in red; hovering the
-  // red names the round that originated them.
-  const finalText = timeline.chain.get(step.index);
-  const retroActive =
-    shown === latest &&
-    retroNotes.length > 0 &&
-    computed?.outText !== undefined &&
-    finalText !== undefined &&
-    finalText !== computed.outText;
-  const retroOrigin = retroNotes
-    .map((note) => `step ${note.byStep} · round ${note.byRound}`)
-    .join(", ");
-  // The pager arrows hug the "Round k / K" title — exactly the seat pager's
-  // pattern — so paging a step's history reads the same as paging seats.
+  // Newest on top: the default card is the deck's last (most recent) entry —
+  // the step's standing text, whichever review wrote it.
+  const selectedIndex =
+    selectedEntry !== undefined
+      ? deck.findIndex((entry) => entry.key === selectedEntry)
+      : -1;
+  const position = selectedIndex >= 0 ? selectedIndex : deck.length - 1;
+  const entry = deck[position]!;
+  const newest = position === deck.length - 1;
+  const versionMeta = newest ? "as the review leaves it" : "an earlier version";
+  // The pager arrows hug the card title — exactly the seat pager's pattern —
+  // so paging a step's history reads the same as paging seats.
+  const olderButton = (
+    <button
+      type="button"
+      className="ghost-btn"
+      aria-label="older version of this step"
+      disabled={position === 0}
+      onClick={() => onSelectEntry(deck[position - 1]!.key)}
+    >
+      <BackIcon size={16} />
+    </button>
+  );
+  const newerButton = (
+    <button
+      type="button"
+      className="ghost-btn"
+      aria-label="newer version of this step"
+      disabled={newest}
+      onClick={() => onSelectEntry(deck[position + 1]!.key)}
+    >
+      <ForwardIcon size={16} />
+    </button>
+  );
+
+  if (entry.kind === "cross") {
+    // A rewrite another walk position applied to this step: its own card,
+    // labeled by origin, the changed words in plain red (color only).
+    return (
+      <div className="round-card" key={entry.key}>
+        <div className="round-card-head">
+          {olderButton}
+          <span
+            className="review-fold-name round-cross-origin"
+            title={crossOriginText(entry.cross)}
+          >
+            changed by step {entry.cross.byStep}
+          </span>
+          {newerButton}
+          {deck.length > 1 && <span className="review-step-meta">{versionMeta}</span>}
+          <span className="round-card-actions">
+            <CopyButton
+              label="copy this rewrite for a bug report"
+              text={() => crossReportText(member, step, entry.cross)}
+            />
+          </span>
+        </div>
+        <p className="round-text">{segmentSpans(entry.cross.segments, "diff-red")}</p>
+      </div>
+    );
+  }
+
+  const round = entry.round;
+  const latest = step.rounds.reduce((max, r) => Math.max(max, r.round), 0);
+  const computed = timeline.rounds.get(roundViewKey(step.index, round.round));
+  const commentKey = `${member.memberId}:${step.index}:${entry.key}`;
   return (
-    <div className="round-card" key={shown}>
+    <div className="round-card" key={entry.key}>
       <div className="round-card-head">
-        <button
-          type="button"
-          className="ghost-btn"
-          aria-label="older round"
-          disabled={position === rounds.length - 1}
-          onClick={() => onSelectRound(rounds[position + 1]!.round)}
-        >
-          <BackIcon size={16} />
-        </button>
+        {olderButton}
         <span className="review-fold-name">
           Round{" "}
           <span
@@ -509,21 +591,13 @@ function RoundDeck({
           </span>
           <span className="dim"> / {latest}</span>
         </span>
-        <button
-          type="button"
-          className="ghost-btn"
-          aria-label="newer round"
-          disabled={position === 0}
-          onClick={() => onSelectRound(rounds[position - 1]!.round)}
-        >
-          <ForwardIcon size={16} />
-        </button>
+        {newerButton}
         {round.revision && <span className="badge badge-warn">redeveloped</span>}
-        {latest > 1 && (
+        {deck.length > 1 && (
           <span className="review-step-meta">
             {[
               ...(!computed?.ownRewrite && round.round > 1 ? ["unchanged this round"] : []),
-              shown === latest ? "as the review leaves it" : "an earlier version",
+              versionMeta,
             ].join(" · ")}
           </span>
         )}
@@ -534,37 +608,16 @@ function RoundDeck({
           />
         </span>
       </div>
-      {retroActive ? (
-        <p className="round-text">
-          {diffWords(computed.outText, finalText).map((segment, index) => (
-            <span
-              key={index}
-              className={segment.changed ? "diff-red retro-change" : undefined}
-              title={
-                segment.changed
-                  ? `changed during ${retroOrigin} — not by this step's own review`
-                  : undefined
-              }
-            >
-              {index > 0 ? " " : ""}
-              {segment.text}
-            </span>
-          ))}
-        </p>
-      ) : (
-        computed?.outText !== undefined && (
-          <p className="round-text">{segmentSpans(computed.segments, "diff-new")}</p>
-        )
+      {computed?.outText !== undefined && (
+        <p className="round-text">{segmentSpans(computed.segments, "diff-new")}</p>
       )}
       {computed !== undefined && computed.crossChanges.length > 0 && (
-        <div className="round-cross-list">
+        <div className="round-cross-note">
           {computed.crossChanges.map((change) => (
-            <div key={change.index} className="round-cross">
-              <span className="detail-label detail-label-bad">
-                also rewrote step {change.index} this round
-              </span>
-              <p className="round-text">{segmentSpans(change.segments, "diff-red")}</p>
-            </div>
+            <span key={change.index} className="detail-label detail-label-bad">
+              also rewrote step {change.index} this round
+              <span className="dim"> — see step {change.index}</span>
+            </span>
           ))}
         </div>
       )}
@@ -618,10 +671,11 @@ export function ReviewStagePanels({
 
   // The seat pager follows the lone active seat until the reader pins one.
   const [pinnedSeat, setPinnedSeat] = useState<string | undefined>(undefined);
-  // Deck position per step; comments fold + selected tag per round. All fold
-  // state is controlled: live snapshots re-render this panel continuously, so
-  // an uncontrolled <details> would snap back on every SSE tick.
-  const [roundChoices, setRoundChoices] = useState<ReadonlyMap<string, number>>(new Map());
+  // Deck position per step (an entry key — a round or a cross rewrite);
+  // comments fold + selected tag per round. All fold state is controlled:
+  // live snapshots re-render this panel continuously, so an uncontrolled
+  // <details> would snap back on every SSE tick.
+  const [roundChoices, setRoundChoices] = useState<ReadonlyMap<string, string>>(new Map());
   const [commentOpen, setCommentOpen] = useState<ReadonlyMap<string, boolean>>(new Map());
   const [commentTags, setCommentTags] = useState<ReadonlyMap<string, string>>(new Map());
   const [finalOpen, setFinalOpen] = useState<ReadonlyMap<string, boolean>>(new Map());
@@ -811,7 +865,7 @@ export function ReviewStagePanels({
               <div className="review-cards">
                 {seat.steps.map((step) => {
                   const stepRefKey = `${seat.memberId}:${step.index}`;
-                  const retroNotes = timeline.retro.get(step.index) ?? [];
+                  const crossCount = (timeline.crossRewrites.get(step.index) ?? []).length;
                   const choiceKey = stepRefKey;
                   const k = redevCount(step);
                   return (
@@ -832,21 +886,25 @@ export function ReviewStagePanels({
                         </span>
                         {k > 0 && <span className="badge">×{k} redeveloped</span>}
                         <span className="review-step-meta">
-                          {step.rounds.length === 0
-                            ? ""
-                            : `${step.rounds.length} round${step.rounds.length === 1 ? "" : "s"}`}
+                          {step.rounds.length > 0
+                            ? `${step.rounds.length} round${step.rounds.length === 1 ? "" : "s"}`
+                            : // With no rounds the pending card usually says it;
+                              // when cross-rewrite cards fill the deck instead,
+                              // the hint moves up here.
+                              crossCount > 0 && step.outcome === "under-review"
+                              ? "round 1 in progress"
+                              : ""}
                         </span>
                       </div>
                       <RoundDeck
                         member={seat}
                         step={step}
                         timeline={timeline}
-                        retroNotes={retroNotes}
-                        selectedRound={roundChoices.get(choiceKey)}
-                        onSelectRound={(round) =>
+                        selectedEntry={roundChoices.get(choiceKey)}
+                        onSelectEntry={(key) =>
                           setRoundChoices((prev) => {
                             const next = new Map(prev);
-                            next.set(choiceKey, round);
+                            next.set(choiceKey, key);
                             return next;
                           })
                         }

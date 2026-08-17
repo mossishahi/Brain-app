@@ -7,8 +7,9 @@
  *
  *  - the step's own words that survived from earlier rounds render dimmed,
  *    so what this round actually changed carries the full weight;
- *  - changes the round applied to OTHER steps (retroactive repairs) render
- *    red, because they moved text the reader is not currently looking at.
+ *  - a change the round applied to ANOTHER step becomes that step's own
+ *    extra "round" card (a cross rewrite), labeled with the walk position
+ *    that caused it, its changed words in plain red.
  *
  * All of it derives from a single chronological replay of the seat's walk:
  * steps ascending, rounds ascending — exactly the order the runtime executed
@@ -112,17 +113,29 @@ export interface RoundComputedView {
   readonly crossChanges: readonly CrossChangeView[];
 }
 
-/** A later walk position's round rewrote this step after its own walk. */
-export interface RetroNote {
+/**
+ * One rewrite ANOTHER walk position's round applied to this step — rendered
+ * as its own card in the affected step's round deck, in chronological
+ * position, labeled with the origin.
+ */
+export interface CrossRewriteView {
+  /** 1-based walk position whose review round produced the rewrite. */
   readonly byStep: number;
   readonly byRound: number;
+  /** The step's text before this rewrite; undefined when unreconstructable. */
+  readonly before?: string;
+  readonly after: string;
+  readonly segments: readonly DiffSegment[];
 }
 
 export interface SeatTimeline {
   /** Keyed `<stepIndex>:<round>`. */
   readonly rounds: ReadonlyMap<string, RoundComputedView>;
-  /** Per step index: rewrites applied to it from OTHER walk positions. */
-  readonly retro: ReadonlyMap<number, readonly RetroNote[]>;
+  /**
+   * Per step index: rewrites applied to it by OTHER walk positions, in walk
+   * order (the order the runtime executed them).
+   */
+  readonly crossRewrites: ReadonlyMap<number, readonly CrossRewriteView[]>;
   /** The chain as the replay leaves it (first pass + every rewrite). */
   readonly chain: ReadonlyMap<number, string>;
 }
@@ -144,7 +157,7 @@ export function computeSeatTimeline(
   const chain = new Map<number, string>();
   (firstPassCot ?? []).forEach((text, index) => chain.set(index + 1, text));
   const rounds = new Map<string, RoundComputedView>();
-  const retro = new Map<number, RetroNote[]>();
+  const crossRewrites = new Map<number, CrossRewriteView[]>();
 
   const steps = [...member.steps].sort((a, b) => a.index - b.index);
   for (const step of steps) {
@@ -163,16 +176,25 @@ export function computeSeatTimeline(
       for (const entry of rewritten) {
         if (entry.index === step.index) continue;
         const before = chain.get(entry.index);
+        const segments = diffWords(before, entry.text);
         crossChanges.push({
           index: entry.index,
           ...(before !== undefined ? { before } : {}),
           after: entry.text,
-          segments: diffWords(before, entry.text),
+          segments,
         });
         chain.set(entry.index, entry.text);
-        const notes = retro.get(entry.index) ?? [];
-        notes.push({ byStep: step.index, byRound: round.round });
-        retro.set(entry.index, notes);
+        // The affected step's own record of the same event: an extra card in
+        // its round deck, carrying who caused it and the text it left behind.
+        const received = crossRewrites.get(entry.index) ?? [];
+        received.push({
+          byStep: step.index,
+          byRound: round.round,
+          ...(before !== undefined ? { before } : {}),
+          after: entry.text,
+          segments,
+        });
+        crossRewrites.set(entry.index, received);
       }
       if (outText !== undefined) chain.set(step.index, outText);
 
@@ -193,5 +215,5 @@ export function computeSeatTimeline(
       });
     }
   }
-  return { rounds, retro, chain };
+  return { rounds, crossRewrites, chain };
 }

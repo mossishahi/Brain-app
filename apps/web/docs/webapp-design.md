@@ -290,14 +290,17 @@ activity feed, fold), and the *walk inspector* sits below in its own panel.
   plain-text bug report (seat, step, round, verdict, issues, texts).
 - Round text: the step text as it came OUT of that round, full height, never clamped or
   scrolled. Words carried from earlier rounds render dimmed; the round's own changes render at
-  full weight (round 1 is all full-weight — nothing was reviewed before it). Rewrites the round
-  applied to OTHER steps render below in red — a `--bad`-tinted block per rewritten step,
-  changed words in red — because they moved text the reader is not currently looking at.
-- Retroactive rewrites land on the AFFECTED step too: when a later walk position's round
-  rewrote this step, its latest card shows the UPDATED standing text with the cross-step
-  changes in red (dotted underline, help cursor); hovering a red part names the origin
-  ("changed during step 2 · round 1 — not by this step's own review"). Older cards keep the
-  step's own history untouched.
+  full weight (round 1 is all full-weight — nothing was reviewed before it). When the round's
+  revision also rewrote OTHER steps, the card carries only a one-line red note per rewritten
+  step ("also rewrote step 5 this round — see step 5"); the rewritten text itself is shown on
+  the affected step, never here.
+- A cross-step rewrite is ITS OWN card in the AFFECTED step's round deck, placed in true
+  chronological position — before the step's own rounds when an earlier walk position caused
+  it, after them when a later one did. The card is labeled "changed by step N" (hover names the
+  exact origin round) and shows the step's updated text with the changed words in plain red —
+  color only, no background tint, no underline — and carried words dimmed. The step's own
+  "Round k / K" numbering never shifts around these cards, and older cards keep the step's
+  history untouched.
 - Comments panel: under each round's text, collapsed by default. The reviewer names ride ON the
   summary row itself, right after the "Comments & judgement" label — Judge first, then each
   commentor — each name colored by its verdict (`--ok` Pass, `--warn` Build, `--bad` Interrupt,
