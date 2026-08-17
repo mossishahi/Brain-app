@@ -83,7 +83,12 @@ export async function withFsDeadline<T>(
             ),
           deadlineMs,
         );
-        timer.unref?.();
+        // REFERENCED deliberately (the executor stall watchdog learned the
+        // same lesson): a write blocked in the kernel holds no live handle,
+        // so an unref'd deadline let the event loop drain mid-race and the
+        // process exit silently — the exact silent death this bound exists
+        // to prevent. The finally below clears the timer the moment the
+        // race settles, so it never outlives a healthy operation.
       }),
     ]);
   } finally {
