@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   mkdtempSync,
   readdirSync,
@@ -8,17 +8,30 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import {
+  createServer as createHttpServer,
+  type IncomingMessage,
+  type ServerResponse,
+} from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
+import { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
+  ListResourcesRequestSchema,
+  ReadResourceRequestSchema,
+  isInitializeRequest,
+} from "@modelcontextprotocol/sdk/types.js";
+
+import {
+  ContentRegistryClient,
   ContentRegistryStore,
   parseContentRegistryManifest,
   readContentPin,
   writeContentPin,
-  type ContentRegistryClient,
   type ContentRegistryPin,
 } from "../src/index.js";
 
@@ -271,4 +284,138 @@ test("declaredRegistryWindowMs reads /health and tolerates registries that decla
     await declaredRegistryWindowMs(`http://127.0.0.1:${port}/mcp`),
     undefined,
   );
+});
+
+/**
+ * A minimal Streamable-HTTP MCP registry whose sessions can be FORGOTTEN on
+ * demand — exactly what the real registry does to sessions idle for 30
+ * minutes (and to every session on a restart), answering later requests
+ * with the same 404 body ("session not found") the incident carried.
+ */
+async function startForgetfulRegistry(): Promise<{
+  readonly url: string;
+  readonly initializeCount: () => number;
+  forgetSessions(): void;
+  close(): Promise<void>;
+}> {
+  const sessions = new Map<string, StreamableHTTPServerTransport>();
+  let initializes = 0;
+  const readBody = (req: IncomingMessage): Promise<unknown> =>
+    new Promise((resolve, reject) => {
+      if (req.method === "GET" || req.method === "DELETE") {
+        resolve(undefined);
+        return;
+      }
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+      req.on("end", () => {
+        const raw = Buffer.concat(chunks).toString("utf8");
+        if (raw.length === 0) {
+          resolve(undefined);
+          return;
+        }
+        try {
+          resolve(JSON.parse(raw));
+        } catch (error) {
+          reject(error instanceof Error ? error : new Error(String(error)));
+        }
+      });
+      req.on("error", reject);
+    });
+  const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    try {
+      const sessionId = req.headers["mcp-session-id"];
+      const known = typeof sessionId === "string" ? sessions.get(sessionId) : undefined;
+      if (known) {
+        await known.handleRequest(req, res, await readBody(req));
+        return;
+      }
+      if (sessionId !== undefined) {
+        res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+        res.end("session not found");
+        return;
+      }
+      const body = await readBody(req);
+      if (req.method !== "POST" || !isInitializeRequest(body)) {
+        res.writeHead(400);
+        res.end("a new session must start with initialize");
+        return;
+      }
+      initializes += 1;
+      const mcp = new McpServer(
+        { name: "forgetful-registry", version: "0.0.1" },
+        { capabilities: { resources: {} } },
+      );
+      mcp.setRequestHandler(ListResourcesRequestSchema, async () => ({
+        resources: [
+          { uri: "brain://file/hello.md", name: "hello.md", mimeType: "text/markdown" },
+        ],
+      }));
+      mcp.setRequestHandler(ReadResourceRequestSchema, async (request) => ({
+        contents: [
+          { uri: request.params.uri, mimeType: "text/markdown", text: "hello" },
+        ],
+      }));
+      let transport!: StreamableHTTPServerTransport;
+      transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+        onsessioninitialized: (id) => {
+          sessions.set(id, transport);
+        },
+      });
+      await mcp.connect(transport);
+      await transport.handleRequest(req, res, body);
+    } catch {
+      if (!res.headersSent) {
+        res.writeHead(500);
+        res.end("error");
+      } else {
+        res.end();
+      }
+    }
+  };
+  const httpServer = createHttpServer((req, res) => {
+    void handle(req, res);
+  });
+  const port = await new Promise<number>((resolve, reject) => {
+    httpServer.once("error", reject);
+    httpServer.listen(0, "127.0.0.1", () => {
+      const address = httpServer.address();
+      resolve(typeof address === "object" && address !== null ? address.port : 0);
+    });
+  });
+  return {
+    url: `http://127.0.0.1:${port}/mcp`,
+    initializeCount: () => initializes,
+    forgetSessions: () => sessions.clear(),
+    close: () =>
+      new Promise<void>((resolve, reject) => {
+        httpServer.closeAllConnections();
+        httpServer.close((error) => (error ? reject(error) : resolve()));
+      }),
+  };
+}
+
+test("a read after the registry forgot the session reconnects instead of failing", async () => {
+  const registry = await startForgetfulRegistry();
+  const client = new ContentRegistryClient(registry.url);
+  try {
+    assert.equal(await client.readText("hello.md"), "hello");
+    assert.equal(registry.initializeCount(), 1);
+
+    // The idle reap (or a registry restart): every session is forgotten.
+    // The next read used to surface "failed to read Brain Registry resource
+    // …: session not found" and sink the run at its first lazy skill fetch
+    // after a long quiet stage; it must instead reconnect once and succeed.
+    registry.forgetSessions();
+    assert.equal(await client.readText("hello.md"), "hello");
+    assert.equal(registry.initializeCount(), 2, "exactly one reconnect");
+
+    // The refreshed session keeps serving without further reconnects.
+    assert.equal(await client.readText("hello.md"), "hello");
+    assert.equal(registry.initializeCount(), 2);
+  } finally {
+    await client.close().catch(() => undefined);
+    await registry.close();
+  }
 });

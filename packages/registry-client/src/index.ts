@@ -269,6 +269,18 @@ function isRateLimitError(error: unknown): boolean {
   return /\b429\b|rate limit/i.test(message);
 }
 
+/**
+ * True when a failed MCP call means OUR SESSION is gone, not that the
+ * operation itself was refused: the registry answered "session not found"
+ * (it reaps sessions idle for ~30 minutes and forgets every session on a
+ * restart or redeploy), or the SDK already tore the transport down ("Not
+ * connected"). Both are healed by reconnecting, never by giving up.
+ */
+function isSessionLoss(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /session not found|not connected/i.test(message);
+}
+
 export interface RegistryRateLimitRetryOptions {
   /** Retries after the first failure. Default 2. */
   readonly retries?: number;
@@ -320,14 +332,18 @@ function textFromResource(value: unknown, path: string): string {
 }
 
 export class ContentRegistryClient {
-  private readonly client = new Client({
+  private client = new Client({
     name: "brain-orchestrator",
     version: "0.1.0",
   });
-  private readonly transport: StreamableHTTPClientTransport;
+  private transport: StreamableHTTPClientTransport;
   private readonly rateLimitRetry: RegistryRateLimitRetryOptions;
   private connected = false;
   private connecting: Promise<void> | undefined;
+  /** Bumped on every reconnect: concurrent losers of ONE dead session then
+   *  reconnect once between them instead of once each. */
+  private sessionGeneration = 0;
+  private reconnecting: Promise<void> | undefined;
   /** The /health-declared window, looked up once and only after a 429. */
   private declaredWindow: Promise<number | undefined> | undefined;
 
@@ -335,9 +351,7 @@ export class ContentRegistryClient {
     readonly url: string,
     options: { readonly rateLimitRetry?: RegistryRateLimitRetryOptions } = {},
   ) {
-    this.transport = new StreamableHTTPClientTransport(
-      new URL(normalizeContentRegistryUrl(url)),
-    );
+    this.transport = this.newTransport();
     this.rateLimitRetry = {
       declaredWaitMs: () => (this.declaredWindow ??= declaredRegistryWindowMs(url)),
       // A minute of dead silence mid-run reads as a hang; narrate the wait
@@ -350,6 +364,12 @@ export class ContentRegistryClient {
       },
       ...(options.rateLimitRetry ?? {}),
     };
+  }
+
+  private newTransport(): StreamableHTTPClientTransport {
+    return new StreamableHTTPClientTransport(
+      new URL(normalizeContentRegistryUrl(this.url)),
+    );
   }
 
   /**
@@ -376,19 +396,71 @@ export class ContentRegistryClient {
     return this.connecting;
   }
 
+  /**
+   * Runs one MCP round-trip, reconnecting ONCE when the registry no longer
+   * knows this session. Sessions are server-side state: the registry reaps
+   * ones idle for ~30 minutes and forgets all of them on a restart, while a
+   * run's client lives for HOURS with long quiet gaps — skills resolve
+   * lazily, so the integrator's role is first read at the audit stage, long
+   * after the review stage's last registry call. Losing the session must
+   * cost one reconnect, never the run.
+   */
+  private async withSession<T>(operation: () => Promise<T>): Promise<T> {
+    await this.connect();
+    const generation = this.sessionGeneration;
+    try {
+      return await operation();
+    } catch (error) {
+      if (!isSessionLoss(error)) throw error;
+      if (this.sessionGeneration === generation) {
+        await this.reconnect(generation);
+      } else {
+        // Another caller already replaced the dead session; just ride it.
+        await this.connect();
+      }
+      return await operation();
+    }
+  }
+
+  /** Replaces the dead client/transport pair; concurrent callers share one. */
+  private reconnect(staleGeneration: number): Promise<void> {
+    this.reconnecting ??= (async () => {
+      if (this.sessionGeneration !== staleGeneration) return;
+      // A reaped session cannot be closed politely; drop the pair and
+      // start fresh. The close is best effort by construction.
+      void this.client.close().catch(() => undefined);
+      this.connected = false;
+      this.connecting = undefined;
+      this.client = new Client({
+        name: "brain-orchestrator",
+        version: "0.1.0",
+      });
+      this.transport = this.newTransport();
+      this.sessionGeneration += 1;
+      await this.connect();
+    })().finally(() => {
+      this.reconnecting = undefined;
+    });
+    return this.reconnecting;
+  }
+
   async readText(path: string): Promise<string> {
     const safe = safeRegistryPath(path);
     try {
       // A 429'd read (or connect) retries after the registry's declared
       // window; a failed connect attempt clears itself, so the retried
-      // operation reconnects cleanly.
-      return await withRegistryRateLimitRetry(async () => {
-        await this.connect();
-        return textFromResource(
-          await this.client.readResource({ uri: resourceUri(safe) }),
-          safe,
-        );
-      }, this.rateLimitRetry);
+      // operation reconnects cleanly. A read that fails because the server
+      // forgot our session reconnects once inside withSession.
+      return await withRegistryRateLimitRetry(
+        () =>
+          this.withSession(async () =>
+            textFromResource(
+              await this.client.readResource({ uri: resourceUri(safe) }),
+              safe,
+            ),
+          ),
+        this.rateLimitRetry,
+      );
     } catch (error) {
       throw new Error(
         `failed to read Brain Registry resource "${safe}": ` +
@@ -436,10 +508,11 @@ export class ContentRegistryClient {
    * server's message.
    */
   async callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
-    const result = (await withRegistryRateLimitRetry(async () => {
-      await this.connect();
-      return this.client.callTool({ name, arguments: args });
-    }, this.rateLimitRetry)) as {
+    const result = (await withRegistryRateLimitRetry(
+      () =>
+        this.withSession(() => this.client.callTool({ name, arguments: args })),
+      this.rateLimitRetry,
+    )) as {
       content?: Array<{ type?: string; text?: string }>;
       isError?: boolean;
     };
