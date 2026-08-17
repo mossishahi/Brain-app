@@ -454,8 +454,20 @@ function deckEntries(step: ReviewStepView, timeline: SeatTimeline): DeckEntry[] 
   ];
 }
 
-function crossOriginText(cross: CrossRewriteView): string {
-  return `rewritten during step ${cross.byStep} · round ${cross.byRound} — not by this step's own review`;
+/**
+ * Whether a rewrite of `affectedStep` looked FORWARD: an earlier walk
+ * position's review changed a later step (prospective, dark blue). The
+ * opposite — a later position reaching back — is retroactive (red).
+ */
+function isProspective(cross: CrossRewriteView, affectedStep: number): boolean {
+  return cross.byStep < affectedStep;
+}
+
+function crossOriginText(cross: CrossRewriteView, affectedStep: number): string {
+  return (
+    `${isProspective(cross, affectedStep) ? "prospective" : "retroactive"} rewrite ` +
+    `during step ${cross.byStep} · round ${cross.byRound} — not by this step's own review`
+  );
 }
 
 function crossReportText(
@@ -465,7 +477,7 @@ function crossReportText(
 ): string {
   return [
     `${member.label}${member.umbrella ? ` (${member.umbrella})` : ""} — step ${step.index}`,
-    crossOriginText(cross),
+    crossOriginText(cross, step.index),
     cross.after,
   ].join("\n");
 }
@@ -548,14 +560,20 @@ function RoundDeck({
 
   if (entry.kind === "cross") {
     // A rewrite another walk position applied to this step: its own card,
-    // labeled by origin, the changed words in plain red (color only).
+    // labeled by origin. The DIRECTION carries the color (plain text, color
+    // only): dark blue when an earlier position's review changed this later
+    // step (prospective), red when a later position reached back
+    // (retroactive).
+    const prospective = isProspective(entry.cross, step.index);
     return (
       <div className="round-card" key={entry.key}>
         <div className="round-card-head">
           {olderButton}
           <span
-            className="review-fold-name round-cross-origin"
-            title={crossOriginText(entry.cross)}
+            className={`review-fold-name ${
+              prospective ? "cross-origin-prospective" : "cross-origin-retroactive"
+            }`}
+            title={crossOriginText(entry.cross, step.index)}
           >
             changed by step {entry.cross.byStep}
           </span>
@@ -568,7 +586,9 @@ function RoundDeck({
             />
           </span>
         </div>
-        <p className="round-text">{segmentSpans(entry.cross.segments, "diff-red")}</p>
+        <p className="round-text">
+          {segmentSpans(entry.cross.segments, prospective ? "diff-blue" : "diff-red")}
+        </p>
       </div>
     );
   }
@@ -614,7 +634,17 @@ function RoundDeck({
       {computed !== undefined && computed.crossChanges.length > 0 && (
         <div className="round-cross-note">
           {computed.crossChanges.map((change) => (
-            <span key={change.index} className="detail-label detail-label-bad">
+            <span
+              key={change.index}
+              // Same color language as the affected step's card: blue when
+              // this round rewrote a LATER step (prospective), red when it
+              // reached back to an earlier one (retroactive).
+              className={`detail-label ${
+                change.index > step.index
+                  ? "detail-label-prospective"
+                  : "detail-label-bad"
+              }`}
+            >
               also rewrote step {change.index} this round
               <span className="dim"> — see step {change.index}</span>
             </span>

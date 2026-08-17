@@ -291,16 +291,20 @@ activity feed, fold), and the *walk inspector* sits below in its own panel.
 - Round text: the step text as it came OUT of that round, full height, never clamped or
   scrolled. Words carried from earlier rounds render dimmed; the round's own changes render at
   full weight (round 1 is all full-weight — nothing was reviewed before it). When the round's
-  revision also rewrote OTHER steps, the card carries only a one-line red note per rewritten
-  step ("also rewrote step 5 this round — see step 5"); the rewritten text itself is shown on
-  the affected step, never here.
+  revision also rewrote OTHER steps, the card carries only a one-line note per rewritten step
+  ("also rewrote step 5 this round — see step 5"); the rewritten text itself is shown on the
+  affected step, never here.
 - A cross-step rewrite is ITS OWN card in the AFFECTED step's round deck, placed in true
   chronological position — before the step's own rounds when an earlier walk position caused
   it, after them when a later one did. The card is labeled "changed by step N" (hover names the
-  exact origin round) and shows the step's updated text with the changed words in plain red —
-  color only, no background tint, no underline — and carried words dimmed. The step's own
-  "Round k / K" numbering never shifts around these cards, and older cards keep the step's
-  history untouched.
+  exact origin round and the direction) and shows the step's updated text with the changed
+  words colored — color only, no background tint, no underline — and carried words dimmed.
+  The DIRECTION is the color: `--prospective` dark blue when an EARLIER position's review
+  rewrote this later step (prospective), `--bad` red when a LATER position reached back
+  (retroactive); the origin card's one-line notes use the same two colors. A step's own-round
+  changes keep the normal full-weight-over-dimmed treatment. The step's own "Round k / K"
+  numbering never shifts around these cards, and older cards keep the step's history
+  untouched.
 - Comments panel: under each round's text, collapsed by default. The reviewer names ride ON the
   summary row itself, right after the "Comments & judgement" label — Judge first, then each
   commentor — each name colored by its verdict (`--ok` Pass, `--warn` Build, `--bad` Interrupt,

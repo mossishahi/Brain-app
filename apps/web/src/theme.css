@@ -12,6 +12,10 @@
   --ok: #2e9e6b;
   --warn: #d99a2b;
   --bad: #d5484d;
+  /* Cross-step rewrites that looked FORWARD (an earlier position's review
+     rewrote a later step): dark blue, against --bad's red for rewrites that
+     reached BACK. Indigo, so it never reads as the azure --accent. */
+  --prospective: #2d3ab0;
   --radius: 8px;
   --app-header-h: 56px;
   --font:
@@ -34,6 +38,9 @@
   --ok-dark: #0a3a1e;
   --warn: #d99a2b;
   --bad: #d5484d;
+  /* The indigo lifted for contrast on dark surfaces — still clearly "the
+     blue one" next to --accent's azure and --bad's red. */
+  --prospective: #8a97f7;
   --border-step-tint: #605e5e;
   /* Dark keeps the classic ladder anchor for the seat stroke, dips the step
      stroke back toward black, and lets the round stroke lift from there
@@ -3730,15 +3737,29 @@ details.drawer-section[open] > summary::before {
   gap: 2px;
 }
 
-/* The affected-side card label naming the walk position that rewrote this
-   step. Plain red text — the color is the whole signal, never a background
-   tint or an underline. */
-.round-cross-origin {
+/* Cross-step rewrites carry their DIRECTION in the color — plain colored
+   text, never a background tint or an underline. Dark blue = prospective
+   (an earlier position's review rewrote this later step); red =
+   retroactive (a later position's review reached back). A step's own-round
+   changes keep the normal full-weight-over-dimmed treatment. */
+.cross-origin-prospective {
+  color: var(--prospective);
+}
+
+.cross-origin-retroactive {
   color: var(--bad);
+}
+
+.diff-blue {
+  color: var(--prospective);
 }
 
 .detail-label-bad {
   color: var(--bad);
+}
+
+.detail-label-prospective {
+  color: var(--prospective);
 }
 
 .copy-btn {
