@@ -7,14 +7,16 @@
  *  - STEPS stack vertically inside the visible seat, one card per
  *    chain-of-thought step;
  *  - ROUNDS sit inside each step card as a deck of sub-cards, newest on top,
- *    paged with prev/next buttons (never scrolled). A round card shows the
- *    text that came OUT of that round — words carried from earlier rounds
- *    dimmed, this round's changes at full weight — plus a collapsed comments
+ *    paged with prev/next buttons (never scrolled). The deck's base is the
+ *    "Original thought" card — the step's first-pass text at full weight;
+ *    every later card shows the text as that version left it, carried words
+ *    dimmed and its own changes at full weight, plus a collapsed comments
  *    panel whose tags switch between the judge (default) and each commentor.
  *    A rewrite another walk position applied to this step is ITS OWN card in
  *    the deck, in chronological position, labeled "changed by step N", its
- *    changed words in plain red; the originating round keeps only a one-line
- *    note naming the step it rewrote.
+ *    changed words colored by direction (prospective dark blue, retroactive
+ *    red); the originating round keeps only a one-line note naming the step
+ *    it rewrote.
  */
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import type {
@@ -422,20 +424,23 @@ function bugReportText(
 }
 
 /**
- * One entry of a step's round deck: a real review round, or a rewrite that
- * ANOTHER walk position's round applied to this step — shown as its own
- * card so paging the deck reads the step's full text history in the order
- * it happened.
+ * One entry of a step's round deck: the step's first-pass base text (the
+ * "Original thought"), a real review round, or a rewrite that ANOTHER walk
+ * position's round applied to this step — each its own card, so paging the
+ * deck reads the step's full text history in the order it happened.
  */
 type DeckEntry =
+  | { readonly kind: "original"; readonly key: string; readonly text: string }
   | { readonly kind: "round"; readonly key: string; readonly round: ReviewRoundView }
   | { readonly kind: "cross"; readonly key: string; readonly cross: CrossRewriteView };
 
 /**
- * The deck in chronological order. Walk order IS the chronology: a rewrite
- * from an EARLIER position landed before this step's own review began, one
- * from a LATER position landed after it finished, and within each side the
- * timeline replay already ordered them.
+ * The deck in chronological order. Walk order IS the chronology: the
+ * original thought first, then rewrites from EARLIER positions (they landed
+ * before this step's own review began), the step's own rounds, and rewrites
+ * from LATER positions; within each side the timeline replay already
+ * ordered them. The base card only joins a deck that has something to
+ * compare against it — a step nothing has touched keeps its pending card.
  */
 function deckEntries(step: ReviewStepView, timeline: SeatTimeline): DeckEntry[] {
   const crosses = timeline.crossRewrites.get(step.index) ?? [];
@@ -447,11 +452,28 @@ function deckEntries(step: ReviewStepView, timeline: SeatTimeline): DeckEntry[] 
   const rounds = [...step.rounds]
     .sort((a, b) => a.round - b.round)
     .map((round): DeckEntry => ({ kind: "round", key: `r${round.round}`, round }));
-  return [
+  const entries: DeckEntry[] = [
     ...crosses.filter((view) => view.byStep < step.index).map(crossEntry),
     ...rounds,
     ...crosses.filter((view) => view.byStep > step.index).map(crossEntry),
   ];
+  const original = timeline.original.get(step.index);
+  if (entries.length > 0 && original !== undefined) {
+    entries.unshift({ kind: "original", key: "original", text: original });
+  }
+  return entries;
+}
+
+function originalReportText(
+  member: ReviewMemberView,
+  step: ReviewStepView,
+  text: string,
+): string {
+  return [
+    `${member.label}${member.umbrella ? ` (${member.umbrella})` : ""} — step ${step.index}`,
+    "original thought (first pass, before any review)",
+    text,
+  ].join("\n");
 }
 
 /**
@@ -558,6 +580,35 @@ function RoundDeck({
     </button>
   );
 
+  if (entry.kind === "original") {
+    // The base every later version is measured against: the step's
+    // first-pass text, the one card whose whole body renders at full
+    // weight — from here on, full-weight words always mean "this card
+    // changed them".
+    return (
+      <div className="round-card" key={entry.key}>
+        <div className="round-card-head">
+          {olderButton}
+          <span
+            className="review-fold-name"
+            title="the first-pass text, before any review touched it"
+          >
+            Original thought
+          </span>
+          {newerButton}
+          {deck.length > 1 && <span className="review-step-meta">{versionMeta}</span>}
+          <span className="round-card-actions">
+            <CopyButton
+              label="copy the original thought"
+              text={() => originalReportText(member, step, entry.text)}
+            />
+          </span>
+        </div>
+        <p className="round-text">{entry.text}</p>
+      </div>
+    );
+  }
+
   if (entry.kind === "cross") {
     // A rewrite another walk position applied to this step: its own card,
     // labeled by origin. The DIRECTION carries the color (plain text, color
@@ -616,7 +667,10 @@ function RoundDeck({
         {deck.length > 1 && (
           <span className="review-step-meta">
             {[
-              ...(!computed?.ownRewrite && round.round > 1 ? ["unchanged this round"] : []),
+              // Round 1 included: with the Original-thought base card in the
+              // deck, a round that rewrote nothing says so instead of
+              // re-debuting the text at full weight.
+              ...(!computed?.ownRewrite ? ["unchanged this round"] : []),
               versionMeta,
             ].join(" · ")}
           </span>

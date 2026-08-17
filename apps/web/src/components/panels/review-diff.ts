@@ -5,11 +5,17 @@
  * round's change-set can touch step n itself AND any other step. The round
  * cards render the text that came OUT of each round with two treatments:
  *
- *  - the step's own words that survived from earlier rounds render dimmed,
+ *  - the step's own words that survived from earlier versions render dimmed,
  *    so what this round actually changed carries the full weight;
  *  - a change the round applied to ANOTHER step becomes that step's own
  *    extra "round" card (a cross rewrite), labeled with the walk position
- *    that caused it, its changed words in plain red.
+ *    that caused it, its changed words colored by direction.
+ *
+ * The deck's BASE is the step's first-pass text — the "Original thought"
+ * card — which is the only card that renders at full weight in its
+ * entirety; every later card's full-weight (or colored) words are exactly
+ * what that card changed, and a round that changed nothing renders fully
+ * dimmed.
  *
  * All of it derives from a single chronological replay of the seat's walk:
  * steps ascending, rounds ascending — exactly the order the runtime executed
@@ -103,9 +109,9 @@ export interface RoundComputedView {
   /** True when this round's redevelopment rewrote the step's own text. */
   readonly ownRewrite: boolean;
   /**
-   * The out-text as diff segments. Round 1 without a rewrite is all-changed
-   * (nothing was reviewed before it); a later round without a rewrite is
-   * all-kept (nothing changed this round); a rewrite diffs against the
+   * The out-text as diff segments. A round without a rewrite is all-kept
+   * (nothing changed this round — the full-weight debut of the text belongs
+   * to the "Original thought" base card); a rewrite diffs against the
    * in-text.
    */
   readonly segments: readonly DiffSegment[];
@@ -136,6 +142,13 @@ export interface SeatTimeline {
    * order (the order the runtime executed them).
    */
   readonly crossRewrites: ReadonlyMap<number, readonly CrossRewriteView[]>;
+  /**
+   * Per step index: the first-pass text — the "Original thought" every later
+   * version is ultimately measured against. Absent when the run carries no
+   * first-pass record (older artifacts), in which case the deck simply has
+   * no base card.
+   */
+  readonly original: ReadonlyMap<number, string>;
   /** The chain as the replay leaves it (first pass + every rewrite). */
   readonly chain: ReadonlyMap<number, string>;
 }
@@ -155,7 +168,11 @@ export function computeSeatTimeline(
   firstPassCot?: readonly string[],
 ): SeatTimeline {
   const chain = new Map<number, string>();
-  (firstPassCot ?? []).forEach((text, index) => chain.set(index + 1, text));
+  const original = new Map<number, string>();
+  (firstPassCot ?? []).forEach((text, index) => {
+    chain.set(index + 1, text);
+    original.set(index + 1, text);
+  });
   const rounds = new Map<string, RoundComputedView>();
   const crossRewrites = new Map<number, CrossRewriteView[]>();
 
@@ -198,12 +215,15 @@ export function computeSeatTimeline(
       }
       if (outText !== undefined) chain.set(step.index, outText);
 
+      // A round without a rewrite is all-kept: the text's full-weight debut
+      // belongs to the "Original thought" base card, so a round card's
+      // full-weight words always mean "this round changed them".
       const segments: readonly DiffSegment[] =
         outText === undefined
           ? []
           : own !== undefined
             ? diffWords(inText, outText)
-            : [{ text: outText, changed: round.round === 1 }];
+            : [{ text: outText, changed: false }];
 
       rounds.set(roundViewKey(step.index, round.round), {
         round,
@@ -215,5 +235,5 @@ export function computeSeatTimeline(
       });
     }
   }
-  return { rounds, crossRewrites, chain };
+  return { rounds, crossRewrites, original, chain };
 }

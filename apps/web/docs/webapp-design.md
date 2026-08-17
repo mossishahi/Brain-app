@@ -287,7 +287,12 @@ activity feed, fold), and the *walk inspector* sits below in its own panel.
   round k−1), paged exactly like the seats: the same ghost prev/next chevrons hugging the
   "Round k / K" title in the card header (disabled dim at either end). The header also carries
   the verdict chip, a "redeveloped" badge, and a copy icon that copies the round as a
-  plain-text bug report (seat, step, round, verdict, issues, texts).
+  plain-text bug report (seat, step, round, verdict, issues, texts). The deck's BASE is the
+  "Original thought" card — the step's first-pass text, the one card rendered at full weight in
+  its entirety — so every later card's full-weight words are exactly what that version changed,
+  and Round 1 is compared against the original like any other version (a round that rewrote
+  nothing renders fully dimmed with an "unchanged this round" note). The base card joins only
+  decks that have at least one round or cross-rewrite; an untouched step keeps its pending card.
 - Round text: the step text as it came OUT of that round, full height, never clamped or
   scrolled. Words carried from earlier rounds render dimmed; the round's own changes render at
   full weight (round 1 is all full-weight — nothing was reviewed before it). When the round's
