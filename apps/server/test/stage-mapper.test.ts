@@ -661,10 +661,103 @@ test("the activity cap evicts plain progress ticks before capability rows", () =
       10,
       "every capability row outlives the heartbeat flood",
     );
-    // Chronology holds: survivors stay in event order, ending at the newest tick.
+    // Chronology holds: survivors stay in event order, ending at the newest
+    // tick. Ids are file positions (0-based), never per-attempt seqs.
     const ids = activity.map((entry) => Number(entry.id));
     assert.deepEqual([...ids].sort((a, b) => a - b), ids);
-    assert.equal(ids[ids.length - 1], 410);
+    assert.equal(ids[ids.length - 1], 409);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("a resumed run's feed stays chronological — per-attempt seqs never reorder it", () => {
+  const workspace = mkdtempSync(join(tmpdir(), "stage-mapper-test-"));
+  try {
+    const sessionDir = join(workspace, "session");
+    const jobDir = join(workspace, "job");
+    mkdirSync(join(sessionDir, "artifacts"), { recursive: true });
+    mkdirSync(jobDir, { recursive: true });
+    writeFileSync(
+      join(sessionDir, "checkpoint.json"),
+      JSON.stringify({
+        runId: "job-1",
+        workflowId: "brainstorm",
+        status: "running",
+        input: {},
+        journal: [],
+        pendingGates: [],
+        seq: 1,
+        updatedAt: Date.now(),
+      }),
+    );
+    writeFileSync(join(sessionDir, "artifacts", "index.json"), JSON.stringify({ refs: [] }));
+
+    // One job, two attempts in one log: a long attempt whose seq climbed
+    // high before it died, then a resume whose seq restarts at 0. Sorting
+    // survivors by seq pinned the DEAD attempt's entries to the feed's tail
+    // forever — the dashboard then claimed "no new events since 3am" while
+    // the resumed run was working live.
+    const path = "brainstorm-root/review-members/member[0]";
+    const lines: string[] = [];
+    for (let i = 0; i < 150; i += 1) {
+      lines.push(
+        JSON.stringify({
+          type: "agent:progress",
+          seq: 9000 + i,
+          at: 1000 + i,
+          path,
+          progress: { kind: "model", message: "overnight attempt heartbeat" },
+        }),
+      );
+    }
+    lines.push(
+      JSON.stringify({ type: "run:started", seq: 0, at: 5000, workflowId: "brainstorm", resumed: true }),
+    );
+    for (let i = 0; i < 60; i += 1) {
+      lines.push(
+        JSON.stringify({
+          type: "agent:progress",
+          seq: 1 + i,
+          at: 6000 + i,
+          path,
+          progress: { kind: "model", message: `resumed heartbeat ${i}` },
+        }),
+      );
+    }
+    writeFileSync(join(jobDir, "events.jsonl"), lines.join("\n") + "\n");
+
+    const record: JobRecord = {
+      jobId: "job-1",
+      topic: "topic",
+      status: "running",
+      runner: "local",
+      createdAt: 1,
+      updatedAt: 2,
+    };
+    const detail = buildJobDetail({
+      record,
+      status: "running",
+      sessionDir,
+      jobDir,
+      settings,
+    });
+    const review = detail.stages.find((candidate) => candidate.id === "review-members");
+    assert.ok(review);
+    const activity = review.activity ?? [];
+    assert.ok(activity.length > 0);
+    const last = activity[activity.length - 1]!;
+    assert.equal(
+      last.message,
+      "resumed heartbeat 59",
+      "the feed ends at the LIVE attempt's newest entry, not the dead attempt's",
+    );
+    assert.equal(last.at, 6059);
+    // True time order end to end, and unique ids across attempts.
+    for (let i = 1; i < activity.length; i += 1) {
+      assert.ok(activity[i]!.at >= activity[i - 1]!.at, "chronological order");
+    }
+    assert.equal(new Set(activity.map((entry) => entry.id)).size, activity.length);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }

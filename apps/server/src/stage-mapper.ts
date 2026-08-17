@@ -508,7 +508,13 @@ function timings(
   const result = new Map<StageId, StageTiming>(
     STAGE_IDS.map((id) => [id, { active: false, errors: [], activity: [] }]),
   );
-  for (const event of events) {
+  // Activity entries are identified and ORDERED by their position in the
+  // event log, never by event.seq: every resume restarts seq at 0, and one
+  // job's log carries every attempt, so seq collides across attempts and a
+  // long dead attempt's high numbers would sort themselves to the feed's
+  // tail forever (observed as "no new events since 3am" on a live run
+  // resumed seven times). File position is unique and chronological.
+  for (const [eventIndex, event] of events.entries()) {
     if (
       event.type === "agent:progress" ||
       event.type === "agent:started" ||
@@ -523,7 +529,7 @@ function timings(
           : undefined;
         const detail = activityDetail(event.progress);
         timing.activity.push({
-          id: String(event.seq),
+          id: String(eventIndex),
           at: event.at,
           kind: event.progress.kind,
           message: event.progress.message,
@@ -549,7 +555,7 @@ function timings(
             ? (event.usage ?? taskUsage.get(event.taskId))
             : undefined;
         timing.activity.push({
-          id: String(event.seq),
+          id: String(eventIndex),
           at: event.at,
           kind: "status",
           message:
