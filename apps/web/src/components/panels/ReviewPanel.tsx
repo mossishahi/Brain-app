@@ -97,27 +97,33 @@ function cellLabel(member: ReviewMemberView, step: ReviewStepView): string {
  * a fourth in flight read "4 rounds" beside a deck of three — and a dismissed
  * seat's abandoned round read as progress that will never come.
  */
+function settledRounds(step: ReviewStepView): number {
+  return step.rounds.filter((round) => round.decision !== undefined).length;
+}
+
+/**
+ * What is still happening to this step — and nothing about what already did.
+ *
+ * A count of rounds used to sit here, and it read as a contradiction however it
+ * was computed: the deck holds one card per VERSION of the step, and the last
+ * round of a position never writes one (it either passed or hit the cap), so a
+ * step reviewed four times pages to "Round 3 / 3" and a header saying "4 rounds"
+ * looks like a missing card. The two numbers count different things, and putting
+ * them side by side invited exactly that comparison. How many times the step was
+ * reviewed now rides the step title's hover, where nothing indexes against it,
+ * and the deck's own numbering is the only count on screen.
+ */
 function roundsMeta(
   step: ReviewStepView,
   dismissed: boolean,
   crossCount: number,
 ): string {
-  const settled = step.rounds.filter((round) => round.decision !== undefined).length;
+  const settled = settledRounds(step);
   const pendingRound = step.rounds.length > settled;
-  const unfinished = dismissed
+  if (!pendingRound && !(crossCount > 0 && step.outcome === "under-review")) return "";
+  return dismissed
     ? `round ${settled + 1} unfinished`
     : `round ${settled + 1} in progress`;
-  if (settled > 0) {
-    return (
-      `${settled} round${settled === 1 ? "" : "s"}` +
-      (pendingRound ? ` · ${unfinished}` : "")
-    );
-  }
-  // With no settled rounds the pending card usually says so; when cross-rewrite
-  // cards fill the deck instead, the hint moves up here.
-  return pendingRound || (crossCount > 0 && step.outcome === "under-review")
-    ? unfinished
-    : "";
 }
 
 /** One phrase for what a seat is doing, shared by the pager chip and the popover. */
@@ -274,7 +280,14 @@ function stepTitleClass(step: ReviewStepView): string {
 }
 
 function stepOutcomeHint(step: ReviewStepView): string {
-  return step.outcome === "force-passed" ? "force-passed at the round cap" : step.outcome;
+  const outcome =
+    step.outcome === "force-passed" ? "force-passed at the round cap" : step.outcome;
+  // The review count belongs here rather than beside the deck: the last round of
+  // a position writes no new version, so this number is legitimately larger than
+  // the number of cards and must not sit next to them.
+  const settled = settledRounds(step);
+  if (settled === 0) return outcome;
+  return `${outcome} · reviewed ${settled} time${settled === 1 ? "" : "s"}`;
 }
 
 /**

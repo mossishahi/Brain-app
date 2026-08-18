@@ -341,7 +341,14 @@ activity feed, fold), and the *walk inspector* sits below in its own panel.
   yet reports what its seat is doing ("round 1 in progress — commentors are working") instead of
   reading as untouched. Cards are NEWEST ON TOP (round k sits over
   round k−1), paged exactly like the seats: the same ghost prev/next chevrons hugging the
-  "Round k / K" title in the card header (disabled dim at either end). The header also carries
+  "Round k / K" title in the card header (disabled dim at either end) — where K is the last round
+  that HAS a card, never the highest round number that occurred: counting to a round the deck
+  cannot show promised a card the pager could not reach. For the same reason the step card's own
+  header carries no round count beside the deck: the deck counts versions and a review count counts
+  rounds, and a step reviewed four times whose fourth round rewrote nothing pages to "Round 3 / 3",
+  so the two numbers side by side read as a missing card. How many times a step was reviewed rides
+  the hover on its "Step n / N" title instead, and the header keeps only what is still happening
+  ("round 4 in progress", or "unfinished" once the seat is dismissed). The header also carries
   the verdict chip, a "redeveloped" badge, and a copy icon that copies the round as a
   plain-text bug report (seat, step, round, verdict, issues, texts). The deck's BASE is the
   "Original thought" card — the step's first-pass text, the one card rendered at full weight in
