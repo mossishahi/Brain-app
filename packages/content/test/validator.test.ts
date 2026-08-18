@@ -31,6 +31,45 @@ test("rejects a bind that reads a field the produced artifact does not define", 
   assert.match(named.message, /update the app/);
 });
 
+test("a per-item output key is field-checked one subscript deep, where the artifact starts", () => {
+  // `ideas[member.id]` writes one brainIdea PER MEMBER, so the field is what
+  // follows the subscript. Reading the key as its bare root would look one
+  // level too shallow and check a member id against brainIdea's fields.
+  const bundle = freshBundle();
+  const judge = findAgent(bundle.workflows["brainstorm"]!.root, "judge-step");
+  judge.bind = { ...judge.bind, good: { ref: "ideas[member.id].cot", through: "stepIndex" } };
+  assert.deepEqual(
+    validateBundle(bundle).filter((issue) => issue.code === "UNKNOWN_ARTIFACT_FIELD"),
+    [],
+    "a real brainIdea field one subscript deep is accepted",
+  );
+
+  const broken = freshBundle();
+  const judge2 = findAgent(broken.workflows["brainstorm"]!.root, "judge-step");
+  judge2.bind = { ...judge2.bind, bad: "ideas[member.id].notAField" };
+  expectIssue(broken, "UNKNOWN_ARTIFACT_FIELD");
+});
+
+test("a loop variable shadowing a produced root is never field-checked", () => {
+  // At runtime a loop variable wins over a produced root of the same name, so
+  // a reference rooted in one reads the ITEM, not the artifact — checking it
+  // against the artifact's schema would reject a legitimate bundle.
+  const bundle = freshBundle();
+  const firstPass = findNode(bundle.workflows["brainstorm"]!.root, "first-pass");
+  assert.equal(firstPass.kind, "forEach");
+  if (firstPass.kind !== "forEach") return;
+  // Rename the loop variable to collide with a produced artifact root, then
+  // read a field only the ITEM has.
+  firstPass.itemVar = "panel";
+  const develop = findAgent(firstPass.body, "develop-idea");
+  develop.bind = { ...develop.bind, department: "panel.department" };
+  assert.deepEqual(
+    validateBundle(bundle).filter((issue) => issue.code === "UNKNOWN_ARTIFACT_FIELD"),
+    [],
+    "the shadowing item's own fields are not measured against the artifact schema",
+  );
+});
+
 test("field checking stays silent wherever it cannot be certain", () => {
   // The rule must never reject a legitimate bundle. It speaks only for a
   // plain first segment of a root the workflow itself produces, so loop

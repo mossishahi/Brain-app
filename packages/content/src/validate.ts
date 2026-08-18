@@ -661,12 +661,32 @@ function validateWorkflow(
   }
   const paramNames = new Set(Object.keys(workflow.params));
   const producedSchemas = new Map<string, Set<string>>();
+  // The same producers keyed by the SHAPE of their output key, so a field
+  // check knows where the artifact actually begins: `ideas[member.id]` puts
+  // it one subscript deep, and the field is what follows the subscript, not
+  // what follows `ideas`.
+  const producedAt = new Map<string, Set<string>>();
+  // Every loop variable the workflow declares, anywhere. A loop variable
+  // SHADOWS a produced root of the same name at runtime, so a reference
+  // rooted in one is not an artifact reference and must not be field-checked.
+  // Collected workflow-wide rather than per-scope: the cost is skipping a
+  // check that might have been safe, never inventing one that is not.
+  const loopVars = new Set<string>();
   walkNodes(workflow.root, (node) => {
+    if (node.kind === "forEach") {
+      loopVars.add(node.itemVar);
+      if (node.indexVar !== undefined) loopVars.add(node.indexVar);
+      return;
+    }
     if (node.kind !== "agent" && node.kind !== "activity") return;
     const root = refRoot(node.output.key);
     const schemas = producedSchemas.get(root) ?? new Set<string>();
     schemas.add(node.output.schema);
     producedSchemas.set(root, schemas);
+    const shape = outputKeyShape(node.output.key);
+    const atShape = producedAt.get(shape) ?? new Set<string>();
+    atShape.add(node.output.schema);
+    producedAt.set(shape, atShape);
   });
 
   // Node-local checks: ids, terminals, loops, skill/route/schema wiring.
@@ -882,7 +902,8 @@ function validateWorkflow(
   const ctx: RefContext = {
     paramNames,
     catalogNames: known.catalogNames,
-    producedSchemas,
+    producedAt,
+    loopVars,
     issues,
     wfPath,
   };
@@ -905,8 +926,20 @@ const ARTIFACT_FIELDS: ReadonlyMap<string, ReadonlySet<string>> = (() => {
         target: "draft-2020-12",
         io: "output",
         unrepresentable: "any",
-      }) as { properties?: Record<string, unknown> };
-      const fields = json.properties ? Object.keys(json.properties) : [];
+      }) as {
+        type?: unknown;
+        properties?: Record<string, unknown>;
+        additionalProperties?: unknown;
+      };
+      // Only a CLOSED object can say what is not there. Every artifact schema
+      // is strict today, but a schema that accepted unknown keys would make
+      // its property list a sample rather than the whole vocabulary, and
+      // "not declared" would stop meaning "can never be present".
+      const closed =
+        json.type === "object" &&
+        json.additionalProperties === false &&
+        json.properties !== undefined;
+      const fields = closed ? Object.keys(json.properties!) : [];
       if (fields.length > 0) table.set(name, new Set(fields));
     } catch {
       // Not enumerable as a flat object; this schema is left unchecked.
@@ -915,16 +948,30 @@ const ARTIFACT_FIELDS: ReadonlyMap<string, ReadonlySet<string>> = (() => {
   return table;
 })();
 
-/** A dotted segment names a field only when it is a plain identifier. */
-function isPlainField(segment: string | undefined): segment is string {
-  return segment !== undefined && /^[A-Za-z_][A-Za-z0-9_]*$/.test(segment);
+/**
+ * A regex source matching any reference that reads a FIELD of the artifact an
+ * output key writes, capturing the field name.
+ *
+ * The key's own subscripts stay subscripts — `ideas[member.id]` writes one
+ * artifact per member, so the field is what follows the subscript. Collapsing
+ * the key to its root would look for the field one level too shallow and
+ * check `ideas.<memberId>` against the member's own schema.
+ */
+function outputKeyShape(outputKey: string): string {
+  const literal = outputKey
+    .split(/(\[[^\]]*\])/)
+    .map((part) => (part.startsWith("[") ? "\\[[^\\]]*\\]" : part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")))
+    .join("");
+  return `^${literal}\\.([A-Za-z_][A-Za-z0-9_]*)`;
 }
 
 interface RefContext {
   paramNames: Set<string>;
   catalogNames: Set<string>;
-  /** Reference root -> the artifact schemas the workflow produces under it. */
-  producedSchemas: Map<string, Set<string>>;
+  /** Output-key SHAPE -> the artifact schemas the workflow produces there. */
+  producedAt: Map<string, Set<string>>;
+  /** Loop-variable names, which shadow produced roots and are never artifacts. */
+  loopVars: Set<string>;
   issues: ValidationIssue[];
   wfPath: string;
 }
@@ -1000,10 +1047,20 @@ function checkRef(ref: string, scope: Set<string>, inRepeatUntil: boolean, ctx: 
   // the same way. Only the first segment is checked, and only when it is a
   // plain field name of a schema whose shape is enumerable — deeper paths
   // reach into shapes that vary, where a rule could only guess.
-  const field = segments[1];
-  if (!isPlainField(field)) return;
-  const schemas = ctx.producedSchemas.get(root);
-  if (!schemas || schemas.size === 0) return;
+  // A loop variable shadows any produced root of the same name, so a
+  // reference rooted in one reads an item, not an artifact.
+  if (ctx.loopVars.has(root)) return;
+  let field: string | undefined;
+  let schemas: Set<string> | undefined;
+  for (const [shape, produced] of ctx.producedAt) {
+    const found = new RegExp(shape).exec(ref);
+    if (found) {
+      field = found[1];
+      schemas = produced;
+      break;
+    }
+  }
+  if (field === undefined || schemas === undefined || schemas.size === 0) return;
   const known: string[] = [];
   for (const schema of schemas) {
     const fields = ARTIFACT_FIELDS.get(schema);
