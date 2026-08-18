@@ -334,17 +334,33 @@ function roundsByStep(entries: readonly JsonValue[]): Map<number, JsonObject[]> 
   return byStep;
 }
 
-function issuePoints(rounds: readonly JsonObject[]): string[] {
-  const points: string[] = [];
+/**
+ * The objections a closed position raised, each with the step it targets.
+ *
+ * Keyed on the PAIR: an objection is identified by what it says and where it
+ * says it. Collapsing on the text alone merged two genuinely different
+ * objections whenever a reviewer worded the same fault at two steps — and the
+ * record then told every later reader that one of them had been raised
+ * somewhere it never was. The target also matters on its own: a position may
+ * fault a step other than its own, so without it "raised at position 3" says
+ * nothing about which step is meant.
+ */
+function issuePoints(rounds: readonly JsonObject[]): JsonObject[] {
+  const seen = new Set<string>();
+  const objections: JsonObject[] = [];
   for (const round of rounds) {
     for (const raw of Array.isArray(round.issues) ? round.issues : []) {
-      const point = isObject(raw) ? raw.point : undefined;
-      if (typeof point === "string" && point.length > 0 && !points.includes(point)) {
-        points.push(point);
-      }
+      if (!isObject(raw)) continue;
+      const point = raw.point;
+      if (typeof point !== "string" || point.length === 0) continue;
+      const step = typeof raw.step === "number" ? raw.step : 0;
+      const key = `${step}\u0000${point}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      objections.push({ step, point });
     }
   }
-  return points;
+  return objections;
 }
 
 /** Every step any revision at this position rewrote, ascending. */

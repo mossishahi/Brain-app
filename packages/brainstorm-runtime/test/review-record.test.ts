@@ -112,7 +112,9 @@ test("closed positions collapse; the working position stays verbatim", () => {
     step: 2,
     rounds: 2,
     outcome: "passed",
-    objections: ["The step relies on an uncontrolled comparison it never justifies."],
+    objections: [
+      { step: 2, point: "The step relies on an uncontrolled comparison it never justifies." },
+    ],
     revised: [2],
     closingReason: "The revision states the control the earlier round required.",
   });
@@ -120,10 +122,10 @@ test("closed positions collapse; the working position stays verbatim", () => {
   assert.deepEqual(
     settled[1]!.objections,
     [
-      "Expanding the product drops the cross term.",
-      "The revised step now contradicts the control stated at step 2.",
+      { step: 3, point: "Expanding the product drops the cross term." },
+      { step: 2, point: "The revised step now contradicts the control stated at step 2." },
     ],
-    "an objection raised in several rounds is named once",
+    "an objection raised in several rounds is named once, and names the step it targets",
   );
 
   // The one thing the flat ledger left every reader to infer: what is still
@@ -223,6 +225,42 @@ test("an untouched closed position carries no revised-since marker", () => {
   assert.ok(
     !projected.includes("revisedSince"),
     "the marker appears only where a later revision actually rewrote the step",
+  );
+});
+
+test("two objections that read alike but sit at different steps stay distinct", () => {
+  // Reviewers word a recurring fault the same way wherever they meet it.
+  // Collapsing closed objections on their text alone merged them, and the
+  // record then claimed one of them had been raised at a step it never was.
+  const repeated = "The bound is applied outside the range the step states.";
+  const entries: JsonValue[] = [
+    {
+      step: 1,
+      round: 1,
+      verdict: "Interrupt",
+      reason: "The opening bound is misapplied.",
+      issues: [issue(1, repeated)],
+      touched: [1],
+      untouched: [2, 3],
+    },
+    { step: 1, round: 2, verdict: "Pass", reason: "The repaired bound now carries the step." },
+    {
+      step: 2,
+      round: 1,
+      verdict: "Interrupt",
+      reason: "The same misapplication reappears downstream.",
+      issues: [issue(2, repeated)],
+      touched: [2],
+      untouched: [1, 3],
+    },
+    { step: 2, round: 2, verdict: "Pass", reason: "The downstream use is now in range." },
+  ];
+  const record = recordOf(initializeReview(stateWith(entries), walkScope(3), VERDICTS));
+  const settled = record.settled as JsonObject[];
+  assert.deepEqual(
+    settled.map((entry) => (entry.objections as JsonObject[]).map((o) => o.step)),
+    [[1], [2]],
+    "each closed position keeps its own objection, at its own step",
   );
 });
 

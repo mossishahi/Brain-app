@@ -1027,10 +1027,12 @@ test("a bundle binding the scoped record gets closed business collapsed and open
   assert.deepEqual(settled.map((entry) => entry.step), [2]);
   assert.equal(settled[0]!.outcome, "passed");
   assert.deepEqual(settled[0]!.revised, [2], "the change-set survives the collapse");
+  const collapsed = (settled[0]!.objections as JsonObject[])[0]!;
   assert.ok(
-    (settled[0]!.objections as string[])[0]?.includes("uncontrolled comparison"),
+    String(collapsed.point).includes("uncontrolled comparison"),
     "the objection stays nameable, so nobody re-raises it",
   );
+  assert.equal(collapsed.step, 2, "and it names the step it targets");
   assert.deepEqual(record.standing, [], "nothing was left unanswered on this path");
   assert.deepEqual(record.rounds, [], "step 3 has not been reviewed yet");
   assert.ok(
