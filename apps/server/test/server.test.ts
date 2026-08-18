@@ -1749,6 +1749,46 @@ test("a review-round override rides the command as its own env variable", () => 
   assert.equal(unset.includes("BRAINSTORM_AGENTIC_MAX_REVIEW_ROUNDS"), false);
 });
 
+test("the attachment store rides every submission for the job, resumes included", () => {
+  // A judge mid-review reported it "could not open the real project files
+  // myself". The manifest names the ROOT the attachment tools read through, and
+  // it was emitted only for `run`: with no roots the worker deletes the
+  // attachment tools and the broker truthfully resolves attachment-access
+  // unavailable. Since a run suspends at its first human gate and continues as a
+  // resume, that silenced the files for the code annotator, every panel member,
+  // and every commentor, judge and reviser of the review.
+  const base = { ...defaultServerSettings(), llm: { provider: "offline" as const } };
+  const fixture = {
+    workerPath: "/tmp/worker/main.js",
+    runId: "bsa_attachments",
+    sessionRoot: "/tmp/sessions",
+    eventsFile: "/tmp/events.jsonl",
+    contentDir: "/tmp/content",
+    attachmentsManifest: "/tmp/jobs/bsa_attachments/attachments/manifest.json",
+    settings: base,
+  };
+  const run = buildOrchestrationCommand({ ...fixture, mode: "run", topic: "Read my files" });
+  const resume = buildOrchestrationCommand({ ...fixture, mode: "resume" });
+  for (const [label, command] of [["run", run], ["resume", resume]] as const) {
+    assert.match(
+      command,
+      /--attachments-manifest '\/tmp\/jobs\/bsa_attachments\/attachments\/manifest\.json'/,
+      `the ${label} command must name the job's attachment store`,
+    );
+  }
+  // The topic, by contrast, IS run-only: a resume replays it from the checkpoint.
+  assert.match(run, /--topic 'Read my files'/);
+  assert.equal(resume.includes("--topic"), false);
+  // A job with nothing attached names no store, so the broker reports the files
+  // as unavailable rather than pointing the tools at a directory that is absent.
+  const without = buildOrchestrationCommand({
+    ...fixture,
+    mode: "resume",
+    attachmentsManifest: undefined,
+  });
+  assert.equal(without.includes("--attachments-manifest"), false);
+});
+
 test("--auto-approve rides the command only when the gate countdown is switched on", () => {
   const fixture = {
     workerPath: "/tmp/worker/main.js",
@@ -1900,7 +1940,12 @@ test("the pilot channel claims a held job, releases it, and never calls sbatch",
   });
   try {
     await putSettings(server, { llm: { provider: "offline" } });
-    const jobId = await submit(server, "Ride a held pilot");
+    // Submitted with a capability switched off for this run: that policy travels
+    // to the worker as an environment variable, so it is the sharpest probe of
+    // whether the pilot assignment carries the environment at all.
+    const jobId = await submit(server, "Ride a held pilot", undefined, {
+      "web-search": false,
+    });
 
     const stored = JSON.parse(
       readFileSync(join(workspace, "workspace", "jobs", jobId, "job.json"), "utf8"),
@@ -1921,6 +1966,31 @@ test("the pilot channel claims a held job, releases it, and never calls sbatch",
       "the assignment cds into the job directory",
     );
     assert.match(assignment, /exec bash .*submit\.sh/);
+    // Pilots are queued long before the run exists and with --export=NONE, so
+    // nothing is inherited: the assignment has to carry the execution
+    // environment itself. Without it every setting that travels as an
+    // environment variable was silently lost on this deployment alone — the
+    // per-run capability disables, the GPU template, the enabled host tools, the
+    // agent-SDK turn/effort/thinking/budget limits and the telemetry opt-out.
+    assert.match(
+      assignment,
+      /^export BRAINSTORM_AGENTIC_DISABLED_CAPABILITIES='web-search'$/m,
+      "the pilot assignment exports what the server configured for this run",
+    );
+    // And never a credential: the spool script lives on shared storage, so
+    // secrets keep coming from the owner-only credentials file.
+    for (const secret of [
+      "ANTHROPIC_API_KEY",
+      "CLAUDE_CODE_OAUTH_TOKEN",
+      "CURSOR_API_KEY",
+      "OPENROUTER_API_KEY",
+    ]) {
+      assert.equal(
+        assignment.includes(secret),
+        false,
+        `${secret} must never be written into a job script`,
+      );
+    }
 
     // An empty pool fails LOUD with the runway instruction, creating no job.
     const empty = await requestJson<{ message: string }>(server, "/api/jobs", {
@@ -3975,10 +4045,27 @@ fs.writeFileSync(checkpointPath, JSON.stringify(checkpoint, null, 2));
     /resume .*--gate confirm-panel=approve/,
     "the auto-approval resumes with a plain approve answer",
   );
-  assert.equal((await manager.detail("gate-auto")).status, "completed");
+  // An answered gate now carries the same in-flight claim every other resume
+  // does, so the job reads "queued" until its worker's own checkpoint postdates
+  // the claim. That claim is the whole point: without it the still-suspended
+  // checkpoint won the reconcile, the answered gate was re-offered immediately,
+  // and the countdown answered it again every 30s for as long as the resume sat
+  // in the scheduler queue. Under this test's synthetic clock the claim is
+  // stamped in the future relative to the file's real mtime, so it stays queued
+  // here; what matters is that the gate is gone and the resume ran exactly once.
+  const answered = await manager.detail("gate-auto");
+  assert.equal(answered.status, "queued");
+  assert.equal(answered.pendingGate, undefined, "the answered gate is not re-offered");
   assert.equal(
-    (await manager.detail("gate-auto")).pendingGate,
-    undefined,
+    readFileSync(marker, "utf8").split("\n").filter((line) => line.includes("resume")).length,
+    1,
+    "one countdown expiry submits exactly one resume",
+  );
+  // A second scan while that submission is in flight must add nothing.
+  await manager.autoApproveDueGates();
+  assert.equal(
+    readFileSync(marker, "utf8").split("\n").filter((line) => line.includes("resume")).length,
+    1,
   );
 
   clock += 31_000;
@@ -3989,6 +4076,86 @@ fs.writeFileSync(checkpointPath, JSON.stringify(checkpoint, null, 2));
   assert.ok(
     !readFileSync(marker, "utf8").includes("gate-held"),
     "a held gate never auto-approves",
+  );
+  rmSync(workspace, { recursive: true, force: true });
+});
+
+test("a resumed run is launched with the same attachment store the run had", async () => {
+  // The end-to-end half of the manifest fix: not only does the command carry the
+  // flag, the script the server actually writes and submits for a resume does.
+  // Without it a resumed worker has no attachment roots, deletes the attachment
+  // tools, and every agent from there on is told the submission's files cannot
+  // be read — which is what a judge reported from a live review.
+  const workspace = tempRoot();
+  const marker = join(workspace, "resume-args.txt");
+  const fakeCli = join(workspace, "fake-cli.mjs");
+  writeFileSync(
+    fakeCli,
+    `import fs from "node:fs";
+fs.appendFileSync(${JSON.stringify(marker)}, process.argv.slice(2).join(" ") + "\\n");
+`,
+  );
+  const now = Date.now();
+  const manager = new JobManager({ workspace, workerPath: fakeCli, now: () => now });
+  const settings = await manager.settings.put({
+    ...manager.settings.get(),
+    runner: "local",
+    llm: { provider: "offline" },
+  });
+  const jobId = "attachment-resume";
+  const jobDir = join(workspace, "workspace", "jobs", jobId);
+  const sessionDir = join(workspace, "workspace", "sessions", jobId);
+  mkdirSync(join(jobDir, "attachments"), { recursive: true });
+  mkdirSync(sessionDir, { recursive: true });
+  // The store the server ingested for this job at submission time.
+  const manifestPath = join(jobDir, "attachments", "manifest.json");
+  writeFileSync(
+    manifestPath,
+    JSON.stringify({ baseDir: join(jobDir, "attachments"), attachments: [] }),
+  );
+  writeFileSync(
+    join(jobDir, "job.json"),
+    JSON.stringify({
+      jobId,
+      topic: "read the attached project",
+      status: "running",
+      runner: "local",
+      pid: 999_999_999, // long dead, so the job reconciles to orphaned
+      createdAt: now - 60_000,
+      updatedAt: now - 30_000,
+      submissionCount: 1,
+      executionSettings: settings,
+    }),
+  );
+  writeFileSync(
+    join(sessionDir, "checkpoint.json"),
+    JSON.stringify({
+      runId: jobId,
+      workflowId: "brainstorm",
+      status: "running",
+      input: {},
+      journal: [],
+      pendingGates: [],
+      seq: 5,
+      updatedAt: now - 30_000,
+    }),
+  );
+  manager.reload();
+  assert.equal((await manager.detail(jobId)).status, "orphaned");
+  assert.equal(await manager.resumeInterrupted(jobId), "queued");
+  const script = readFileSync(
+    join(jobDir, "submit-interrupted-resume-1.sh"),
+    "utf8",
+  );
+  assert.match(script, /resume/);
+  assert.ok(
+    script.includes(`--attachments-manifest '${manifestPath}'`),
+    "the resumed worker must be pointed at the job's attachment store",
+  );
+  await waitUntil(() => existsSync(marker), 5_000);
+  assert.ok(
+    readFileSync(marker, "utf8").includes("--attachments-manifest"),
+    "and the worker must actually receive it",
   );
   rmSync(workspace, { recursive: true, force: true });
 });
@@ -4141,7 +4308,13 @@ fs.writeFileSync(checkpointPath, JSON.stringify(checkpoint, null, 2));
     /resume .*--gate confirm-panel=approve/,
     "the re-armed countdown approves the panel as seated",
   );
-  assert.equal((await manager.detail(jobId)).status, "completed");
+  // "queued", not "completed": answering a gate now claims the job as having a
+  // submission in flight, and under this test's synthetic clock that claim is
+  // stamped ahead of the checkpoint file's real mtime. The gate is answered and
+  // gone, which is what the countdown was for.
+  const approved = await manager.detail(jobId);
+  assert.equal(approved.status, "queued");
+  assert.equal(approved.pendingGate, undefined);
   rmSync(workspace, { recursive: true, force: true });
 });
 
@@ -4342,6 +4515,54 @@ test("a per-section settings save keeps every other section and re-verifies noth
     await server.close();
     await removeWorkspace(workspace);
   }
+});
+
+test("switching telemetry off survives the save and reaches the worker", async () => {
+  // The flag was validated and then dropped from the persisted document, so
+  // opting out appeared to work and was forgotten on the next read. It also
+  // never reached the worker, which gates on BRAINSTORM_AGENTIC_TELEMETRY: the
+  // records were still written into the spool and merely withheld from sending,
+  // where the contract is that opting out produces no record at all.
+  const workspace = tempRoot();
+  const store = new SettingsStore(workspace, {
+    validateAnthropic: async () => undefined,
+  });
+  const enabled = await store.put({
+    ...store.get(),
+    llm: { provider: "offline" },
+  });
+  assert.equal(enabled.telemetry?.enabled, true, "reporting is on by default");
+  assert.equal(
+    store.executionEnvironment({}, enabled).BRAINSTORM_AGENTIC_TELEMETRY,
+    undefined,
+    "an opted-in run says nothing, so the worker's default applies",
+  );
+
+  const off = await store.put({ telemetry: { enabled: false } });
+  assert.equal(off.telemetry?.enabled, false);
+  // Read back from disk, not echoed: this is the assertion the bug failed.
+  assert.equal(new SettingsStore(workspace).get().telemetry?.enabled, false);
+  const stored = JSON.parse(
+    readFileSync(join(workspace, "settings.json"), "utf8"),
+  ) as { telemetry?: { enabled?: boolean; ingestUrl?: string } };
+  assert.equal(stored.telemetry?.enabled, false);
+  // The ingest destination is deployment-owned and recomputed on every read, so
+  // persisting it could only go stale.
+  assert.equal(stored.telemetry?.ingestUrl, undefined);
+  assert.equal(
+    store.executionEnvironment({}, off).BRAINSTORM_AGENTIC_TELEMETRY,
+    "off",
+    "the worker must know, or it writes a record nobody asked for",
+  );
+
+  // And back on again, so the opt-out is a switch rather than a one-way door.
+  const again = await store.put({ telemetry: { enabled: true } });
+  assert.equal(again.telemetry?.enabled, true);
+  assert.equal(
+    store.executionEnvironment({}, again).BRAINSTORM_AGENTIC_TELEMETRY,
+    undefined,
+  );
+  await removeWorkspace(workspace);
 });
 
 test("a new credential and a changed model each re-verify the connection for real", async () => {

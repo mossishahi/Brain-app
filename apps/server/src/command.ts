@@ -83,9 +83,14 @@ export function buildOrchestrationCommand(
   if (options.mode === "run") {
     if (options.topic === undefined) throw new Error("run command needs a topic");
     args.push("--topic", shellQuote(options.topic));
-    if (options.attachmentsManifest !== undefined) {
-      args.push("--attachments-manifest", shellQuote(options.attachmentsManifest));
-    }
+  }
+  // On EVERY mode, not just `run`: the manifest names the root the attachment
+  // tools read through, so a resume without it has no attachment store and the
+  // capability broker truthfully reports the submitted files as unavailable to
+  // every agent from there on. The topic above is genuinely run-only — a resume
+  // replays it from the checkpoint — but this is not.
+  if (options.attachmentsManifest !== undefined) {
+    args.push("--attachments-manifest", shellQuote(options.attachmentsManifest));
   }
   args.push(
     "--run-id",

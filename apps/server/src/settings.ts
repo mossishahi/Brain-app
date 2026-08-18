@@ -49,12 +49,22 @@ type StoredCreditRecovery = Omit<
   ServerSettings["creditRecovery"],
   "openRouterKeyConfigured"
 >;
+/**
+ * Telemetry as it is STORED: the enabled flag only. The ingest destination is
+ * deployment-owned and recomputed from the registry origin on every read, so
+ * persisting it could only go stale.
+ */
+type StoredTelemetry = Omit<
+  NonNullable<ServerSettings["telemetry"]>,
+  "ingestUrl"
+>;
 type StoredServerSettings = Omit<
   ServerSettings,
-  "llm" | "creditRecovery"
+  "llm" | "creditRecovery" | "telemetry"
 > & {
   readonly llm: StoredLlmSettings;
   readonly creditRecovery: StoredCreditRecovery;
+  readonly telemetry?: StoredTelemetry;
 };
 
 interface StoredCredentials {
@@ -594,6 +604,11 @@ function validateStoredSettings(value: unknown): StoredServerSettings {
     },
     ...(hostTools !== undefined ? { hostTools } : {}),
     ...(common.updateCheck !== undefined ? { updateCheck: common.updateCheck } : {}),
+    // Only the enabled flag is the user's; get() recomputes the deployment-owned
+    // ingest URL on every read, so storing it would go stale.
+    ...(common.telemetry !== undefined
+      ? { telemetry: { enabled: common.telemetry.enabled === true } }
+      : {}),
   };
 }
 
@@ -725,6 +740,13 @@ function validateSettingsUpdate(value: unknown): ValidatedUpdate {
       panelConfirmation: common.panelConfirmation,
       gateAutoApprove: common.gateAutoApprove,
       ...(common.updateCheck !== undefined ? { updateCheck: common.updateCheck } : {}),
+      // Opt-out has to survive the save that made it. This was validated and
+      // then dropped from the persisted document, so switching telemetry off
+      // appeared to work and was silently forgotten: get() resolved the absent
+      // flag back to `true` on the next read, and the next run reported.
+      ...(common.telemetry !== undefined
+        ? { telemetry: { enabled: common.telemetry.enabled === true } }
+        : {}),
       creditRecovery,
       ...(interruptedRecovery !== undefined ? { interruptedRecovery } : {}),
       llm: {
@@ -1009,6 +1031,13 @@ export class SettingsStore {
     if (disabledCapabilities.length > 0) {
       env.BRAINSTORM_AGENTIC_DISABLED_CAPABILITIES =
         disabledCapabilities.join(",");
+    }
+    // Opting out means no record is produced at all, rather than one written and
+    // then withheld — so the WORKER has to know. Without this the flag only
+    // stopped the server from sending, and every run still wrote its summary
+    // into the spool, where it sat undrained.
+    if (settings.telemetry?.enabled === false) {
+      env.BRAINSTORM_AGENTIC_TELEMETRY = "off";
     }
     if (settings.llm.provider === "anthropic") {
       const apiKey = this.getAnthropicApiKey();

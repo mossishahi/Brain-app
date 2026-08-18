@@ -286,17 +286,62 @@ interface AttachmentsManifestFile {
   readonly attachments: readonly JsonValue[];
 }
 
-/** Loads the server-ingested attachment manifest referenced by --attachments-manifest. */
+/**
+ * Loads the server-ingested attachment manifest referenced by
+ * --attachments-manifest.
+ *
+ * Needed by `resume` exactly as much as by `run`: the manifest's `baseDir` is
+ * the ROOT the attachment tools read through, not a one-time input. Without it
+ * `buildRuntime` has no roots, deletes the attachment tools, and the broker
+ * truthfully reports attachment-access as unavailable — so every agent from the
+ * resume onward is told the submitted files cannot be read. Since a run suspends
+ * at its first human gate and continues as a resume, that was most of the
+ * pipeline: the code annotator, every panel member, and every commentor, judge
+ * and reviser of the review.
+ */
 function loadAttachmentsManifest(
   path: string | undefined,
+  options: { readonly tolerant?: boolean } = {},
 ): AttachmentsManifestFile | undefined {
   if (path === undefined) return undefined;
-  const parsed = JSON.parse(readFileSync(path, "utf8")) as {
-    readonly baseDir?: unknown;
-    readonly attachments?: unknown;
-  };
+  let parsed: { readonly baseDir?: unknown; readonly attachments?: unknown };
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8")) as typeof parsed;
+  } catch (error) {
+    // A fresh run fails loudly: the submission just wrote this file, so an
+    // unreadable one is a real defect and failing at once is the honest answer.
+    // A RESUME must not, or a truncated manifest — a partial write, a shared-FS
+    // blip — would strand a run that has hours of journalled work behind it and
+    // needs nothing from this file but a directory to read.
+    if (!options.tolerant) throw error;
+    console.error(
+      `[attachments] cannot read the manifest "${path}": ${
+        error instanceof Error ? error.message : String(error)
+      }; continuing with no attachment access`,
+    );
+    return undefined;
+  }
   if (typeof parsed.baseDir !== "string" || !Array.isArray(parsed.attachments)) {
-    throw new Error(`attachments manifest "${path}" is malformed`);
+    if (!options.tolerant) {
+      throw new Error(`attachments manifest "${path}" is malformed`);
+    }
+    console.error(
+      `[attachments] the manifest "${path}" is malformed; continuing with no attachment access`,
+    );
+    return undefined;
+  }
+  // A root that does not resolve HERE is the same failure as no root at all,
+  // reached differently: every honesty rule downstream keys on whether roots
+  // exist, so an unreachable directory would resolve attachment-access as
+  // available and then refuse or ENOENT every read. This host cannot see the
+  // store (a pruned job directory, or a compute node whose workspace path
+  // differs), so it says so loudly and runs as if nothing were attached.
+  if (!existsSync(parsed.baseDir)) {
+    console.error(
+      `[attachments] the manifest's store "${parsed.baseDir}" does not exist on this host; ` +
+        "continuing with no attachment access rather than offering reads that must fail",
+    );
+    return undefined;
   }
   return {
     baseDir: parsed.baseDir,
@@ -892,6 +937,15 @@ async function main(): Promise<void> {
     // shrink. The run only suspends on gates in manual mode anyway, so a
     // gate-answering resume is by definition a manual-mode continuation.
     const resumeAutoApprove = autoApprove && Object.keys(responses).length === 0;
+    // The attachment store is a resource of the JOB, not an input of the first
+    // submission: a resume must read through the same roots or every agent after
+    // it is told the submitted files are unavailable.
+    const manifest = loadAttachmentsManifest(
+      stringFlag(args, "attachments-manifest"),
+      // A resume carries journalled work: losing attachment access is a
+      // degradation to report, never a reason to strand the run.
+      { tolerant: true },
+    );
     const artifacts = new FsArtifactStore(sessionRoot, runId, fsStoreOptions(process.env));
     const taxonomy = taxonomyForRun(lazy, contentDir!, sessionRoot, runId);
     const codeEnvironment = await prepareRunCodeEnvironment(
@@ -906,6 +960,7 @@ async function main(): Promise<void> {
       artifacts,
       autoApproveGates: resumeAutoApprove,
       ...(dismissedMembers.length > 0 ? { dismissedMembers } : {}),
+      ...(manifest ? { attachmentRoots: [manifest.baseDir] } : {}),
       ...(taxonomy ? { taxonomy } : {}),
       ...(codeEnvironment ? { codeEnvironment } : {}),
       ...(gpuRun ? { gpuRun } : {}),

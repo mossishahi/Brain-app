@@ -365,7 +365,10 @@ export class JobManager {
         ? { credentialsFile: join(this.workspace, "credentials.json") }
         : {}),
       ...(mode === "run" ? { topic: record.topic } : {}),
-      ...(mode === "run" && existsSync(this.manifestPath(record.jobId))
+      // Every mode: the attachment store is a resource of the job, and a resume
+      // launched without it runs the rest of the pipeline with the submitted
+      // files reported unavailable.
+      ...(existsSync(this.manifestPath(record.jobId))
         ? { attachmentsManifest: this.manifestPath(record.jobId) }
         : {}),
       sessionRoot: this.sessionsDir,
@@ -421,7 +424,45 @@ export class JobManager {
    * `spool/<jobid>.sh`, which cds into the job directory and runs the same
    * rendered submit script an sbatch submission would have run.
    */
-  private async submitViaPilot(record: JobRecord, script: string): Promise<void> {
+  /**
+   * Never written into a job script, however the channel is built. Secrets ride
+   * the scheduler environment or the owner-only credentials file; a spool script
+   * lives on shared storage, so a name that looks like a credential is skipped
+   * by rule rather than by remembering to list it.
+   */
+  private static secretEnvName(name: string): boolean {
+    return /KEY|TOKEN|SECRET|PASSWORD/i.test(name);
+  }
+
+  /**
+   * The execution environment as `export` lines for a submission channel that
+   * cannot be handed an environment.
+   *
+   * Held pilots are queued long before the run exists and with `--export=NONE`,
+   * so nothing is inherited: without this the worker received only what the
+   * command string inlines, and every setting that travels as an environment
+   * variable was silently lost on that deployment — the per-run capability
+   * disables, the GPU template, the enabled host tools, the agent-SDK turn,
+   * effort, thinking and USD BUDGET limits, the API base URL, and the telemetry
+   * opt-out. Only what this server actually added is exported, and never a
+   * secret: those still come from the credentials file.
+   */
+  private exportedEnvironment(executionEnv: NodeJS.ProcessEnv): string {
+    const lines: string[] = [];
+    for (const [name, value] of Object.entries(executionEnv)) {
+      if (value === undefined) continue;
+      if (this.env[name] === value) continue; // inherited, not ours to restate
+      if (JobManager.secretEnvName(name)) continue;
+      lines.push(`export ${name}=${shellQuote(value)}`);
+    }
+    return lines.length > 0 ? `${lines.join("\n")}\n` : "";
+  }
+
+  private async submitViaPilot(
+    record: JobRecord,
+    script: string,
+    executionEnv: NodeJS.ProcessEnv,
+  ): Promise<void> {
     const poolDir = this.pilotPoolDir!;
     const availableDir = join(poolDir, "available");
     const claimedDir = join(poolDir, "claimed");
@@ -447,7 +488,9 @@ export class JobManager {
         readFileSync(join(claimedDir, id), "utf8").trim() || undefined;
       atomicWriteFile(
         join(spoolDir, `${id}.sh`),
-        `#!/usr/bin/env bash\ncd ${shellQuote(this.jobDir(record.jobId))} || exit 1\nexec bash ${shellQuote(script)}\n`,
+        `#!/usr/bin/env bash\ncd ${shellQuote(this.jobDir(record.jobId))} || exit 1\n` +
+          `${this.exportedEnvironment(executionEnv)}` +
+          `exec bash ${shellQuote(script)}\n`,
         0o755,
       );
       // execute() rejects on a non-zero exit, so a refused release fails
@@ -476,7 +519,7 @@ export class JobManager {
     const executionEnv = this.settings.executionEnvironment(this.env, settings);
     if (record.runner === "slurm") {
       if (this.pilotPoolDir !== undefined) {
-        await this.submitViaPilot(record, script);
+        await this.submitViaPilot(record, script, executionEnv);
         return;
       }
       const result = await execute("sbatch", [script], {
@@ -1430,6 +1473,19 @@ export class JobManager {
 
   async answerGate(jobId: string, answer: GateAnswerRequest): Promise<JobDetail> {
     const record = this.record(jobId);
+    // An answered gate is a resubmission like any other, and it needs the same
+    // in-flight claim. Without one, the resumed worker has not yet written a
+    // non-suspended checkpoint, so reconcile keeps answering "suspended" with
+    // the same gate attached: the card re-appeared the instant it was answered,
+    // and the countdown re-armed and answered it again every 30 seconds for as
+    // long as the resume sat in the scheduler queue — a stream of submissions
+    // all resuming one runId into one session directory, writing over each
+    // other's checkpoints and artifacts.
+    if (this.autoResuming.has(jobId)) {
+      throw new JobConflictError(
+        `job "${jobId}" already has a resume submission in progress`,
+      );
+    }
     const detail = await this.detail(jobId);
     if (detail.status !== "suspended" || !detail.pendingGate) {
       throw new Error(`job "${jobId}" is not suspended on a gate`);
@@ -1527,24 +1583,38 @@ export class JobManager {
     // continuation no matter what the settings say now: `--auto-approve` on a
     // gate-answering resume would compile the gate as an auto-approve activity
     // and silently discard the answer (e.g. a panel shrink).
+    // Refused at the button, like every other resume: a run pinned to content
+    // this app no longer executes must not be discovered minutes later by a
+    // worker that dies on startup.
+    this.assertPinResumable(jobId);
     const settings: ServerSettings = {
       ...(record.executionSettings ?? this.settings.get()),
       panelConfirmation: "manual",
     };
-    const command = this.command(record, "resume", settings, answer);
-    const number = (record.submissionCount ?? 1) + 1;
-    const script = this.writeScript(
-      record,
-      `submit-resume-${number - 1}.sh`,
-      command,
-      settings.slurmTemplate,
-    );
-    await this.submitScript(record, script, settings);
-    record.status = "running";
-    record.submissionCount = number;
-    delete record.gateAutoApprove;
-    record.updatedAt = this.now();
-    this.write(record);
+    this.autoResuming.add(jobId);
+    try {
+      const command = this.command(record, "resume", settings, answer);
+      const number = (record.submissionCount ?? 1) + 1;
+      const script = this.writeScript(
+        record,
+        `submit-resume-${number - 1}.sh`,
+        command,
+        settings.slurmTemplate,
+      );
+      await this.submitScript(record, script, settings);
+      // "queued", not "running": the worker has been submitted, not started.
+      // Paired with the claim below, this is what stops reconcile from reading
+      // the still-suspended checkpoint as the live truth and re-offering a gate
+      // that has already been answered.
+      record.status = "queued";
+      record.submissionCount = number;
+      record.autoResumePending = { submittedAt: this.now() };
+      delete record.gateAutoApprove;
+      record.updatedAt = this.now();
+      this.write(record);
+    } finally {
+      this.autoResuming.delete(jobId);
+    }
     return this.detail(jobId);
   }
 
@@ -1795,7 +1865,9 @@ export class JobManager {
       if (marker.heldAt !== undefined) continue;
       if (this.now() < marker.deadlineAt) continue;
       if (this.autoResuming.has(record.jobId)) continue;
-      this.autoResuming.add(record.jobId);
+      // answerGate takes the claim itself, so this must not take it first: the
+      // two would deadlock into "already has a resume submission in progress"
+      // and the countdown would never be able to answer anything.
       try {
         await this.answerGate(record.jobId, {
           gateKey: gate.gateKey,
@@ -1810,8 +1882,6 @@ export class JobManager {
         );
         record.updatedAt = this.now();
         this.write(record);
-      } finally {
-        this.autoResuming.delete(record.jobId);
       }
     }
   }

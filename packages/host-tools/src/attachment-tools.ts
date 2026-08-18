@@ -69,12 +69,21 @@ function looksBinary(buffer: Buffer): boolean {
   return window.includes(0);
 }
 
+/**
+ * The host's own record of what it ingested, which lives AT the root of the
+ * store it describes. Every submitted file is materialized one directory down,
+ * so a file with this name at the top level is never the submitter's: listing it
+ * would present host bookkeeping as an attachment and put the inventory one
+ * ahead of the count the manifest itself reports.
+ */
+const INGEST_BOOKKEEPING = "manifest.json";
+
 /** Depth-first walk of the attachment roots, in stable name order. */
 function walkRoots(
   roots: readonly string[],
   visit: (path: string, bytes: number) => void,
 ): void {
-  const walk = (dir: string): void => {
+  const walk = (dir: string, atRoot: boolean): void => {
     let entries;
     try {
       entries = readdirSync(dir, { withFileTypes: true });
@@ -83,11 +92,12 @@ function walkRoots(
     }
     for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
       const path = join(dir, entry.name);
-      if (entry.isDirectory()) walk(path);
+      if (entry.isDirectory()) walk(path, false);
+      else if (atRoot && entry.name === INGEST_BOOKKEEPING) continue;
       else if (entry.isFile()) visit(path, statSync(path).size);
     }
   };
-  for (const root of roots) walk(root);
+  for (const root of roots) walk(root, true);
 }
 
 /** True when the file is searchable text (known extension or non-binary sniff). */

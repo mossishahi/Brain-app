@@ -52,6 +52,28 @@ describe("attachmentTools", () => {
     assert.ok(files.some((f) => f.path.endsWith("b.txt")));
   });
 
+  it("attachment_list hides the ingest manifest but not a nested one", async () => {
+    // The server writes its record of what it ingested AT the root of the store
+    // it describes, while every submitted file is materialized one directory
+    // down. Listing it presented host bookkeeping as one of the submitter's
+    // files and put the inventory one ahead of the count the manifest reports.
+    const root = mkdtempSync(join(tmpdir(), "host-tools-test-"));
+    writeFileSync(join(root, "manifest.json"), '{"version":1}');
+    mkdirSync(join(root, "0-project"));
+    writeFileSync(join(root, "0-project", "paper.txt"), "hello");
+    // A file the SUBMITTER happens to have named manifest.json is theirs, and
+    // it can only ever appear below the root.
+    writeFileSync(join(root, "0-project", "manifest.json"), '{"mine":true}');
+
+    const tools = attachmentTools([root]);
+    const result = await tools[0]!.execute({}, { runId: "r1" });
+    const files = (result.output as { files: { path: string }[] }).files;
+    assert.deepEqual(
+      files.map((f) => f.path.slice(root.length + 1)).sort(),
+      [join("0-project", "manifest.json"), join("0-project", "paper.txt")].sort(),
+    );
+  });
+
   it("attachment_read returns text content", async () => {
     const root = mkdtempSync(join(tmpdir(), "host-tools-test-"));
     writeFileSync(join(root, "file.txt"), "content here");
