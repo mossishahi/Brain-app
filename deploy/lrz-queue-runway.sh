@@ -42,7 +42,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-NODE_VERSION="v22.13.0"
+NODE_VERSION="v24.19.0"
 NODE_DIR="$HOME/opt/node-$NODE_VERSION-linux-x64"
 APP="${BRAIN_APP_DIR:-$PWD}"
 PORT="${BRAIN_PORT:-8787}"

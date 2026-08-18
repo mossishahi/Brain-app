@@ -7,7 +7,7 @@
 # The user never installs Node themselves. The script owns three things:
 #
 # - NODE: any Node >= 22.13 already on PATH is used as-is. Otherwise the
-#   pinned Node v22.13.0 for this OS and CPU is downloaded into ~/opt and
+#   pinned Node v24.19.0 for this OS and CPU is downloaded into ~/opt and
 #   used from there — no root, no package manager, and nothing outside
 #   ~/opt is touched (the same convention deploy/slurm-launch.sh uses on
 #   clusters, so one machine never ends up with two conventions).
@@ -24,7 +24,7 @@
 set -euo pipefail
 
 # The same version the SLURM wrapper pins; the repo's enforced floor is 22.13.
-NODE_VERSION="v22.13.0"
+NODE_VERSION="v24.19.0"
 
 cd "$(dirname "$0")"
 

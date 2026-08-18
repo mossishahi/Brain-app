@@ -42,7 +42,7 @@
 
 set -uo pipefail  # deliberately no -e: the relaunch loop must survive failures
 
-NODE_VERSION="v22.13.0"
+NODE_VERSION="v24.19.0"
 NODE_DIR="$HOME/opt/node-$NODE_VERSION-linux-x64"
 APP="${BRAIN_APP_DIR:-${SLURM_SUBMIT_DIR:-$PWD}}"
 PORT="${BRAIN_PORT:-8787}"
