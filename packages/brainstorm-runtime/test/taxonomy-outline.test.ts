@@ -159,6 +159,44 @@ test("with no anchors at all, the outline is the skeleton with counts", async ()
   assert.ok(!outline.includes("      "), "no topics are expanded anywhere");
 });
 
+test("an outline too large to record degrades instead of failing the run", async () => {
+  // A broad submission can anchor in many topic-heavy subfields at once. The
+  // artifact schema caps this field, so rendering past the cap used to fail
+  // the deterministic activity — and because that activity's output is
+  // journaled, every resume replayed straight back into the same failure.
+  const topics = Array.from({ length: 4000 }, (_, i) => `      topic ${i} ${"x".repeat(40)}`);
+  const huge = [
+    "Natural Sciences",
+    "  Physics",
+    "    Quantum Optics",
+    ...topics,
+    "    Condensed Matter",
+    "      transport",
+  ].join("\n");
+
+  class HugeTree extends OutlineStubTaxonomy {
+    override async tree(): Promise<{ revision: number; nodeCount: number; outline: string }> {
+      return { revision: 9, nodeCount: 4003, outline: huge };
+    }
+  }
+  const taxonomy = new HugeTree();
+  const outline = await buildPlacerOutline(taxonomy, [
+    member({ candidates: [{ name: "Quantum Optics", path: ["Natural Sciences", "Physics", "Quantum Optics"], score: 0.9 }] }),
+  ]);
+
+  assert.ok(
+    outline.length <= 120_000,
+    `the rendered outline stays inside the artifact schema's cap (was ${outline.length})`,
+  );
+  // Degrading is not going blank: the placer still gets the skeleton, and
+  // every cut still names itself so the branch remains fetchable.
+  assert.ok(outline.includes("Physics"), "the skeleton survives the degrade");
+  assert.ok(
+    outline.includes("not shown"),
+    "the cut branches are still announced as fetchable",
+  );
+});
+
 test("a failing tree read falls open to a fetch-it-yourself note, never an error", async () => {
   const taxonomy = new OutlineStubTaxonomy(true);
   const outline = await buildPlacerOutline(taxonomy, [member({})]);

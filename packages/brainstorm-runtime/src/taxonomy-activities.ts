@@ -359,16 +359,61 @@ export async function buildPlacerOutline(
   } catch {
     // Fail open: the placer then falls back to reading the tree itself
     // through its taxonomy-access capability, exactly as before the outline.
-    return (
-      "Shared taxonomy — outline unavailable for this run; fetch the tree " +
-      "through your taxonomy-access capability instead."
-    );
+    return OUTLINE_UNAVAILABLE;
   }
   const fromCandidates = candidatePaths(unmatched);
   const anchorPaths =
     fromCandidates.length > 0 ? fromCandidates : await optionPaths(taxonomy, unmatched);
   const anchors = anchorsFromPaths(anchorPaths);
 
+  // A broad submission can anchor in many topic-heavy subfields at once, and
+  // the expansions then add up. The artifact schema caps this field, so an
+  // outline over the cap would fail the deterministic activity that renders
+  // it — killing the run, and killing every resume with it, because the
+  // activity's output is journaled. Nothing about the placer's job requires
+  // the widest possible outline, so the render degrades instead: fewer
+  // expansions, then none, then the same fetch-it-yourself note a missing
+  // tree produces. Every level names its cuts, so what is dropped stays
+  // reachable through the placer's taxonomy-access capability.
+  for (const level of [anchors, topicsCut(anchors), NOTHING_EXPANDED]) {
+    const text = renderOutline(tree, level);
+    if (text.length <= MAX_OUTLINE_CHARS) return text;
+  }
+  return OUTLINE_UNAVAILABLE;
+}
+
+/**
+ * Expansion budget for the rendered outline, under the artifact schema's own
+ * ceiling with room to spare. It is not a token budget — a normal outline is
+ * a small fraction of this — it is the point past which rendering more would
+ * fail the run instead of informing the placer.
+ */
+const MAX_OUTLINE_CHARS = 110_000;
+
+const OUTLINE_UNAVAILABLE =
+  "Shared taxonomy — outline unavailable for this run; fetch the tree " +
+  "through your taxonomy-access capability instead.";
+
+interface OutlineAnchors {
+  readonly fields: ReadonlySet<string>;
+  readonly branches: ReadonlySet<string>;
+}
+
+/** The same anchors with every topic list cut back to a count. */
+function topicsCut(anchors: OutlineAnchors): OutlineAnchors {
+  return { fields: anchors.fields, branches: new Set<string>() };
+}
+
+/** The bare domain/field skeleton: every branch cut, every cut counted. */
+const NOTHING_EXPANDED: OutlineAnchors = {
+  fields: new Set<string>(),
+  branches: new Set<string>(),
+};
+
+function renderOutline(
+  tree: { revision: number; nodeCount: number; outline: string },
+  anchors: OutlineAnchors,
+): string {
   const lines: string[] = [
     `Shared taxonomy — revision ${tree.revision}, ${tree.nodeCount} nodes. ` +
       'Branches marked "not shown" are cut for brevity: fetch any of them by ' +
