@@ -21,7 +21,11 @@
  * steps ascending, rounds ascending — exactly the order the runtime executed
  * them — threading a working chain seeded from the first-pass text.
  */
-import type { ReviewMemberView, ReviewRoundView } from "@brainstorm-agentic/protocol";
+import type {
+  ReviewMemberView,
+  ReviewRoundView,
+  ReviewStepView,
+} from "@brainstorm-agentic/protocol";
 
 export interface DiffSegment {
   readonly text: string;
@@ -236,4 +240,60 @@ export function computeSeatTimeline(
     }
   }
   return { rounds, crossRewrites, original, chain };
+}
+
+/**
+ * One entry of a step's round deck: the step's first-pass base text (the
+ * "Original thought"), a real review round, or a rewrite that ANOTHER walk
+ * position's round applied to this step — each its own card, so paging the
+ * deck reads the step's full text history in the order it happened.
+ */
+export type DeckEntry =
+  | { readonly kind: "original"; readonly key: string; readonly text: string }
+  | { readonly kind: "round"; readonly key: string; readonly round: ReviewRoundView }
+  | { readonly kind: "cross"; readonly key: string; readonly cross: CrossRewriteView };
+
+/**
+ * The deck in chronological order. Walk order IS the chronology: the
+ * original thought first, then rewrites from EARLIER positions (they landed
+ * before this step's own review began), the step's own rounds, and rewrites
+ * from LATER positions; within each side the timeline replay already
+ * ordered them. The base card only joins a deck that has something to
+ * compare against it — a step nothing has touched keeps its pending card.
+ */
+export function deckEntries(step: ReviewStepView, timeline: SeatTimeline): DeckEntry[] {
+  const crosses = timeline.crossRewrites.get(step.index) ?? [];
+  const crossEntry = (view: CrossRewriteView): DeckEntry => ({
+    kind: "cross",
+    key: `x${view.byStep}:${view.byRound}`,
+    cross: view,
+  });
+  const rounds = [...step.rounds]
+    .sort((a, b) => a.round - b.round)
+    .map((round): DeckEntry => ({ kind: "round", key: `r${round.round}`, round }));
+  const entries: DeckEntry[] = [
+    ...crosses.filter((view) => view.byStep < step.index).map(crossEntry),
+    ...rounds,
+    ...crosses.filter((view) => view.byStep > step.index).map(crossEntry),
+  ];
+  const original = timeline.original.get(step.index);
+  if (entries.length > 0 && original !== undefined) {
+    entries.unshift({ kind: "original", key: "original", text: original });
+  }
+  return entries;
+}
+
+/**
+ * The round that reviewed the version a given deck entry shows.
+ *
+ * A round is handed a text, gathers comments on it, and only then
+ * redevelops — so the comments of round k describe the text that ENTERED
+ * round k, which is the version the previous card displays. The deck is
+ * chronological, so "the next entry, when it is a round" is the whole rule,
+ * and it stays correct across the cross-rewrite cards interleaved with the
+ * step's own rounds. The last version has no reviewer yet.
+ */
+export function reviewedBy(deck: readonly DeckEntry[], index: number): ReviewRoundView | undefined {
+  const next = deck[index + 1];
+  return next?.kind === "round" ? next.round : undefined;
 }

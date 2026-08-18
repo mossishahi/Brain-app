@@ -1,0 +1,18 @@
+// Tests only. The app itself compiles with "noEmit" and bundles through Vite,
+// so its pure logic had no runnable form and went untested. This config emits
+// just that logic — the review inspector's change tracking and deck rules,
+// which touch no DOM and import no React — so `node --test` can run it like
+// every other package's suite.
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022"],
+    "outDir": "dist-test",
+    "rootDir": ".",
+    "types": ["node"]
+  },
+  "include": ["src/components/panels/review-diff.ts", "test/**/*.ts"]
+}
