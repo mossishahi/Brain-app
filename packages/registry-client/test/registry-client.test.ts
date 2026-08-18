@@ -29,6 +29,7 @@ import {
 import {
   ContentRegistryClient,
   ContentRegistryStore,
+  isSessionLoss,
   parseContentRegistryManifest,
   readContentPin,
   writeContentPin,
@@ -452,4 +453,17 @@ test("a read after the registry forgot the session reconnects instead of failing
     await client.close().catch(() => undefined);
     await registry.close();
   }
+});
+
+test("isSessionLoss recognizes every healable session/transport failure", () => {
+  // The exact string of the overnight incident: the idle HTTP connection
+  // died under the session and the SDK reported a transport-level close.
+  // The old matcher missed it, so the client stayed a zombie and every
+  // later skill fetch failed identically for hours.
+  assert.equal(isSessionLoss(new Error("MCP error -32000: Connection closed")), true);
+  assert.equal(isSessionLoss(new Error("session not found")), true);
+  assert.equal(isSessionLoss(new Error("Not connected")), true);
+  // Real refusals must NOT trigger reconnects.
+  assert.equal(isSessionLoss(new Error('unknown static file "nope.md"')), false);
+  assert.equal(isSessionLoss(new Error("rate limit exceeded (429)")), false);
 });

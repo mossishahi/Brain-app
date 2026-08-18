@@ -289,15 +289,24 @@ function isRateLimitError(error: unknown): boolean {
 }
 
 /**
- * True when a failed MCP call means OUR SESSION is gone, not that the
- * operation itself was refused: the registry answered "session not found"
- * (it reaps sessions idle for ~30 minutes and forgets every session on a
- * restart or redeploy), or the SDK already tore the transport down ("Not
- * connected"). Both are healed by reconnecting, never by giving up.
+ * True when a failed MCP call means OUR SESSION (or its transport) is gone,
+ * not that the operation itself was refused:
+ *
+ * - the registry answered "session not found" (it reaps sessions idle for
+ *   ~30 minutes and forgets every session on a restart or redeploy);
+ * - the SDK already tore the transport down ("Not connected");
+ * - the SDK reports "Connection closed" (MCP -32000): the underlying HTTP
+ *   connection died under the session — an idle drop by a proxy or NAT, a
+ *   server restart mid-stream. This variant slipped through the original
+ *   matcher and left the client a ZOMBIE: an overnight run lost its
+ *   connection once and then failed every later skill fetch for four hours
+ *   with the same error, because nothing ever rebuilt the transport.
+ *
+ * All of these are healed by reconnecting, never by giving up.
  */
-function isSessionLoss(error: unknown): boolean {
+export function isSessionLoss(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /session not found|not connected/i.test(message);
+  return /session not found|not connected|connection closed/i.test(message);
 }
 
 export interface RegistryRateLimitRetryOptions {

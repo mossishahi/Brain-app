@@ -23,8 +23,9 @@ packages/
 ```
 
 The independently deployed Brain Registry is deliberately not part of this application. The
-worker connects over MCP, pins an immutable version, and retrieves only the current role and its
-declared techniques. Files are hash-verified and cached for resume.
+worker connects over MCP, pins an immutable version, and fetches the whole skill set up front —
+hash-verified, held in memory only — so a run never depends on the registry connection staying
+alive into its later stages. A resume re-fetches the same immutable version and re-verifies it.
 
 ## Quick start (no Node setup needed)
 
@@ -34,7 +35,7 @@ cd Brain-app && ./setup.sh
 ```
 
 `setup.sh` takes care of everything a fresh machine is missing: when no Node 22.13+ is on the
-PATH it downloads the pinned Node v22.13.0 for this OS/CPU into `~/opt` (no root, no package
+PATH it downloads the pinned Node v24.19.0 for this OS/CPU into `~/opt` (no root, no package
 manager — the same convention the SLURM wrapper uses), then installs, builds, and launches.
 Arguments pass through to the server (`./setup.sh --port 9000 --no-open`); `--build-only`
 prepares the machine without launching. Linux and macOS; on Windows use WSL. Re-running it is
@@ -49,7 +50,9 @@ npm test
 ```
 
 Node.js **22.13 or newer** is required (the Cursor SDK's floor; `setup.sh` and the `deploy/`
-scripts install v22.13.0). The floor is enforced: `engine-strict` fails installs on an older Node, and the
+scripts install v24.19.0 — the floor is a minimum, not what we install: on v22.13.0 the Cursor
+SDK's use of Node's then-experimental SQLite segfaulted on linux-x64, taking the whole server
+down while it merely verified an API key). The floor is enforced: `engine-strict` fails installs on an older Node, and the
 server and worker entry points refuse to start on one with a clear message — a worker on a
 cluster compute node checks its own Node too, so a wrong job environment fails loudly in the
 job log instead of crashing mid-run.

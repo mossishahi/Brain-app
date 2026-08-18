@@ -33,6 +33,11 @@ function skillFromText(text: string, path: string): Skill {
   return skill;
 }
 
+/**
+ * Resolves roles from the store's in-memory cache. Since the up-front skill
+ * prefetch (see openLazyRegistryContent) the laziness is parse-only: every
+ * file is already in memory, so resolution never touches the network.
+ */
 class LazyRegistrySkillResolver implements SkillResolver {
   private readonly resolved = new Map<string, Promise<ResolvedRole>>();
 
@@ -149,6 +154,21 @@ export async function openLazyRegistryContent(options: {
     pin.manifest.entrypoints.workflow,
     ...pin.manifest.entrypoints.controls,
   ]);
+  // EVERY skill file is fetched up front, while the connection that just
+  // resolved the pin is proven alive. Skills used to be fetched lazily, the
+  // first time their role ran — which made a run's success depend on the
+  // registry connection surviving into its final hours: an overnight run
+  // lost its connection at 03:08 and the one never-yet-fetched skill (the
+  // interdisciplinary commentor, first needed deep in review) failed every
+  // walk that reached it. The whole set is a few hundred kilobytes and a
+  // couple dozen requests — far inside the registry's per-minute budget —
+  // so buying it now removes the mid-run network dependency entirely;
+  // resolveRole afterwards always answers from memory.
+  await store.ensureMany(
+    pin.manifest.files
+      .map((file) => file.path)
+      .filter((path) => path.startsWith("skills/")),
+  );
   const bundle = loadControlContent(
     memoryContentSource(`${pin.bundle}@${pin.version}`, store.loaded()),
     pin.manifest.entrypoints.workflow,
