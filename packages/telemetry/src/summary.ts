@@ -84,9 +84,14 @@ function stageFacts(events: readonly JsonObject[]): StageFact[] {
 }
 
 /**
- * Per-role cost and latency. `taskKind` is already stamped on every agent
- * event, and token usage rides the journaled AgentResult — the two are joined
- * on taskId, which is stable across retries and resumes.
+ * Per-role cost and latency, joined on taskId — stable across retries and
+ * resumes.
+ *
+ * Spend comes from the completion EVENTS, which carry each attempt's usage:
+ * a failed attempt spends real tokens and is never journaled, so a
+ * journal-only total silently under-reports every retried task and disagrees
+ * with the dashboard's figure for the same run. Runs recorded before events
+ * carried usage still fall back to the journal.
  */
 function roleFacts(
   events: readonly JsonObject[],
@@ -104,6 +109,15 @@ function roleFacts(
     reasoningTokens: number;
   }
   const roles = new Map<string, MutableRole>();
+  /** Tasks whose spend the event stream already supplied. */
+  const countedFromEvents = new Set<string>();
+  const addUsage = (fact: MutableRole, usage: JsonObject): void => {
+    fact.inputTokens += num(usage.inputTokens) ?? 0;
+    fact.outputTokens += num(usage.outputTokens) ?? 0;
+    fact.cacheReadTokens += num(usage.cacheReadInputTokens) ?? 0;
+    fact.cacheWriteTokens += num(usage.cacheWriteInputTokens) ?? 0;
+    fact.reasoningTokens += num(usage.reasoningTokens) ?? 0;
+  };
   const ensure = (role: string): MutableRole => {
     const existing = roles.get(role);
     if (existing) return existing;
@@ -138,24 +152,31 @@ function roleFacts(
       if (str(event.status) === "error") fact.failures += 1;
       const begin = startedAt.get(taskId);
       if (begin !== undefined && at !== undefined) fact.durationMs += at - begin;
+      // Each ATTEMPT's spend rides its completion event, failed attempts
+      // included — and a failed attempt buys real tokens. Counting them is
+      // what makes this total the money actually spent, and what keeps it
+      // equal to the figure the dashboard shows for the same run.
+      const usage = obj(event.usage);
+      if (usage) {
+        addUsage(fact, usage);
+        countedFromEvents.add(taskId);
+      }
     }
   }
 
-  // Usage is not on the event stream — it rides the journaled AgentResult.
+  // Runs recorded before completion events carried usage fall back to the
+  // journaled AgentResult — the successful attempt only, which is all those
+  // runs ever recorded. Tasks already counted above are skipped, or their
+  // successful attempt would be added twice.
   for (const entry of journal) {
     if (str(entry.kind) !== "agent") continue;
     const value = obj(entry.value);
     const taskId = str(value?.taskId);
     const usage = obj(value?.usage);
-    if (!taskId || !usage) continue;
+    if (!taskId || !usage || countedFromEvents.has(taskId)) continue;
     const role = kindOfTask.get(taskId);
     if (!role) continue;
-    const fact = ensure(role);
-    fact.inputTokens += num(usage.inputTokens) ?? 0;
-    fact.outputTokens += num(usage.outputTokens) ?? 0;
-    fact.cacheReadTokens += num(usage.cacheReadInputTokens) ?? 0;
-    fact.cacheWriteTokens += num(usage.cacheWriteInputTokens) ?? 0;
-    fact.reasoningTokens += num(usage.reasoningTokens) ?? 0;
+    addUsage(ensure(role), usage);
   }
   return [...roles.values()];
 }

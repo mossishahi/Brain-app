@@ -129,6 +129,70 @@ test("run summary facts derive from a format-2 journal (no state)", () => {
 });
 
 /** The gate's shrink answer trims the recorded panel, like the state did. */
+test("role spend counts every attempt, and old runs still fall back to the journal", () => {
+  // A retried task spends real tokens on the attempt that failed, and that
+  // attempt is never journaled. Summing the journal alone under-reported it
+  // and disagreed with the dashboard's figure for the same run.
+  const retried = deriveRunSummary({
+    status: "completed",
+    events: [
+      { type: "agent:started", taskId: "t-1", taskKind: "brainstorm.judge", at: 0 },
+      {
+        type: "agent:completed",
+        taskId: "t-1",
+        taskKind: "brainstorm.judge",
+        status: "error",
+        at: 10,
+        usage: { inputTokens: 700, outputTokens: 30 },
+      },
+      {
+        type: "agent:completed",
+        taskId: "t-1",
+        taskKind: "brainstorm.judge",
+        status: "ok",
+        at: 20,
+        usage: { inputTokens: 1000, outputTokens: 100, cacheReadInputTokens: 5000 },
+      },
+    ] as unknown as JsonObject[],
+    journal: [
+      {
+        key: "root/judge-step/judge-step-execute::result",
+        kind: "agent",
+        value: {
+          taskId: "t-1",
+          status: "ok",
+          usage: { inputTokens: 1000, outputTokens: 100, cacheReadInputTokens: 5000 },
+        },
+      },
+    ] as unknown as JsonObject[],
+  });
+  const judge = retried.roles.find((role) => role.role === "brainstorm.judge");
+  assert.ok(judge);
+  assert.equal(judge.inputTokens, 1700, "the failed attempt's input tokens are real spend");
+  assert.equal(judge.outputTokens, 130);
+  assert.equal(judge.cacheReadTokens, 5000, "the journaled attempt is not counted twice");
+
+  // A run recorded before completion events carried usage has only the
+  // journal to go on, and must still report what it spent.
+  const legacy = deriveRunSummary({
+    status: "completed",
+    events: [
+      { type: "agent:started", taskId: "t-9", taskKind: "brainstorm.brain", at: 0 },
+      { type: "agent:completed", taskId: "t-9", taskKind: "brainstorm.brain", status: "ok", at: 5 },
+    ] as unknown as JsonObject[],
+    journal: [
+      {
+        key: "root/develop-idea/develop-idea-execute::result",
+        kind: "agent",
+        value: { taskId: "t-9", status: "ok", usage: { inputTokens: 42, outputTokens: 7 } },
+      },
+    ] as unknown as JsonObject[],
+  });
+  const brain = legacy.roles.find((role) => role.role === "brainstorm.brain");
+  assert.equal(brain?.inputTokens, 42, "the journal still backs pre-event runs");
+  assert.equal(brain?.outputTokens, 7);
+});
+
 test("a shrunk panel gate is applied to the journal-sourced panel fact", () => {
   const journal: JsonObject[] = [
     {
