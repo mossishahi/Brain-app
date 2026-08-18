@@ -99,7 +99,28 @@ One rectangle per job, newest first, same 640px column. The list streams live fr
 
 ## Settings drawer (gear icon)
 
-A right-side drawer, 420px, `--surface`, hairline left border. Sections:
+A right-side drawer, 420px, `--surface`, hairline left border. It slides in, and out again on
+Escape, on a backdrop click, or on the close button; sections fold with an animated height (a
+grid row travelling 0fr→1fr, since a native `<details>` cannot animate) and every animation is
+dropped under `prefers-reduced-motion`.
+
+**Each section saves itself.** There is no drawer-wide Save button: a select or checkbox saves the
+moment it changes, a typed value saves shortly after the last keystroke, and a template textarea
+saves when focus leaves it (an intermediate keystroke would fail the tag check on every character).
+Each section shows its own outcome next to its title — a spinning ring while the save is away, a
+green check that fades once it lands, or the server's reason if it was refused. Anything still
+waiting on its debounce is flushed when the drawer closes.
+
+The exception is a value that costs a real request to the provider: **every credential keeps its
+own Save button beside the input**, which spins while the connection is tested and settles into a
+check. A secret is submitted ONLY by that button — editing the model next to a half-typed key must
+never send the key — and the input clears once it is stored.
+
+This is a correction, not a preference. One drawer-wide Save re-sent the whole document for any
+edit, so the server re-verified the selected provider to persist it: changing the review-round
+budget took seconds and then reported "Claude token verified", as though that had been the edit.
+
+Sections:
 
 1. **Execution** — Runner select: `slurm` (default) / `local` (footnote: "runs on this machine,
    for development"). SLURM template: monospace textarea (12 rows) editing the template verbatim.
@@ -119,7 +140,14 @@ A right-side drawer, 420px, `--surface`, hairline left border. Sections:
    Saving makes a small live request through the selected backend first; invalid credentials/model
    leave the previous settings and secrets untouched. Secrets are write-only — the browser receives
    only `apiKeyConfigured` / `setupTokenConfigured`, never their values.
-3. **Panel confirmation** — radio: `Ask me on the dashboard` (default) / `Approve automatically`.
+3. **Panel confirmation** — radio: `Ask me on the dashboard` (default) / `Approve automatically`,
+   plus **If I do not answer**: `Continue on my behalf after a short countdown` (default on). Both
+   gates — the reading of the submission and the panel — count down about 30s and then proceed with
+   what the pipeline proposed, so an unattended run never stalls. Switching it off makes every gate
+   wait indefinitely, **applies immediately to runs already in progress** (including one that has
+   passed the first gate and not yet reached the second), and stops any countdown already on
+   screen. While it is off it also overrides `Approve automatically`, and the card says so rather
+   than disabling the choice.
 4. **Review rounds** — select: `Bundle default` (follows the published workflow) or 1–10. The
    budget one chain step may take during review: the first review plus up to N−1 revisions.
    Applies to every NEW run — the value is snapshotted into the job at submit, so resumes replay
@@ -129,7 +157,22 @@ A right-side drawer, 420px, `--surface`, hairline left border. Sections:
    model (`openrouter/free`), and optional write-only OpenRouter API key. Known reset messages are
    parsed locally; the free router is used only for unknown formats.
 
-Save button persists via PUT /api/settings; drawer closes on success.
+Each section persists via PUT /api/settings carrying ONLY its own fields; the server keeps every
+section the request omits, so one panel's save can never disturb another's.
+
+### Dismissing a panel seat mid-run
+
+Every seat card in **First pass** and the review inspector's seat pager carries a quiet `Dismiss`
+control while the run still has work ahead of it. It asks first — dismissal cannot be undone — and
+the question states the cost: the seat stops contributing and reviewing for the rest of the run,
+and work in flight on the other seats restarts from the last checkpoint (the server stops the
+worker and resumes the run without that seat).
+
+A dismissed seat is **struck through and dimmed, never removed**: everything it produced up to that
+moment stays on the dashboard exactly as it was, its matrix row stays in place, and its chip reads
+`dismissed`. It shows no live position, stops holding the first-pass and review stages open, and
+leaves the seat counts in the progress summary. The server refuses a dismissal that would leave
+fewer than two seats, and answers 409 with the reason, which the control shows in place.
 
 ## View 2 — Job dashboard (`#/jobs/:id`)
 

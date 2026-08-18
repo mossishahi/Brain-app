@@ -136,6 +136,9 @@ export function defaultServerSettings(
   return {
     runner: "slurm",
     panelConfirmation: "manual",
+    // An unattended run keeps moving by default; the submitter may switch the
+    // countdown off and make every gate wait for a human instead.
+    gateAutoApprove: true,
     contentRegistry: {
       url: contentRegistryUrl,
       bundle: "brainstorm",
@@ -202,6 +205,7 @@ function validateCommonSettings(value: unknown): {
   readonly gpu?: GpuRunSettings;
   readonly runner: "slurm" | "local";
   readonly panelConfirmation: "manual" | "auto";
+  readonly gateAutoApprove: boolean;
   readonly review?: { readonly maxRounds?: number };
   readonly llm: Record<string, unknown>;
   readonly creditRecovery: Record<string, unknown>;
@@ -228,6 +232,15 @@ function validateCommonSettings(value: unknown): {
   ) {
     throw new Error('panelConfirmation must be "manual" or "auto"');
   }
+  if (
+    input.gateAutoApprove !== undefined &&
+    typeof input.gateAutoApprove !== "boolean"
+  ) {
+    throw new Error("gateAutoApprove must be a boolean");
+  }
+  // Absent in a settings file written before the switch existed = the behavior
+  // that file ran under, which was always to count down and approve.
+  const gateAutoApprove = input.gateAutoApprove !== false;
   const llm = object(input.llm, "llm");
   const creditRecovery =
     input.creditRecovery === undefined
@@ -280,6 +293,7 @@ function validateCommonSettings(value: unknown): {
     ...(gpu !== undefined ? { gpu } : {}),
     runner: input.runner,
     panelConfirmation: input.panelConfirmation,
+    gateAutoApprove,
     ...(review !== undefined ? { review } : {}),
     llm,
     creditRecovery,
@@ -563,6 +577,7 @@ function validateStoredSettings(value: unknown): StoredServerSettings {
     ...(common.gpu !== undefined ? { gpu: common.gpu } : {}),
     runner: common.runner,
     panelConfirmation: common.panelConfirmation,
+    gateAutoApprove: common.gateAutoApprove,
     // Stored only when it actually overrides; `{}` normalizes to absent.
     ...(common.review?.maxRounds !== undefined
       ? { review: { maxRounds: common.review.maxRounds } }
@@ -708,6 +723,7 @@ function validateSettingsUpdate(value: unknown): ValidatedUpdate {
       ...(common.gpu !== undefined ? { gpu: common.gpu } : {}),
       runner: common.runner,
       panelConfirmation: common.panelConfirmation,
+      gateAutoApprove: common.gateAutoApprove,
       ...(common.updateCheck !== undefined ? { updateCheck: common.updateCheck } : {}),
       creditRecovery,
       ...(interruptedRecovery !== undefined ? { interruptedRecovery } : {}),
@@ -1102,6 +1118,55 @@ export class SettingsStore {
   }
 
   /**
+   * Overlays a PATCH onto the stored settings so validation always sees a
+   * complete document.
+   *
+   * This is what lets one panel of the settings drawer save on its own. The
+   * validator's omission rules are unforgiving by design — an absent `llm`,
+   * `hostTools`, `updateCheck` or `creditRecovery` RESETS rather than keeps —
+   * so a narrow payload sent straight into it would quietly wipe whatever the
+   * user was not editing. Merging first means those rules never see an omission
+   * at all, and the one validation path stays the only one.
+   *
+   * Sections are merged one level deep and no further: the leaves are flat
+   * values, and a deeper merge would make it impossible to say what a submitted
+   * object means (`review: {}` clears the override — that is exactly the kind
+   * of distinction a generic deep merge destroys).
+   */
+  private mergeOverStored(value: unknown): ServerSettingsUpdate {
+    const patch = object(value, "settings update");
+    // Deliberately the UNCACHED read that put() has always merged against.
+    const stored = validateStoredSettings(readJsonFile<unknown>(this.path));
+    const section = (name: "llm" | "creditRecovery" | "hostTools" | "gpu"): unknown => {
+      if (patch[name] === undefined) return (stored as Record<string, unknown>)[name];
+      return {
+        ...object((stored as Record<string, unknown>)[name] ?? {}, name),
+        ...object(patch[name], name),
+      };
+    };
+    const merged: Record<string, unknown> = {
+      slurmTemplate: patch.slurmTemplate ?? stored.slurmTemplate,
+      runner: patch.runner ?? stored.runner,
+      panelConfirmation: patch.panelConfirmation ?? stored.panelConfirmation,
+      gateAutoApprove: patch.gateAutoApprove ?? stored.gateAutoApprove,
+      updateCheck: patch.updateCheck ?? stored.updateCheck,
+      llm: section("llm"),
+      creditRecovery: section("creditRecovery"),
+      hostTools: section("hostTools"),
+      gpu: section("gpu"),
+      interruptedRecovery: patch.interruptedRecovery ?? stored.interruptedRecovery,
+      // `review` keeps its own three-way meaning: absent = keep the stored
+      // policy, `{}` = follow the bundle default again, `{maxRounds}` = override.
+      review: patch.review !== undefined ? patch.review : stored.review,
+      telemetry: patch.telemetry ?? stored.telemetry,
+    };
+    for (const key of Object.keys(merged)) {
+      if (merged[key] === undefined) delete merged[key];
+    }
+    return merged as ServerSettingsUpdate;
+  }
+
+  /**
    * Focused per-task-type model update from the submission-box picker.
    * Unlike put(), this never touches credentials and performs no connection
    * re-verification; entries with an empty model string mean "use the
@@ -1132,8 +1197,27 @@ export class SettingsStore {
     return this.get();
   }
 
+  /**
+   * Serializes writes. Every write is read-modify-write over one JSON document,
+   * and per-section saving means several can be in flight at once — two
+   * concurrent saves that both read before either wrote would silently drop one
+   * section's change. Queueing them costs nothing at this rate.
+   */
+  private writeQueue: Promise<unknown> = Promise.resolve();
+
   async put(value: unknown): Promise<ServerSettings> {
-    const update = validateSettingsUpdate(value as ServerSettingsUpdate);
+    const run = this.writeQueue.then(
+      () => this.putExclusive(value),
+      () => this.putExclusive(value),
+    );
+    // The queue must not reject for the next waiter, but the caller still must
+    // see its own failure.
+    this.writeQueue = run.catch(() => undefined);
+    return run;
+  }
+
+  private async putExclusive(value: unknown): Promise<ServerSettings> {
+    const update = validateSettingsUpdate(this.mergeOverStored(value));
     const currentSettings = this.get();
     const currentKey = this.getAnthropicApiKey();
     const currentSetupToken = this.getClaudeSetupToken();
@@ -1144,39 +1228,64 @@ export class SettingsStore {
       update.submittedSetupToken ?? currentSetupToken;
     const candidateCursorKey =
       update.submittedCursorApiKey ?? currentCursorKey;
+    /**
+     * Whether this update actually changes the model connection. Verification
+     * is a real request to the provider and costs seconds, so it runs when — and
+     * only when — something it could disprove has changed: a freshly submitted
+     * secret, or a different provider, model, or base URL.
+     *
+     * Verifying unconditionally is what made every unrelated save slow and
+     * mislabelled: changing the review-round budget re-tested the Claude token
+     * and then reported "token verified" as if that had been the edit.
+     */
+    const connectionChanged =
+      update.submittedApiKey !== undefined ||
+      update.submittedSetupToken !== undefined ||
+      update.submittedCursorApiKey !== undefined ||
+      update.settings.llm.provider !== currentSettings.llm.provider ||
+      update.settings.llm.model !== currentSettings.llm.model ||
+      update.settings.llm.baseUrl !== currentSettings.llm.baseUrl;
     if (update.settings.llm.provider === "anthropic") {
+      // The credential REQUIREMENT is checked either way: selecting a provider
+      // with nothing to authenticate as must fail loudly, verified or not.
       if (!candidateKey) {
         throw new Error("An Anthropic API key is required");
       }
-      await this.connectionValidator({
-        apiKey: candidateKey,
-        model: update.settings.llm.model!,
-        ...(update.settings.llm.baseUrl !== undefined
-          ? { baseUrl: update.settings.llm.baseUrl }
-          : {}),
-      });
+      if (connectionChanged) {
+        await this.connectionValidator({
+          apiKey: candidateKey,
+          model: update.settings.llm.model!,
+          ...(update.settings.llm.baseUrl !== undefined
+            ? { baseUrl: update.settings.llm.baseUrl }
+            : {}),
+        });
+      }
     }
     if (update.settings.llm.provider === "claude-agent") {
       if (!candidateSetupToken) {
         throw new Error("A Claude setup token is required");
       }
-      await this.claudeAgentValidator({
-        token: candidateSetupToken,
-        ...(update.settings.llm.model !== undefined
-          ? { model: update.settings.llm.model }
-          : {}),
-      });
+      if (connectionChanged) {
+        await this.claudeAgentValidator({
+          token: candidateSetupToken,
+          ...(update.settings.llm.model !== undefined
+            ? { model: update.settings.llm.model }
+            : {}),
+        });
+      }
     }
     if (update.settings.llm.provider === "cursor-agent") {
       if (!candidateCursorKey) {
         throw new Error("A Cursor API key is required");
       }
-      await this.cursorAgentValidator({
-        apiKey: candidateCursorKey,
-        ...(update.settings.llm.model !== undefined
-          ? { model: update.settings.llm.model }
-          : {}),
-      });
+      if (connectionChanged) {
+        await this.cursorAgentValidator({
+          apiKey: candidateCursorKey,
+          ...(update.settings.llm.model !== undefined
+            ? { model: update.settings.llm.model }
+            : {}),
+        });
+      }
     }
     if (update.submittedOpenRouterApiKey !== undefined) {
       await this.openRouterValidator(

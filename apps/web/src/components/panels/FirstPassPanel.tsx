@@ -22,7 +22,7 @@ import type {
   VerifyOutputView,
 } from "@brainstorm-agentic/protocol";
 import type { DotState } from "../../format";
-import { Clamp, Dot, EvidenceBlock, TokenChip } from "../common";
+import { Clamp, DismissSeatButton, Dot, EvidenceBlock, TokenChip } from "../common";
 
 type TabId = "primary" | "requested" | "chain" | "novelty" | "papers";
 
@@ -634,10 +634,16 @@ export function IdeaTabs({ idea }: { idea: BrainIdeaView }) {
   );
 }
 
-function MemberCard({ member }: { member: FirstPassMemberView }) {
+function MemberCard({
+  member,
+  onDismiss,
+}: {
+  member: FirstPassMemberView;
+  onDismiss?: (memberId: string) => Promise<void>;
+}) {
   const status = memberStatus(member.status);
   return (
-    <div className="member-card">
+    <div className={`member-card${member.dismissed ? " member-dismissed" : ""}`}>
       <div className="member-head">
         <span className="member-umbrella">{member.umbrella}</span>
         <span className="member-dept">{member.department}</span>
@@ -646,17 +652,31 @@ function MemberCard({ member }: { member: FirstPassMemberView }) {
           <Dot state={status.dot} />
           {status.text}
         </span>
+        {onDismiss && (
+          <DismissSeatButton
+            label={member.umbrella}
+            dismissed={member.dismissed !== undefined}
+            onDismiss={() => onDismiss(member.memberId)}
+          />
+        )}
       </div>
       {member.idea && <IdeaTabs idea={member.idea} />}
     </div>
   );
 }
 
-export function FirstPassBody({ members }: { members: readonly FirstPassMemberView[] }) {
+export function FirstPassBody({
+  members,
+  onDismiss,
+}: {
+  members: readonly FirstPassMemberView[];
+  /** Absent on a finished or trashed run: there is nothing left to dismiss. */
+  onDismiss?: (memberId: string) => Promise<void>;
+}) {
   return (
     <div className="member-grid">
       {members.map((m) => (
-        <MemberCard key={m.memberId} member={m} />
+        <MemberCard key={m.memberId} member={m} {...(onDismiss ? { onDismiss } : {})} />
       ))}
     </div>
   );

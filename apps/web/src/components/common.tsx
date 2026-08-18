@@ -461,6 +461,7 @@ export function SeatCard({
       <div className="seat-head">
         <span className="seat-no">Seat {seat}</span>
         {removed && <span className="chip chip-dim">removed at confirmation</span>}
+        {member.dismissed && <span className="chip chip-dim">dismissed</span>}
         {checkbox && (
           <input
             type="checkbox"
@@ -490,5 +491,81 @@ export function SeatCard({
       </label>
     );
   }
-  return <div className={`seat-card${removed ? " seat-removed" : ""}`}>{body}</div>;
+  // Dismissal and gate-removal read the same way at a glance (a seat that is no
+  // longer taking part) but are distinct facts, so they carry distinct classes
+  // and distinct chips.
+  const state = removed ? " seat-removed" : member.dismissed ? " seat-dismissed" : "";
+  return <div className={`seat-card${state}`}>{body}</div>;
+}
+
+/**
+ * Dismiss control for one panel seat, with the inline confirm the rest of the
+ * app uses for irreversible actions (the job card's cancel/trash, the
+ * credit-block banner). Dismissal cannot be undone — the seat takes no further
+ * part in the run — so it always asks first, and it says what the cost is:
+ * stopping the worker means the other seats resume from the last checkpoint.
+ */
+export function DismissSeatButton({
+  label,
+  dismissed,
+  onDismiss,
+}: {
+  label: string;
+  dismissed: boolean;
+  onDismiss: () => Promise<void>;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (dismissed) return <span className="chip chip-dim">dismissed</span>;
+  if (!confirming) {
+    return (
+      <span className="seat-dismiss">
+        {error && <span className="error-text">{error}</span>}
+        <button
+          type="button"
+          className="ghost-btn btn-small"
+          onClick={() => {
+            setError(null);
+            setConfirming(true);
+          }}
+        >
+          Dismiss
+        </button>
+      </span>
+    );
+  }
+  return (
+    <span className="cancel-zone seat-dismiss">
+      <span className="cancel-question">
+        Dismiss {label}? It stops contributing and reviewing for the rest of the
+        run; work in flight on the other seats restarts from the last checkpoint.
+      </span>
+      <button
+        type="button"
+        className="btn btn-danger btn-small"
+        disabled={busy}
+        onClick={() => {
+          setBusy(true);
+          setError(null);
+          void onDismiss()
+            .then(() => setConfirming(false))
+            .catch((e: unknown) =>
+              setError(e instanceof Error ? e.message : String(e)),
+            )
+            .finally(() => setBusy(false));
+        }}
+      >
+        {busy ? "Dismissing…" : "Yes, dismiss"}
+      </button>
+      <button
+        type="button"
+        className="btn btn-small"
+        disabled={busy}
+        onClick={() => setConfirming(false)}
+      >
+        No
+      </button>
+    </span>
+  );
 }

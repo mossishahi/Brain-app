@@ -232,6 +232,8 @@ export interface PanelMemberView {
   readonly department: string;
   readonly umbrella: string;
   readonly subfields: readonly string[];
+  /** Set when the submitter dismissed this seat mid-run. */
+  readonly dismissed?: DismissedSeatView;
 }
 
 export interface PaperView {
@@ -567,6 +569,20 @@ export interface ReviewMemberView {
    * re-executes exactly this seat's failed task.
    */
   readonly error?: string;
+  /**
+   * The submitter dismissed this seat mid-run. Everything it had produced by
+   * then is still here — the dismissal ends its future, not its record.
+   */
+  readonly dismissed?: DismissedSeatView;
+}
+
+/**
+ * A seat the submitter dismissed while the run was in flight. From the
+ * dismissal on, the seat develops nothing further, comments on nobody, and is
+ * withheld from the integrator and the chair.
+ */
+export interface DismissedSeatView {
+  readonly at: number;
 }
 
 /**
@@ -747,6 +763,8 @@ export interface FirstPassMemberView {
   readonly idea?: BrainIdeaView;
   /** What this member's first-pass task(s) spent. */
   readonly usage?: TokenUsageView;
+  /** Set when the submitter dismissed this seat mid-run. */
+  readonly dismissed?: DismissedSeatView;
 }
 
 export interface FirstPassStage extends StageBase {
@@ -875,6 +893,23 @@ export interface PendingGateView {
 export interface JobDetail extends JobSummary {
   readonly stages: readonly StageView[];
   readonly pendingGate?: PendingGateView;
+  /**
+   * Seats the submitter dismissed mid-run, in dismissal order. The run carries
+   * the list forward through every later resume, so a dismissal is permanent.
+   */
+  readonly dismissedMembers?: readonly DismissedMemberView[];
+}
+
+/** One dismissal, as the dashboard renders it. */
+export interface DismissedMemberView {
+  readonly memberId: string;
+  readonly label?: string;
+  readonly at: number;
+}
+
+/** Body of POST /api/jobs/:id/dismiss-member. */
+export interface DismissMemberRequest {
+  readonly memberId: string;
 }
 
 /* ------------------------------------------------------------------ settings */
@@ -967,6 +1002,17 @@ export interface ServerSettings {
   readonly llm: LlmSettings;
   /** "manual": jobs pause at the panel gate for dashboard confirmation. */
   readonly panelConfirmation: "manual" | "auto";
+  /**
+   * Whether an unanswered gate is approved for the submitter after a
+   * countdown. `true` (default) keeps an unattended run moving: the server
+   * counts down and then approves what the pipeline proposed. `false` means
+   * every gate waits for a human, however long that takes.
+   *
+   * Read LIVE by the server's poller, never snapshotted per job: switching it
+   * off stops the countdown for every run in flight, including a run that has
+   * already passed one gate and has not yet reached the next.
+   */
+  readonly gateAutoApprove?: boolean;
   /**
    * Review-round budget for NEW runs: one chain step may take at most
    * `maxRounds` rounds (the first review plus revisions). Absent = the
@@ -1134,12 +1180,24 @@ export interface ModelsByRouteUpdate {
  *
  * The response is always ServerSettings and therefore never contains the key.
  */
+/**
+ * A settings update is a PATCH: every section is optional and an absent
+ * section keeps whatever is stored. That is what lets each panel of the
+ * settings drawer save on its own — one section's edit never re-submits (and
+ * so never re-verifies) another's. A full object remains valid, so callers
+ * that send everything keep working unchanged.
+ *
+ * The one place absence means something else is documented per field below
+ * (`review: {}` clears the override, while absent keeps it).
+ */
 export interface ServerSettingsUpdate {
-  readonly slurmTemplate: string;
+  readonly slurmTemplate?: string;
   /** Absent = keep the current GPU run setup. */
   readonly gpu?: GpuRunSettings;
-  readonly runner: RunnerKind;
-  readonly panelConfirmation: "manual" | "auto";
+  readonly runner?: RunnerKind;
+  readonly panelConfirmation?: "manual" | "auto";
+  /** Absent = keep the stored gate countdown policy. */
+  readonly gateAutoApprove?: boolean;
   /**
    * Absent = keep the stored review policy. `{}` = follow the bundle's
    * default again. `{ maxRounds: n }` = override the budget for new runs.
@@ -1163,7 +1221,8 @@ export interface ServerSettingsUpdate {
     readonly updatePolicy?: "auto" | "notify";
   };
   readonly updateCheck?: "off" | "notify";
-  readonly creditRecovery: {
+  /** Absent = keep the stored credit-recovery policy. */
+  readonly creditRecovery?: {
     readonly autoResume: boolean;
     readonly safetyBufferSeconds: number;
     readonly openRouterModel: string;
@@ -1174,7 +1233,13 @@ export interface ServerSettingsUpdate {
   readonly interruptedRecovery?: {
     readonly autoResume: boolean;
   };
-  readonly llm: {
+  /**
+   * Absent = keep the stored model connection untouched, which also means NO
+   * provider verification runs. Present and materially changed (provider,
+   * model, base URL, or a newly submitted secret) = the server verifies the
+   * connection for real before it persists anything.
+   */
+  readonly llm?: {
     readonly provider: "anthropic" | "claude-agent" | "cursor-agent" | "offline";
     readonly model?: string;
     readonly baseUrl?: string;
@@ -1696,7 +1761,7 @@ export interface ToolUsageReport {
  *   POST /api/update-check                    -> UpdateCheckResponse (re-probes release tags now, throttled; called by the dashboard on load and after run submission)
  *   POST /api/update                          -> UpdateAppResponse   (starts the detached self-updater and exits; 409 when no release is known, self-update is disabled, or the checkout is dirty)
  *   GET  /api/settings                        -> ServerSettings
- *   PUT  /api/settings                        -> ServerSettings (body: ServerSettingsUpdate; Anthropic credentials are connection-tested before any save)
+ *   PUT  /api/settings                        -> ServerSettings (body: ServerSettingsUpdate — a PATCH: absent sections keep their stored value, and the provider connection is tested only when the model connection itself materially changed)
  *   GET  /api/model-options                   -> ModelOptionsResponse (task types from the pinned bundle + provider model catalog)
  *   GET  /api/capabilities                    -> CapabilityOptionsResponse (toggleable capabilities from the pinned bundle's catalog)
  *   PUT  /api/settings/models-by-route        -> ServerSettings (body: ModelsByRouteUpdate; no credential re-verification)
@@ -1717,6 +1782,7 @@ export interface ToolUsageReport {
  *   POST /api/jobs/:jobId/trash               -> TrashJobResponse   (409 while the job is still live)
  *   POST /api/jobs/:jobId/gate                -> JobDetail           (body: GateAnswerRequest; submits a resume job)
  *   POST /api/jobs/:jobId/gate-hold           -> JobDetail           (permanently pauses the gate's auto-approve countdown)
+ *   POST /api/jobs/:jobId/dismiss-member      -> JobDetail           (body: DismissMemberRequest; stops one seat mid-run and resumes the rest from the last checkpoint)
  *   GET  /api/jobs/:jobId/tool-usage          -> ToolUsageReport     (aggregated from the job's event log)
  *   GET  /api/stream                          -> SSE of ServerEvent{type:"jobs"|"readiness"}
  *   GET  /api/jobs/:jobId/stream              -> SSE of ServerEvent{type:"job"}

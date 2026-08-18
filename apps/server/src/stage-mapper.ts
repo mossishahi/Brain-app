@@ -46,6 +46,7 @@ import {
   type SoundnessAspectView,
   type SurveyOutputView,
   type VerifyOutputView,
+  type DismissedSeatView,
   type PanelMemberView,
   type PendingGateView,
   type ProcessorOutputView,
@@ -1839,6 +1840,9 @@ function buildReviews(
   stageActive: boolean,
   maxRounds: number,
   taskUsage: ReadonlyMap<string, TokenUsageView> = new Map(),
+  dismissedSeat: (
+    memberId: string,
+  ) => { readonly dismissed: DismissedSeatView } | Record<string, never> = () => ({}),
 ): { members: ReviewMemberView[]; maxRounds: number; complete: boolean } {
   const rounds = new Map<string, {
     cot?: string;
@@ -2146,12 +2150,16 @@ function buildReviews(
     return undefined;
   };
   const withProgress = members.map((member, memberIndex) => {
+    const dismissal = dismissedSeat(member.memberId);
     const progress = progressFor.get(memberIndex);
     const error = seatFailure(memberIndex);
-    if (!progress && error === undefined) return member;
+    if (!progress && error === undefined) return { ...member, ...dismissal };
     return {
       ...member,
-      ...(progress ? { progress } : {}),
+      ...dismissal,
+      // A dismissed seat is not working on anything, so it shows no live
+      // position — but everything it already recorded stays below.
+      ...(progress && !("dismissed" in dismissal) ? { progress } : {}),
       ...(error !== undefined ? { error } : {}),
       // Mirror the live phase onto the step under review, so a per-step status
       // light needs no cross-referencing.
@@ -2162,9 +2170,13 @@ function buildReviews(
       ),
     };
   });
+  // A dismissed seat can never finish its walk, so counting it would leave the
+  // review stage active for the rest of the run. The stage is complete when
+  // every seat still in the review has finished.
+  const reviewing = withProgress.filter((member) => !("dismissed" in member));
   const complete =
-    withProgress.length > 0 &&
-    withProgress.every((member) =>
+    reviewing.length > 0 &&
+    reviewing.every((member) =>
       member.steps.length > 0 &&
       member.steps.every((step) =>
         step.outcome === "passed" || step.outcome === "force-passed"
@@ -2198,8 +2210,12 @@ function reviewSummary(review: {
   members: readonly ReviewMemberView[];
   maxRounds: number;
 }): ReviewProgressSummary {
-  const active = review.members.filter((member) => member.progress !== undefined);
-  const complete = review.members.filter(
+  // A dismissed seat has left the review, so counting it would leave the
+  // summary permanently short of a total it can never reach ("3/4 seats" with
+  // nothing left to run). It stays visible in the stage itself.
+  const reviewing = review.members.filter((member) => member.dismissed === undefined);
+  const active = reviewing.filter((member) => member.progress !== undefined);
+  const complete = reviewing.filter(
     (member) =>
       member.steps.length > 0 &&
       member.steps.every(
@@ -2209,7 +2225,7 @@ function reviewSummary(review: {
   const only = active.length === 1 ? active[0]!.progress! : undefined;
   return {
     membersComplete: complete,
-    memberCount: review.members.length,
+    memberCount: reviewing.length,
     activeSeats: active.length,
     maxRounds: review.maxRounds,
     ...(only
@@ -2389,6 +2405,23 @@ export function buildJobDetail(input: MapperInput): JobDetail {
       ? selectedPanel.filter((member) => !retained.has(member.id)).map((member) => member.id)
       : [];
   const addedMemberIds = gate.added.map((member) => member.id);
+  /**
+   * Seats the submitter dismissed mid-run, read from the JOB RECORD and never
+   * inferred from events: a dismissed seat's last event stays exactly as it was,
+   * which is precisely the history this preserves.
+   *
+   * The seat is MARKED, never removed. Fan-out journal paths are `member[i]`
+   * over the panel array, and this view keys a seat's first pass, its token
+   * spend, its review coordinates and its failure label by that same index —
+   * so dropping one seat would renumber the rest and re-attribute their work.
+   */
+  const dismissedIds = new Set(input.record.dismissedMembers ?? []);
+  const dismissedSeat = (
+    memberId: string,
+  ): { readonly dismissed: DismissedSeatView } | Record<string, never> =>
+    dismissedIds.has(memberId)
+      ? { dismissed: { at: input.record.dismissedAt?.[memberId] ?? 0 } }
+      : {};
 
   // First-pass ideas stay pinned to the FIRST artifact under each member's
   // idea path: the runtime appends a new version there after every
@@ -2465,6 +2498,7 @@ export function buildJobDetail(input: MapperInput): JobDetail {
             : "pending",
       ...(idea ? { idea } : {}),
       ...(usage !== undefined ? { usage } : {}),
+      ...dismissedSeat(member.id),
     };
   });
 
@@ -2506,6 +2540,7 @@ export function buildJobDetail(input: MapperInput): JobDetail {
       (checkpoint?.status === "running" && reviewJournalPresent),
     reviewRoundBudget(checkpoint),
     taskUsage,
+    dismissedSeat,
   );
   const bridgeOutput =
     bridgeReport(artifact(artifacts, "bridgeReport")) ??
@@ -2609,9 +2644,14 @@ export function buildJobDetail(input: MapperInput): JobDetail {
     ["select-panel", selectedPanel.length > 0],
     ["confirm-panel", confirmGate.state !== "not-reached" && confirmGate.state !== "pending"],
     [
+      // A dismissed seat never develops, so it must not hold the stage open:
+      // completeness is about the seats still taking part.
       "first-pass",
       finalPanel.length > 0 &&
-        firstPassMembers.every((member) => member.status === "completed"),
+        firstPassMembers.some((member) => member.dismissed === undefined) &&
+        firstPassMembers.every(
+          (member) => member.dismissed !== undefined || member.status === "completed",
+        ),
     ],
     ["review-members", review.complete],
     ["bridge-audit", bridgeOutput !== undefined],
@@ -2932,7 +2972,14 @@ export function buildJobDetail(input: MapperInput): JobDetail {
     {
       ...panelBase,
       id: "select-panel",
-      ...(selectedPanel.length > 0 ? { panel: selectedPanel } : {}),
+      ...(selectedPanel.length > 0
+        ? {
+            panel: selectedPanel.map((member) => ({
+              ...member,
+              ...dismissedSeat(member.id),
+            })),
+          }
+        : {}),
       ...(expertCounts ? { leavesAvailable: expertCounts.umbrellas } : {}),
     },
     { ...confirmBase, id: "confirm-panel", gate: confirmGate },
@@ -2993,6 +3040,18 @@ export function buildJobDetail(input: MapperInput): JobDetail {
     ...(contentBundle ? { contentBundle } : {}),
     ...(input.record.trashedAt !== undefined
       ? { trashedAt: input.record.trashedAt }
+      : {}),
+    ...(dismissedIds.size > 0
+      ? {
+          dismissedMembers: (input.record.dismissedMembers ?? []).map((memberId) => {
+            const seat = finalPanel.find((member) => member.id === memberId);
+            return {
+              memberId,
+              ...(seat ? { label: seat.umbrella } : {}),
+              at: input.record.dismissedAt?.[memberId] ?? 0,
+            };
+          }),
+        }
       : {}),
     progress: {
       ...(activeStage ? { activeStage } : {}),

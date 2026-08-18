@@ -2064,6 +2064,31 @@ button.server-file-name {
   inset: 0;
   background: color-mix(in srgb, var(--text) 20%, transparent);
   z-index: 50;
+  animation: overlay-in 0.2s ease both;
+}
+
+.drawer-overlay-closing {
+  animation: overlay-in 0.2s ease reverse both;
+}
+
+@keyframes overlay-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes drawer-in {
+  from {
+    transform: translateX(16px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
 }
 
 .drawer {
@@ -2081,6 +2106,90 @@ button.server-file-name {
   display: flex;
   flex-direction: column;
   gap: 24px;
+  animation: drawer-in 0.2s ease both;
+}
+
+.drawer-closing {
+  animation: drawer-in 0.2s ease reverse both;
+}
+
+/* ------------------------------------------------- per-section save feedback
+   Each section reports its own outcome: a ring while the save is away, a check
+   once it lands, the server's reason if it was refused. */
+
+.save-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-dim);
+  animation: overlay-in 0.15s ease both;
+}
+
+.save-status-ok {
+  color: var(--ok);
+}
+
+.save-status-bad {
+  color: var(--bad);
+  font-weight: 400;
+  text-align: right;
+  max-width: 26ch;
+  line-height: 1.3;
+}
+
+.save-spinner {
+  width: 13px;
+  height: 13px;
+  border-radius: 999px;
+  border: 1.5px solid color-mix(in srgb, var(--accent) 25%, transparent);
+  border-top-color: var(--accent);
+  animation: save-spin 0.7s linear infinite;
+}
+
+@keyframes save-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* An input whose value costs a real provider request keeps its own Save. */
+.field-with-action {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.field-with-action > input {
+  flex: 1;
+  min-width: 0;
+}
+
+.credential-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .drawer,
+  .drawer-closing,
+  .drawer-overlay,
+  .drawer-overlay-closing,
+  .save-status {
+    animation: none;
+  }
+
+  .drawer-fold,
+  .drawer-summary-chevron {
+    transition: none;
+  }
+
+  .save-spinner {
+    animation-duration: 2s;
+  }
 }
 
 .drawer-head {
@@ -2111,40 +2220,69 @@ button.server-file-name {
   font-weight: 600;
 }
 
-/* Collapsible concept sections: the summary reads like the old headings,
-   with a chevron that follows the open state. */
-details.drawer-section {
+/* Collapsible concept sections. A native <details> cannot animate its height,
+   so the body is a grid row that travels 0fr -> 1fr — the same fold the job
+   cards use — with the chevron following the open state. */
+section.drawer-section:not(.drawer-updates) {
   border-top: 1px solid var(--border);
   padding-top: 10px;
+  gap: 0;
 }
 
-details.drawer-section > summary {
+.drawer-summary {
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
-  list-style: none;
   display: flex;
   align-items: center;
   gap: 6px;
   user-select: none;
+  background: none;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  font-family: inherit;
+  text-align: left;
+  width: 100%;
 }
 
-details.drawer-section > summary::-webkit-details-marker {
-  display: none;
+.drawer-summary-title {
+  flex: 1;
 }
 
-details.drawer-section > summary::before {
-  content: "";
-  width: 7px;
-  height: 7px;
-  border-right: 1.5px solid var(--text-dim);
-  border-bottom: 1.5px solid var(--text-dim);
-  transform: rotate(-45deg);
-  transition: transform 0.15s ease;
+.drawer-summary-chevron {
+  display: inline-flex;
+  color: var(--text-dim);
+  transform: rotate(-90deg);
+  transition: transform 0.18s ease;
 }
 
-details.drawer-section[open] > summary::before {
-  transform: rotate(45deg);
+.drawer-section-open > .drawer-summary .drawer-summary-chevron {
+  transform: rotate(0deg);
+}
+
+.drawer-fold {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.2s ease;
+}
+
+.drawer-section-open > .drawer-fold {
+  grid-template-rows: 1fr;
+}
+
+/* A 0fr row only collapses the content box, so the inner wrapper owns both the
+   clipping and the spacing that must vanish with it. */
+.drawer-fold-inner {
+  overflow: hidden;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.drawer-section-open > .drawer-fold > .drawer-fold-inner {
+  padding-top: 10px;
 }
 
 .drawer-subhead {
@@ -3537,6 +3675,47 @@ details.drawer-section[open] > summary::before {
 .step-chip-bad {
   color: var(--bad);
   border-color: var(--bad);
+}
+
+.step-chip-dim {
+  color: var(--text-dim);
+  border-color: var(--border);
+}
+
+/* ------------------------------------------------- dismissed panel seats
+   A dismissed seat keeps everything it recorded and stops taking part. It
+   therefore reads like a removed seat (dimmed, struck) rather than like a
+   failure — nothing went wrong, the submitter simply let it go. */
+
+.seat-dismissed,
+.member-dismissed {
+  opacity: 0.55;
+}
+
+.seat-dismissed .seat-umbrella,
+.seat-dismissed .seat-dept,
+.member-dismissed .member-umbrella {
+  text-decoration: line-through;
+}
+
+.matrix-label-dismissed {
+  color: var(--text-dim);
+  text-decoration: line-through;
+}
+
+/* The seat's own control sits in a busy head row, so it stays quiet until
+   hovered and its confirm question is allowed to wrap. */
+.seat-dismiss {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.seat-dismiss .cancel-question,
+.cancel-zone.seat-dismiss .cancel-question {
+  white-space: normal;
+  max-width: 34ch;
 }
 
 /* Reviewer names ride ON the "Comments & judgement" summary row itself —

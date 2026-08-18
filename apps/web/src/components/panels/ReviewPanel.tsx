@@ -36,7 +36,7 @@ import {
   seatTexFileName,
 } from "../../latex";
 import { LATEX_STYLE } from "../../latex-style";
-import { EvidenceBlock, TokenChip } from "../common";
+import { DismissSeatButton, EvidenceBlock, TokenChip } from "../common";
 import { BackIcon, CopyIcon, DownloadIcon, ForwardIcon } from "../Icons";
 import { IdeaTabs } from "./FirstPassPanel";
 import {
@@ -719,6 +719,7 @@ export function ReviewStagePanels({
   frame,
   expanded,
   topic,
+  onDismiss,
 }: {
   stage: ReviewStage;
   firstPass?: FirstPassStage;
@@ -728,6 +729,8 @@ export function ReviewStagePanels({
   expanded: boolean;
   /** The run's submission topic; titles the seat's LaTeX export. */
   topic?: string;
+  /** Absent on a finished or trashed run: there is nothing left to dismiss. */
+  onDismiss?: (memberId: string) => Promise<void>;
 }) {
   // No global cursor: each seat carries its own progress, so several seats can
   // be under review at once.
@@ -844,11 +847,19 @@ export function ReviewStagePanels({
           return (
             <div key={member.memberId} className="matrix-row">
               <span
-                className={`matrix-label${member.error !== undefined ? " matrix-label-bad" : ""}`}
+                className={`matrix-label${
+                  member.dismissed !== undefined
+                    ? " matrix-label-dismissed"
+                    : member.error !== undefined
+                      ? " matrix-label-bad"
+                      : ""
+                }`}
                 title={
-                  member.error !== undefined
-                    ? `${member.label} failed: ${member.error}`
-                    : expertise || member.label
+                  member.dismissed !== undefined
+                    ? `${member.label} was dismissed — what it recorded before then is kept`
+                    : member.error !== undefined
+                      ? `${member.label} failed: ${member.error}`
+                      : expertise || member.label
                 }
               >
                 {member.label}
@@ -917,13 +928,22 @@ export function ReviewStagePanels({
             >
               <ForwardIcon size={16} />
             </button>
-            {seat.error !== undefined ? (
+            {seat.dismissed !== undefined ? (
+              <span className="step-chip step-chip-dim">dismissed</span>
+            ) : seat.error !== undefined ? (
               <span className="step-chip step-chip-bad">failed</span>
             ) : seat.progress !== undefined ? (
               <span className="step-chip step-chip-active">under review</span>
             ) : walkComplete(seat) ? (
               <span className="step-chip step-chip-ok">done with thinking</span>
             ) : null}
+            {onDismiss && (
+              <DismissSeatButton
+                label={seat.label}
+                dismissed={seat.dismissed !== undefined}
+                onDismiss={() => onDismiss(seat.memberId)}
+              />
+            )}
             <span className="seat-pager-expertise marquee" title={expertiseOf(seat)}>
               <span className="marquee-inner">{expertiseOf(seat)}</span>
             </span>

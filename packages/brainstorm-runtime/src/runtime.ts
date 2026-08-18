@@ -6,6 +6,7 @@ import {
   InMemoryArtifactStore,
   InMemoryCheckpointStore,
   WorkflowRunner,
+  createBuiltinExecutorRegistry,
   type AgentExecutor,
   type ArtifactStore,
   type CheckpointStore,
@@ -13,9 +14,11 @@ import {
   type GateResponses,
   type HostToolManifest,
   type JsonValue,
+  type NodeExecutorRegistry,
   type ProviderNativeOffer,
   type RunEventListener,
   type RunResult,
+  type ScopeReader,
 } from "@brainstorm-agentic/core";
 
 import {
@@ -54,6 +57,12 @@ export interface BrainstormRuntimeOptions {
   readonly journalFormat?: 1 | 2;
   /** Retry ladder for failed checkpoint writes (shared-filesystem blips). */
   readonly checkpointWriteRetry?: CheckpointWriteRetryPolicy;
+  /**
+   * Panel members the submitter dismissed mid-run. The server accumulates the
+   * list on the job record and re-supplies it on every resume, so a dismissal
+   * is permanent and each replay reaches the same decisions.
+   */
+  readonly dismissedMembers?: readonly string[];
 }
 
 export interface StartBrainstormOptions {
@@ -68,6 +77,35 @@ export interface ResumeBrainstormOptions {
   readonly responses?: GateResponses;
   readonly signal?: AbortSignal;
   readonly onEvent?: RunEventListener;
+}
+
+/**
+ * The node-executor table a run with dismissed seats needs, or undefined when
+ * nothing is dismissed (then the runner uses the builtin table untouched).
+ *
+ * The `agent` kind is overridden rather than wrapped in a guard NODE on
+ * purpose: journal keys are execution paths, so an extra node would move every
+ * key beneath it and a resumed run would miss — and re-buy — its own completed
+ * work. Skipping inside the executor records no journal entry at all, which is
+ * indistinguishable from never having reached the node, so the seat's history
+ * stays exactly as the dismissal found it.
+ */
+function dismissalExecutors(
+  isAgentDismissed: ((nodeId: string, scope: ScopeReader) => boolean) | undefined,
+): NodeExecutorRegistry | undefined {
+  if (isAgentDismissed === undefined) return undefined;
+  const executors = createBuiltinExecutorRegistry();
+  const runAgent = executors.get("agent");
+  executors.register(
+    "agent",
+    async (node, context) => {
+      const id = node.id;
+      if (id !== undefined && isAgentDismissed(id, context.scope)) return undefined;
+      return runAgent(node, context);
+    },
+    { override: true },
+  );
+  return executors;
 }
 
 /**
@@ -94,6 +132,9 @@ export class BrainstormRuntime {
       disabledCapabilityIds: options.disabledCapabilityIds,
       skillResolver: options.skillResolver,
       journalFormat: options.journalFormat,
+      ...(options.dismissedMembers !== undefined
+        ? { dismissedMembers: options.dismissedMembers }
+        : {}),
     });
     const checkpoints = options.checkpoints ?? new InMemoryCheckpointStore();
     // Loads migrate pre-fold (format-1) journals forward against this run's
@@ -104,11 +145,13 @@ export class BrainstormRuntime {
         ? checkpoints
         : new MigratingCheckpointStore(checkpoints, this.compiled.content);
     this.artifacts = options.artifacts ?? new InMemoryArtifactStore();
+    const executors = dismissalExecutors(this.compiled.isAgentDismissed);
     this.runner = new WorkflowRunner({
       functions: this.compiled.functions,
       checkpoints: this.checkpoints,
       artifacts: this.artifacts,
       agentExecutor: options.agentExecutor,
+      ...(executors !== undefined ? { executors } : {}),
       onEvent: options.onEvent,
       now: options.now,
       // The checkpoint stamp must match the layout the compiler emitted.

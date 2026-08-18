@@ -239,6 +239,29 @@ function stringFlag(args: CliArgs, name: string): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
+/**
+ * Panel members the submitter dismissed mid-run, as a comma-separated id list
+ * (one flag rather than a repeated one, because flags are parsed into a map).
+ * The server re-supplies the FULL accumulated list on every resume, so the
+ * guards in the runtime reach the same decisions on every replay.
+ */
+function dismissedMembersFlag(args: CliArgs): readonly string[] {
+  const raw = stringFlag(args, "dismissed-members");
+  if (raw === undefined) return [];
+  const ids: string[] = [];
+  for (const part of raw.split(",")) {
+    const id = part.trim();
+    if (id.length === 0) continue;
+    // Member ids are plain identifiers by construction; refusing anything else
+    // keeps a hand-edited resume command from smuggling a path or a pattern in.
+    if (!/^[A-Za-z0-9_-]+$/.test(id)) {
+      throw new Error(`--dismissed-members contains an invalid member id: "${id}"`);
+    }
+    if (!ids.includes(id)) ids.push(id);
+  }
+  return ids;
+}
+
 function newRunId(): string {
   const d = new Date();
   const pad = (n: number) => String(n).padStart(2, "0");
@@ -352,6 +375,7 @@ async function writeFinalOutputs(
   artifacts: ArtifactStore,
   sessionRoot: string,
   runId: string,
+  dismissedMembers: readonly string[] = [],
 ): Promise<readonly string[]> {
   const refs = await artifacts.list();
   // Last ref per member idea path wins: first pass, then every revision, in
@@ -388,6 +412,11 @@ async function writeFinalOutputs(
     // Member ids are runtime-minted (`member-N`, `member-user-N`) and safe as
     // file names; anything unexpected is skipped rather than sanitized.
     if (!/^[A-Za-z0-9_-]+$/.test(memberId)) continue;
+    // A dismissed seat is not one of the run's deliverables. Its artifacts stay
+    // in the store — the dashboard still shows what it produced — but the
+    // readable `final/` copies are the run's answer, and it is no longer part
+    // of that answer.
+    if (dismissedMembers.includes(memberId)) continue;
     written.push(await writeAtomic(`${memberId}.json`, pretty(stored.data)));
   }
   if (proposalId !== undefined) {
@@ -724,6 +753,7 @@ async function main(): Promise<void> {
     stringFlag(args, "content-registry-url") ??
     process.env.BRAIN_CONTENT_REGISTRY_URL?.trim();
   const contentRegistryVersion = stringFlag(args, "content-registry-version");
+  const dismissedMembers = dismissedMembersFlag(args);
   const eventLog = eventListener(verbose, eventsFile);
 
   if (args.command === "list") {
@@ -783,6 +813,7 @@ async function main(): Promise<void> {
       checkpoints: new FsCheckpointStore(sessionRoot, fsStoreOptions(process.env)),
       artifacts,
       autoApproveGates: autoApprove,
+      ...(dismissedMembers.length > 0 ? { dismissedMembers } : {}),
       ...(manifest ? { attachmentRoots: [manifest.baseDir] } : {}),
       ...(taxonomy ? { taxonomy } : {}),
       ...(codeEnvironment ? { codeEnvironment } : {}),
@@ -802,7 +833,7 @@ async function main(): Promise<void> {
         ...(params !== undefined ? { params } : {}),
       });
       const trees = await writeExpertiseTrees(artifacts, sessionRoot, runId);
-      const finals = await writeFinalOutputs(artifacts, sessionRoot, runId);
+      const finals = await writeFinalOutputs(artifacts, sessionRoot, runId, dismissedMembers);
       // Queued event appends must land before the log is read back.
       await eventLog.flush();
       // Opt-out is honored here: with telemetry off, no record is produced at
@@ -874,6 +905,7 @@ async function main(): Promise<void> {
       checkpoints: new FsCheckpointStore(sessionRoot, fsStoreOptions(process.env)),
       artifacts,
       autoApproveGates: resumeAutoApprove,
+      ...(dismissedMembers.length > 0 ? { dismissedMembers } : {}),
       ...(taxonomy ? { taxonomy } : {}),
       ...(codeEnvironment ? { codeEnvironment } : {}),
       ...(gpuRun ? { gpuRun } : {}),
@@ -886,7 +918,7 @@ async function main(): Promise<void> {
         ...(Object.keys(responses).length > 0 ? { responses } : {}),
       });
       const trees = await writeExpertiseTrees(artifacts, sessionRoot, runId);
-      const finals = await writeFinalOutputs(artifacts, sessionRoot, runId);
+      const finals = await writeFinalOutputs(artifacts, sessionRoot, runId, dismissedMembers);
       // Queued event appends must land before the log is read back.
       await eventLog.flush();
       // Opt-out is honored here: with telemetry off, no record is produced at

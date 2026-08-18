@@ -28,6 +28,13 @@ export interface OrchestrationCommandOptions {
    */
   readonly credentialsFile?: string;
   readonly settings: ServerSettings;
+  /**
+   * Panel members dismissed mid-run, accumulated on the job record. Supplied on
+   * EVERY submission for the job (every resume path builds its command here),
+   * because the runtime holds the list only for the life of one worker process —
+   * omitting it on a later resume would put a dismissed seat back to work.
+   */
+  readonly dismissedMembers?: readonly string[];
   readonly gate?: {
     readonly gateKey: string;
     readonly action: "approve" | "shrink" | "revise";
@@ -103,7 +110,24 @@ export function buildOrchestrationCommand(
     );
   }
   if (options.settings.llm.provider === "offline") args.push("--offline");
-  if (options.settings.panelConfirmation === "auto") args.push("--auto-approve");
+  // The gate-countdown switch is authoritative over both ways a gate can be
+  // skipped. `panelConfirmation: "auto"` compiles the gates away in the worker,
+  // so a run launched that way has no gate to wait at; with the countdown
+  // switched off the submitter has said no gate may pass without them, and this
+  // is the only place that can honour it. It can only ever make the pipeline
+  // wait MORE than the job's snapshot asked for, never less.
+  if (
+    options.settings.panelConfirmation === "auto" &&
+    options.settings.gateAutoApprove !== false
+  ) {
+    args.push("--auto-approve");
+  }
+  if (options.dismissedMembers && options.dismissedMembers.length > 0) {
+    // One comma-joined value, not a repeated flag: the worker parses flags into
+    // a map, where a repeat would overwrite and silently lose every id but the
+    // last. The server sends the FULL accumulated list on every resume.
+    args.push("--dismissed-members", shellQuote(options.dismissedMembers.join(",")));
+  }
   if (options.gate) {
     const needsJson =
       (options.gate.addedMembers && options.gate.addedMembers.length > 0) ||

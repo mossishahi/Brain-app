@@ -19,6 +19,7 @@ import {
   cancelJob,
   errorMessage,
   getJob,
+  dismissMember,
   holdGateAutoApprove,
   jobStreamUrl,
   resumeInterruptedJob,
@@ -332,6 +333,16 @@ export function Dashboard({
       .catch(() => undefined);
   }, [jobId]);
 
+  const onDismissMember = useCallback(
+    async (memberId: string) => {
+      // Errors propagate to the seat's own control, which shows them in place —
+      // a 409 here is a real answer ("that would leave too few seats"), not a
+      // glitch to swallow.
+      setJob(await dismissMember(jobId, memberId));
+    },
+    [jobId],
+  );
+
   const cancelCreditWait = useCallback(async () => {
     setCancellingResume(true);
     try {
@@ -403,6 +414,18 @@ export function Dashboard({
   const proposalStage = stageOf(job, "synthesize-proposal");
   const removedIds: ReadonlySet<string> = new Set(confirmStage?.gate.removedMemberIds ?? []);
   const anyStageFailed = job.stages.some((s) => s.status === "failed");
+  /**
+   * A seat can only be dismissed while the run still has work ahead of it. The
+   * server enforces this too (and refuses to leave fewer than two seats); the
+   * check here is so a settled or trashed run simply shows no control.
+   */
+  const dismissable =
+    job.trashedAt === undefined &&
+    (job.status === "queued" ||
+      job.status === "running" ||
+      job.status === "suspended" ||
+      job.status === "credit-blocked" ||
+      job.status === "orphaned");
   const fallbackEnd = job.updatedAt;
 
   const renderBody = (id: StageId): ReactNode => {
@@ -456,7 +479,12 @@ export function Dashboard({
       }
       case "first-pass": {
         const stage = stageOf(job, id);
-        return stage && stage.members.length > 0 ? <FirstPassBody members={stage.members} /> : null;
+        return stage && stage.members.length > 0 ? (
+          <FirstPassBody
+            members={stage.members}
+            {...(dismissable ? { onDismiss: onDismissMember } : {})}
+          />
+        ) : null;
       }
       case "review-members":
         // The review stage renders as two detached panels through
@@ -708,6 +736,7 @@ export function Dashboard({
                   expanded={!collapsed.has(selected)}
                   frame={frame}
                   topic={job.topic}
+                  {...(dismissable ? { onDismiss: onDismissMember } : {})}
                 />
               ) : (
                 frame(renderBody(selected))

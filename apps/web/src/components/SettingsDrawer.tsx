@@ -1,5 +1,19 @@
-/** The settings drawer behind the gear icon: Execution, Model, Confirmation. */
-import { useEffect, useRef, useState } from "react";
+/**
+ * The settings drawer behind the gear icon.
+ *
+ * Every section saves ON ITS OWN. There is no drawer-wide Save button, because
+ * one existed and made every edit look like a credential change: changing the
+ * review-round budget re-sent the whole document, the server re-tested the
+ * Claude token to persist it, and seconds later the drawer announced "token
+ * verified" as though that had been the edit.
+ *
+ * So: a control that carries no risk saves as you leave it (selects and
+ * checkboxes at once, typed values shortly after you stop typing), and each one
+ * reports back in its own section. A credential is the exception — it costs a
+ * real request to the provider — so it keeps an explicit Save beside the input
+ * that spins while the connection is tested and settles into a check.
+ */
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   GPU_COMMAND_TAG,
   GPU_TEMPLATE_EXAMPLE,
@@ -11,42 +25,141 @@ import type {
   ServerSettingsUpdate,
 } from "@brainstorm-agentic/protocol";
 import { errorMessage, getHealth, getSettings, postUpdateCheck, putSettings } from "../api";
-import { TrashIcon, XIcon } from "./Icons";
+import { prefersReducedMotion } from "../format";
+import { ChevronIcon, TrashIcon, XIcon } from "./Icons";
 
 type Provider = "anthropic" | "claude-agent" | "cursor-agent" | "offline";
+
+/**
+ * The sections of an update, non-optional. Every field of ServerSettingsUpdate
+ * is optional (absent = keep stored), so a payload has to be built through
+ * these to keep its own required fields — a spread of the optional type would
+ * quietly drop `provider`.
+ */
+type LlmPatch = NonNullable<ServerSettingsUpdate["llm"]>;
+type AgentSdkPatch = NonNullable<LlmPatch["agentSdk"]>;
+type CreditRecoveryPatch = NonNullable<ServerSettingsUpdate["creditRecovery"]>;
+
+const SECTION_IDS = [
+  "updates",
+  "execution",
+  "gpu",
+  "model",
+  "credential",
+  "confirmation",
+  "review",
+  "tools",
+  "recovery",
+] as const;
+type SectionId = (typeof SECTION_IDS)[number];
+
+type SaveState = "idle" | "saving" | "saved" | "error";
+
+/** How long a settled check stays before it fades back to nothing. */
+const SAVED_LINGER_MS = 2000;
+/** Quiet time after the last keystroke before a typed value is saved. */
+const TYPING_SETTLE_MS = 700;
+/** Must match the drawer's CSS transition; the drawer unmounts after it. */
+const CLOSE_ANIMATION_MS = 200;
+
+/**
+ * The per-section indicator: a spinning ring while the save is in flight, a
+ * green check once it lands, the reason if it was refused.
+ */
+function SaveStatus({ state, error }: { state?: SaveState; error?: string }) {
+  if (state === "saving") {
+    return (
+      <span className="save-status" role="status" aria-label="saving">
+        <span className="save-spinner" aria-hidden />
+      </span>
+    );
+  }
+  if (state === "saved") {
+    return (
+      <span className="save-status save-status-ok" role="status">
+        <svg viewBox="0 0 16 16" width={14} height={14} aria-hidden>
+          <path
+            d="m3.5 8.5 3 3 6-6.5"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={1.8}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+        <span className="save-status-text">saved</span>
+      </span>
+    );
+  }
+  if (state === "error") {
+    return (
+      <span className="save-status save-status-bad" role="alert">
+        {error ?? "not saved"}
+      </span>
+    );
+  }
+  return null;
+}
+
+/**
+ * One foldable section. Native <details> cannot animate its height, so the fold
+ * is a grid row that goes from 0fr to 1fr — the same mechanism the job cards
+ * expand with.
+ */
+function Section({
+  title,
+  summary,
+  defaultOpen = false,
+  state,
+  error,
+  children,
+}: {
+  title: string;
+  summary?: string;
+  defaultOpen?: boolean;
+  state?: SaveState;
+  error?: string;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <section className={`drawer-section${open ? " drawer-section-open" : ""}`}>
+      <button
+        type="button"
+        className="drawer-summary"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className="drawer-summary-chevron" aria-hidden>
+          <ChevronIcon />
+        </span>
+        <span className="drawer-summary-title">{title}</span>
+        {summary && <span className="dim small">{summary}</span>}
+        <SaveStatus state={state} error={error} />
+      </button>
+      <div className="drawer-fold">
+        <div className="drawer-fold-inner">{children}</div>
+      </div>
+    </section>
+  );
+}
 
 export function SettingsDrawer({ onClose }: { onClose: () => void }) {
   const [loaded, setLoaded] = useState<ServerSettings | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [saveError, setSaveError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
   const [checkingUpdates, setCheckingUpdates] = useState(false);
   const [updateStatus, setUpdateStatus] = useState<string | null>(null);
+  const [closing, setClosing] = useState(false);
 
+  const [saveState, setSaveState] = useState<Partial<Record<SectionId, SaveState>>>({});
+  const [saveError, setSaveError] = useState<Partial<Record<SectionId, string>>>({});
   /**
-   * The manual path for anyone who pressed "Later" on the notification: a
-   * fresh server-side release probe; when something newer exists the
-   * lower-left card reappears (its snooze is cleared via the window event).
+   * Per section, which save is the newest. A superseded response must not
+   * overwrite a newer one's outcome — the user kept typing while it was away.
    */
-  const checkForUpdates = async (): Promise<void> => {
-    setCheckingUpdates(true);
-    setUpdateStatus(null);
-    try {
-      const result = await postUpdateCheck();
-      window.dispatchEvent(new Event("brain-check-updates"));
-      setUpdateStatus(
-        result.appUpdate
-          ? "Update available — use the notification at the lower left to install it."
-          : result.selfUpdateEnabled === false
-            ? `Update checks are switched off on this deployment (launched with --no-self-update), so nothing was checked — v${result.version} is running, but a newer release may exist. Update it the way it was installed.`
-            : `You are on the latest version (v${result.version}).`,
-      );
-    } catch (error) {
-      setUpdateStatus(errorMessage(error));
-    } finally {
-      setCheckingUpdates(false);
-    }
-  };
+  const seq = useRef<Partial<Record<SectionId, number>>>({});
+  /** Debounced saves not yet sent, so closing the drawer can flush them. */
+  const pending = useRef<Partial<Record<SectionId, { timer: number; build: () => ServerSettingsUpdate | null }>>>({});
 
   const [runner, setRunner] = useState<RunnerKind>("slurm");
   const [template, setTemplate] = useState("");
@@ -73,12 +186,13 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
   const [agentEffort, setAgentEffort] = useState<
     "low" | "medium" | "high" | "xhigh" | "max"
   >("high");
-  const [agentThinking, setAgentThinking] = useState<
-    "adaptive" | "disabled"
-  >("adaptive");
+  const [agentThinking, setAgentThinking] = useState<"adaptive" | "disabled">(
+    "adaptive",
+  );
   const [agentFallbackModel, setAgentFallbackModel] = useState("");
   const [connectionMessage, setConnectionMessage] = useState<string | null>(null);
   const [confirmation, setConfirmation] = useState<"manual" | "auto">("manual");
+  const [gateAutoApprove, setGateAutoApprove] = useState(true);
   /** "" = follow the bundle's default; otherwise the override as a string. */
   const [reviewMaxRounds, setReviewMaxRounds] = useState<string>("");
   const [autoResume, setAutoResume] = useState(true);
@@ -99,6 +213,110 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
    * apply verbatim to whichever SDK is selected.
    */
   const isAgentSdk = provider === "claude-agent" || provider === "cursor-agent";
+
+  /**
+   * Sends one section's patch. Absent sections keep their stored value, so a
+   * section save can never disturb another's settings — that is the whole point
+   * of the patch shape on the wire.
+   */
+  const save = useCallback(
+    async (section: SectionId, patch: ServerSettingsUpdate): Promise<ServerSettings | undefined> => {
+      const mine = (seq.current[section] ?? 0) + 1;
+      seq.current[section] = mine;
+      setSaveState((s) => ({ ...s, [section]: "saving" }));
+      setSaveError((e) => ({ ...e, [section]: undefined }));
+      try {
+        const saved = await putSettings(patch);
+        if (seq.current[section] !== mine) return saved;
+        setLoaded(saved);
+        // Landing and the composer both read the whole settings object off this
+        // event, so every section save must broadcast the COMPLETE settings.
+        window.dispatchEvent(
+          new CustomEvent("brain-settings-updated", { detail: saved }),
+        );
+        setSaveState((s) => ({ ...s, [section]: "saved" }));
+        window.setTimeout(() => {
+          setSaveState((s) =>
+            seq.current[section] === mine ? { ...s, [section]: "idle" } : s,
+          );
+        }, SAVED_LINGER_MS);
+        return saved;
+      } catch (error) {
+        if (seq.current[section] !== mine) return undefined;
+        setSaveError((e) => ({ ...e, [section]: errorMessage(error) }));
+        setSaveState((s) => ({ ...s, [section]: "error" }));
+        return undefined;
+      }
+    },
+    [],
+  );
+
+  /** Reports a client-side refusal in the section's own indicator. */
+  const reject = useCallback((section: SectionId, message: string) => {
+    seq.current[section] = (seq.current[section] ?? 0) + 1;
+    setSaveError((e) => ({ ...e, [section]: message }));
+    setSaveState((s) => ({ ...s, [section]: "error" }));
+  }, []);
+
+  /**
+   * Saves after the user stops typing. `build` returns null when the current
+   * value is not worth sending yet (a half-typed template has no command tag),
+   * which leaves the previous value stored rather than failing on every keystroke.
+   */
+  const saveSoon = useCallback(
+    (section: SectionId, build: () => ServerSettingsUpdate | null) => {
+      const slot = pending.current[section];
+      if (slot) window.clearTimeout(slot.timer);
+      const timer = window.setTimeout(() => {
+        delete pending.current[section];
+        const patch = build();
+        if (patch) void save(section, patch);
+      }, TYPING_SETTLE_MS);
+      pending.current[section] = { timer, build };
+    },
+    [save],
+  );
+
+  /** Sends every debounced edit now — the drawer is closing. */
+  const flushPending = useCallback(() => {
+    for (const [section, slot] of Object.entries(pending.current)) {
+      if (!slot) continue;
+      window.clearTimeout(slot.timer);
+      const patch = slot.build();
+      if (patch) void save(section as SectionId, patch);
+    }
+    pending.current = {};
+  }, [save]);
+
+  const requestClose = useCallback(() => {
+    flushPending();
+    if (prefersReducedMotion()) {
+      onClose();
+      return;
+    }
+    setClosing(true);
+    window.setTimeout(onClose, CLOSE_ANIMATION_MS);
+  }, [flushPending, onClose]);
+
+  const checkForUpdates = async (): Promise<void> => {
+    setCheckingUpdates(true);
+    setUpdateStatus(null);
+    try {
+      const result = await postUpdateCheck();
+      window.dispatchEvent(new Event("brain-check-updates"));
+      setUpdateStatus(
+        result.appUpdate
+          ? "Update available — use the notification at the lower left to install it."
+          : result.selfUpdateEnabled === false
+            ? `Update checks are switched off on this deployment (launched with --no-self-update), so nothing was checked — v${result.version} is running, but a newer release may exist. Update it the way it was installed.`
+            : `You are on the latest version (v${result.version}).`,
+      );
+    } catch (error) {
+      setUpdateStatus(errorMessage(error));
+    } finally {
+      setCheckingUpdates(false);
+    }
+  };
 
   useEffect(() => {
     let live = true;
@@ -123,6 +341,7 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
         setAgentThinking(s.llm.agentSdk?.thinking ?? "adaptive");
         setAgentFallbackModel(s.llm.agentSdk?.fallbackModel ?? "");
         setConfirmation(s.panelConfirmation);
+        setGateAutoApprove(s.gateAutoApprove !== false);
         setReviewMaxRounds(
           s.review?.maxRounds !== undefined ? String(s.review.maxRounds) : "",
         );
@@ -168,198 +387,191 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
 
   useEffect(() => {
     const onKey = (e: globalThis.KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") requestClose();
     };
     window.addEventListener("keydown", onKey);
     drawerRef.current?.focus();
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [requestClose]);
 
-  const save = async () => {
-    setSaving(true);
-    setSaveError(null);
-    setConnectionMessage(null);
-    try {
-      if (provider === "anthropic" && model.trim() === "") {
-        throw new Error("Choose an Anthropic model before saving.");
-      }
-      if (
-        provider === "anthropic" &&
-        apiKey.trim() === "" &&
-        !loaded?.llm.apiKeyConfigured
-      ) {
-        throw new Error("Enter an Anthropic API key before saving.");
-      }
-      if (
-        provider === "claude-agent" &&
-        setupToken.trim() === "" &&
-        !loaded?.llm.setupTokenConfigured
-      ) {
-        throw new Error(
-          "Enter the token printed by `claude setup-token` before saving.",
-        );
-      }
-      if (
-        provider === "cursor-agent" &&
-        cursorApiKey.trim() === "" &&
-        !loaded?.llm.cursorApiKeyConfigured
-      ) {
-        throw new Error("Enter a Cursor API key before saving.");
-      }
-      const maxTurns = Number(agentMaxTurns);
-      if (
-        isAgentSdk &&
-        (!Number.isSafeInteger(maxTurns) || maxTurns < 1 || maxTurns > 500)
-      ) {
-        throw new Error("Max turns must be an integer from 1 to 500.");
-      }
-      const maxBudgetUsd =
-        agentMaxBudgetUsd.trim() === ""
-          ? undefined
-          : Number(agentMaxBudgetUsd);
-      if (
-        isAgentSdk &&
-        maxBudgetUsd !== undefined &&
-        (!Number.isFinite(maxBudgetUsd) || maxBudgetUsd <= 0)
-      ) {
-        throw new Error("Max budget must be a positive USD amount.");
-      }
-      const parsedSafetyBuffer = Number(safetyBufferSeconds);
-      if (
-        !Number.isSafeInteger(parsedSafetyBuffer) ||
-        parsedSafetyBuffer < 0 ||
-        parsedSafetyBuffer > 3600
-      ) {
-        throw new Error(
-          "Credit recovery safety buffer must be an integer from 0 to 3600 seconds.",
-        );
-      }
-      if (openRouterModel.trim() === "") {
-        throw new Error("OpenRouter model must not be empty.");
-      }
-      const gpuConfigured = gpuTemplate.trim() !== "";
-      if (gpuConfigured && !gpuTemplate.includes(GPU_COMMAND_TAG)) {
-        throw new Error(
-          `The GPU template must contain ${GPU_COMMAND_TAG} (or be empty to switch GPU runs off).`,
-        );
-      }
-      const parsedGpuTimeLimit = Number.parseInt(gpuTimeLimit, 10);
-      if (!Number.isInteger(parsedGpuTimeLimit) || parsedGpuTimeLimit < 1 || parsedGpuTimeLimit > 1440) {
-        throw new Error("GPU time limit must be between 1 and 1440 minutes.");
-      }
-      // Configuring the template IS the setup: the gpu_run host tool follows
-      // it into (or out of) the enabled set, visibly, so one panel is the
-      // whole flow instead of a second hidden checkbox hunt.
-      const toolIds = gpuConfigured
-        ? enabledHostTools.includes("gpu_run")
-          ? enabledHostTools
-          : [...enabledHostTools, "gpu_run"]
-        : enabledHostTools.filter((id) => id !== "gpu_run");
-      if (toolIds !== enabledHostTools) setEnabledHostTools(toolIds);
-      // contentRegistry is deployment-owned and deliberately not sent: the
-      // server ignores it on PUT anyway.
-      const update: ServerSettingsUpdate = {
-        slurmTemplate: template,
-        gpu: { template: gpuTemplate, timeLimitMinutes: parsedGpuTimeLimit },
-        runner,
-        updateCheck,
-        llm: {
-          provider,
-          model: model.trim() ? model.trim() : undefined,
-          ...(provider === "anthropic" && baseUrl.trim()
-            ? { baseUrl: baseUrl.trim() }
-            : {}),
-          modelsByRoute: loaded?.llm.modelsByRoute,
-          agentSdk: {
-            maxTurns: isAgentSdk
-              ? maxTurns
-              : (loaded?.llm.agentSdk?.maxTurns ?? 100),
-            effort: isAgentSdk
-              ? agentEffort
-              : (loaded?.llm.agentSdk?.effort ?? "high"),
-            thinking: isAgentSdk
-              ? agentThinking
-              : (loaded?.llm.agentSdk?.thinking ?? "adaptive"),
-            ...(isAgentSdk && maxBudgetUsd !== undefined
-              ? { maxBudgetUsd }
-              : loaded?.llm.agentSdk?.maxBudgetUsd !== undefined
-                ? {
-                    maxBudgetUsd:
-                      loaded.llm.agentSdk.maxBudgetUsd,
-                  }
-                : {}),
-            ...(isAgentSdk && agentFallbackModel.trim()
-              ? { fallbackModel: agentFallbackModel.trim() }
-              : loaded?.llm.agentSdk?.fallbackModel
-                ? {
-                    fallbackModel:
-                      loaded.llm.agentSdk.fallbackModel,
-                  }
-                : {}),
-          },
-          ...(provider === "anthropic" && apiKey.trim()
-            ? { apiKey: apiKey.trim() }
-            : {}),
-          ...(provider === "claude-agent" && setupToken.trim()
-            ? { setupToken: setupToken.trim() }
-            : {}),
-          ...(provider === "cursor-agent" && cursorApiKey.trim()
-            ? { cursorApiKey: cursorApiKey.trim() }
-            : {}),
-        },
-        panelConfirmation: confirmation,
-        // "" = follow the bundle default ({} clears a stored override).
-        review:
-          reviewMaxRounds === ""
-            ? {}
-            : { maxRounds: Number(reviewMaxRounds) },
-        creditRecovery: {
-          autoResume,
-          safetyBufferSeconds: parsedSafetyBuffer,
-          openRouterModel: openRouterModel.trim(),
-          ...(openRouterApiKey.trim()
-            ? { openRouterApiKey: openRouterApiKey.trim() }
-            : {}),
-        },
-        interruptedRecovery: {
-          autoResume: resumeInterrupted,
-        },
-        hostTools: {
-          enabledToolIds: toolIds,
-        },
-      };
-      const saved = await putSettings(update);
-      setLoaded(saved);
-      window.dispatchEvent(
-        new CustomEvent("brain-settings-updated", {
-          detail: saved,
-        }),
-      );
-      setApiKey("");
-      setSetupToken("");
-      setCursorApiKey("");
-      setOpenRouterApiKey("");
-      setConnectionMessage(
-        provider === "anthropic"
-          ? `Connected to ${saved.llm.model} and saved.`
-          : provider === "claude-agent"
-            ? `Claude Agent SDK token verified${saved.llm.model ? ` with ${saved.llm.model}` : ""} and saved.`
-            : provider === "cursor-agent"
-              ? `Cursor API key verified${saved.llm.model ? ` with ${saved.llm.model}` : ""} and saved.`
-              : "Settings saved.",
-      );
-    } catch (e) {
-      setSaveError(errorMessage(e));
-    } finally {
-      setSaving(false);
+  // Anything still debounced when the component goes away must not be lost.
+  useEffect(() => flushPending, [flushPending]);
+
+  /* ------------------------------------------------------ section payloads */
+
+  /**
+   * The model connection as the drawer currently shows it, WITHOUT any secret.
+   * Secrets travel only through their own Save button, so changing the model
+   * never submits a half-typed key sitting in the field next to it.
+   *
+   * `modelsByRoute` is deliberately omitted: the composer's per-task-type picker
+   * writes the same field through its own endpoint, and re-sending a copy
+   * captured when this drawer opened would silently revert its edits.
+   */
+  const agentSdkPatch = (): AgentSdkPatch => ({
+    maxTurns: Number(agentMaxTurns),
+    effort: agentEffort,
+    thinking: agentThinking,
+    ...(agentMaxBudgetUsd.trim() !== ""
+      ? { maxBudgetUsd: Number(agentMaxBudgetUsd) }
+      : {}),
+    ...(agentFallbackModel.trim()
+      ? { fallbackModel: agentFallbackModel.trim() }
+      : {}),
+  });
+
+  const llmPatch = (): LlmPatch => ({
+    provider,
+    ...(model.trim() ? { model: model.trim() } : {}),
+    ...(provider === "anthropic" && baseUrl.trim()
+      ? { baseUrl: baseUrl.trim() }
+      : {}),
+    agentSdk: agentSdkPatch(),
+  });
+
+  /** Validates the shared agent-SDK knobs; null means "do not send". */
+  const agentSdkValid = (): boolean => {
+    const turns = Number(agentMaxTurns);
+    if (!Number.isSafeInteger(turns) || turns < 1 || turns > 500) {
+      reject("model", "Max turns must be an integer from 1 to 500.");
+      return false;
     }
+    if (agentMaxBudgetUsd.trim() !== "") {
+      const budget = Number(agentMaxBudgetUsd);
+      if (!Number.isFinite(budget) || budget <= 0) {
+        reject("model", "Max budget must be a positive USD amount.");
+        return false;
+      }
+    }
+    return true;
   };
+
+  const saveModelSection = () => {
+    if (!agentSdkValid()) return;
+    void save("model", { llm: llmPatch() });
+  };
+
+  /**
+   * The GPU template IS the on/off switch for the gpu_run tool, so the template
+   * and the enabled-tool list are one payload: saved apart, an emptied template
+   * could leave an enabled tool with nothing behind it.
+   */
+  const gpuPatch = (): ServerSettingsUpdate | null => {
+    const configured = gpuTemplate.trim() !== "";
+    if (configured && !gpuTemplate.includes(GPU_COMMAND_TAG)) {
+      reject("gpu", `The template must contain ${GPU_COMMAND_TAG}.`);
+      return null;
+    }
+    const minutes = Number.parseInt(gpuTimeLimit, 10);
+    if (!Number.isInteger(minutes) || minutes < 1 || minutes > 1440) {
+      reject("gpu", "Time limit must be between 1 and 1440 minutes.");
+      return null;
+    }
+    const toolIds = configured
+      ? [...new Set([...enabledHostTools, "gpu_run"])]
+      : enabledHostTools.filter((id) => id !== "gpu_run");
+    return {
+      gpu: { template: gpuTemplate, timeLimitMinutes: minutes },
+      hostTools: { enabledToolIds: toolIds },
+    };
+  };
+
+  const saveTools = (toolIds: readonly string[]) => {
+    setEnabledHostTools([...toolIds]);
+    void save("tools", { hostTools: { enabledToolIds: [...toolIds] } }).then(
+      (saved) => {
+        // The server enables attachment_search alongside attachment_read, so the
+        // stored list can differ from the one submitted; follow it.
+        if (saved?.hostTools?.enabledToolIds) {
+          setEnabledHostTools([...saved.hostTools.enabledToolIds]);
+        }
+      },
+    );
+  };
+
+  /** The recovery section as shown, without the OpenRouter key. */
+  const creditRecoveryPatch = (): CreditRecoveryPatch | null => {
+    const buffer = Number(safetyBufferSeconds);
+    if (!Number.isSafeInteger(buffer) || buffer < 0 || buffer > 3600) {
+      reject("recovery", "Safety buffer must be 0 to 3600 seconds.");
+      return null;
+    }
+    if (openRouterModel.trim() === "") {
+      reject("recovery", "OpenRouter model must not be empty.");
+      return null;
+    }
+    return {
+      autoResume,
+      safetyBufferSeconds: buffer,
+      openRouterModel: openRouterModel.trim(),
+    };
+  };
+
+  const recoveryPatch = (): ServerSettingsUpdate | null => {
+    const creditRecovery = creditRecoveryPatch();
+    if (!creditRecovery) return null;
+    return {
+      interruptedRecovery: { autoResume: resumeInterrupted },
+      creditRecovery,
+    };
+  };
+
+  /** Saves one credential: the only payload that carries a secret. */
+  const saveCredential = async (): Promise<void> => {
+    const secret =
+      provider === "anthropic"
+        ? { apiKey: apiKey.trim() }
+        : provider === "claude-agent"
+          ? { setupToken: setupToken.trim() }
+          : { cursorApiKey: cursorApiKey.trim() };
+    if (Object.values(secret)[0] === "") return;
+    if (!agentSdkValid()) return;
+    setConnectionMessage(null);
+    const saved = await save("credential", { llm: { ...llmPatch(), ...secret } });
+    if (!saved) return;
+    setApiKey("");
+    setSetupToken("");
+    setCursorApiKey("");
+    setConnectionMessage(
+      provider === "anthropic"
+        ? `Connected to ${saved.llm.model}.`
+        : provider === "claude-agent"
+          ? `Claude Agent SDK token verified${saved.llm.model ? ` with ${saved.llm.model}` : ""}.`
+          : `Cursor API key verified${saved.llm.model ? ` with ${saved.llm.model}` : ""}.`,
+    );
+  };
+
+  const secretValue =
+    provider === "anthropic"
+      ? apiKey
+      : provider === "claude-agent"
+        ? setupToken
+        : cursorApiKey;
+
+  /** Save button next to a credential input: spins, then settles into a check. */
+  const CredentialSave = () => (
+    <div className="credential-actions">
+      <button
+        type="button"
+        className="btn btn-primary btn-small"
+        disabled={secretValue.trim() === "" || saveState.credential === "saving"}
+        onClick={() => void saveCredential()}
+      >
+        {saveState.credential === "saving" ? "Verifying…" : "Save"}
+      </button>
+      <SaveStatus state={saveState.credential} error={saveError.credential} />
+    </div>
+  );
 
   return (
     <>
-      <div className="drawer-overlay" onClick={onClose} aria-hidden />
       <div
-        className="drawer"
+        className={`drawer-overlay${closing ? " drawer-overlay-closing" : ""}`}
+        onClick={requestClose}
+        aria-hidden
+      />
+      <div
+        className={`drawer${closing ? " drawer-closing" : ""}`}
         role="dialog"
         aria-modal="true"
         aria-label="settings"
@@ -369,26 +581,17 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
         <div className="drawer-head">
           <h2>Settings</h2>
           <div className="drawer-head-actions">
+            <span className="dim small">changes save as you make them</span>
             <button
               type="button"
-              className="btn btn-primary"
-              disabled={saving || !loaded}
-              onClick={() => void save()}
+              className="ghost-btn"
+              aria-label="close settings"
+              onClick={requestClose}
             >
-              {saving
-                ? provider === "anthropic"
-                  ? "Testing connection…"
-                  : "Saving…"
-                : "Save"}
-            </button>
-            <button type="button" className="ghost-btn" aria-label="close settings" onClick={onClose}>
               <XIcon />
             </button>
           </div>
         </div>
-
-        {saveError && <p className="error-text">{saveError}</p>}
-        {connectionMessage && <p className="success-text">{connectionMessage}</p>}
 
         {loadError ? (
           <p className="error-text">{loadError}</p>
@@ -411,18 +614,26 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                     id="settings-update-check"
                     aria-label="automatic update checks"
                     value={updateCheck}
-                    onChange={(e) => setUpdateCheck(e.target.value as "off" | "notify")}
+                    onChange={(e) => {
+                      const next = e.target.value as "off" | "notify";
+                      setUpdateCheck(next);
+                      void save("updates", { updateCheck: next });
+                    }}
                   >
                     <option value="notify">notify automatically</option>
                     <option value="off">manual checks only</option>
                   </select>
                 </div>
+                <SaveStatus state={saveState.updates} error={saveError.updates} />
               </div>
               {updateStatus && <span className="field-note">{updateStatus}</span>}
             </section>
 
-            <details className="drawer-section">
-              <summary>Execution</summary>
+            <Section
+              title="Execution"
+              state={saveState.execution}
+              error={saveError.execution}
+            >
               <div className="field">
                 <label className="field-label" htmlFor="settings-runner">
                   Runner
@@ -430,7 +641,11 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                 <select
                   id="settings-runner"
                   value={runner}
-                  onChange={(e) => setRunner(e.target.value as RunnerKind)}
+                  onChange={(e) => {
+                    const next = e.target.value as RunnerKind;
+                    setRunner(next);
+                    void save("execution", { runner: next });
+                  }}
                 >
                   <option value="slurm">slurm</option>
                   <option value="local">local</option>
@@ -449,18 +664,29 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                   rows={12}
                   value={template}
                   onChange={(e) => setTemplate(e.target.value)}
+                  onBlur={() => {
+                    if (template === loaded.slurmTemplate) return;
+                    if (!template.includes(SLURM_COMMAND_TAG)) {
+                      reject("execution", `The template must contain ${SLURM_COMMAND_TAG}.`);
+                      return;
+                    }
+                    void save("execution", { slurmTemplate: template });
+                  }}
                   spellCheck={false}
                 />
                 <span className="field-note">
-                  Put <code>{SLURM_COMMAND_TAG}</code> where the orchestration command must run.
+                  Put <code>{SLURM_COMMAND_TAG}</code> where the orchestration command
+                  must run. Saved when you click away from the box.
                 </span>
               </div>
-            </details>
+            </Section>
 
-            <details className="drawer-section">
-              <summary>
-                GPU runs{gpuTemplate.trim() !== "" ? " · on" : " · off"}
-              </summary>
+            <Section
+              title="GPU runs"
+              summary={gpuTemplate.trim() !== "" ? "on" : "off"}
+              state={saveState.gpu}
+              error={saveError.gpu}
+            >
               <div className="field">
                 <label className="field-label" htmlFor="settings-gpu-template">
                   GPU job template
@@ -471,6 +697,11 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                   rows={11}
                   value={gpuTemplate}
                   onChange={(e) => setGpuTemplate(e.target.value)}
+                  onBlur={() => {
+                    if (gpuTemplate === (loaded.gpu?.template ?? "")) return;
+                    const patch = gpuPatch();
+                    if (patch) void save("gpu", patch);
+                  }}
                   placeholder={GPU_TEMPLATE_EXAMPLE}
                   spellCheck={false}
                 />
@@ -494,16 +725,18 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                   min={1}
                   max={1440}
                   value={gpuTimeLimit}
-                  onChange={(e) => setGpuTimeLimit(e.target.value)}
+                  onChange={(e) => {
+                    setGpuTimeLimit(e.target.value);
+                    saveSoon("gpu", gpuPatch);
+                  }}
                 />
                 <span className="field-note">
                   Hard ceiling enforced at submission; an agent may request less, never more.
                 </span>
               </div>
-            </details>
+            </Section>
 
-            <details className="drawer-section">
-              <summary>Brain Registry</summary>
+            <Section title="Brain Registry">
               <div className="registry-info">
                 <div className="registry-info-row">
                   <span className="registry-info-label">Endpoint</span>
@@ -547,10 +780,14 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                 new pipeline automatically fetches the latest published skills
                 and records the exact version it used.
               </span>
-            </details>
+            </Section>
 
-            <details className="drawer-section" open>
-              <summary>Model connection</summary>
+            <Section
+              title="Model connection"
+              defaultOpen
+              state={saveState.model}
+              error={saveError.model}
+            >
               <div className="field">
                 <label className="field-label" htmlFor="settings-provider">
                   Provider
@@ -560,10 +797,12 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                   value={provider}
                   onChange={(e) => {
                     const next = e.target.value as Provider;
+                    let nextModel = model;
                     if (
                       (next === "claude-agent" || next === "cursor-agent") &&
                       next !== provider
                     ) {
+                      nextModel = "";
                       setModel("");
                       setBaseUrl("");
                     } else if (
@@ -571,11 +810,21 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                       provider !== "anthropic" &&
                       model.trim() === ""
                     ) {
-                      setModel("claude-sonnet-5");
+                      nextModel = "claude-sonnet-5";
+                      setModel(nextModel);
                     }
                     setProvider(next);
                     setConnectionMessage(null);
-                    setSaveError(null);
+                    // Switching to a provider whose credential is already
+                    // verified applies immediately; one that still needs a key
+                    // is refused here and saves with the key below.
+                    void save("model", {
+                      llm: {
+                        provider: next,
+                        ...(nextModel.trim() ? { model: nextModel.trim() } : {}),
+                        agentSdk: agentSdkPatch(),
+                      },
+                    });
                   }}
                 >
                   <option value="anthropic">
@@ -596,26 +845,28 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                     <label className="field-label" htmlFor="settings-api-key">
                       API key
                     </label>
-                    <input
-                      id="settings-api-key"
-                      type="password"
-                      value={apiKey}
-                      autoComplete="new-password"
-                      placeholder={
-                        loaded.llm.apiKeyConfigured
-                          ? "Verified key saved — enter a new key to replace it"
-                          : "sk-ant-…"
-                      }
-                      onChange={(e) => {
-                        setApiKey(e.target.value);
-                        setConnectionMessage(null);
-                        setSaveError(null);
-                      }}
-                    />
+                    <div className="field-with-action">
+                      <input
+                        id="settings-api-key"
+                        type="password"
+                        value={apiKey}
+                        autoComplete="new-password"
+                        placeholder={
+                          loaded.llm.apiKeyConfigured
+                            ? "Verified key saved — enter a new key to replace it"
+                            : "sk-ant-…"
+                        }
+                        onChange={(e) => {
+                          setApiKey(e.target.value);
+                          setConnectionMessage(null);
+                        }}
+                      />
+                      <CredentialSave />
+                    </div>
                     <span className="field-note">
                       {loaded.llm.apiKeyConfigured
                         ? "A verified key is configured. It is never returned to this page."
-                        : "The key is tested with Anthropic before it is stored."}
+                        : "Saving tests the key with Anthropic first; nothing is stored if it fails."}
                     </span>
                   </div>
                   <div className="field">
@@ -630,7 +881,9 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                       onChange={(e) => {
                         setModel(e.target.value);
                         setConnectionMessage(null);
-                        setSaveError(null);
+                        saveSoon("model", () =>
+                          e.target.value.trim() === "" ? null : { llm: llmPatch() },
+                        );
                       }}
                     />
                   </div>
@@ -646,12 +899,15 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                       onChange={(e) => {
                         setBaseUrl(e.target.value);
                         setConnectionMessage(null);
-                        setSaveError(null);
+                      }}
+                      onBlur={() => {
+                        if (baseUrl.trim() === (loaded.llm.baseUrl ?? "")) return;
+                        saveModelSection();
                       }}
                     />
                     <span className="field-note">
-                      Save performs a small live request with this key and model. Nothing is
-                      persisted if the connection fails.
+                      Changing the model or base URL re-tests the connection with the
+                      stored key; nothing is persisted if it fails.
                     </span>
                   </div>
                 </>
@@ -661,26 +917,28 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                   <label className="field-label" htmlFor="settings-setup-token">
                     Setup token
                   </label>
-                  <input
-                    id="settings-setup-token"
-                    type="password"
-                    value={setupToken}
-                    autoComplete="new-password"
-                    placeholder={
-                      loaded.llm.setupTokenConfigured
-                        ? "Verified token saved — enter a new token to replace it"
-                        : "Run `claude setup-token`, then paste its token"
-                    }
-                    onChange={(e) => {
-                      setSetupToken(e.target.value);
-                      setConnectionMessage(null);
-                      setSaveError(null);
-                    }}
-                  />
+                  <div className="field-with-action">
+                    <input
+                      id="settings-setup-token"
+                      type="password"
+                      value={setupToken}
+                      autoComplete="new-password"
+                      placeholder={
+                        loaded.llm.setupTokenConfigured
+                          ? "Verified token saved — enter a new token to replace it"
+                          : "Run `claude setup-token`, then paste its token"
+                      }
+                      onChange={(e) => {
+                        setSetupToken(e.target.value);
+                        setConnectionMessage(null);
+                      }}
+                    />
+                    <CredentialSave />
+                  </div>
                   <span className="field-note">
                     Run <code>claude setup-token</code> in a terminal, complete the
-                    browser flow, and paste the printed token here. The server tests it
-                    before saving and never returns it to the browser.
+                    browser flow, and paste the printed token here. Saving tests it
+                    and never returns it to the browser.
                   </span>
                 </div>
               )}
@@ -689,28 +947,33 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                   <label className="field-label" htmlFor="settings-cursor-key">
                     Cursor API key
                   </label>
-                  <input
-                    id="settings-cursor-key"
-                    type="password"
-                    value={cursorApiKey}
-                    autoComplete="new-password"
-                    placeholder={
-                      loaded.llm.cursorApiKeyConfigured
-                        ? "Verified key saved — enter a new key to replace it"
-                        : "cursor_…"
-                    }
-                    onChange={(e) => {
-                      setCursorApiKey(e.target.value);
-                      setConnectionMessage(null);
-                      setSaveError(null);
-                    }}
-                  />
+                  <div className="field-with-action">
+                    <input
+                      id="settings-cursor-key"
+                      type="password"
+                      value={cursorApiKey}
+                      autoComplete="new-password"
+                      placeholder={
+                        loaded.llm.cursorApiKeyConfigured
+                          ? "Verified key saved — enter a new key to replace it"
+                          : "cursor_…"
+                      }
+                      onChange={(e) => {
+                        setCursorApiKey(e.target.value);
+                        setConnectionMessage(null);
+                      }}
+                    />
+                    <CredentialSave />
+                  </div>
                   <span className="field-note">
                     Create a key at cursor.com/dashboard (Integrations → API keys, or a
-                    team service account) and paste it here. The server tests it before
-                    saving and never returns it to the browser.
+                    team service account) and paste it here. Saving tests it and never
+                    returns it to the browser.
                   </span>
                 </div>
+              )}
+              {connectionMessage && (
+                <p className="success-text">{connectionMessage}</p>
               )}
               {isAgentSdk && (
                 <>
@@ -730,13 +993,15 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                       onChange={(e) => {
                         setModel(e.target.value);
                         setConnectionMessage(null);
-                        setSaveError(null);
+                      }}
+                      onBlur={() => {
+                        if (model.trim() === (loaded.llm.model ?? "")) return;
+                        saveModelSection();
                       }}
                     />
                     <span className="field-note">
-                      Save performs a real one-turn Agent SDK request. Nothing is
-                      persisted if the credential or model is rejected. The same
-                      execution settings below apply to both agent SDKs, so
+                      Changing the model performs a real one-turn Agent SDK request.
+                      The same execution settings below apply to both agent SDKs, so
                       switching SDKs never changes how tasks run.
                     </span>
                   </div>
@@ -752,7 +1017,10 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                         max={500}
                         step={1}
                         value={agentMaxTurns}
-                        onChange={(e) => setAgentMaxTurns(e.target.value)}
+                        onChange={(e) => {
+                          setAgentMaxTurns(e.target.value);
+                          saveSoon("model", () => ({ llm: llmPatch() }));
+                        }}
                       />
                       <span className="field-note">
                         Decomposition may need dozens of search round-trips.
@@ -769,7 +1037,10 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                         step="0.01"
                         value={agentMaxBudgetUsd}
                         placeholder="No explicit cap"
-                        onChange={(e) => setAgentMaxBudgetUsd(e.target.value)}
+                        onChange={(e) => {
+                          setAgentMaxBudgetUsd(e.target.value);
+                          saveSoon("model", () => ({ llm: llmPatch() }));
+                        }}
                       />
                     </div>
                   </div>
@@ -781,16 +1052,25 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                       <select
                         id="settings-agent-effort"
                         value={agentEffort}
-                        onChange={(e) =>
+                        onChange={(e) => {
                           setAgentEffort(
-                            e.target.value as
-                              | "low"
-                              | "medium"
-                              | "high"
-                              | "xhigh"
-                              | "max",
-                          )
-                        }
+                            e.target.value as "low" | "medium" | "high" | "xhigh" | "max",
+                          );
+                          void save("model", {
+                            llm: {
+                              ...llmPatch(),
+                              agentSdk: {
+                                ...agentSdkPatch(),
+                                effort: e.target.value as
+                                  | "low"
+                                  | "medium"
+                                  | "high"
+                                  | "xhigh"
+                                  | "max",
+                              },
+                            },
+                          });
+                        }}
                       >
                         <option value="low">low</option>
                         <option value="medium">medium</option>
@@ -806,11 +1086,16 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                       <select
                         id="settings-agent-thinking"
                         value={agentThinking}
-                        onChange={(e) =>
-                          setAgentThinking(
-                            e.target.value as "adaptive" | "disabled",
-                          )
-                        }
+                        onChange={(e) => {
+                          const next = e.target.value as "adaptive" | "disabled";
+                          setAgentThinking(next);
+                          void save("model", {
+                            llm: {
+                              ...llmPatch(),
+                              agentSdk: { ...agentSdkPatch(), thinking: next },
+                            },
+                          });
+                        }}
                       >
                         <option value="adaptive">adaptive</option>
                         <option value="disabled">disabled</option>
@@ -826,21 +1111,30 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                       type="text"
                       value={agentFallbackModel}
                       placeholder="e.g. sonnet"
-                      onChange={(e) => setAgentFallbackModel(e.target.value)}
+                      onChange={(e) => {
+                        setAgentFallbackModel(e.target.value);
+                        saveSoon("model", () => ({ llm: llmPatch() }));
+                      }}
                     />
                   </div>
                 </>
               )}
-            </details>
+            </Section>
 
-            <details className="drawer-section">
-              <summary>Panel confirmation</summary>
+            <Section
+              title="Panel confirmation"
+              state={saveState.confirmation}
+              error={saveError.confirmation}
+            >
               <label className="radio-row">
                 <input
                   type="radio"
                   name="panel-confirmation"
                   checked={confirmation === "manual"}
-                  onChange={() => setConfirmation("manual")}
+                  onChange={() => {
+                    setConfirmation("manual");
+                    void save("confirmation", { panelConfirmation: "manual" });
+                  }}
                 />
                 Ask me on the dashboard
               </label>
@@ -849,14 +1143,49 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                   type="radio"
                   name="panel-confirmation"
                   checked={confirmation === "auto"}
-                  onChange={() => setConfirmation("auto")}
+                  onChange={() => {
+                    setConfirmation("auto");
+                    void save("confirmation", { panelConfirmation: "auto" });
+                  }}
                 />
                 Approve automatically
               </label>
-            </details>
+              {confirmation === "auto" && !gateAutoApprove && (
+                <span className="field-note">
+                  Waiting for you wins while the countdown below is off: new runs
+                  will still stop and ask. This choice takes effect again as soon
+                  as you switch it back on.
+                </span>
+              )}
+              <h3 className="drawer-subhead">If I do not answer</h3>
+              <label className="radio-row">
+                <input
+                  type="checkbox"
+                  checked={gateAutoApprove}
+                  onChange={(e) => {
+                    const next = e.target.checked;
+                    setGateAutoApprove(next);
+                    void save("confirmation", { gateAutoApprove: next });
+                  }}
+                />
+                Continue on my behalf after a short countdown
+              </label>
+              <span className="field-note">
+                Both places a run asks for you — the reading of your submission and
+                the panel — count down about 30 seconds and then proceed with what
+                the pipeline proposed, so an unattended run never stalls. Switch this
+                off and every gate waits for you instead, however long that takes.
+                <strong> This applies immediately to runs already in progress</strong>,
+                including a run that has passed the first gate and not yet reached the
+                second; any countdown already on screen stops at once.
+              </span>
+            </Section>
 
-            <details className="drawer-section">
-              <summary>Review rounds</summary>
+            <Section
+              title="Review rounds"
+              state={saveState.review}
+              error={saveError.review}
+            >
               <div className="field">
                 <label className="field-label" htmlFor="settings-review-rounds">
                   Rounds one chain step may take
@@ -864,7 +1193,13 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                 <select
                   id="settings-review-rounds"
                   value={reviewMaxRounds}
-                  onChange={(e) => setReviewMaxRounds(e.target.value)}
+                  onChange={(e) => {
+                    const next = e.target.value;
+                    setReviewMaxRounds(next);
+                    void save("review", {
+                      review: next === "" ? {} : { maxRounds: Number(next) },
+                    });
+                  }}
                 >
                   <option value="">Bundle default</option>
                   {Array.from({ length: 10 }, (_, i) => i + 1).map((n) => (
@@ -880,67 +1215,82 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                   &quot;Bundle default&quot; follows the published workflow.
                 </span>
               </div>
-            </details>
+            </Section>
 
-            <details className="drawer-section">
-              <summary>Capabilities &amp; host tools</summary>
+            <Section
+              title="Capabilities & host tools"
+              state={saveState.tools}
+              error={saveError.tools}
+            >
               <span className="field-note" style={{ marginBottom: "0.5rem", display: "block" }}>
                 Tools that run on your machine. Uncheck to disable a capability for all pipeline roles.
               </span>
               <label className="radio-row">
                 <input
                   type="checkbox"
-                  checked={enabledHostTools.includes("attachment_list") && enabledHostTools.includes("attachment_read")}
-                  onChange={(e) => {
-                    if (e.target.checked) {
-                      setEnabledHostTools((prev) => [...new Set([...prev, "attachment_list", "attachment_read", "attachment_search"])]);
-                    } else {
-                      setEnabledHostTools((prev) => prev.filter((id) => id !== "attachment_list" && id !== "attachment_read" && id !== "attachment_search"));
-                    }
-                  }}
+                  checked={
+                    enabledHostTools.includes("attachment_list") &&
+                    enabledHostTools.includes("attachment_read")
+                  }
+                  onChange={(e) =>
+                    saveTools(
+                      e.target.checked
+                        ? [
+                            ...new Set([
+                              ...enabledHostTools,
+                              "attachment_list",
+                              "attachment_read",
+                              "attachment_search",
+                            ]),
+                          ]
+                        : enabledHostTools.filter(
+                            (id) =>
+                              id !== "attachment_list" &&
+                              id !== "attachment_read" &&
+                              id !== "attachment_search",
+                          ),
+                    )
+                  }
                 />
                 Attachment access (list, read, and search submission files)
               </label>
               <label className="radio-row">
-                <input
-                  type="checkbox"
-                  checked={enabledHostTools.includes("web_search") && enabledHostTools.includes("web_fetch")}
-                  onChange={(e) => {
-                    if (e.target.checked) {
-                      setEnabledHostTools((prev) => [...new Set([...prev, "web_search", "web_fetch"])]);
-                    } else {
-                      setEnabledHostTools((prev) => prev.filter((id) => id !== "web_search" && id !== "web_fetch"));
-                    }
-                  }}
-                  disabled
-                />
+                <input type="checkbox" checked={false} disabled />
                 Web search (not yet implemented)
               </label>
               <label className="radio-row">
                 <input
                   type="checkbox"
                   checked={enabledHostTools.includes("code_execute")}
-                  onChange={(e) => {
-                    if (e.target.checked) {
-                      setEnabledHostTools((prev) => [...new Set([...prev, "code_execute"])]);
-                    } else {
-                      setEnabledHostTools((prev) => prev.filter((id) => id !== "code_execute"));
-                    }
-                  }}
+                  onChange={(e) =>
+                    saveTools(
+                      e.target.checked
+                        ? [...new Set([...enabledHostTools, "code_execute"])]
+                        : enabledHostTools.filter((id) => id !== "code_execute"),
+                    )
+                  }
                 />
                 Code execution (host scratch workspace; providers with native
                 execution keep using it)
               </label>
-            </details>
+            </Section>
 
-            <details className="drawer-section">
-              <summary>Recovery</summary>
+            <Section
+              title="Recovery"
+              state={saveState.recovery}
+              error={saveError.recovery}
+            >
               <h3 className="drawer-subhead">Interrupted jobs</h3>
               <label className="radio-row">
                 <input
                   type="checkbox"
                   checked={resumeInterrupted}
-                  onChange={(e) => setResumeInterrupted(e.target.checked)}
+                  onChange={(e) => {
+                    setResumeInterrupted(e.target.checked);
+                    void save("recovery", {
+                      interruptedRecovery: { autoResume: e.target.checked },
+                    });
+                  }}
                 />
                 Resume interrupted jobs automatically from their last
                 checkpoint
@@ -956,7 +1306,19 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                 <input
                   type="checkbox"
                   checked={autoResume}
-                  onChange={(e) => setAutoResume(e.target.checked)}
+                  onChange={(e) => {
+                    setAutoResume(e.target.checked);
+                    const creditRecovery = creditRecoveryPatch();
+                    if (creditRecovery) {
+                      void save("recovery", {
+                        interruptedRecovery: { autoResume: resumeInterrupted },
+                        creditRecovery: {
+                          ...creditRecovery,
+                          autoResume: e.target.checked,
+                        },
+                      });
+                    }
+                  }}
                 />
                 Resume automatically after provider credit resets
               </label>
@@ -972,7 +1334,10 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                     max={3600}
                     step={1}
                     value={safetyBufferSeconds}
-                    onChange={(e) => setSafetyBufferSeconds(e.target.value)}
+                    onChange={(e) => {
+                      setSafetyBufferSeconds(e.target.value);
+                      saveSoon("recovery", recoveryPatch);
+                    }}
                   />
                 </div>
                 <div className="field">
@@ -983,7 +1348,10 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                     id="settings-openrouter-model"
                     type="text"
                     value={openRouterModel}
-                    onChange={(e) => setOpenRouterModel(e.target.value)}
+                    onChange={(e) => {
+                      setOpenRouterModel(e.target.value);
+                      saveSoon("recovery", recoveryPatch);
+                    }}
                   />
                 </div>
               </div>
@@ -991,32 +1359,58 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                 <label className="field-label" htmlFor="settings-openrouter-key">
                   OpenRouter API key <span className="dim">(optional)</span>
                 </label>
-                <input
-                  id="settings-openrouter-key"
-                  type="password"
-                  value={openRouterApiKey}
-                  autoComplete="new-password"
-                  placeholder={
-                    loaded.creditRecovery.openRouterKeyConfigured
-                      ? "Verified key saved — enter a new key to replace it"
-                      : "Required only for reset messages the deterministic parser cannot read"
-                  }
-                  onChange={(e) => setOpenRouterApiKey(e.target.value)}
-                />
+                <div className="field-with-action">
+                  <input
+                    id="settings-openrouter-key"
+                    type="password"
+                    value={openRouterApiKey}
+                    autoComplete="new-password"
+                    placeholder={
+                      loaded.creditRecovery.openRouterKeyConfigured
+                        ? "Verified key saved — enter a new key to replace it"
+                        : "Required only for reset messages the deterministic parser cannot read"
+                    }
+                    onChange={(e) => setOpenRouterApiKey(e.target.value)}
+                  />
+                  <div className="credential-actions">
+                    <button
+                      type="button"
+                      className="btn btn-primary btn-small"
+                      disabled={
+                        openRouterApiKey.trim() === "" ||
+                        saveState.recovery === "saving"
+                      }
+                      onClick={() => {
+                        const creditRecovery = creditRecoveryPatch();
+                        if (!creditRecovery) return;
+                        void save("recovery", {
+                          interruptedRecovery: { autoResume: resumeInterrupted },
+                          creditRecovery: {
+                            ...creditRecovery,
+                            openRouterApiKey: openRouterApiKey.trim(),
+                          },
+                        }).then((saved) => {
+                          if (saved) setOpenRouterApiKey("");
+                        });
+                      }}
+                    >
+                      {saveState.recovery === "saving" ? "Verifying…" : "Save"}
+                    </button>
+                  </div>
+                </div>
                 <span className="field-note">
                   Known Claude reset messages are parsed locally first. Unknown formats can be
                   sent with current time and timezone to <code>openrouter/free</code>. The key is
                   verified before saving and never returned to the browser.
                 </span>
               </div>
-            </details>
+            </Section>
 
-            <details className="drawer-section">
-              <summary>Trash</summary>
+            <Section title="Trash">
               <a
                 className="btn drawer-trash-link"
                 href="#/trash"
-                onClick={onClose}
+                onClick={requestClose}
               >
                 <TrashIcon size={14} />
                 View trashed jobs
@@ -1025,7 +1419,7 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                 Stopped jobs moved to trash leave the job list but stay
                 readable.
               </span>
-            </details>
+            </Section>
           </>
         )}
       </div>

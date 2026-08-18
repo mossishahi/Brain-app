@@ -946,11 +946,22 @@ export async function startBrainServer(
       }
       if (req.method === "PUT" && path === "/api/settings") {
         try {
-          const settings = await manager.settings.put(await readJson(req));
+          const body = await readJson(req);
+          const before = manager.settings.get();
+          const settings = await manager.settings.put(body);
           broadcast();
-          // Provider/runner changes flip which checks matter; re-verify.
-          readiness.refresh();
-          broadcastReadiness();
+          // Provider/runner changes flip which checks matter, so those re-verify.
+          // Nothing else does: with each section saving on its own, refreshing
+          // on every save would re-probe the provider (a real request) every
+          // time someone nudged an unrelated control.
+          if (
+            settings.llm.provider !== before.llm.provider ||
+            settings.llm.model !== before.llm.model ||
+            settings.runner !== before.runner
+          ) {
+            readiness.refresh();
+            broadcastReadiness();
+          }
           sendJson(res, 200, settings);
         } catch (error) {
           throw new HttpError(
@@ -1388,6 +1399,29 @@ export async function startBrainServer(
             400,
             error instanceof Error ? error.message : String(error),
           );
+        }
+        broadcast();
+        sendJson(res, 200, detail);
+        return;
+      }
+
+      const dismissMatch = /^\/api\/jobs\/([^/]+)\/dismiss-member$/.exec(path);
+      if (req.method === "POST" && dismissMatch) {
+        const body = requestObject(await readJson(req));
+        if (typeof body.memberId !== "string" || body.memberId.trim().length === 0) {
+          throw new HttpError(400, "memberId must be a non-empty string");
+        }
+        let detail;
+        try {
+          detail = await manager.dismissMember(
+            decodeURIComponent(dismissMatch[1]!),
+            body.memberId,
+          );
+        } catch (error) {
+          if (error instanceof JobConflictError) {
+            throw new HttpError(409, error.message);
+          }
+          throw error; // "was not found" maps to 404 in the outer handler
         }
         broadcast();
         sendJson(res, 200, detail);

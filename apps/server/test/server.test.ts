@@ -1749,6 +1749,43 @@ test("a review-round override rides the command as its own env variable", () => 
   assert.equal(unset.includes("BRAINSTORM_AGENTIC_MAX_REVIEW_ROUNDS"), false);
 });
 
+test("--auto-approve rides the command only when the gate countdown is switched on", () => {
+  const fixture = {
+    workerPath: "/tmp/worker/main.js",
+    mode: "run" as const,
+    runId: "bsa_gate_switch",
+    topic: "Run this unattended",
+    sessionRoot: "/tmp/sessions",
+    eventsFile: "/tmp/events.jsonl",
+    contentDir: "/tmp/content",
+  };
+  const auto: ServerSettings = {
+    ...defaultServerSettings(),
+    panelConfirmation: "auto",
+    llm: { provider: "offline" },
+  };
+  const flag = (settings: ServerSettings): boolean =>
+    buildOrchestrationCommand({ ...fixture, settings }).includes("--auto-approve");
+  assert.equal(flag(auto), true);
+  // Workspaces created before the switch existed store no value for it, and
+  // absent has to keep meaning "on" — otherwise upgrading would silently start
+  // parking every unattended run at a gate nobody is watching.
+  const { gateAutoApprove: _absent, ...withoutSwitch } = auto;
+  assert.equal(flag(withoutSwitch), true);
+  // With the countdown switched off the flag must be withheld here, because
+  // "auto" compiles the gates out of the worker altogether: a run launched with
+  // the flag has no gate left for a human to answer, so nothing downstream
+  // could honour the switch afterwards.
+  assert.equal(flag({ ...auto, gateAutoApprove: false }), false);
+  // A manual panel keeps its gates regardless, so the flag stays off whichever
+  // way the countdown switch is set.
+  assert.equal(flag({ ...auto, panelConfirmation: "manual" }), false);
+  assert.equal(
+    flag({ ...auto, panelConfirmation: "manual", gateAutoApprove: false }),
+    false,
+  );
+});
+
 test("Claude Agent command selects its executor without embedding the setup token", () => {
   const settings: ServerSettings = {
     ...defaultServerSettings(),
@@ -3954,4 +3991,595 @@ fs.writeFileSync(checkpointPath, JSON.stringify(checkpoint, null, 2));
     "a held gate never auto-approves",
   );
   rmSync(workspace, { recursive: true, force: true });
+});
+
+test("switching the gate countdown off retires the armed deadline and waits forever", async () => {
+  const workspace = tempRoot();
+  const marker = join(workspace, "gate-switch-marker.txt");
+  const fakeCli = join(workspace, "fake-cli.mjs");
+  writeFileSync(
+    fakeCli,
+    `import fs from "node:fs"; import path from "node:path";
+const args = process.argv.slice(2);
+const value = (name) => args[args.indexOf(name) + 1];
+fs.appendFileSync(${JSON.stringify(marker)}, args.join(" ") + "\\n");
+const checkpointPath = path.join(value("--session-root"), value("--run-id"), "checkpoint.json");
+const checkpoint = JSON.parse(fs.readFileSync(checkpointPath, "utf8"));
+checkpoint.status = "completed"; checkpoint.output = { resumed: true };
+checkpoint.pendingGates = []; checkpoint.seq += 1; checkpoint.updatedAt = Date.now();
+fs.writeFileSync(checkpointPath, JSON.stringify(checkpoint, null, 2));
+`,
+  );
+  let clock = Date.now();
+  const manager = new JobManager({
+    workspace,
+    workerPath: fakeCli,
+    now: () => clock,
+    gateAutoApproveGraceMs: 0,
+  });
+  const settings = await manager.settings.put({
+    ...manager.settings.get(),
+    runner: "local",
+    panelConfirmation: "manual",
+    llm: { provider: "offline" },
+  });
+  assert.equal(settings.gateAutoApprove, true, "the countdown ships switched on");
+  const jobId = "gate-switch";
+  const jobDir = join(workspace, "workspace", "jobs", jobId);
+  const sessionDir = join(workspace, "workspace", "sessions", jobId);
+  mkdirSync(jobDir, { recursive: true });
+  mkdirSync(sessionDir, { recursive: true });
+  writeFileSync(
+    join(jobDir, "job.json"),
+    JSON.stringify({
+      jobId,
+      topic: "nobody may approve this panel but a human",
+      status: "running",
+      runner: "local",
+      pid: 999_999_999,
+      createdAt: clock - 60_000,
+      updatedAt: clock - 30_000,
+      submissionCount: 1,
+      executionSettings: settings,
+    }),
+  );
+  writeFileSync(
+    join(sessionDir, "checkpoint.json"),
+    JSON.stringify({
+      runId: jobId,
+      workflowId: "brainstorm",
+      status: "suspended",
+      input: {},
+      journal: [],
+      pendingGates: [
+        {
+          gateKey: "confirm-panel",
+          journalKey: "brainstorm-root/confirm-panel/confirm-panel-wait::response",
+          path: "brainstorm-root/confirm-panel/confirm-panel-wait",
+          prompt: "Review the seated panel.",
+          metadata: { title: "Confirm the panel" },
+        },
+      ],
+      seq: 5,
+      updatedAt: clock - 30_000,
+    }),
+  );
+  manager.reload();
+
+  // With the switch on, the first scan arms the countdown as usual: this is the
+  // state the dashboard is already showing a deadline for when the submitter
+  // changes their mind.
+  await manager.autoApproveDueGates();
+  assert.equal(
+    (await manager.detail(jobId)).pendingGate?.autoApprove?.deadlineAt,
+    clock + 30_000,
+  );
+
+  await manager.settings.put({ ...manager.settings.get(), gateAutoApprove: false });
+  await manager.autoApproveDueGates();
+  const retired = await manager.detail(jobId);
+  assert.equal(retired.status, "suspended");
+  assert.equal(retired.pendingGate?.gateKey, "confirm-panel");
+  assert.equal(
+    retired.pendingGate?.autoApprove,
+    undefined,
+    "the card must stop promising a deadline the server will not act on",
+  );
+  assert.equal(
+    (JSON.parse(readFileSync(join(jobDir, "job.json"), "utf8")) as {
+      gateAutoApprove?: unknown;
+    }).gateAutoApprove,
+    undefined,
+    "the armed marker is deleted from the record, not merely hidden",
+  );
+
+  // Well past the deadline that was armed, and past a second full window: an
+  // expired marker must not be resurrected by any later scan.
+  clock += 31_000;
+  await manager.autoApproveDueGates();
+  clock += 60_000;
+  await manager.autoApproveDueGates();
+  assert.equal((await manager.detail(jobId)).status, "suspended");
+  assert.equal(
+    existsSync(marker),
+    false,
+    "a switched-off countdown never submits a resume",
+  );
+  assert.equal(
+    (JSON.parse(readFileSync(join(jobDir, "job.json"), "utf8")) as {
+      submissionCount: number;
+    }).submissionCount,
+    1,
+  );
+
+  // Switching it back on arms a FRESH full window rather than firing at once on
+  // the deadline that quietly went by while it was off.
+  await manager.settings.put({ ...manager.settings.get(), gateAutoApprove: true });
+  await manager.autoApproveDueGates();
+  const rearmed = await manager.detail(jobId);
+  assert.equal(rearmed.status, "suspended");
+  assert.equal(rearmed.pendingGate?.autoApprove?.held, false);
+  assert.equal(rearmed.pendingGate?.autoApprove?.totalMs, 30_000);
+  assert.equal(rearmed.pendingGate?.autoApprove?.deadlineAt, clock + 30_000);
+  assert.equal(existsSync(marker), false, "re-arming alone approves nothing");
+
+  clock += 31_000;
+  await manager.autoApproveDueGates();
+  await waitUntil(() => {
+    try {
+      return (
+        (JSON.parse(
+          readFileSync(join(sessionDir, "checkpoint.json"), "utf8"),
+        ) as { status: string }).status === "completed"
+      );
+    } catch {
+      return false;
+    }
+  }, 5_000);
+  assert.match(
+    readFileSync(marker, "utf8"),
+    /resume .*--gate confirm-panel=approve/,
+    "the re-armed countdown approves the panel as seated",
+  );
+  assert.equal((await manager.detail(jobId)).status, "completed");
+  rmSync(workspace, { recursive: true, force: true });
+});
+
+test("the gate countdown switch is read live, never from the job's snapshot", async () => {
+  // A run submitted while the countdown was on carries `gateAutoApprove: true`
+  // in its execution settings forever, and every resume replays that snapshot.
+  // The countdown itself must NOT come from there: switching it off is the
+  // submitter saying no gate may pass without them, including in runs that are
+  // already in flight and have not yet reached their next gate.
+  const workspace = tempRoot();
+  const marker = join(workspace, "gate-live-marker.txt");
+  const fakeCli = join(workspace, "fake-cli.mjs");
+  // The run-mode worker parks the run on the panel gate, exactly as a real
+  // manual-confirmation run does, and logs every invocation so a resume this
+  // test forbids would leave evidence.
+  writeFileSync(
+    fakeCli,
+    `import fs from "node:fs"; import path from "node:path";
+const args = process.argv.slice(2);
+const value = (name) => args[args.indexOf(name) + 1];
+fs.appendFileSync(${JSON.stringify(marker)}, args.join(" ") + "\\n");
+if (args[0] !== "run") process.exit(0);
+const runId = value("--run-id");
+const runDir = path.join(value("--session-root"), runId);
+fs.mkdirSync(runDir, { recursive: true });
+fs.writeFileSync(path.join(runDir, "checkpoint.json"), JSON.stringify({
+  runId,
+  workflowId: "brainstorm",
+  status: "suspended",
+  input: {},
+  journal: [],
+  pendingGates: [{
+    gateKey: "confirm-panel",
+    journalKey: "brainstorm-root/confirm-panel/confirm-panel-wait::response",
+    path: "brainstorm-root/confirm-panel/confirm-panel-wait",
+    prompt: "Review the seated panel.",
+    metadata: { title: "Confirm the panel" },
+  }],
+  seq: 3,
+  updatedAt: Date.now(),
+}, null, 2));
+`,
+  );
+  let clock = Date.now();
+  const manager = new JobManager({
+    workspace,
+    workerPath: fakeCli,
+    now: () => clock,
+    gateAutoApproveGraceMs: 0,
+  });
+  await manager.settings.put({
+    ...manager.settings.get(),
+    runner: "local",
+    panelConfirmation: "manual",
+    llm: { provider: "offline" },
+  });
+  const jobId = await manager.submit("submitted while the countdown was on");
+  const jobDir = join(workspace, "workspace", "jobs", jobId);
+  const sessionDir = join(workspace, "workspace", "sessions", jobId);
+  await waitUntil(() => {
+    try {
+      return (
+        (JSON.parse(
+          readFileSync(join(sessionDir, "checkpoint.json"), "utf8"),
+        ) as { status: string }).status === "suspended"
+      );
+    } catch {
+      return false;
+    }
+  }, 10_000);
+  const snapshot = JSON.parse(readFileSync(join(jobDir, "job.json"), "utf8")) as {
+    executionSettings?: { gateAutoApprove?: boolean };
+  };
+  assert.equal(
+    snapshot.executionSettings?.gateAutoApprove,
+    true,
+    "the run's own settings snapshot recorded the countdown as on",
+  );
+
+  await manager.settings.put({ ...manager.settings.get(), gateAutoApprove: false });
+  clock += 31_000;
+  await manager.autoApproveDueGates();
+  clock += 31_000;
+  await manager.autoApproveDueGates();
+  const detail = await manager.detail(jobId);
+  assert.equal(detail.status, "suspended");
+  assert.equal(detail.pendingGate?.gateKey, "confirm-panel");
+  assert.equal(detail.pendingGate?.autoApprove, undefined);
+  assert.equal(
+    readFileSync(marker, "utf8").includes("resume"),
+    false,
+    "the in-flight run's snapshot must not out-vote the live switch",
+  );
+  const record = JSON.parse(readFileSync(join(jobDir, "job.json"), "utf8")) as {
+    submissionCount: number;
+    executionSettings?: { gateAutoApprove?: boolean };
+  };
+  assert.equal(record.submissionCount, 1);
+  assert.equal(
+    record.executionSettings?.gateAutoApprove,
+    true,
+    "the snapshot is left alone; only the live read changed the outcome",
+  );
+  rmSync(workspace, { recursive: true, force: true });
+});
+
+test("a per-section settings save keeps every other section and re-verifies nothing", async () => {
+  // The reported bug: every save verified the model connection, so changing
+  // the review-round budget re-tested the Claude setup token — seconds of
+  // waiting, and then a "token verified" notice about an edit nobody made.
+  const workspace = tempRoot();
+  const attempts: Array<{ token: string; model?: string }> = [];
+  // Verification is FORBIDDEN once the connection stands. A validator that
+  // throws turns a stray re-verification into a failed PUT that names itself,
+  // rather than a bare count mismatch at the end of the test.
+  let forbidden = false;
+  const server = await startTestBrainServer({
+    workspace,
+    port: 0,
+    validateClaudeAgent: async (input) => {
+      if (forbidden) {
+        throw new Error("re-verified a connection that did not change");
+      }
+      attempts.push(input);
+    },
+    // The readiness llm check drives the SAME validator on its own schedule,
+    // so it is stubbed out here: this test counts what the SAVES verify.
+    readinessProbes: { llm: async () => ({ message: "stubbed" }) },
+    readinessAdvisor: null,
+  });
+  try {
+    // One full save establishes the connection and every neighbouring section.
+    const connected = await requestJson<ServerSettings>(server, "/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({
+        llm: {
+          provider: "claude-agent",
+          model: "sonnet",
+          setupToken: "verified-setup-token",
+          agentSdk: { maxTurns: 12, effort: "high", thinking: "adaptive" },
+        },
+        hostTools: { enabledToolIds: ["taxonomy_tree"] },
+        updateCheck: "off",
+        creditRecovery: {
+          autoResume: false,
+          safetyBufferSeconds: 90,
+          openRouterModel: "openrouter/keep-me",
+        },
+      } satisfies ServerSettingsUpdate),
+    });
+    assert.equal(connected.status, 200);
+    assert.equal(connected.value.llm.setupTokenConfigured, true);
+    assert.equal(attempts.length, 1, "establishing the connection verifies it once");
+
+    forbidden = true;
+    const patched = await requestJson<ServerSettings>(server, "/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({
+        review: { maxRounds: 7 },
+      } satisfies ServerSettingsUpdate),
+    });
+    assert.equal(patched.status, 200);
+    assert.equal(attempts.length, 1, "a review-budget patch verifies nothing at all");
+    // The budget is the ONLY difference between the two documents. An absent
+    // section used to RESET rather than keep, so this is the assertion that one
+    // panel of the drawer cannot wipe what another panel holds: the connection,
+    // its agentSdk knobs, the host tools, the update policy and the
+    // credit-recovery policy all survive a save that never mentioned them.
+    assert.deepEqual(patched.value, { ...connected.value, review: { maxRounds: 7 } });
+
+    // The same holds section by section, in either direction.
+    const tools = await requestJson<ServerSettings>(server, "/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({
+        hostTools: { enabledToolIds: ["taxonomy_tree", "attachment_list"] },
+      } satisfies ServerSettingsUpdate),
+    });
+    assert.equal(tools.status, 200);
+    assert.deepEqual(tools.value, {
+      ...patched.value,
+      hostTools: { enabledToolIds: ["taxonomy_tree", "attachment_list"] },
+    });
+    assert.equal(attempts.length, 1, "no save but the connecting one verified");
+
+    // Served from disk, not echoed back: a patch that kept a section only in
+    // the response would lose it on the next read.
+    const reread = await requestJson<ServerSettings>(server, "/api/settings");
+    assert.deepEqual(reread.value, tools.value);
+    const stored = JSON.parse(
+      readFileSync(join(workspace, "settings.json"), "utf8"),
+    ) as ServerSettings;
+    assert.equal(stored.review?.maxRounds, 7);
+    assert.equal(stored.llm.model, "sonnet");
+    assert.equal(stored.llm.agentSdk?.maxTurns, 12);
+    assert.equal(stored.creditRecovery.openRouterModel, "openrouter/keep-me");
+    assert.equal(stored.updateCheck, "off");
+  } finally {
+    await server.close();
+    await removeWorkspace(workspace);
+  }
+});
+
+test("a new credential and a changed model each re-verify the connection for real", async () => {
+  // The other half of the rule: skipping verification must never skip it for a
+  // change verification is the whole point of. A submitted secret is unproven
+  // until the provider answers, and a different model can be one the account
+  // cannot reach at all.
+  const workspace = tempRoot();
+  const attempts: Array<{ token: string; model?: string }> = [];
+  const server = await startTestBrainServer({
+    workspace,
+    port: 0,
+    validateClaudeAgent: async (input) => {
+      attempts.push(input);
+      if (input.model === "unreachable") throw new Error("model not available");
+    },
+    readinessProbes: { llm: async () => ({ message: "stubbed" }) },
+    readinessAdvisor: null,
+  });
+  try {
+    const connected = await requestJson<ServerSettings>(server, "/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({
+        llm: {
+          provider: "claude-agent",
+          model: "sonnet",
+          setupToken: "first-token",
+        },
+      } satisfies ServerSettingsUpdate),
+    });
+    assert.equal(connected.status, 200);
+    assert.deepEqual(attempts, [{ token: "first-token", model: "sonnet" }]);
+
+    // A freshly submitted secret is verified even though nothing else moved.
+    const rekeyed = await requestJson<ServerSettings>(server, "/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({
+        llm: {
+          provider: "claude-agent",
+          model: "sonnet",
+          setupToken: "second-token",
+        },
+      } satisfies ServerSettingsUpdate),
+    });
+    assert.equal(rekeyed.status, 200);
+    assert.deepEqual(attempts[1], { token: "second-token", model: "sonnet" });
+
+    // A changed model is verified against the STORED credential — the patch
+    // carries no secret, so this only works if the verification reads the one
+    // on disk.
+    const remodelled = await requestJson<ServerSettings>(server, "/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({
+        llm: { provider: "claude-agent", model: "opus" },
+      } satisfies ServerSettingsUpdate),
+    });
+    assert.equal(remodelled.status, 200);
+    assert.equal(remodelled.value.llm.model, "opus");
+    assert.deepEqual(attempts[2], { token: "second-token", model: "opus" });
+
+    // And a model the account cannot reach is rejected before anything is
+    // persisted, exactly as an unverifiable credential is.
+    const rejected = await requestJson<{ message: string }>(server, "/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({
+        llm: { provider: "claude-agent", model: "unreachable" },
+      } satisfies ServerSettingsUpdate),
+    });
+    assert.equal(rejected.status, 400);
+    assert.match(rejected.value.message, /model not available/);
+    assert.equal(attempts.length, 4);
+    const after = (await requestJson<ServerSettings>(server, "/api/settings")).value;
+    assert.equal(after.llm.model, "opus", "the refused model was never stored");
+  } finally {
+    await server.close();
+    await removeWorkspace(workspace);
+  }
+});
+
+test("POST /api/jobs/:id/dismiss-member stops one seat and resumes the rest", async () => {
+  const workspace = tempRoot();
+  const marker = join(workspace, "dismiss-worker.txt");
+  const fakeCli = join(workspace, "fake-cli.mjs");
+  // The resubmitted worker records the argv it was given and leaves the
+  // checkpoint exactly as it found it, so the run stays resumable throughout.
+  writeFileSync(
+    fakeCli,
+    `import fs from "node:fs";
+fs.appendFileSync(${JSON.stringify(marker)}, process.argv.slice(2).join(" ") + "\\n");
+`,
+  );
+  const server = await startTestBrainServer({
+    workspace,
+    port: 0,
+    workerPath: fakeCli,
+  });
+  try {
+    await putSettings(server, {
+      runner: "local",
+      llm: { provider: "offline" },
+      // The orphan scan would resubmit this manufactured run on its own tick
+      // and race every assertion below. Here the dismissal is the only thing
+      // allowed to resubmit.
+      interruptedRecovery: { autoResume: false },
+    });
+    const settings = (await requestJson<ServerSettings>(server, "/api/settings")).value;
+
+    // A run interrupted mid-flight with a seated panel of four: its worker is
+    // long gone, its checkpoint is intact, and it is still resumable — the
+    // state a submitter actually dismisses a seat from.
+    const jobId = "dismiss-job";
+    const jobDir = join(workspace, "workspace", "jobs", jobId);
+    const sessionDir = join(workspace, "workspace", "sessions", jobId);
+    mkdirSync(join(sessionDir, "artifacts"), { recursive: true });
+    mkdirSync(jobDir, { recursive: true });
+    writeFileSync(
+      join(jobDir, "job.json"),
+      JSON.stringify({
+        jobId,
+        topic: "one seat is off the rails",
+        status: "running",
+        runner: "local",
+        pid: 999_999_999, // long dead
+        createdAt: 1,
+        updatedAt: 2,
+        submissionCount: 1,
+        executionSettings: settings,
+      }),
+    );
+    writeFileSync(
+      join(sessionDir, "checkpoint.json"),
+      JSON.stringify({
+        runId: jobId,
+        workflowId: "brainstorm",
+        status: "running",
+        input: {},
+        journal: [],
+        pendingGates: [],
+        seq: 5,
+        updatedAt: 3,
+      }),
+    );
+    writeFileSync(
+      join(sessionDir, "artifacts", "index.json"),
+      JSON.stringify({
+        refs: [{ id: "a-panel", metadata: { schema: "panel", path: "panel" } }],
+      }),
+    );
+    writeFileSync(
+      join(sessionDir, "artifacts", "a-panel"),
+      JSON.stringify({
+        members: [1, 2, 3, 4].map((n) => ({
+          id: `member-${n}`,
+          department: "Physics",
+          umbrella: `Umbrella ${n}`,
+          subfields: [],
+        })),
+      }),
+    );
+    server.manager.reload();
+
+    const dismiss = (id: string, body: unknown) =>
+      requestJson<JobDetail & { message?: string }>(
+        server,
+        `/api/jobs/${id}/dismiss-member`,
+        { method: "POST", body: JSON.stringify(body) },
+      );
+
+    assert.equal((await dismiss("no-such-job", { memberId: "member-1" })).status, 404);
+    assert.equal((await dismiss(jobId, {})).status, 400);
+    // A seat that is not on this run's roster is a conflict, not a silent
+    // no-op: the id came from somewhere, and dismissing nothing would look
+    // like success in the dashboard.
+    const stranger = await dismiss(jobId, { memberId: "member-9" });
+    assert.equal(stranger.status, 409);
+    assert.match(stranger.value.message!, /not a seat of job/);
+
+    const dismissed = await dismiss(jobId, { memberId: "member-4" });
+    assert.equal(dismissed.status, 200);
+    assert.deepEqual(
+      dismissed.value.dismissedMembers?.map((entry) => entry.memberId),
+      ["member-4"],
+    );
+    assert.equal(dismissed.value.dismissedMembers?.[0]?.label, "Umbrella 4");
+    // The run continues. Stopping the worker is how the dismissal reaches a
+    // process that has no channel to be told anything — it must never be
+    // mistaken for cancelling the run.
+    assert.notEqual(dismissed.value.status, "cancelled");
+    await waitUntil(() => existsSync(marker), 5_000);
+    const first = readFileSync(join(jobDir, "submit-dismiss-1.sh"), "utf8");
+    assert.match(first, /--dismissed-members 'member-4'/);
+    assert.match(first, /fake-cli\.mjs' resume/, "the run resumes, never restarts");
+
+    // Idempotent: a double click, or a retry of a request whose response was
+    // lost, must not stop and resubmit the run a second time.
+    const again = await dismiss(jobId, { memberId: "member-4" });
+    assert.equal(again.status, 200);
+    assert.deepEqual(
+      again.value.dismissedMembers?.map((entry) => entry.memberId),
+      ["member-4"],
+    );
+    assert.deepEqual(
+      readdirSync(jobDir).filter((name) => name.startsWith("submit-dismiss")),
+      ["submit-dismiss-1.sh"],
+      "the second identical call submits nothing",
+    );
+
+    // A second dismissal carries the FULL accumulated list as one
+    // comma-joined value: the worker parses flags into a map, so a repeated
+    // flag would keep only the last id and put the earlier seat back to work.
+    const second = await dismiss(jobId, { memberId: "member-3" });
+    assert.equal(second.status, 200);
+    assert.deepEqual(
+      second.value.dismissedMembers?.map((entry) => entry.memberId),
+      ["member-4", "member-3"],
+    );
+    assert.match(
+      readFileSync(join(jobDir, "submit-dismiss-2.sh"), "utf8"),
+      /--dismissed-members 'member-4,member-3'/,
+    );
+
+    // The floor the confirmation gate enforces holds here too: below two seats
+    // there is no panel left to review anything.
+    const tooFew = await dismiss(jobId, { memberId: "member-2" });
+    assert.equal(tooFew.status, 409);
+    assert.match(tooFew.value.message!, /at least 2 seats/);
+    const record = JSON.parse(readFileSync(join(jobDir, "job.json"), "utf8")) as {
+      dismissedMembers?: string[];
+      dismissedAt?: Record<string, number>;
+      submissionCount: number;
+      status: string;
+    };
+    assert.deepEqual(record.dismissedMembers, ["member-4", "member-3"]);
+    assert.deepEqual(Object.keys(record.dismissedAt ?? {}), ["member-4", "member-3"]);
+    assert.equal(record.submissionCount, 3, "two dismissals, two resubmissions");
+    assert.notEqual(record.status, "cancelled");
+  } finally {
+    await server.close();
+    await removeWorkspace(workspace);
+  }
 });

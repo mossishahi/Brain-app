@@ -377,6 +377,12 @@ export class JobManager {
         ? { contentRegistryVersion: settings.contentRegistry.version }
         : {}),
       settings,
+      // Threaded here, in the one builder every submission path goes through,
+      // so a dismissal survives a gate answer, a credit resume, a retry and an
+      // interrupted-job resubmission without each having to remember it.
+      ...(record.dismissedMembers !== undefined && record.dismissedMembers.length > 0
+        ? { dismissedMembers: record.dismissedMembers }
+        : {}),
       ...(gate
         ? {
             gate: {
@@ -1003,16 +1009,18 @@ export class JobManager {
     }
   }
 
-  async cancel(jobId: string): Promise<JobStatus> {
-    const record = this.record(jobId);
-    const current = await this.reconcile(record);
-    if (
-      current === "completed" ||
-      current === "failed" ||
-      current === "cancelled"
-    ) {
-      return current;
-    }
+  /**
+   * Stops the job's worker process, whatever it is doing, WITHOUT deciding what
+   * the job becomes — the caller does that. `cancel()` ends the job here;
+   * `dismissMember()` uses the same stop and then resubmits, so the run
+   * continues from its last checkpoint without the dismissed seat.
+   *
+   * The worker installs no signal handlers on purpose, so a signal terminates
+   * it immediately and its last checkpoint is the resume point. Work that was
+   * in flight is lost and re-executed on the resume; work already journaled
+   * replays.
+   */
+  private async stopWorker(record: JobRecord): Promise<void> {
     try {
       if (record.runner === "slurm" && record.slurmJobId) {
         await execute("scancel", [...slurmClusterArgs(record.slurmCluster), record.slurmJobId], {
@@ -1032,6 +1040,19 @@ export class JobManager {
         }`,
       );
     }
+  }
+
+  async cancel(jobId: string): Promise<JobStatus> {
+    const record = this.record(jobId);
+    const current = await this.reconcile(record);
+    if (
+      current === "completed" ||
+      current === "failed" ||
+      current === "cancelled"
+    ) {
+      return current;
+    }
+    await this.stopWorker(record);
     record.status = "cancelled";
     delete record.autoResumePending;
     record.updatedAt = this.now();
@@ -1527,6 +1548,190 @@ export class JobManager {
     return this.detail(jobId);
   }
 
+  /** Job states a seat can still be dismissed from — the run is not over. */
+  private static readonly DISMISSABLE_STATUSES: ReadonlySet<JobStatus> = new Set([
+    "queued",
+    "running",
+    "suspended",
+    "orphaned",
+    "credit-blocked",
+  ]);
+
+  /**
+   * Dismisses one panel seat mid-run: it develops nothing further, comments on
+   * nobody, and is withheld from the integrator and the chair. What it produced
+   * before the dismissal is untouched — the dashboard's record of the run is
+   * never rewritten, and no artifact is deleted.
+   *
+   * The mechanism is stop-and-resume, because a running worker has no channel
+   * to be told anything: the dismissal is recorded on the job, the worker is
+   * stopped, and the run is resubmitted from its last checkpoint with the
+   * accumulated dismissal list on the command line. Completed work replays out
+   * of the journal; only what was in flight is re-executed — for the dismissed
+   * seat, not at all.
+   */
+  async dismissMember(jobId: string, memberId: string): Promise<JobDetail> {
+    const record = this.record(jobId);
+    if (record.trashedAt !== undefined) {
+      throw new JobConflictError(`job "${jobId}" is in the trash`);
+    }
+    if (this.autoResuming.has(jobId)) {
+      throw new JobConflictError(
+        `job "${jobId}" already has a resume submission in progress`,
+      );
+    }
+    if (record.dismissedMembers?.includes(memberId)) {
+      // Idempotent: a double click, or a retry of a request whose response was
+      // lost, must not stop and resubmit the run twice.
+      return this.detail(jobId);
+    }
+    const status = await this.reconcile(record);
+    if (!JobManager.DISMISSABLE_STATUSES.has(status)) {
+      throw new JobConflictError(
+        `a ${status} job has no panel left to change`,
+      );
+    }
+    const roster = await this.roster(jobId);
+    if (roster.length === 0) {
+      throw new JobConflictError(
+        `job "${jobId}" has not seated its panel yet`,
+      );
+    }
+    if (!roster.includes(memberId)) {
+      throw new JobConflictError(
+        `"${memberId}" is not a seat of job "${jobId}"`,
+      );
+    }
+    const remaining = roster.filter(
+      (id) => id !== memberId && !(record.dismissedMembers ?? []).includes(id),
+    ).length;
+    if (remaining < PANEL_EDIT_LIMITS.minMembers) {
+      // The same floor the confirmation gate enforces: below it there is no
+      // panel left to review anything, and the review stage cannot proceed.
+      throw new JobConflictError(
+        `a panel needs at least ${PANEL_EDIT_LIMITS.minMembers} seats — dismissing this one would leave ${remaining}`,
+      );
+    }
+    this.assertPinResumable(jobId);
+    this.autoResuming.add(jobId);
+    try {
+      // Recorded BEFORE the worker is stopped and before the resubmission, so
+      // an interruption anywhere after this point still leaves the dismissal in
+      // force: every later submission reads it back off the record.
+      record.dismissedMembers = [...(record.dismissedMembers ?? []), memberId];
+      record.dismissedAt = { ...record.dismissedAt, [memberId]: this.now() };
+      record.updatedAt = this.now();
+      this.write(record);
+
+      if (status === "credit-blocked") {
+        // The worker already exited and the run is waiting for the provider's
+        // reset. Resubmitting now would only walk into the same block; the
+        // dismissal rides the credit resume that is already scheduled, because
+        // every submission builds its command from this record.
+        return this.detail(jobId);
+      }
+
+      await this.stopWorker(record);
+      await this.awaitWorkerExit(record);
+
+      const settings = record.executionSettings ?? this.settings.get();
+      // A run that died before its first checkpoint has nothing to resume from
+      // and starts over, reusing its content pin — the same rule the
+      // interrupted-job path follows.
+      const checkpoint = this.checkpoint(jobId);
+      const command = this.command(
+        record,
+        checkpoint !== undefined ? "resume" : "run",
+        settings,
+      );
+      const number = (record.submissionCount ?? 1) + 1;
+      const script = this.writeScript(
+        record,
+        `submit-dismiss-${number - 1}.sh`,
+        command,
+        settings.slurmTemplate,
+      );
+      try {
+        await this.submitScript(record, script, settings);
+      } catch (error) {
+        // The seat is dismissed and the worker is stopped, but the replacement
+        // did not reach the scheduler. Say so on the job: the interrupted-job
+        // scan resubmits it (carrying the dismissal, which lives on the record),
+        // and if that recovery is switched off the resume action is one click.
+        this.warning(
+          record,
+          `Dismissing ${memberId} stopped the run, but resubmitting it failed: ${
+            error instanceof Error ? error.message : String(error)
+          }. Resume the job to continue without that seat.`,
+        );
+        record.updatedAt = this.now();
+        this.write(record);
+        throw error;
+      }
+      record.status = "queued";
+      delete record.error;
+      // Any countdown belonged to the submission that just ended. If the run
+      // comes back to an unanswered gate it gets a fresh window rather than a
+      // deadline that may already have passed while this was being arranged.
+      delete record.gateAutoApprove;
+      record.submissionCount = number;
+      // The claim a restart reads: this job has a submission in flight, so
+      // neither the interrupted scan nor a second dismissal double-submits it.
+      record.autoResumePending = { submittedAt: this.now() };
+      record.updatedAt = this.now();
+      this.write(record);
+    } finally {
+      this.autoResuming.delete(jobId);
+    }
+    return this.detail(jobId);
+  }
+
+  /**
+   * Waits, briefly and boundedly, for a stopped worker to actually be gone
+   * before the replacement is submitted: two workers sharing one session
+   * directory would write over each other's checkpoints and artifacts.
+   *
+   * Only the local runner can be observed directly. A SLURM job gets a fixed
+   * grace instead — scancel signals a worker that has no handler to delay it,
+   * and squeue must not be polled at seconds-scale on shared clusters — after
+   * which queue latency on the resubmission is the remaining margin.
+   */
+  private async awaitWorkerExit(record: JobRecord): Promise<void> {
+    if (record.runner === "local") {
+      if (record.pid === undefined) return;
+      for (let waited = 0; waited < 5_000; waited += 200) {
+        if (!this.localAlive(record.pid)) return;
+        await sleep(200);
+      }
+      this.warning(
+        record,
+        "The previous worker was still running when the run was resubmitted; it may re-execute the task it was on.",
+      );
+      return;
+    }
+    if (record.slurmJobId !== undefined) await sleep(3_000);
+  }
+
+  /**
+   * The seat ids the run is actually working with — the panel as the run
+   * executed it, including seats the submitter added at confirmation. Empty
+   * until the panel exists.
+   */
+  private async roster(jobId: string): Promise<readonly string[]> {
+    const detail = await this.detail(jobId);
+    for (const stage of detail.stages) {
+      if (stage.id === "first-pass" && stage.members.length > 0) {
+        return stage.members.map((member) => member.memberId);
+      }
+    }
+    for (const stage of detail.stages) {
+      if (stage.id === "review-members" && stage.members.length > 0) {
+        return stage.members.map((member) => member.memberId);
+      }
+    }
+    return [];
+  }
+
   /**
    * Called by the server poller: starts the auto-approve countdown when a
    * suspended gate is first observed, and approves the panel as seated when
@@ -1534,8 +1739,24 @@ export class JobManager {
    * (heldAt set) never fires — "the whole timeout idea stops".
    */
   async autoApproveDueGates(): Promise<void> {
+    // Read LIVE, once per tick, and never from the job's own snapshot: the
+    // submitter must be able to switch the countdown off while runs are in
+    // flight, including a run that has already passed the classification gate
+    // and has not yet reached the panel gate.
+    const countdownEnabled = this.settings.get().gateAutoApprove !== false;
     for (const record of this.jobs.values()) {
       if (record.trashedAt !== undefined) continue;
+      if (!countdownEnabled) {
+        // Switching it off retires any countdown already showing, so the card
+        // stops promising a deadline the server will not act on. A later
+        // switch-on arms a fresh one, with the full window.
+        if (record.gateAutoApprove !== undefined) {
+          delete record.gateAutoApprove;
+          record.updatedAt = this.now();
+          this.write(record);
+        }
+        continue;
+      }
       if (
         record.status !== "suspended" &&
         record.status !== "running" &&

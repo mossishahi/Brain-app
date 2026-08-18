@@ -266,6 +266,17 @@ export const answerGate = (jobId: string, body: GateAnswerRequest): Promise<JobD
 export const holdGateAutoApprove = (jobId: string): Promise<JobDetail> =>
   request(`/jobs/${encodeURIComponent(jobId)}/gate-hold`, { method: "POST" });
 
+/**
+ * Dismisses one panel seat mid-run. The server stops the worker and resumes the
+ * rest of the run from its last checkpoint, so this takes a moment and the job
+ * comes back as "queued".
+ */
+export const dismissMember = (jobId: string, memberId: string): Promise<JobDetail> =>
+  request(
+    `/jobs/${encodeURIComponent(jobId)}/dismiss-member`,
+    jsonInit("POST", { memberId }),
+  );
+
 export const jobsStreamUrl = `${API_BASE}/stream`;
 export const jobStreamUrl = (jobId: string): string =>
   `${API_BASE}/jobs/${encodeURIComponent(jobId)}/stream`;

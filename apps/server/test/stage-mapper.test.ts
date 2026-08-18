@@ -1709,3 +1709,205 @@ test("review failures are located per seat and accumulate; a restart clears them
   assert.equal(resumedReview.members[1]!.error, undefined);
   assert.notEqual(resumedReview.status, "failed");
 });
+
+test("a dismissed seat keeps its whole record and leaves the review to the seats still in it", () => {
+  const paper = {
+    abstract: [paragraph, paragraph, paragraph],
+    introduction: [paragraph, paragraph, paragraph],
+    method: [paragraph, paragraph, paragraph],
+    discussion: [paragraph, paragraph, paragraph],
+    conclusion: [paragraph],
+  };
+  /** One seat's branch in a parallel review walk. */
+  const seat = (index: number) =>
+    `brainstorm-root/review-members/review-members-fanout/member[${index}]`;
+  const judgePass = (index: number) => ({
+    key:
+      `${seat(index)}/cotStep[0]/review-round-loop/iter[0]/review-round-body/` +
+      "judge-step/judge-step-execute::result",
+    kind: "agent",
+    value: {
+      taskId: `t-judge-${index}`,
+      status: "ok",
+      output: {
+        verdict: "Pass",
+        reason: "The step holds.",
+        assessment: [{ commentorId: "member-1", basis: "authority" }],
+      },
+    },
+  });
+  // Seat 1's only recorded round: a commentor interrupted it and no judge ever
+  // decided, because the dismissal stopped the walk mid-round. That is the
+  // realistic shape — a dismissed seat's walk is cut off wherever it stood.
+  const interruptOfSeat1 = {
+    key:
+      `${seat(0)}/cotStep[0]/review-round-loop/iter[0]/review-round-body/` +
+      "gather-comments/gather-comments-fanout/commentor[0]/" +
+      "dispatch-comment/else/comment-step-execute::result",
+    kind: "agent",
+    value: {
+      taskId: "t-comment",
+      status: "ok",
+      output: {
+        verdict: "Interrupt",
+        step: 1,
+        reason: "The mechanism assumes the very thing it sets out to show.",
+        suggestion: "",
+        evidence: noEvidence,
+      },
+    },
+  };
+
+  /**
+   * The same in-flight run built twice — once with member-1 dismissed and once
+   * without. Everything else is identical, so every difference below is the
+   * dismissal's doing and nothing else's.
+   */
+  const detailFor = (dismissed: boolean) => {
+    const workspace = mkdtempSync(join(tmpdir(), "stage-mapper-test-"));
+    try {
+      const sessionDir = join(workspace, "session");
+      const jobDir = join(workspace, "job");
+      mkdirSync(join(sessionDir, "artifacts"), { recursive: true });
+      mkdirSync(jobDir, { recursive: true });
+      writeFileSync(
+        join(sessionDir, "checkpoint.json"),
+        JSON.stringify({
+          runId: "job-1",
+          workflowId: "brainstorm",
+          // Still running: a completed checkpoint would report every stage
+          // complete on its own and prove nothing about the review's own count.
+          status: "running",
+          input: {},
+          journal: [interruptOfSeat1, judgePass(1), judgePass(2)],
+          pendingGates: [],
+          seq: 1,
+          updatedAt: 1_000,
+        }),
+      );
+      writeFileSync(
+        join(sessionDir, "artifacts", "index.json"),
+        JSON.stringify({
+          refs: [
+            { id: "a-panel", metadata: { schema: "panel", path: "panel" } },
+            { id: "a-idea-1", metadata: { schema: "brainIdea", path: "ideas.member-1" } },
+            { id: "a-idea-2", metadata: { schema: "brainIdea", path: "ideas.member-2" } },
+            { id: "a-idea-3", metadata: { schema: "brainIdea", path: "ideas.member-3" } },
+          ],
+        }),
+      );
+      writeFileSync(
+        join(sessionDir, "artifacts", "a-panel"),
+        JSON.stringify({
+          members: [
+            { id: "member-1", department: "Physics", umbrella: "Quantum Optics", subfields: [] },
+            { id: "member-2", department: "Biology", umbrella: "Systems Biology", subfields: [] },
+            { id: "member-3", department: "CS", umbrella: "Machine Learning", subfields: [] },
+          ],
+        }),
+      );
+      for (const index of [1, 2, 3]) {
+        writeFileSync(
+          join(sessionDir, "artifacts", `a-idea-${index}`),
+          JSON.stringify({
+            output: { type: "research idea", paper },
+            cot: [`Seat ${index} step one.`],
+            novelty: `Seat ${index}'s claim.`,
+          }),
+        );
+      }
+      const record: JobRecord = {
+        jobId: "job-1",
+        topic: "topic",
+        status: "running",
+        runner: "local",
+        createdAt: 1,
+        updatedAt: 2,
+        ...(dismissed
+          ? {
+              dismissedMembers: ["member-1"],
+              dismissedAt: { "member-1": 1_700_000_000_000 },
+            }
+          : {}),
+      };
+      return buildJobDetail({
+        record,
+        status: "running",
+        sessionDir,
+        jobDir,
+        settings,
+      });
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  };
+
+  const detail = detailFor(true);
+  assert.deepEqual(detail.dismissedMembers, [
+    { memberId: "member-1", label: "Quantum Optics", at: 1_700_000_000_000 },
+  ]);
+
+  // The seat is MARKED in every view that seats it, never dropped: the views
+  // key a seat's first pass, its review coordinates and its token spend by its
+  // index in the panel array, so removing one would re-attribute the rest.
+  const select = detail.stages.find((stage) => stage.id === "select-panel");
+  assert.ok(select && select.id === "select-panel");
+  assert.deepEqual(
+    select.panel?.map((member) => member.id),
+    ["member-1", "member-2", "member-3"],
+  );
+  assert.equal(select.panel?.[0]?.dismissed?.at, 1_700_000_000_000);
+  assert.equal(select.panel?.[1]?.dismissed, undefined);
+
+  const firstPass = detail.stages.find((stage) => stage.id === "first-pass");
+  assert.ok(firstPass && firstPass.id === "first-pass");
+  const dismissedFirstPass = firstPass.members[0]!;
+  assert.equal(dismissedFirstPass.memberId, "member-1");
+  assert.equal(dismissedFirstPass.dismissed?.at, 1_700_000_000_000);
+  // The dismissal ends the seat's future, not its record: the idea it had
+  // already developed is still exactly there, and the card still reads completed.
+  assert.equal(dismissedFirstPass.status, "completed");
+  assert.equal(
+    dismissedFirstPass.idea?.paper?.method.startsWith(paragraph),
+    true,
+    "the dismissed seat's first-pass idea is still shown in full",
+  );
+  assert.equal(firstPass.members[1]!.dismissed, undefined);
+
+  const review = detail.stages.find((stage) => stage.id === "review-members");
+  assert.ok(review && review.id === "review-members");
+  const dismissedReview = review.members[0]!;
+  assert.equal(dismissedReview.memberId, "member-1");
+  assert.equal(dismissedReview.dismissed?.at, 1_700_000_000_000);
+  // Every round the seat did record is still replayed, comments and all.
+  const round = dismissedReview.steps[0]?.rounds[0];
+  assert.ok(round, "the dismissed seat's round is still in the view");
+  assert.equal(round.cot, "Seat 1 step one.");
+  assert.deepEqual(
+    round.comments.map((comment) => [comment.commentorId, comment.verdict]),
+    [["member-2", "Interrupt"]],
+  );
+  assert.ok(dismissedReview.finalIdea?.paper, "its version as of the dismissal stands");
+  // A dismissed seat is not working on anything, so it carries no live
+  // position — the seat card must not animate an agent that will never run.
+  assert.equal(dismissedReview.progress, undefined);
+
+  // The review completes on the REMAINING seats. Counting the dismissed seat
+  // would hold the stage open for the rest of the run, since its walk can
+  // never finish.
+  assert.equal(review.status, "completed");
+  assert.equal(detail.progress?.review?.memberCount, 2);
+  assert.equal(detail.progress?.review?.membersComplete, 2);
+  assert.equal(detail.progress?.review?.activeSeats, 0);
+
+  // Without the dismissal the very same run is still under review — which is
+  // what makes every assertion above the dismissal's doing.
+  const undismissed = detailFor(false);
+  const stillReviewing = undismissed.stages.find((stage) => stage.id === "review-members");
+  assert.ok(stillReviewing && stillReviewing.id === "review-members");
+  assert.equal(stillReviewing.status, "active");
+  assert.equal(stillReviewing.members[0]!.dismissed, undefined);
+  assert.equal(undismissed.progress?.review?.memberCount, 3);
+  assert.equal(undismissed.progress?.review?.membersComplete, 2);
+  assert.equal(undismissed.dismissedMembers, undefined);
+});

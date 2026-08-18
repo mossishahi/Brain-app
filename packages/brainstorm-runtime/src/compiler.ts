@@ -49,6 +49,7 @@ import {
 } from "@brainstorm-agentic/core";
 
 import { planTaskCaches, type TaskCachePlan } from "./cache-plan.js";
+import { createDismissalPolicy, type DismissalPolicy } from "./dismissal.js";
 import {
   jsonEqual,
   type ReferenceRoots,
@@ -118,6 +119,12 @@ export interface CompileContentWorkflowOptions {
    * outgrew the engine's maximum string length on real runs.
    */
   readonly journalFormat?: 1 | 2;
+  /**
+   * Panel members the submitter dismissed mid-run (see dismissal.ts). Held for
+   * the whole process and re-supplied on every resume, so the guards decide
+   * identically on every replay.
+   */
+  readonly dismissedMembers?: readonly string[];
 }
 
 export interface ResolvedRole {
@@ -165,6 +172,14 @@ export interface CompiledContentWorkflow {
     submission: JsonValue,
     params?: Readonly<Record<string, JsonValue>>,
   ): JsonObject;
+  /**
+   * True when the agent node compiled under `nodeId` belongs to a dismissed
+   * seat — either it works ON one or it IS one. The runner consults this
+   * through an override of the `agent` node executor (see runtime.ts), which is
+   * how a dismissed seat's remaining model calls are skipped without moving a
+   * single journal key. Absent when nothing is dismissed.
+   */
+  readonly isAgentDismissed?: (nodeId: string, scope: ScopeReader) => boolean;
 }
 
 const STATE_SELECTOR = "brainstorm.runtime.state";
@@ -206,11 +221,13 @@ function resolveBindings(
   bindings: Readonly<Record<string, BindValue>> | undefined,
   scope: ScopeReader,
   roots: ReferenceRoots,
+  dismissal?: DismissalPolicy | undefined,
 ): JsonObject {
   const state = stateFrom(scope);
   const output: Record<string, JsonValue> = {};
   for (const [name, binding] of Object.entries(bindings ?? {})) {
-    output[name] = resolveBindValue(binding, scope, state, roots);
+    const value = resolveBindValue(binding, scope, state, roots);
+    output[name] = dismissal === undefined ? value : dismissal.strip(value);
   }
   return output;
 }
@@ -1136,6 +1153,21 @@ class ContentCompiler {
    * every call of the run — the task turn's cacheable prefix.
    */
   private readonly cachePlan: TaskCachePlan;
+  /**
+   * Mid-run seat dismissal, or undefined when nothing is dismissed — in which
+   * case every guard below compiles away and the run behaves exactly as it did
+   * before the feature existed.
+   */
+  private readonly dismissal: DismissalPolicy | undefined;
+  /**
+   * The enclosing loop item variables at the point currently being compiled
+   * (`member`, then `cotStep`, then `commentor`, …). A dismissal guard asks
+   * about exactly these, so it reads the identities the CONTENT declared
+   * instead of guessing at variable names.
+   */
+  private readonly loopVars: string[] = [];
+  /** Enclosing loop vars per compiled agent node id, for the executor override. */
+  private readonly agentLoopVars = new Map<string, readonly string[]>();
 
   constructor(
     private readonly bundle: ContentBundle,
@@ -1161,6 +1193,7 @@ class ContentCompiler {
       },
     };
     this.cachePlan = planTaskCaches(this.content);
+    this.dismissal = createDismissalPolicy(options.dismissedMembers);
     this.functions
       .registerSelector(STATE_SELECTOR, (scope) => scope.get(BRAINSTORM_STATE))
       .registerActivity(SNAPSHOT_ACTIVITY, (_input, scope) => scope.get(BRAINSTORM_STATE));
@@ -1178,7 +1211,32 @@ class ContentCompiler {
       createInput: (submission, params = {}) => ({
         [BRAINSTORM_STATE]: createInitialState(this.content, submission, params),
       }),
+      ...(this.dismissal !== undefined
+        ? {
+            isAgentDismissed: (nodeId: string, scope: ScopeReader) =>
+              this.dismissedHere(scope, this.agentLoopVars.get(nodeId) ?? []),
+          }
+        : {}),
     };
+  }
+
+  /**
+   * The one question every dismissal guard asks: does this scope belong to a
+   * dismissed seat? `vars` are the enclosing loop item variables captured when
+   * the guarded node was compiled.
+   */
+  private dismissedHere(scope: ScopeReader, vars: readonly string[]): boolean {
+    return this.dismissal?.taints(scope, vars) ?? false;
+  }
+
+  /** Compiles `body` with `itemVar` added to the enclosing loop variables. */
+  private withLoopVar(itemVar: string, compileBody: () => WorkflowNode): WorkflowNode {
+    this.loopVars.push(itemVar);
+    try {
+      return compileBody();
+    } finally {
+      this.loopVars.pop();
+    }
   }
 
   private functionName(nodeId: string, purpose: string): string {
@@ -1236,6 +1294,11 @@ class ContentCompiler {
     const builderName = this.functionName(node.id, "task");
     const applyName = this.functionName(node.id, "apply");
     const resultKey = this.temp(node.id, "result");
+    // Captured for the `agent` executor override, which skips the call itself
+    // (see dismissal.ts), and for the store fold below, which must then not
+    // insist on an output that was deliberately never produced.
+    const enclosing = [...this.loopVars];
+    this.agentLoopVars.set(`${node.id}-execute`, enclosing);
     const routeDefinition = this.bundle.routes.routes[node.route];
     if (!this.skillResolver.hasRole(node.skill) || !routeDefinition) {
       throw new WorkflowConfigError(`agent node "${node.id}" has unresolved skill or route`);
@@ -1276,7 +1339,11 @@ class ContentCompiler {
             (extraVars.length > 0 ? `; unexpected: ${extraVars.join(", ")}` : ""),
         );
       }
-      const bindings = resolveBindings(node.bind, scope, this.roots);
+      // A dismissed seat has no role from here on: it leaves the roster the
+      // panel binds, the `ideas` map the integrator and the chair read, and the
+      // comment set a judge weighs. Applied to AGENT bindings only —
+      // deterministic activity handlers keep their journaled inputs untouched.
+      const bindings = resolveBindings(node.bind, scope, this.roots, this.dismissal);
       if (node.output.schema === "judgeDecision" && isJsonRecord(bindings.comments)) {
         // The merged comments object arrives in panel seating order every
         // round; re-key it in a deterministic per-round order so the judge's
@@ -1796,6 +1863,11 @@ class ContentCompiler {
     });
     this.functions.registerActivity(applyName, async (_input, scope, context) => {
       const raw = scope.get(resultKey);
+      // The agent node was skipped because its seat is dismissed: there is no
+      // output to store, and nothing further is written under that seat's
+      // paths — which is what leaves its history exactly as the dismissal
+      // found it.
+      if (raw === undefined && this.dismissedHere(scope, enclosing)) return stateFrom(scope);
       if (raw === undefined) throw new BrainstormRuntimeError(`agent "${node.id}" produced no output`, "MISSING_OUTPUT");
       return writeValidatedOutput(
         scope,
@@ -1942,7 +2014,14 @@ class ContentCompiler {
 
   private registerCollection(node: ContentForEachNode): string {
     const name = this.functionName(node.id, "items");
+    // The loop variables enclosing the forEach itself: its own itemVar is not
+    // bound yet, because the collection resolves in the parent frame.
+    const enclosing = [...this.loopVars];
     this.functions.registerCollection(name, (scope) => {
+      // A dismissed seat iterates nothing — this is what ends its own walk over
+      // its chain steps, and it answers before the reference is resolved
+      // because a seat dismissed before its first pass has no chain to read.
+      if (this.dismissedHere(scope, enclosing)) return [];
       const state = stateFrom(scope);
       const value = resolveDataReference(node.items, scope, state, { required: true });
       if (!Array.isArray(value)) {
@@ -1951,6 +2030,13 @@ class ContentCompiler {
           "INVALID_COLLECTION",
         );
       }
+      // A dismissed member is deliberately NOT filtered out of a member
+      // collection. Fan-out paths are `${itemVar}[${index}]` over the resolved
+      // array, and the dashboard reads a seat's first pass, its token spend and
+      // its review coordinates by that same index into the panel — so dropping
+      // one seat would renumber the rest and silently re-attribute their work.
+      // The seat keeps its branch and every leaf inside it is skipped instead,
+      // which costs a few journal entries and not one model call.
       if (node.exclude === undefined) return structuredClone(value) as JsonArray;
       const excluded = resolveDataReference(node.exclude, scope, state, { required: true });
       return value.filter((item) => !jsonEqual(item, excluded)) as JsonArray;
@@ -1960,7 +2046,7 @@ class ContentCompiler {
 
   private compileForEach(node: ContentForEachNode): WorkflowNode {
     const itemsFrom = this.registerCollection(node);
-    const body = this.compileNode(node.body);
+    const body = this.withLoopVar(node.itemVar, () => this.compileNode(node.body));
     if (node.mode === "sequential") {
       return reduce({
         id: node.id,
@@ -2043,15 +2129,31 @@ class ContentCompiler {
     const prepareName = this.functionName(node.id, "prepare");
     const finishName = this.functionName(node.id, "finish");
     const conditionName = this.functionName(node.id, "until");
+    const enclosing = [...this.loopVars];
+    // A dismissed seat's round does nothing, so its bookkeeping has nothing to
+    // record: `finishReviewRound` in particular REQUIRES a decision verdict,
+    // and the judge that would have produced one was skipped.
+    const seatGone = (scope: ScopeReader): boolean => this.dismissedHere(scope, enclosing);
     this.functions
       .registerActivity(initializeName, (_input, scope) =>
-        initializeReview(stateFrom(scope), scope, this.bundle.catalogs.verdicts),
+        seatGone(scope)
+          ? stateFrom(scope)
+          : initializeReview(stateFrom(scope), scope, this.bundle.catalogs.verdicts),
       )
       .registerActivity(prepareName, (_input, scope) =>
-        prepareReviewRound(stateFrom(scope), scope, this.bundle.catalogs.verdicts),
+        seatGone(scope)
+          ? stateFrom(scope)
+          : prepareReviewRound(stateFrom(scope), scope, this.bundle.catalogs.verdicts),
       )
-      .registerActivity(finishName, (_input, scope) => finishReviewRound(stateFrom(scope), scope))
-      .registerCondition(conditionName, (scope) => evaluateCondition(node.until, scope, this.roots));
+      .registerActivity(finishName, (_input, scope) =>
+        seatGone(scope) ? stateFrom(scope) : finishReviewRound(stateFrom(scope), scope),
+      )
+      // Ends a dismissed seat's loop at the first boundary instead of spinning
+      // it to the round budget: with the round's leaves skipped there is no
+      // verdict, and the content's own until-expression would never be true.
+      .registerCondition(conditionName, (scope) =>
+        seatGone(scope) ? true : evaluateCondition(node.until, scope, this.roots),
+      );
 
     // Round bookkeeping (allowed verdicts, ledger refresh, cursor flags) is
     // a pure function of the state plus the bundle's verdict catalog — a

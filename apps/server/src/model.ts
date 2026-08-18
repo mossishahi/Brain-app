@@ -62,6 +62,15 @@ export interface JobRecord {
   };
   /** Snapshot used so a suspended run resumes with the same execution policy. */
   executionSettings?: ServerSettings;
+  /**
+   * Panel seats the submitter dismissed mid-run, in dismissal order, with the
+   * moment each was dismissed. Append-only and never cleared by any resume
+   * path: the list rides every later submission's command, and dropping it
+   * would put a dismissed seat back to work.
+   */
+  dismissedMembers?: string[];
+  /** memberId -> when it was dismissed, for the dashboard's record. */
+  dismissedAt?: Record<string, number>;
   /** Set when the job moves to the view-only trash; never cleared. */
   trashedAt?: number;
 }
