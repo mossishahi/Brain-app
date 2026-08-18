@@ -30,6 +30,15 @@ interface AttemptScript {
   /** Throw from send() instead of running (startup failure). */
   readonly sendError?: Error;
   readonly costUsd?: number;
+  /**
+   * Per-SEND behavior within one attempt (session). Absent = every send in the
+   * attempt behaves the same, which is what every scenario except the result
+   * nudge needs; the nudge is precisely a SECOND send to the SAME session.
+   */
+  readonly sends?: readonly Pick<
+    AttemptScript,
+    "messages" | "callTools" | "result"
+  >[];
 }
 
 interface FakeState {
@@ -49,26 +58,32 @@ function fakeFactory(
     const script = attempts[Math.min(attemptIndex, attempts.length - 1)]!;
     attemptIndex += 1;
     let cancelled = false;
+    let sendIndex = 0;
     return {
       agentId: `agent-${attemptIndex}`,
       async send(message: string) {
         state.prompts.push(message);
         if (script.sendError) throw script.sendError;
+        const turn =
+          script.sends === undefined
+            ? script
+            : script.sends[Math.min(sendIndex, script.sends.length - 1)]!;
+        sendIndex += 1;
         const tools = options.local.customTools ?? {};
         return {
           id: `run-${attemptIndex}`,
           async *stream() {
-            for (const raw of script.messages ?? []) {
+            for (const raw of turn.messages ?? []) {
               if (cancelled) return;
               yield raw;
             }
-            if (script.callTools) await script.callTools(tools);
+            if (turn.callTools) await turn.callTools(tools);
           },
           async wait() {
-            if (cancelled && script.result.status === "finished") {
+            if (cancelled && turn.result.status === "finished") {
               return { status: "cancelled" } as CursorSdkRunResult;
             }
-            return script.result;
+            return turn.result;
           },
           supports: () => true,
           async cancel() {
@@ -471,15 +486,129 @@ test("a parse-failure attempt's usage carries into the eventual success", async 
   assert.deepEqual(result.status === "ok" ? result.output : undefined, {
     answer: "recovered",
   });
-  // Attempt 1 (10 in, 5 out) plus attempt 2 (12 in, 4 out, 2 read, 1 write).
+  // Attempt 1 is asked twice for its result before the session is abandoned, so
+  // it streams its usage message three times (3 x 10 in / 5 out); attempt 2 then
+  // adds 12 in, 4 out, 2 read, 1 write. Every send is billed and every send is
+  // counted — the point of the test is that none of it vanishes with the
+  // exception that reports the parse failure.
   assert.deepEqual(result.usage, {
-    inputTokens: 22,
-    outputTokens: 9,
-    totalTokens: 31,
+    inputTokens: 42,
+    outputTokens: 19,
+    totalTokens: 61,
     cacheReadInputTokens: 2,
     cacheWriteInputTokens: 1,
   });
-  assert.match(state.prompts[1]!, /not parseable JSON/);
+  // Same session first (asking for the result it never submitted), then the
+  // fresh session with the corrective feedback.
+  assert.match(state.prompts[1]!, /submit_result tool now/);
+  assert.match(state.prompts[2]!, /submit_result tool now/);
+  assert.match(state.prompts[3]!, /not parseable JSON/);
+  assert.equal(state.options.length, 2, "exactly one fresh session was started");
+});
+
+test("a session that ends mid-thought is asked for its result, not thrown away", async () => {
+  // Observed in a live review: a redeveloper ended its turn with "Good — I've
+  // confirmed the key literature facts. Now let me run my own independent
+  // verification…" and the run finished successfully having submitted nothing.
+  // The agent's loop ends when the model stops calling tools, so narration
+  // instead of a tool call ends the session — with all of its work still in it.
+  const state = newState();
+  const executor = new CursorAgentExecutor({
+    apiKey: "cursor-key",
+    listModels: async () => CATALOG,
+    agentFactory: fakeFactory(
+      [
+        {
+          result: finished(),
+          sends: [
+            {
+              // The model narrates its next move and stops. Nothing submitted.
+              messages: [
+                { type: "usage", usage: { inputTokens: 10, outputTokens: 5 } },
+              ],
+              result: {
+                status: "finished",
+                result:
+                  "Good — I've confirmed the key literature facts. Now let me run my own " +
+                  "independent verification of the joint/group selection mechanism.",
+              },
+            },
+            {
+              // Asked for the result, it hands it over in the SAME session.
+              callTools: async (tools) => {
+                await tools.submit_result!.execute({ answer: "finished after all" }, {});
+              },
+              result: finished(),
+            },
+          ],
+        },
+      ],
+      state,
+    ),
+  });
+  const result = await executor.execute(structuredTask, {
+    runId: "run-1",
+    nodePath: "root/review/redevelop",
+  });
+
+  assert.equal(result.status, "ok");
+  assert.deepEqual(result.status === "ok" ? result.output : undefined, {
+    answer: "finished after all",
+  });
+  // The session was CONTINUED, never restarted: one agent, two sends. Restarting
+  // would re-buy the literature review the model had just finished, and can fail
+  // the same way twice and take the run down with it.
+  assert.equal(state.options.length, 1, "no fresh session was started");
+  assert.equal(state.prompts.length, 2);
+  assert.match(state.prompts[1]!, /ended your turn without submitting a result/);
+  assert.match(state.prompts[1]!, /Do not start new work/);
+  // Usage across a multi-send session stays an ESTIMATE, and deliberately so:
+  // the streamed messages and the terminal result are two partial views of the
+  // same session (either can miss its tail), so they merge component-wise by
+  // MAX rather than summing — summing them would double-count a terminal figure
+  // that is already cumulative. Send 1 streamed 10 in / 5 out; send 2's terminal
+  // reported 15 in / 4 out with 2 read and 1 write, which normalizes to 12
+  // disjoint input tokens.
+  assert.deepEqual(result.usage, {
+    inputTokens: 12,
+    outputTokens: 5,
+    totalTokens: 17,
+    cacheReadInputTokens: 2,
+    cacheWriteInputTokens: 1,
+  });
+});
+
+test("a model that ignores the request twice falls back to a fresh session", async () => {
+  // The nudge is bounded: a model that will not hand over a result after two
+  // explicit requests is stuck, and starting over with corrective feedback is
+  // then the right answer rather than sending forever.
+  const state = newState();
+  const executor = new CursorAgentExecutor({
+    apiKey: "cursor-key",
+    listModels: async () => CATALOG,
+    agentFactory: fakeFactory(
+      [
+        { result: { status: "finished", result: "still thinking out loud" } },
+        {
+          // The fresh session runs in the raw-JSON fallback, so there is no
+          // submit_result tool to call: the object rides the final message.
+          result: { status: "finished", result: '{"answer":"fresh start"}' },
+        },
+      ],
+      state,
+    ),
+  });
+  const result = await executor.execute(structuredTask, {
+    runId: "run-1",
+    nodePath: "root/review/redevelop",
+  });
+
+  assert.equal(result.status, "ok");
+  // Three sends in the first session (the original plus two requests), then one
+  // fresh session — not an unbounded conversation.
+  assert.equal(state.prompts.length, 4);
+  assert.equal(state.options.length, 2);
+  assert.match(state.prompts[3]!, /not parseable JSON/);
 });
 
 test("terminal usage merges component-wise with the streamed sum", async () => {

@@ -323,6 +323,19 @@ const MAX_CRASH_RETRIES = 2;
 /** Base wait before a resource_exhausted restart (see quotaRetryDelayMs). */
 const DEFAULT_QUOTA_RETRY_DELAY_MS = 30_000;
 
+/**
+ * How many times one session is asked to hand over its result before the
+ * attempt is abandoned.
+ *
+ * The agent's loop ends when the model stops calling tools, so a model that
+ * closes its turn describing what it will do next — "Now let me run my own
+ * verification…" — ends the run having submitted nothing. Everything it has
+ * worked out is still in that session, so the cheap and accurate move is to ask
+ * it to finish rather than discard the session and re-buy the work. Two refusals
+ * is a stuck model, and the fresh-session ladder handles that.
+ */
+const MAX_RESULT_NUDGES = 2;
+
 /** The structured-output transport tool (in-process; input = the task schema). */
 const RESULT_TOOL = "submit_result";
 
@@ -1618,8 +1631,6 @@ async function executeAttempt(
   };
   armStallTimer();
   try {
-    run = await Promise.race([agent.send(promptParts.join("\n")), stallSignal]);
-    if (context.signal?.aborted) cancelRun("signal");
     const progressState = newProgressState(config);
     // Turn accounting. The stream is FRAGMENTS: one model turn arrives as
     // many `assistant` and `thinking` delta messages (a single probed turn
@@ -1629,6 +1640,10 @@ async function executeAttempt(
     // round-trip) and `usage` (one per completed send), which together
     // approximate the same "tool/API round-trips" the shared maxTurns
     // setting means on the Claude Agent SDK.
+    //
+    // Declared out here because a session may take more than one send (see
+    // the result nudge below): turns and usage accumulate across all of them,
+    // so a follow-up can never slip past the configured ceiling.
     let toolRounds = 0;
     const countedToolCalls = new Set<string>();
     let usageTurns = 0;
@@ -1640,107 +1655,158 @@ async function executeAttempt(
         cancelRun("turns");
       }
     };
-    // Manual iteration so the stall signal can interrupt a read blocked on a
-    // dead connection: run.cancel() cannot be relied on to end a generator
-    // whose upstream socket is a black hole.
-    const stream = run.stream();
-    const iterator = (
-      stream as AsyncIterable<UnknownRecord>
-    )[Symbol.asyncIterator]();
-    while (true) {
-      const step = await Promise.race([iterator.next(), stallSignal]);
-      if (step.done === true) break;
-      const rawMessage = step.value;
-      lastStreamActivityAt = Date.now();
-      armStallTimer();
-      const message = record(rawMessage);
-      if (message.type === "tool_call" && message.status === "running") {
-        const callId =
-          typeof message.call_id === "string"
-            ? message.call_id
-            : `round-${toolRounds}`;
-        if (!countedToolCalls.has(callId)) {
-          countedToolCalls.add(callId);
-          toolRounds += 1;
-          enforceTurnCap();
-        }
-      }
-      if (message.type === "usage") {
-        usageTurns += 1;
-        usage = addUsage(usage, coreUsage(message.usage as CursorSdkTokenUsage));
-        capture.usage = usage;
-        enforceTurnCap();
-      }
-      capture.turn = toolRounds + usageTurns + 1;
-      if (message.type === "thinking") {
-        // Thinking arrives as DELTAS; an empty delta separates blocks.
-        // Consecutive fragments concatenate into one trace segment so the
-        // captured reasoning summary reads as prose, not confetti.
-        const text = typeof message.text === "string" ? message.text : "";
-        if (text.length === 0) {
-          thinkingOpen = false;
-        } else if (capture.wantsTrace) {
-          const last = capture.thinking[capture.thinking.length - 1];
-          if (thinkingOpen && last !== undefined) {
-            last.text += text;
-          } else {
-            capture.thinking.push({ turn: capture.turn, text });
-            thinkingOpen = true;
+
+    /** Sends one turn and drains its stream, returning the terminal result. */
+    const sendAndConsume = async (prompt: string): Promise<CursorSdkRunResult> => {
+      run = await Promise.race([agent.send(prompt), stallSignal]);
+      if (context.signal?.aborted) cancelRun("signal");
+      // Manual iteration so the stall signal can interrupt a read blocked on
+      // a dead connection: run.cancel() cannot be relied on to end a
+      // generator whose upstream socket is a black hole.
+      const stream = run.stream();
+      const iterator = (
+        stream as AsyncIterable<UnknownRecord>
+      )[Symbol.asyncIterator]();
+      while (true) {
+        const step = await Promise.race([iterator.next(), stallSignal]);
+        if (step.done === true) break;
+        const rawMessage = step.value;
+        lastStreamActivityAt = Date.now();
+        armStallTimer();
+        const message = record(rawMessage);
+        if (message.type === "tool_call" && message.status === "running") {
+          const callId =
+            typeof message.call_id === "string"
+              ? message.call_id
+              : `round-${toolRounds}`;
+          if (!countedToolCalls.has(callId)) {
+            countedToolCalls.add(callId);
+            toolRounds += 1;
+            enforceTurnCap();
           }
         }
-      } else {
-        thinkingOpen = false;
-      }
-      reportSdkMessage(message, context, progressState);
-    }
-    const turns = toolRounds + usageTurns;
-    const finalResult = await Promise.race([run.wait(), stallSignal]);
-    if (finalResult.usage) {
-      // The terminal result's usage is cumulative when reported, and some
-      // runtimes emit only it (or only the streamed messages, or miss a
-      // session's tail in both): take the component-wise best estimate.
-      // Merged BEFORE the throw checks below, so a cancelled or errored run
-      // that still reported usage hands its spend to the retry ladder
-      // through the capture instead of losing it with the exception.
-      usage = mergeUsageEstimates(usage, coreUsage(finalResult.usage));
-      capture.usage = usage;
-    }
-    if (cancelled === "signal" || context.signal?.aborted) {
-      throw abortError(context.signal?.reason);
-    }
-    if (cancelled === "stall") {
-      throw stallError();
-    }
-    if (cancelled === "turns") {
-      throw new Error(
-        `Cursor SDK task exceeded the configured maximum of ${maxTurns} turns and was cancelled`,
-      );
-    }
-    if (finalResult.status === "cancelled") {
-      throw abortError();
-    }
-    if (finalResult.status === "error") {
-      throw new Error(
-        finalResult.error?.message ?? "Cursor SDK run ended with an error",
-      );
-    }
-
-    let output: JsonValue;
-    if (task.outputSchema !== undefined) {
-      if (capture.submittedResult !== undefined) {
-        output = capture.submittedResult;
-      } else {
-        const text = typeof finalResult.result === "string" ? finalResult.result : "";
-        const salvaged = salvageJsonText(text);
-        if (salvaged === undefined) {
-          const head = text.slice(0, 400).replace(/\s+/g, " ");
-          const tail = text.length > 700 ? text.slice(-200).replace(/\s+/g, " ") : "";
-          throw new Error(
-            `Cursor SDK did not return valid structured JSON (final message: ${text.length} chars). ` +
-              `Head: ${head}${tail ? ` … Tail: ${tail}` : ""}`,
-          );
+        if (message.type === "usage") {
+          usageTurns += 1;
+          usage = addUsage(usage, coreUsage(message.usage as CursorSdkTokenUsage));
+          capture.usage = usage;
+          enforceTurnCap();
         }
-        output = salvaged;
+        capture.turn = toolRounds + usageTurns + 1;
+        if (message.type === "thinking") {
+          // Thinking arrives as DELTAS; an empty delta separates blocks.
+          // Consecutive fragments concatenate into one trace segment so the
+          // captured reasoning summary reads as prose, not confetti.
+          const text = typeof message.text === "string" ? message.text : "";
+          if (text.length === 0) {
+            thinkingOpen = false;
+          } else if (capture.wantsTrace) {
+            const last = capture.thinking[capture.thinking.length - 1];
+            if (thinkingOpen && last !== undefined) {
+              last.text += text;
+            } else {
+              capture.thinking.push({ turn: capture.turn, text });
+              thinkingOpen = true;
+            }
+          }
+        } else {
+          thinkingOpen = false;
+        }
+        reportSdkMessage(message, context, progressState);
+      }
+      const result = await Promise.race([run.wait(), stallSignal]);
+      if (result.usage) {
+        // The terminal result's usage is cumulative when reported, and some
+        // runtimes emit only it (or only the streamed messages, or miss a
+        // session's tail in both): take the component-wise best estimate.
+        // Merged BEFORE the throw checks below, so a cancelled or errored run
+        // that still reported usage hands its spend to the retry ladder
+        // through the capture instead of losing it with the exception.
+        usage = mergeUsageEstimates(usage, coreUsage(result.usage));
+        capture.usage = usage;
+      }
+      // Asserted per SEND, not once per attempt: a stall or a turn-ceiling
+      // cancel during a follow-up must surface as itself. Reported as "no
+      // structured JSON" it would send the ladder down the wrong lane and
+      // describe a wedged connection as a model that answered badly.
+      if (cancelled === "signal" || context.signal?.aborted) {
+        throw abortError(context.signal?.reason);
+      }
+      if (cancelled === "stall") {
+        throw stallError();
+      }
+      if (cancelled === "turns") {
+        throw new Error(
+          `Cursor SDK task exceeded the configured maximum of ${maxTurns} turns and was cancelled`,
+        );
+      }
+      if (result.status === "cancelled") {
+        throw abortError();
+      }
+      if (result.status === "error") {
+        throw new Error(
+          result.error?.message ?? "Cursor SDK run ended with an error",
+        );
+      }
+      return result;
+    };
+
+    let finalResult = await sendAndConsume(promptParts.join("\n"));
+    let turns = toolRounds + usageTurns;
+
+    /**
+     * The result this send produced, or undefined when the session ended
+     * without one.
+     */
+    const resultOf = (result: CursorSdkRunResult): JsonValue | undefined => {
+      if (capture.submittedResult !== undefined) return capture.submittedResult;
+      const text = typeof result.result === "string" ? result.result : "";
+      return salvageJsonText(text);
+    };
+
+    let output: JsonValue | undefined;
+    if (task.outputSchema !== undefined) {
+      output = resultOf(finalResult);
+      /**
+       * The agent's loop ends when the model stops calling tools, so a model
+       * that finishes its turn narrating its next move — "Now let me run my own
+       * verification…" — ends the run successfully having submitted nothing.
+       * Its work is all still there in the session, so ASK IT to finish: the
+       * alternative (and what happened before) is to throw the session away and
+       * re-buy a redevelopment's literature review from scratch on the next
+       * attempt, which can fail the same way and take the run down with it.
+       *
+       * Bounded, and the turn ceiling still applies across sends: a model that
+       * ignores two explicit requests is genuinely stuck, and the fresh-session
+       * ladder below is the right answer then.
+       */
+      for (
+        let nudge = 0;
+        output === undefined && nudge < MAX_RESULT_NUDGES;
+        nudge += 1
+      ) {
+        progress(context, {
+          kind: "retry",
+          message: `Session ended without a result; asking for it (${nudge + 1}/${MAX_RESULT_NUDGES})`,
+          turn: turns,
+        });
+        finalResult = await sendAndConsume(
+          nativeStructuredOutput
+            ? "You ended your turn without submitting a result. Do not start new work and do not " +
+                "explain: call the submit_result tool now with the complete result for the task above."
+            : "You ended your turn without producing a result. Do not start new work and do not " +
+                "explain: reply with ONLY the complete raw JSON object for the task above.",
+        );
+        turns = toolRounds + usageTurns;
+        output = resultOf(finalResult);
+      }
+      if (output === undefined) {
+        const text = typeof finalResult.result === "string" ? finalResult.result : "";
+        const head = text.slice(0, 400).replace(/\s+/g, " ");
+        const tail = text.length > 700 ? text.slice(-200).replace(/\s+/g, " ") : "";
+        throw new Error(
+          `Cursor SDK did not return valid structured JSON (final message: ${text.length} chars). ` +
+            `Head: ${head}${tail ? ` … Tail: ${tail}` : ""}`,
+        );
       }
     } else {
       output = typeof finalResult.result === "string" ? finalResult.result : "";
@@ -1769,7 +1835,7 @@ async function executeAttempt(
     const metadata: JsonObject = {
       executor: "cursor-agent-sdk",
       ...(typeof agent.agentId === "string" ? { agentId: agent.agentId } : {}),
-      ...(typeof run.id === "string" ? { runId: run.id } : {}),
+      ...(typeof run?.id === "string" ? { runId: run.id } : {}),
       turns,
       ...(typeof finalResult.durationMs === "number"
         ? { durationMs: finalResult.durationMs }
@@ -1777,7 +1843,9 @@ async function executeAttempt(
       ...(costUsd !== undefined ? { totalCostUsd: costUsd } : {}),
     };
     return {
-      result: { taskId: task.taskId, status: "ok", output, usage, metadata },
+      // Defined by construction: the schema branch throws above when no result
+      // could be obtained, and the schemaless branch always assigns a string.
+      result: { taskId: task.taskId, status: "ok", output: output as JsonValue, usage, metadata },
       turns,
       ...(costUsd !== undefined ? { costUsd } : {}),
     };
