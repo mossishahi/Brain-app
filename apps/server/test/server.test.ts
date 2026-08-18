@@ -2543,8 +2543,8 @@ test("manual gate can shrink, complete, and reload after restart", async () => {
       "the run leaves only its provenance pin on disk",
     );
 
-    // Lazy fetching is now observed where it actually happens — the documents
-    // the run requested from the registry — rather than through a disk
+    // Skill delivery is observed where it actually happens — the documents the
+    // run requested from the registry — rather than through a disk
     // side-effect that no longer exists.
     // The double logs full registry paths; compare on bundle-relative ones.
     const prefix = `bundles/${pin.bundle}/${pin.version}/`;
@@ -2567,11 +2567,18 @@ test("manual gate can shrink, complete, and reload after restart", async () => {
     for (const path of panelRoles) {
       assert.ok(fetched.has(path), `${path} fetched by suspension`);
     }
-    for (const notReached of ["brain", "commentor", "judge", "chair"]) {
-      assert.equal(
-        fetched.has(`skills/roles/${notReached}.md`),
-        false,
-        `${notReached} must not be fetched before its stage is reached`,
+    // Every skill is bought at pin time, while the connection that resolved the
+    // pin is proven alive — including the roles whose stages are still many
+    // hours away. Fetching them lazily made a run's success depend on the
+    // registry connection surviving into its final stretch, and an overnight
+    // run died exactly there: the one never-yet-fetched skill failed every
+    // walk that reached it.
+    for (const laterStage of ["brain", "commentor", "judge", "chair"]) {
+      const path = `skills/roles/${laterStage}.md`;
+      if (!shippedRoles.has(path)) continue;
+      assert.ok(
+        fetched.has(path),
+        `${laterStage} is fetched up front, so no later stage needs the connection`,
       );
     }
     assert.ok(suspended.pendingGate?.members);
