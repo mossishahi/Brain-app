@@ -253,6 +253,13 @@ export interface CursorAgentExecutorConfig {
    * not a thinking model. Default 6 minutes; 0 disables.
    */
   readonly stallTimeoutMs?: number;
+  /**
+   * Base wait before restarting after an upstream resource_exhausted
+   * (scaled by the retry number: 1x, then 2x). A quota window needs time
+   * to refill, so restarting immediately re-hits the same empty window.
+   * Default 30 seconds; tests set it low.
+   */
+  readonly quotaRetryDelayMs?: number;
   readonly creditRecovery?: {
     readonly safetyBufferSeconds?: number;
     readonly openRouterApiKey?: string;
@@ -312,6 +319,9 @@ const TRACE_TRAIT = "extended-reasoning";
  * produced no output to validate.
  */
 const MAX_CRASH_RETRIES = 2;
+
+/** Base wait before a resource_exhausted restart (see quotaRetryDelayMs). */
+const DEFAULT_QUOTA_RETRY_DELAY_MS = 30_000;
 
 /** The structured-output transport tool (in-process; input = the task schema). */
 const RESULT_TOOL = "submit_result";
@@ -1350,10 +1360,42 @@ function mergeUsageEstimates(a: TokenUsage, b: TokenUsage): TokenUsage {
 function isRetryableInfrastructure(error: unknown): boolean {
   const value = record(error);
   if (value.isRetryable === true) return true;
+  if (isResourceExhausted(error)) return true;
   const message = error instanceof Error ? error.message : String(error);
   return /local runtime (?:crashed|exited|terminated)|transport (?:closed|error)|ECONNRESET|socket hang up/i.test(
     message,
   );
+}
+
+/**
+ * Upstream quota/rate exhaustion ("[resource_exhausted] Error"). Transient
+ * by nature — the window refills — but unlike a crash it needs TIME, not a
+ * fresh session: an immediate restart re-hits the same empty window, which
+ * is exactly how an overnight run turned one 07:08 quota dip into a failed
+ * task. Classified retryable, with a bounded wait before the restart.
+ */
+function isResourceExhausted(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /resource_exhausted/i.test(message);
+}
+
+/** Signal-aware pause for the quota-retry wait; aborts reject immediately. */
+function delayForRetry(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(abortError(signal.reason));
+      return;
+    }
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(abortError(signal?.reason));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 /* ------------------------------------------------------------------------ */
@@ -2069,15 +2111,23 @@ export class CursorAgentExecutor implements AgentExecutor {
           continue;
         }
         // Transient infrastructure (crashed local runtime, dropped
-        // transport, retryable backend error): bounded restarts in a fresh
-        // session and sandbox, consuming no validation attempts.
+        // transport, retryable backend error, exhausted upstream quota):
+        // bounded restarts in a fresh session and sandbox, consuming no
+        // validation attempts.
         if (isRetryableInfrastructure(error) && crashRetries < MAX_CRASH_RETRIES) {
           crashRetries += 1;
           attempt -= 1;
+          const quotaWaitMs = isResourceExhausted(error)
+            ? (this.config.quotaRetryDelayMs ?? DEFAULT_QUOTA_RETRY_DELAY_MS) * crashRetries
+            : 0;
           progress(context, {
             kind: "retry",
-            message: `Cursor SDK infrastructure error; restarting the task, retry ${crashRetries}/${MAX_CRASH_RETRIES}`,
+            message:
+              quotaWaitMs > 0
+                ? `Cursor backend reports resource_exhausted; waiting ${Math.round(quotaWaitMs / 1000)}s, then retry ${crashRetries}/${MAX_CRASH_RETRIES}`
+                : `Cursor SDK infrastructure error; restarting the task, retry ${crashRetries}/${MAX_CRASH_RETRIES}`,
           });
+          if (quotaWaitMs > 0) await delayForRetry(quotaWaitMs, context.signal);
           continue;
         }
         return {

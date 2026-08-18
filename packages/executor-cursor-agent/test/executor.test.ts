@@ -942,6 +942,46 @@ test("retryable infrastructure errors restart without consuming attempts", async
   });
 });
 
+test("resource_exhausted waits briefly and restarts instead of failing the task", async () => {
+  const state = newState();
+  const events: string[] = [];
+  const executor = new CursorAgentExecutor({
+    apiKey: "cursor-key",
+    listModels: async () => CATALOG,
+    maxValidationAttempts: 1,
+    quotaRetryDelayMs: 5,
+    agentFactory: fakeFactory(
+      [
+        // The upstream quota error carries NO isRetryable flag: the message
+        // alone must route it into the bounded restart lane.
+        { sendError: new Error("[resource_exhausted] Error"), result: finished("") },
+        {
+          callTools: async (tools) => {
+            await tools.submit_result!.execute({ answer: "after refill" }, {});
+          },
+          result: finished(""),
+        },
+      ],
+      state,
+    ),
+  });
+  const result = await executor.execute(structuredTask, {
+    runId: "run-1",
+    nodePath: "root/brain",
+    reportProgress: (progress) => {
+      events.push(`${progress.kind}: ${progress.message}`);
+    },
+  });
+  assert.equal(result.status, "ok");
+  assert.deepEqual(result.status === "ok" ? result.output : undefined, {
+    answer: "after refill",
+  });
+  assert.ok(
+    events.some((entry) => /retry: .*resource_exhausted.*waiting \d+s/.test(entry)),
+    `expected a quota-wait retry event, got: ${events.join(" | ")}`,
+  );
+});
+
 test("cancellation propagates as an AbortError and cancels the run", async () => {
   const state = newState();
   const controller = new AbortController();
