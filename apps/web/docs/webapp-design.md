@@ -298,9 +298,11 @@ activity feed, fold), and the *walk inspector* sits below in its own panel.
   and Round 1 is compared against the original like any other version (a round that rewrote
   nothing renders fully dimmed with an "unchanged this round" note). The base card joins only
   decks that have at least one round or cross-rewrite; an untouched step keeps its pending card.
-- Round text: the step text as it came OUT of that round, full height, never clamped or
-  scrolled. Words carried from earlier rounds render dimmed; the round's own changes render at
-  full weight (round 1 is all full-weight — nothing was reviewed before it). When the round's
+- Round text: the step text as it came OUT of that round (its number is an identity, not a
+  verdict — that round's verdict rides with its comments, one card back), full height, never
+  clamped or scrolled. Words carried from earlier rounds render dimmed; the round's own changes
+  render at full weight (round 1 is all full-weight — nothing was reviewed before it). When the
+  round's
   revision also rewrote OTHER steps, the card carries only a one-line note per rewritten step
   ("also rewrote step 5 this round — see step 5"); the rewritten text itself is shown on the
   affected step, never here.
@@ -315,10 +317,17 @@ activity feed, fold), and the *walk inspector* sits below in its own panel.
   changes keep the normal full-weight-over-dimmed treatment. The step's own "Round k / K"
   numbering never shifts around these cards, and older cards keep the step's history
   untouched.
-- Comments panel: under each round's text, collapsed by default. The reviewer names ride ON the
-  summary row itself, right after the "Comments & judgement" label — Judge first, then each
-  commentor — each name colored by its verdict (`--ok` Pass, `--warn` Build, `--bad` Interrupt,
-  dim pending), so the row is a verdict summary even while folded. Clicking a name opens the
+- Comments panel: under the text the comments were actually made against, collapsed by default.
+  A round is handed a text, gathers comments on it, and only then redevelops, so round k's
+  comments describe the version the PREVIOUS card shows: every card carries the review of the
+  version it displays, which puts round 1's comments under "Original thought" and leaves the
+  newest version unreviewed until a later round reads it. The summary row names the round the
+  review came from, because the card it sits on is numbered for the round that WROTE the text,
+  not the one that judged it. The reviewer names ride ON the
+  summary row itself, right after the "Comments & judgement · round k" label — Judge first,
+  then each commentor — each name colored by its verdict (`--ok` Pass, `--warn` Build,
+  `--bad` Interrupt, dim pending), so the row is a verdict summary even while folded. Clicking a
+  name opens the
   panel on that reviewer (Judge is the default): the judge's reason, confirmed issues (step /
   verified-vs-authority / must-address badges, evidence), and per-commentor assessment badges;
   a commentor's reason, suggestion (Build), and evidence (Interrupt). A copy icon copies the

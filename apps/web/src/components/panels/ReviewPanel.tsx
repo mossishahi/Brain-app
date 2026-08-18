@@ -250,8 +250,7 @@ function CommentContent({ comment }: { comment: CommentView }) {
   );
 }
 
-function commentCopyText(selected: "judge" | string, computed: RoundComputedView): string {
-  const round = computed.round;
+function commentCopyText(selected: "judge" | string, round: ReviewRoundView): string {
   if (selected === "judge") {
     const d = round.decision;
     if (!d) return `round ${round.round}: judgement in progress`;
@@ -281,20 +280,6 @@ function commentCopyText(selected: "judge" | string, computed: RoundComputedView
  * between the judge (default) and each commentor; the copy button copies the
  * selected view for pasting into a bug report.
  */
-/* The round's verdict is carried by the COLOR of its index number alone. */
-function roundNumClass(round: ReviewRoundView): string {
-  switch (round.decision?.verdict) {
-    case "Pass":
-      return "round-num-ok";
-    case "Build":
-      return "round-num-warn";
-    case "Interrupt":
-      return "round-num-bad";
-    default:
-      return "round-num-active";
-  }
-}
-
 /** The reviewer's name colored by its verdict — the color IS the status. */
 function verdictClass(verdict: string | undefined): string {
   switch (verdict) {
@@ -310,19 +295,24 @@ function verdictClass(verdict: string | undefined): string {
 }
 
 function CommentsPanel({
-  computed,
+  round,
   open,
   onToggle,
   selected,
   onSelect,
 }: {
-  computed: RoundComputedView;
+  /**
+   * The round that reviewed the version this card shows — the round AFTER
+   * the one that produced it. A round comments on the text it was handed and
+   * only then redevelops, so pairing a card with its OWN round's comments
+   * showed every reviewer against a version written in reply to them.
+   */
+  round: ReviewRoundView;
   open: boolean;
   onToggle: () => void;
   selected: string;
   onSelect: (tag: string) => void;
 }) {
-  const round = computed.round;
   const labelOf = (commentorId: string): string =>
     round.comments.find((c) => c.commentorId === commentorId)?.commentorLabel ?? commentorId;
   const active = selected === "judge" || round.comments.some((c) => c.commentorId === selected)
@@ -345,7 +335,10 @@ function CommentsPanel({
           onToggle();
         }}
       >
-        <span className="review-fold-name">Comments & judgement</span>
+        <span className="review-fold-name">
+          Comments & judgement
+          <span className="dim"> · round {round.round}</span>
+        </span>
         <span className="reviewer-names" role="tablist" aria-label="reviewer">
           <button
             type="button"
@@ -376,7 +369,7 @@ function CommentsPanel({
         <span className="round-card-actions">
           <CopyButton
             label="copy this view for a bug report"
-            text={() => commentCopyText(active, computed)}
+            text={() => commentCopyText(active, round)}
           />
         </span>
       </summary>
@@ -471,6 +464,21 @@ function deckEntries(step: ReviewStepView, timeline: SeatTimeline): DeckEntry[] 
   return entries;
 }
 
+/**
+ * The round that reviewed the version a given deck entry shows.
+ *
+ * A round is handed a text, gathers comments on it, and only then
+ * redevelops — so the comments of round k describe the text that ENTERED
+ * round k, which is the version the previous card displays. The deck is
+ * chronological, so "the next entry, when it is a round" is the whole rule,
+ * and it stays correct across the cross-rewrite cards interleaved with the
+ * step's own rounds. The last version has no reviewer yet.
+ */
+function reviewedBy(deck: readonly DeckEntry[], index: number): ReviewRoundView | undefined {
+  const next = deck[index + 1];
+  return next?.kind === "round" ? next.round : undefined;
+}
+
 function originalReportText(
   member: ReviewMemberView,
   step: ReviewStepView,
@@ -560,6 +568,18 @@ function RoundDeck({
       : -1;
   const position = selectedIndex >= 0 ? selectedIndex : deck.length - 1;
   const entry = deck[position]!;
+  // The review performed ON this version — see reviewedBy.
+  const review = reviewedBy(deck, position);
+  const reviewFold = (key: string): ReactNode =>
+    review === undefined ? undefined : (
+      <CommentsPanel
+        round={review}
+        open={commentState.open(key)}
+        onToggle={() => commentState.toggle(key)}
+        selected={commentState.tag(key)}
+        onSelect={(tag) => commentState.select(key, tag)}
+      />
+    );
   const newest = position === deck.length - 1;
   const versionMeta = newest ? "as the review leaves it" : "an earlier version";
   // The pager arrows hug the card title — exactly the seat pager's pattern —
@@ -612,6 +632,7 @@ function RoundDeck({
           </span>
         </div>
         <p className="round-text">{entry.text}</p>
+        {reviewFold(`${member.memberId}:${step.index}:${entry.key}`)}
       </div>
     );
   }
@@ -647,6 +668,7 @@ function RoundDeck({
         <p className="round-text">
           {segmentSpans(entry.cross.segments, prospective ? "diff-blue" : "diff-red")}
         </p>
+        {reviewFold(`${member.memberId}:${step.index}:${entry.key}`)}
       </div>
     );
   }
@@ -662,8 +684,8 @@ function RoundDeck({
         <span className="review-fold-name">
           Round{" "}
           <span
-            className={roundNumClass(round)}
-            title={round.decision?.verdict ?? "in progress"}
+            className="round-num-active"
+            title="the text this round left standing; its own verdict sits with the review of the version before it"
           >
             {round.round}
           </span>
@@ -712,15 +734,7 @@ function RoundDeck({
           ))}
         </div>
       )}
-      {computed !== undefined && (
-        <CommentsPanel
-          computed={computed}
-          open={commentState.open(commentKey)}
-          onToggle={() => commentState.toggle(commentKey)}
-          selected={commentState.tag(commentKey)}
-          onSelect={(tag) => commentState.select(commentKey, tag)}
-        />
-      )}
+      {reviewFold(commentKey)}
     </div>
   );
 }
