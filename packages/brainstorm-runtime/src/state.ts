@@ -359,6 +359,37 @@ function revisedSteps(rounds: readonly JsonObject[]): number[] {
 }
 
 /**
+ * For each position in the ledger, the steps that a LATER round's revision
+ * rewrote. Built once from the back, so the reconciliation below stays linear
+ * and — like every other part of the projection — is a pure function of the
+ * recorded ledger.
+ *
+ * This is what lets a closed record stay honest. A repair at a later walk
+ * position may rewrite a step that closed earlier: the text an objection was
+ * raised against, or that a `closingReason` certified, is then gone. Without
+ * this, the projection keeps asserting the old status forever — an objection
+ * left standing reads as open long after a later revision answered it, and a
+ * settled step reads as checked when what was checked no longer exists.
+ */
+function stepsRevisedAfter(entries: readonly JsonValue[]): ReadonlySet<number>[] {
+  const after: ReadonlySet<number>[] = new Array<ReadonlySet<number>>(entries.length);
+  let running: ReadonlySet<number> = new Set<number>();
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    after[index] = running;
+    const entry = entries[index];
+    const touched = isObject(entry) && Array.isArray(entry.touched) ? entry.touched : [];
+    if (touched.length > 0) {
+      const next = new Set(running);
+      for (const step of touched) {
+        if (typeof step === "number") next.add(step);
+      }
+      running = next;
+    }
+  }
+  return after;
+}
+
+/**
  * The member's ledger SCOPED to what the current walk position can still act
  * on. The flat ledger carried every round of every earlier position into every
  * later call, so a seat's context grew with its own walk — and most of that
@@ -379,13 +410,25 @@ function revisedSteps(rounds: readonly JsonObject[]): number[] {
  *   are unresolved by construction — the one thing the flat ledger left every
  *   reader to infer for itself.
  * - `rounds`: this position's own rounds, verbatim, exactly as before.
+ *
+ * A closed entry carries `revisedSince: true` when a LATER revision rewrote
+ * the step it speaks about. Nothing is dropped — the objection and the
+ * closing reason still ride — but the reader is told the text they were
+ * recorded against has since moved, so a standing objection is not presented
+ * as open when a later repair may already have answered it, and a settled
+ * step is not presented as checked when the check was made against text that
+ * no longer stands.
  */
 function scopedRecord(
   state: JsonObject,
   memberId: string,
   currentStep: number,
 ): JsonObject {
-  const byStep = roundsByStep(memberHistory(state, memberId));
+  const entries = memberHistory(state, memberId);
+  const byStep = roundsByStep(entries);
+  const revisedAfter = stepsRevisedAfter(entries);
+  const positionOf = new Map<JsonValue, number>();
+  entries.forEach((entry, index) => positionOf.set(entry, index));
   const clean: number[] = [];
   const settled: JsonObject[] = [];
   const standing: JsonValue[] = [];
@@ -399,6 +442,8 @@ function scopedRecord(
       clean.push(step);
       continue;
     }
+    // What a later round rewrote, as of the moment this position closed.
+    const rewrittenLater = revisedAfter[positionOf.get(last) ?? entries.length - 1] ?? new Set<number>();
     settled.push({
       step,
       rounds: rounds.length,
@@ -406,10 +451,17 @@ function scopedRecord(
       objections,
       revised: revisedSteps(rounds),
       closingReason: typeof last.reason === "string" ? last.reason : "",
+      ...(rewrittenLater.has(step) ? { revisedSince: true } : {}),
     });
     if (!passed) {
-      for (const issue of Array.isArray(last.issues) ? last.issues : []) {
-        standing.push(structuredClone(issue));
+      for (const raw of Array.isArray(last.issues) ? last.issues : []) {
+        const issue = structuredClone(raw);
+        const target = isObject(issue) ? issue.step : undefined;
+        standing.push(
+          typeof target === "number" && rewrittenLater.has(target)
+            ? { ...issue, revisedSince: true }
+            : issue,
+        );
       }
     }
   }

@@ -171,6 +171,61 @@ test("the current position's rounds ride verbatim, wherever their issues point",
   );
 });
 
+test("a later revision retires the record's claim that closed business still stands", () => {
+  // Step 3 ran out of rounds with two objections standing — one of them
+  // pinned to step 2, which had already settled. A repair at step 4 then
+  // rewrites steps 2 and 3. Both the standing objections and step 2's
+  // settled entry speak about text that no longer exists, so the projection
+  // must say so rather than keep asserting the old status.
+  const entries = [
+    ...ledger(),
+    {
+      step: 4,
+      round: 1,
+      verdict: "Interrupt",
+      reason: "The opening bound is applied where it does not hold.",
+      issues: [issue(4, "The bound is applied outside its stated range.")],
+      touched: [2, 3, 4],
+      untouched: [1, 5, 6],
+    },
+    { step: 4, round: 2, verdict: "Pass", reason: "The repaired bound now carries the step." },
+  ];
+  const record = recordOf(initializeReview(stateWith(entries), walkScope(5), VERDICTS));
+
+  const standing = record.standing as JsonObject[];
+  assert.equal(standing.length, 2, "no standing objection is dropped");
+  for (const entry of standing) {
+    assert.equal(
+      entry.revisedSince,
+      true,
+      `the step ${String(entry.step)} objection is marked as speaking about rewritten text`,
+    );
+    assert.ok(entry.point, "the objection itself still rides in full");
+  }
+
+  const settled = record.settled as JsonObject[];
+  const step2 = settled.find((entry) => entry.step === 2);
+  assert.equal(step2?.revisedSince, true, "step 2 closed, then a later repair rewrote it");
+  assert.equal(
+    step2?.closingReason,
+    "The revision states the control the earlier round required.",
+    "the closing reason still rides — nothing is dropped, only qualified",
+  );
+  const step1Clean = record.clean as number[];
+  assert.deepEqual(step1Clean, [1], "a step no later repair touched stays plainly clean");
+});
+
+test("an untouched closed position carries no revised-since marker", () => {
+  // The unmodified fixture: step 4 is the working position and nothing after
+  // step 3 rewrote anything, so no closed entry may claim its text moved.
+  const record = recordOf(initializeReview(stateWith(ledger()), walkScope(4), VERDICTS));
+  const projected = JSON.stringify(record);
+  assert.ok(
+    !projected.includes("revisedSince"),
+    "the marker appears only where a later revision actually rewrote the step",
+  );
+});
+
 test("no objection is ever dropped: every recorded point stays reachable", () => {
   const entries = [
     ...ledger(),
