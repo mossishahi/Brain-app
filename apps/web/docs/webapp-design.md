@@ -288,7 +288,12 @@ activity feed, fold), and the *walk inspector* sits below in its own panel.
   full expertise (department / umbrella · subfields) on the right. One seat visible at a time.
   Inside, one card per chain step stacks vertically ("Step i / N" colored by its outcome, plus
   the ×k redeveloped badge).
-- Round deck: each step card holds its rounds as sub-cards, NEWEST ON TOP (round k sits over
+- Round deck: one sub-card per VERSION of the step, not per round. A round that rewrote nothing
+  wrote no version, so it gets no card — its review rides the version it actually read, which is
+  why a position that ends on a Pass has no trailing card repeating the previous text. Every
+  round's review still appears exactly once. A step the walk has reached but recorded nothing for
+  yet reports what its seat is doing ("round 1 in progress — commentors are working") instead of
+  reading as untouched. Cards are NEWEST ON TOP (round k sits over
   round k−1), paged exactly like the seats: the same ghost prev/next chevrons hugging the
   "Round k / K" title in the card header (disabled dim at either end). The header also carries
   the verdict chip, a "redeveloped" badge, and a copy icon that copies the round as a
@@ -316,7 +321,8 @@ activity feed, fold), and the *walk inspector* sits below in its own panel.
   (retroactive); the origin card's one-line notes use the same two colors. A step's own-round
   changes keep the normal full-weight-over-dimmed treatment. The step's own "Round k / K"
   numbering never shifts around these cards, and older cards keep the step's history
-  untouched.
+  untouched. The "redeveloped" badge belongs to the review shown on the card — it says THIS
+  version was sent back — not to the round that wrote the text, so it travels with the comments.
 - Comments panel: under the text the comments were actually made against, collapsed by default.
   A round is handed a text, gathers comments on it, and only then redevelops, so round k's
   comments describe the version the PREVIOUS card shows: every card carries the review of the

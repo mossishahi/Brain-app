@@ -83,22 +83,39 @@ test("a round's comments belong to the card showing the text it was handed", () 
   const timeline = computeSeatTimeline(member, ["v0 original"]);
   const deck = deckEntries(step, timeline);
 
-  // Original thought, then one card per round.
+  // A card is a VERSION. Rounds 1 and 2 each rewrote the step, so each wrote
+  // one; round 3 passed without rewriting, so it wrote none and gets no card
+  // — its review rides the version it actually read.
   assert.deepEqual(
     deck.map((entry) => entry.kind),
-    ["original", "round", "round", "round"],
+    ["original", "round", "round"],
+  );
+  assert.ok(
+    !deck.some((entry) => entry.kind === "round" && entry.round.round === 3),
+    "a round that wrote no new version has no card repeating the previous text",
   );
 
   // The whole point: round 1 reviewed the ORIGINAL, so its comments belong to
   // the base card — not to the card showing what round 1 then wrote in reply.
   assert.equal(reviewedBy(deck, 0)?.round, 1, "the original was reviewed by round 1");
   assert.equal(reviewedBy(deck, 1)?.round, 2, "round 1's output was reviewed by round 2");
-  assert.equal(reviewedBy(deck, 2)?.round, 3, "round 2's output was reviewed by round 3");
   assert.equal(
-    reviewedBy(deck, 3),
-    undefined,
-    "the version the walk left standing has not been reviewed by anything",
+    reviewedBy(deck, 2)?.round,
+    3,
+    "the standing version carries the review that closed the position",
   );
+});
+
+test("every round's review is shown exactly once, on some card", () => {
+  // Dropping cards must not drop reviews: each round read some version, and
+  // that version's card is where its comments belong.
+  const step = threeRoundStep();
+  const timeline = computeSeatTimeline(seat([step]), ["v0 original"]);
+  const deck = deckEntries(step, timeline);
+  const shown = deck
+    .map((_, index) => reviewedBy(deck, index)?.round)
+    .filter((n): n is number => n !== undefined);
+  assert.deepEqual(shown, [1, 2, 3], "each round appears once, in order");
 });
 
 test("every card's review is the one that read that card's own text", () => {

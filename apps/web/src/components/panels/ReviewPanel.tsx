@@ -426,6 +426,31 @@ function bugReportText(
 }
 
 
+/**
+ * What a step with no recorded round yet is actually doing.
+ *
+ * A step's rounds only appear once results are recorded, so a position whose
+ * commentors are already running looked identical to one nothing had reached
+ * — the seat read as idle while six reviewers were mid-flight on it. The
+ * seat's live position says otherwise, so it is what the card reports.
+ */
+function pendingNote(member: ReviewMemberView, step: ReviewStepView): string {
+  const at = member.progress;
+  if (at?.step === step.index) {
+    const doing =
+      at.phase === "judging"
+        ? "the judge is ruling"
+        : at.phase === "redeveloping"
+          ? "the member is redeveloping"
+          : "commentors are working";
+    return `round ${at.round} in progress — ${doing}`;
+  }
+  if (step.outcome === "under-review") {
+    return "round 1 in progress — comments are being gathered";
+  }
+  return "not yet reviewed";
+}
+
 function originalReportText(
   member: ReviewMemberView,
   step: ReviewStepView,
@@ -498,11 +523,7 @@ function RoundDeck({
     const text = timeline.chain.get(step.index);
     return (
       <div className="round-card round-card-pending">
-        <p className="dim small">
-          {step.outcome === "under-review"
-            ? "round 1 in progress — comments are being gathered"
-            : "not yet reviewed"}
-        </p>
+        <p className="dim small">{pendingNote(member, step)}</p>
         {text !== undefined && <p className="round-text diff-keep-block">{text}</p>}
       </div>
     );
@@ -639,14 +660,13 @@ function RoundDeck({
           <span className="dim"> / {latest}</span>
         </span>
         {newerButton}
-        {round.revision && <span className="badge badge-warn">redeveloped</span>}
+        {/* Whether THIS version was sent back — a fact about the review shown
+            on this card, not about the round that wrote the text. */}
+        {review?.revision && <span className="badge badge-warn">redeveloped</span>}
         {deck.length > 1 && (
           <span className="review-step-meta">
             {[
-              // Round 1 included: with the Original-thought base card in the
-              // deck, a round that rewrote nothing says so instead of
-              // re-debuting the text at full weight.
-              ...(!computed?.ownRewrite ? ["unchanged this round"] : []),
+              ...(!computed?.ownRewrite ? ["unchanged from the previous version"] : []),
               versionMeta,
             ].join(" · ")}
           </span>

@@ -248,10 +248,17 @@ export function computeSeatTimeline(
  * position's round applied to this step — each its own card, so paging the
  * deck reads the step's full text history in the order it happened.
  */
-export type DeckEntry =
+/**
+ * One card of a step's deck: a VERSION of the step's text, plus the review
+ * performed ON that version. For a round entry, `round` is the round that
+ * WROTE the text and `review` the round that then read it — a different
+ * round, because a round comments before it redevelops.
+ */
+export type DeckEntry = { readonly review?: ReviewRoundView } & (
   | { readonly kind: "original"; readonly key: string; readonly text: string }
   | { readonly kind: "round"; readonly key: string; readonly round: ReviewRoundView }
-  | { readonly kind: "cross"; readonly key: string; readonly cross: CrossRewriteView };
+  | { readonly kind: "cross"; readonly key: string; readonly cross: CrossRewriteView }
+);
 
 /**
  * The deck in chronological order. Walk order IS the chronology: the
@@ -280,20 +287,32 @@ export function deckEntries(step: ReviewStepView, timeline: SeatTimeline): DeckE
   if (entries.length > 0 && original !== undefined) {
     entries.unshift({ kind: "original", key: "original", text: original });
   }
-  return entries;
+  // Attach each version's reviewer BEFORE anything is dropped: the deck is
+  // chronological, so the round that read a version is the next entry that
+  // is a round.
+  const withReview = entries.map((entry, index) => {
+    const next = entries[index + 1];
+    return next?.kind === "round" ? { ...entry, review: next.round } : entry;
+  });
+
+  // A round that wrote no new version of THIS step gets no card of its own —
+  // its review rides the version it actually read. The last round of a
+  // position never redevelops (it either passed or hit the cap), so without
+  // this the deck always ended on a card repeating the previous text with
+  // nothing of its own to show.
+  return withReview.filter((entry) => {
+    if (entry.kind !== "round") return true;
+    const computed = timeline.rounds.get(roundViewKey(step.index, entry.round.round));
+    return computed?.ownRewrite === true || entry.review !== undefined;
+  });
 }
 
 /**
- * The round that reviewed the version a given deck entry shows.
- *
- * A round is handed a text, gathers comments on it, and only then
- * redevelops — so the comments of round k describe the text that ENTERED
- * round k, which is the version the previous card displays. The deck is
- * chronological, so "the next entry, when it is a round" is the whole rule,
- * and it stays correct across the cross-rewrite cards interleaved with the
- * step's own rounds. The last version has no reviewer yet.
+ * The round that reviewed the version a given deck entry shows — the round
+ * AFTER the one that wrote it, because a round comments on the text it was
+ * handed and only then redevelops. Resolved while the deck is built, so it
+ * survives dropping the rounds that wrote no version of this step.
  */
 export function reviewedBy(deck: readonly DeckEntry[], index: number): ReviewRoundView | undefined {
-  const next = deck[index + 1];
-  return next?.kind === "round" ? next.round : undefined;
+  return deck[index]?.review;
 }
