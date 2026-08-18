@@ -1,3 +1,5 @@
+import { z } from "zod";
+
 import { artifactSchemas, NOVELTY_SHAPES, SHAPE_FIELDS, type OutputShape } from "./schemas/artifacts.js";
 import type {
   ActivityRegistry,
@@ -114,6 +116,7 @@ export type IssueCode =
   | "UNKNOWN_PARAM"
   | "UNKNOWN_CATALOG"
   | "REVIEW_REF_OUTSIDE_LOOP"
+  | "UNKNOWN_ARTIFACT_FIELD"
   | "WORKFLOW_VERSION_UNSUPPORTED"
   | "UNKNOWN_VERDICT"
   | "DUPLICATE_SKILL"
@@ -876,13 +879,52 @@ function validateWorkflow(
   }
 
   // Scope-aware reference checking.
-  const ctx: RefContext = { paramNames, catalogNames: known.catalogNames, issues, wfPath };
+  const ctx: RefContext = {
+    paramNames,
+    catalogNames: known.catalogNames,
+    producedSchemas,
+    issues,
+    wfPath,
+  };
   checkNodeRefs(workflow.root, new Set(), false, ctx);
+}
+
+/**
+ * The top-level fields each artifact schema actually defines, derived from the
+ * schemas themselves so the table cannot drift from them.
+ *
+ * A schema whose shape cannot be enumerated (no object properties) is absent,
+ * and references into it are simply not field-checked — the rule only ever
+ * speaks where it is certain.
+ */
+const ARTIFACT_FIELDS: ReadonlyMap<string, ReadonlySet<string>> = (() => {
+  const table = new Map<string, ReadonlySet<string>>();
+  for (const [name, schema] of Object.entries(artifactSchemas)) {
+    try {
+      const json = z.toJSONSchema(schema as z.ZodType, {
+        target: "draft-2020-12",
+        io: "output",
+        unrepresentable: "any",
+      }) as { properties?: Record<string, unknown> };
+      const fields = json.properties ? Object.keys(json.properties) : [];
+      if (fields.length > 0) table.set(name, new Set(fields));
+    } catch {
+      // Not enumerable as a flat object; this schema is left unchecked.
+    }
+  }
+  return table;
+})();
+
+/** A dotted segment names a field only when it is a plain identifier. */
+function isPlainField(segment: string | undefined): segment is string {
+  return segment !== undefined && /^[A-Za-z_][A-Za-z0-9_]*$/.test(segment);
 }
 
 interface RefContext {
   paramNames: Set<string>;
   catalogNames: Set<string>;
+  /** Reference root -> the artifact schemas the workflow produces under it. */
+  producedSchemas: Map<string, Set<string>>;
   issues: ValidationIssue[];
   wfPath: string;
 }
@@ -947,7 +989,38 @@ function checkRef(ref: string, scope: Set<string>, inRepeatUntil: boolean, ctx: 
       path: at,
       message: `"${ref}" has root "${root}" which is not defined at this point of the workflow`,
     });
+    return;
   }
+
+  // The root exists — but a bind may still name a FIELD this host's artifact
+  // schema does not define. That is what a bundle written for a newer app
+  // looks like from here, and checking only roots let it load: the run then
+  // paid for a panel and died mid-flight on a reference that resolved to
+  // nothing, with the half-finished artifact journaled so every resume died
+  // the same way. Only the first segment is checked, and only when it is a
+  // plain field name of a schema whose shape is enumerable — deeper paths
+  // reach into shapes that vary, where a rule could only guess.
+  const field = segments[1];
+  if (!isPlainField(field)) return;
+  const schemas = ctx.producedSchemas.get(root);
+  if (!schemas || schemas.size === 0) return;
+  const known: string[] = [];
+  for (const schema of schemas) {
+    const fields = ARTIFACT_FIELDS.get(schema);
+    // One unenumerable producer means the union cannot be trusted to be
+    // complete, so the whole reference goes unchecked.
+    if (!fields) return;
+    if (fields.has(field)) return;
+    known.push(...fields);
+  }
+  ctx.issues.push({
+    code: "UNKNOWN_ARTIFACT_FIELD",
+    path: at,
+    message:
+      `"${ref}" reads field "${field}", which "${[...schemas].join('"/"')}" does not define ` +
+      `(known: ${[...new Set(known)].sort().join(", ")}). The bundle was written for a newer ` +
+      "app than this one; update the app, or pin an older bundle version.",
+  });
 }
 
 function checkBind(value: BindValue, scope: Set<string>, inRepeatUntil: boolean, ctx: RefContext, at: string): void {

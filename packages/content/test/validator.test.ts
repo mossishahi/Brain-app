@@ -16,6 +16,40 @@ test("baseline: the untouched bundle validates cleanly", () => {
   assert.deepEqual(validateBundle(freshBundle()), []);
 });
 
+test("rejects a bind that reads a field the produced artifact does not define", () => {
+  // What a bundle written for a NEWER app looks like from here. Checking only
+  // reference roots let it load: `poolMatches` exists, so `placerOutline` on
+  // an app that never produced it passed validation, and the run died on the
+  // bind long after the panel had been paid for — with the half-finished
+  // artifact journaled, so every resume died the same way.
+  const bundle = freshBundle();
+  const placer = findAgent(bundle.workflows["brainstorm"]!.root, "place-fields");
+  placer.bind = { ...placer.bind, outline: "poolMatches.fieldFromAFutureApp" };
+  const issues = expectIssue(bundle, "UNKNOWN_ARTIFACT_FIELD");
+  const named = issues.find((issue) => issue.code === "UNKNOWN_ARTIFACT_FIELD")!;
+  assert.match(named.message, /fieldFromAFutureApp/);
+  assert.match(named.message, /update the app/);
+});
+
+test("field checking stays silent wherever it cannot be certain", () => {
+  // The rule must never reject a legitimate bundle. It speaks only for a
+  // plain first segment of a root the workflow itself produces, so loop
+  // variables, catalog projections, deeper paths into shapes that vary, and
+  // seat state all pass untouched.
+  const bundle = freshBundle();
+  const placer = findAgent(bundle.workflows["brainstorm"]!.root, "place-fields");
+  placer.bind = {
+    ...placer.bind,
+    deeper: "poolMatches.unmatched.anythingAtAll",
+    catalog: "bundle.inputTypes.types",
+    session: "session.submission",
+  };
+  assert.deepEqual(
+    validateBundle(bundle).filter((issue) => issue.code === "UNKNOWN_ARTIFACT_FIELD"),
+    [],
+  );
+});
+
 test("rejects a workflow that references a missing skill", () => {
   const bundle = freshBundle();
   delete bundle.skills["judge"];
