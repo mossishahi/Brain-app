@@ -1165,6 +1165,33 @@ test("the cache plan proves stability from the workflow's structure, never from 
   assert.equal(plan.get("match-taxonomy"), undefined, "activities are not agent tasks");
 });
 
+test("a bind the plan cannot parse is volatile, never stable", () => {
+  // The rule is only safe in one direction: what cannot be PROVEN stable has
+  // to fall to volatile, costing a cache read. A reference the parser rejects
+  // used to land the other way — its stand-in root was simply absent from the
+  // volatile set, which reads as stable — so an unparsable bind was declared
+  // cacheable, the one outcome the module promises cannot happen.
+  const plan = planTaskCaches({
+    apiVersion: "brainstorm.workflow/v1",
+    name: "probe",
+    version: "0.0.0",
+    description: "probe",
+    params: {},
+    root: {
+      kind: "agent",
+      id: "probe-task",
+      skill: "brain",
+      route: "reasoning",
+      bind: { sound: "input", broken: "ideas[" },
+      output: { key: "out", schema: "brainIdea" },
+    },
+  } as unknown as Parameters<typeof planTaskCaches>[0]);
+
+  const stable = plan.get("probe-task")!;
+  assert.ok(stable.has("sound"), "a parseable run-level bind still caches");
+  assert.ok(!stable.has("broken"), "an unparsable bind is treated as volatile");
+});
+
 test("the task turn declares its stable prefixes without changing a byte the model reads", async () => {
   const executor = new FakeBrainstormExecutor();
   const result = await runtime(executor).run({

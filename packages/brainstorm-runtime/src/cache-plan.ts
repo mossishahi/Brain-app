@@ -37,6 +37,16 @@ export type TaskCachePlan = ReadonlyMap<string, ReadonlySet<string>>;
  * a payload field that happens to be called `member` cannot be mistaken for
  * the loop variable.
  */
+/**
+ * Stand-in root for a reference this module cannot parse. It is SEEDED into
+ * the volatile set, because the rule only holds in the conservative
+ * direction if "cannot prove stable" resolves to volatile: a root that is
+ * merely absent from the volatile set reads as stable, which is how an
+ * unparsable bind used to be declared cacheable — the exact inverse of what
+ * this module promises.
+ */
+const UNPARSABLE_ROOT = "\u0000unparsable";
+
 function referenceRoots(ref: string): readonly string[] {
   let tokens;
   try {
@@ -44,7 +54,7 @@ function referenceRoots(ref: string): readonly string[] {
   } catch {
     // An unparsable reference fails elsewhere with a real message; here it
     // only means "cannot prove stable".
-    return ["\u0000unparsable"];
+    return [UNPARSABLE_ROOT];
   }
   const roots: string[] = [];
   const first = tokens[0];
@@ -145,7 +155,7 @@ function collectAgents(
 export function planTaskCaches(content: ContentWorkflowDefinition): TaskCachePlan {
   const scan: VolatileScan = { loopVars: new Set(), loopWritten: new Set() };
   scanNode(content.root, false, scan);
-  const volatileRoots = new Set([...scan.loopVars, ...scan.loopWritten]);
+  const volatileRoots = new Set([UNPARSABLE_ROOT, ...scan.loopVars, ...scan.loopWritten]);
 
   const agents: Array<{ id: string; bind: Readonly<Record<string, BindValue>> }> = [];
   collectAgents(content.root, agents);
