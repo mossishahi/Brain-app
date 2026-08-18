@@ -52,6 +52,12 @@ export interface OutputValidator<T extends JsonValue = JsonValue> {
   validate(
     value: JsonValue,
     schema: JsonObject,
+    /**
+     * The task the value answers. Supplied so a validator can check what the
+     * schema alone cannot — a patch's coherence against the version it
+     * revises (AgentTask.revisionBase) — while a retry is still possible.
+     */
+    task?: AgentTask,
   ):
     | boolean
     | OutputValidationResult<T>
@@ -853,7 +859,7 @@ export class ToolLoopAgentExecutor<
         );
       }
 
-      const validation = await this.#validateOutput(output, schema);
+      const validation = await this.#validateOutput(output, schema, task);
       if (validation.valid) {
         context.reportProgress?.({
           kind: "validation",
@@ -1019,9 +1025,10 @@ export class ToolLoopAgentExecutor<
   async #validateOutput(
     output: JsonValue,
     schema: JsonObject,
+    task: AgentTask,
   ): Promise<NormalizedValidation<TOutput>> {
     try {
-      const result = await this.#validator!.validate(output, schema);
+      const result = await this.#validator!.validate(output, schema, task);
       return normalizeValidation(result, output);
     } catch (error) {
       return { valid: false, issues: [errorMessage(error)] };

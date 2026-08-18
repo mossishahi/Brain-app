@@ -464,3 +464,108 @@ test("generic agent adapter consumes compiled request descriptions and content s
   );
   assert.equal(new ContentArtifactOutputValidator().validate(value, schema).success, true);
 });
+
+test("a patch that only breaks once applied is retryable, not a recorded failure", () => {
+  // The rules a patch cannot be judged against on its own live on the merged
+  // whole. Before the base travelled with the task these passed validation
+  // and failed at write time — and because the answer is journaled first,
+  // every resume replayed the same patch into the same dead end.
+  const validator = new ContentArtifactOutputValidator();
+  const schema = { title: "redevelopmentPatch" };
+  const paragraph = "One paragraph of finished text that stands alone and says something real.";
+  const base = {
+    cot: ["step one text here", "step two text here", "step three text here"],
+    output: {
+      type: "research obstacle",
+      solution: {
+        problemFraming: paragraph,
+        diagnosis: [{ cause: "A concrete cause statement.", rationale: paragraph }],
+        priorAttempts: [],
+        candidateSolutions: [
+          { approach: "An approach.", mechanism: paragraph, expectedEffect: paragraph, risk: paragraph },
+        ],
+        recommendation: paragraph,
+        validationPlan: ["A validation step that is concrete."],
+        residualRisks: ["A residual risk worth naming."],
+      },
+    },
+  };
+  // Legal as a patch — the patch schema drops the cross-field rules on
+  // purpose — but a solution-shaped output may not carry a novelty claim.
+  const patch = {
+    steps: [{ index: 2, text: "a repaired step two paragraph that stands alone" }],
+    novelty: paragraph,
+  };
+
+  assert.equal(
+    validator.validate(patch, schema).success,
+    true,
+    "on its own the patch is well-formed: the whole is what it contradicts",
+  );
+
+  const checked = validator.validate(patch, schema, {
+    taskId: "t-1",
+    kind: "brainstorm.redeveloper",
+    input: {},
+    revisionBase: base,
+  });
+  assert.equal(checked.success, false, "merged against its base, the patch is incoherent");
+  assert.ok(
+    checked.success === false &&
+      checked.issues.some((issue) => issue.includes("must omit novelty")),
+    "the feedback names the rule the merged whole breaks",
+  );
+});
+
+test("a patch that fits its base still passes, and no base means no merge check", () => {
+  const validator = new ContentArtifactOutputValidator();
+  const schema = { title: "redevelopmentPatch" };
+  const base = {
+    cot: ["step one text here", "step two text here", "step three text here"],
+    output: {
+      type: "research idea",
+      paper: {
+        abstract: ["a one", "a two", "a three"],
+        introduction: ["i one", "i two", "i three"],
+        method: ["m one", "m two", "m three"],
+        discussion: ["d one", "d two", "d three"],
+        conclusion: ["c one"],
+      },
+    },
+    novelty: "the claim as it currently stands",
+  };
+  const patch = { steps: [{ index: 1, text: "a repaired opening step" }] };
+
+  assert.equal(
+    validator.validate(patch, schema, {
+      taskId: "t-2",
+      kind: "brainstorm.redeveloper",
+      input: {},
+      revisionBase: base,
+    }).success,
+    true,
+    "a patch that leaves the whole consistent is accepted",
+  );
+  // Tasks that carry no base — every non-revision task, and the full-emission
+  // contract older bundles use — are untouched by the check.
+  assert.equal(
+    validator.validate(patch, schema, { taskId: "t-3", kind: "brainstorm.redeveloper", input: {} })
+      .success,
+    true,
+  );
+
+  // A base that is not itself a valid whole must not be charged to the patch:
+  // the reviser cannot repair a fault it did not cause, and failing here would
+  // spend every validation attempt before the fold ever reports the real one.
+  const brokenBase = { ...base, cot: ["only one step"] };
+  assert.equal(
+    validator.validate(patch, schema, {
+      taskId: "t-4",
+      kind: "brainstorm.redeveloper",
+      input: {},
+      revisionBase: brokenBase,
+    }).success,
+    true,
+    "an unsound base is left to the fold, not blamed on the revision",
+  );
+});

@@ -183,6 +183,12 @@ export interface CursorAgentOutputValidator {
   validate(
     value: JsonValue,
     schema: JsonObject,
+    /**
+     * The task the value answers, so a validator can check what the schema
+     * alone cannot — a patch's coherence against the version it revises
+     * (AgentTask.revisionBase) — while a retry is still possible.
+     */
+    task?: AgentTask,
   ): CursorAgentValidationResult | Promise<CursorAgentValidationResult>;
 }
 
@@ -1956,6 +1962,7 @@ export class CursorAgentExecutor implements AgentExecutor {
         const checked = await this.config.outputValidator.validate(
           succeeded.output,
           task.outputSchema.schema,
+          task,
         );
         const normalized = normalizeValidation(checked, succeeded.output);
         if (normalized.success) {

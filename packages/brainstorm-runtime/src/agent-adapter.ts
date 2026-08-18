@@ -1,4 +1,8 @@
-import { artifactSchemas } from "@brainstorm-agentic/content";
+import {
+  artifactSchemas,
+  mergeRedevelopment,
+  type RedevelopmentPatch,
+} from "@brainstorm-agentic/content";
 import {
   systemPromptSegments,
   textContent,
@@ -415,8 +419,95 @@ function collectEnumTemplates(
   }
 }
 
+/**
+ * The rules a PATCH can only break once it is applied.
+ *
+ * redevelopmentPatchSchema deliberately drops every cross-field refinement:
+ * a rule relating two sections is unjudgeable on a patch that names one of
+ * them, and a novelty statement is legal or not depending on the shape of the
+ * body it belongs to — which the patch need not carry. Those rules live on the
+ * assembled idea, so this merges the patch over the version it revises and
+ * validates that, exactly as the runtime will when it records the revision.
+ *
+ * Returns nothing at all when the task carries no base (every non-revision
+ * task, and full-emission bundles, whose schema already carries the rules).
+ */
+function mergedRevisionIssues(
+  schemaName: string | undefined,
+  patch: JsonValue,
+  task: AgentTask | undefined,
+): string[] {
+  if (schemaName !== "redevelopmentPatch") return [];
+  const base = task?.revisionBase;
+  if (base === undefined || base === null || typeof base !== "object" || Array.isArray(base)) {
+    return [];
+  }
+  const record = base as JsonObject;
+  const cot = record.cot;
+  const output = record.output;
+  if (
+    !Array.isArray(cot) ||
+    !cot.every((step): step is string => typeof step === "string") ||
+    typeof output !== "object" ||
+    output === null ||
+    Array.isArray(output)
+  ) {
+    return [];
+  }
+  // A patch can only be judged against a whole that was sound to begin with.
+  // If the version being revised does not itself validate, every patch over
+  // it fails here — the model burns its attempts on a fault it did not cause
+  // and cannot repair, turning a bad state into a dead task. Report nothing
+  // and let the fold, which is authoritative either way, fail loudly.
+  const baseIdea = {
+    output,
+    cot,
+    ...(typeof record.novelty === "string" ? { novelty: record.novelty } : {}),
+    ...(record.literature !== undefined ? { literature: record.literature } : {}),
+  };
+  if (!(artifactSchemas.brainIdea.safeParse(baseIdea) as { success: boolean }).success) {
+    return [];
+  }
+  let merged;
+  try {
+    merged = mergeRedevelopment(
+      {
+        cot,
+        output: output as Record<string, unknown>,
+        ...(typeof record.novelty === "string" ? { novelty: record.novelty } : {}),
+      },
+      patch as unknown as RedevelopmentPatch,
+    );
+  } catch (error) {
+    // The patch does not fit what it revises (an out-of-range step, a body
+    // key this member's output never had). Retryable: the model can only
+    // learn this from being told.
+    return [error instanceof Error ? error.message : String(error)];
+  }
+  const idea = artifactSchemas.brainIdea.safeParse({
+    output: merged.output,
+    cot: merged.steps,
+    ...(merged.novelty !== undefined ? { novelty: merged.novelty } : {}),
+    ...(record.literature !== undefined ? { literature: record.literature } : {}),
+  }) as
+    | { readonly success: true }
+    | {
+        readonly success: false;
+        readonly error: { readonly issues: readonly { readonly message: string }[] };
+      };
+  if (idea.success) return [];
+  return idea.error.issues.map((issue) => {
+    const path = "path" in issue && Array.isArray(issue.path) ? issue.path.join(".") : "";
+    const where = path ? `${path}: ` : "";
+    return (
+      `${where}${issue.message} — this is how your patch reads once applied to the ` +
+      `version it revises; deliver the sections that make the whole consistent.`
+    );
+  });
+}
+
 export class ContentArtifactOutputValidator {
-  validate(value: unknown, schema: unknown): ContentValidationResult {
+  validate(value: unknown, schema: unknown, task?: AgentTask): ContentValidationResult {
     const schemaName =
       typeof schema === "object" && schema !== null && typeof (schema as JsonObject).title === "string"
         ? ((schema as JsonObject).title as string)
@@ -503,6 +594,16 @@ export class ContentArtifactOutputValidator {
     );
     if (placeholderIssues.length > 0) {
       return { success: false, issues: placeholderIssues };
+    }
+    // A patch is validated loosely on its own — a rule relating two sections
+    // cannot be judged from a patch naming one of them — so the rules that
+    // only exist on the WHOLE are checked here, against the version being
+    // revised. Doing it while the loop can still retry is the whole point:
+    // the same check runs again when the revision is recorded, and a failure
+    // there is a dead run, because the answer is already journaled.
+    const mergeIssues = mergedRevisionIssues(schemaName, parsed.data, task);
+    if (mergeIssues.length > 0) {
+      return { success: false, issues: mergeIssues };
     }
     return { success: true, value: parsed.data };
   }

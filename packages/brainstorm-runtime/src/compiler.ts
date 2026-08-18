@@ -181,6 +181,23 @@ function stateFrom(scope: ScopeReader): JsonObject {
   return asObject(scope.get(BRAINSTORM_STATE), BRAINSTORM_STATE);
 }
 
+/**
+ * The member's idea as it currently stands — the version a patch revises.
+ *
+ * Carried on the task so the executor's validator can check the merged whole
+ * while a retry is still possible. Resolved leniently: a task the reference
+ * cannot be resolved for simply carries no base, and the rules it would have
+ * checked are enforced when the revision is recorded, exactly as before.
+ */
+function revisionBaseFor(scope: ScopeReader): { revisionBase?: JsonValue } {
+  const idea = resolveDataReference("ideas[member.id]", scope, stateFrom(scope), {
+    required: false,
+  });
+  return typeof idea === "object" && idea !== null && !Array.isArray(idea)
+    ? { revisionBase: idea }
+    : {};
+}
+
 function unique(values: readonly string[]): readonly string[] {
   return [...new Set(values)];
 }
@@ -1760,6 +1777,13 @@ class ContentCompiler {
         modelRequest,
         ...(resolved.requirements !== undefined ? { requirements: resolved.requirements } : {}),
         capabilityPlan,
+        // A patch's coherence can only be judged once it is applied, so the
+        // executor's validator gets the version being revised. Host-side
+        // context only: it is never rendered into the request — the reviser
+        // already receives what it needs through its own bindings.
+        ...(node.output.schema === "redevelopmentPatch"
+          ? revisionBaseFor(scope)
+          : {}),
         metadata: {
           workflow: this.content.name,
           nodeId: node.id,

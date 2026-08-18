@@ -65,6 +65,21 @@ export interface AgentTask {
   readonly requirements?: CapabilityRequirements;
   /** Resolved capability plan from the broker. */
   readonly capabilityPlan?: ResolvedCapabilityPlan;
+  /**
+   * The version a PATCH-shaped output revises, for host-side validation only.
+   *
+   * A patch is deliberately validated loosely on its own — a rule relating two
+   * sections cannot be judged from a patch that names one of them — so the
+   * coherence of the MERGED whole can only be checked against the version
+   * being revised. Supplying it here lets the executor's output validator run
+   * that check while a retry is still possible; without it an incoherent patch
+   * is only caught after the result is recorded, where the failure is no
+   * longer retryable.
+   *
+   * Never rendered into a request and never journaled: it is context the host
+   * already holds, not something the model is shown or asked to reproduce.
+   */
+  readonly revisionBase?: JsonValue;
   /** Free-form routing/observability metadata. */
   readonly metadata?: JsonObject;
 }
