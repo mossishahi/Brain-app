@@ -1778,11 +1778,19 @@ function activePaths(events: readonly RunEvent[]): Set<string> {
  * artifact can never disagree. A patch that does not fit the version it
  * revises returns undefined and the round is skipped, exactly as a malformed
  * entry always was: this reconstruction renders history, it never fails a run.
+ *
+ * The version a patch merges over is the member's IDEA, so the base carries
+ * the standing novelty claim alongside the chain and the envelope. Novelty is
+ * a sibling of `output` on the idea record, never a field inside the envelope,
+ * and a patch names it only when the repair moved it — so reading the base
+ * claim off the envelope finds nothing and silently drops a standing claim
+ * from every revision that left it alone.
  */
 function applyRevision(
   revision: Record<string, unknown>,
   chain: readonly string[],
   previousOutput: Record<string, unknown>,
+  previousNovelty: string | undefined,
 ):
   | {
       replacement: string[];
@@ -1805,16 +1813,16 @@ function applyRevision(
       {
         cot: chain,
         output: previousOutput,
-        ...(typeof previousOutput.novelty === "string"
-          ? { novelty: previousOutput.novelty }
-          : {}),
+        ...(previousNovelty !== undefined ? { novelty: previousNovelty } : {}),
       },
       revision as unknown as RedevelopmentPatch,
     );
     return {
       replacement: [...merged.steps],
       envelope: merged.output,
-      novelty: novelty ?? merged.novelty,
+      // The merge already resolved the patch's claim against the standing
+      // one; taking its answer keeps this replay on the single merge.
+      novelty: merged.novelty,
     };
   } catch {
     return undefined;
@@ -1900,6 +1908,22 @@ function buildReviews(
     return current;
   };
 
+  // Working novelty claim per member, replayed alongside the chain and the
+  // envelope. It is the third part of the version a patch revises: a patch
+  // carries `novelty` only when the repair moved it, so the claim a
+  // revision leaves standing has to be carried here — the shapes that state
+  // one (paper, resolution, survey) would otherwise lose it the moment any
+  // revision left it alone. Shapes that carry no claim stay undefined.
+  const workingNovelty = new Map<number, string | undefined>();
+  const noveltyFor = (memberIndex: number): string | undefined => {
+    if (!workingNovelty.has(memberIndex)) {
+      const member = panel[memberIndex];
+      const claim = object(member ? rawIdeas.get(member.id) : undefined)?.novelty;
+      workingNovelty.set(memberIndex, typeof claim === "string" ? claim : undefined);
+    }
+    return workingNovelty.get(memberIndex);
+  };
+
   for (const entry of entries) {
     const output = agentOutput(entry);
     if (output === undefined || !entry.key.includes("/review-members/")) continue;
@@ -1941,7 +1965,12 @@ function buildReviews(
         // applied through the SAME merge the runtime folded into the run, so
         // this replay can never show a chain no reviewer read.
         const chain = cotFor(at.member);
-        const applied = applyRevision(revision, chain, outputFor(at.member));
+        const applied = applyRevision(
+          revision,
+          chain,
+          outputFor(at.member),
+          noveltyFor(at.member),
+        );
         if (!applied) continue;
         const { replacement, envelope, novelty } = applied;
         // The change-set mirrors the runtime's own diff: exact per-step
@@ -1965,6 +1994,7 @@ function buildReviews(
         };
         chain.splice(0, chain.length, ...replacement);
         workingOutput.set(at.member, envelope);
+        workingNovelty.set(at.member, novelty);
         const state = memberRevisions.get(at.member);
         memberRevisions.set(at.member, {
           count: (state?.count ?? 0) + 1,

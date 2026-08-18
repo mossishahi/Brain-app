@@ -112,7 +112,7 @@ function memberIdea(stage: FirstPassStage) {
  */
 function assertReviewReconstruction(
   memberPathPrefix: string,
-  delivery: "full" | "patch" = "full",
+  delivery: "full" | "patch" | "patch-standing-novelty" = "full",
 ): void {
   const workspace = mkdtempSync(join(tmpdir(), "stage-mapper-test-"));
   try {
@@ -138,10 +138,19 @@ function assertReviewReconstruction(
       type: "research idea",
       paper: paperBody("The repaired mechanism."),
     };
+    // A patch names `novelty` only when the repair actually moved the claim.
+    // When it does not, the first pass's claim still stands and the runtime
+    // records it on the revised idea — so the replay must reach the same
+    // claim rather than dropping it. `finalNovelty` is therefore both what
+    // the recorded artifact carries and what the review view must show.
+    const movesNovelty = delivery !== "patch-standing-novelty";
+    const finalNovelty = movesNovelty
+      ? "Revised novelty claim."
+      : "Original novelty claim.";
     const revisedIdea = {
       output: revisedEnvelope,
       cot: ["Step one.", "REVISED step two.", "Step three."],
-      novelty: "Revised novelty claim.",
+      novelty: finalNovelty,
       literature: firstIdea.literature,
     };
     // The journal records exactly as the runner writes them: a commentor's
@@ -182,18 +191,18 @@ function assertReviewReconstruction(
         // below is shared: the dashboard must not be able to tell which one
         // produced the round it renders.
         output:
-          delivery === "patch"
+          delivery === "full"
             ? {
+                output: revisedEnvelope,
+                steps: revisedIdea.cot,
+                novelty: "Revised novelty claim.",
+              }
+            : {
                 steps: [{ index: 2, text: "REVISED step two." }],
                 outputPatch: {
                   paper: { method: ["The repaired mechanism.", paragraph, paragraph] },
                 },
-                novelty: "Revised novelty claim.",
-              }
-            : {
-                output: revisedEnvelope,
-                steps: revisedIdea.cot,
-                novelty: "Revised novelty claim.",
+                ...(movesNovelty ? { novelty: "Revised novelty claim." } : {}),
               },
       },
     };
@@ -273,7 +282,11 @@ function assertReviewReconstruction(
       "the review view carries the revised envelope as the final version",
     );
     assert.equal(reviewed.finalIdea.cot[1], "REVISED step two.");
-    assert.equal(reviewed.finalIdea.novelty, "Revised novelty claim.");
+    assert.equal(
+      reviewed.finalIdea.novelty,
+      finalNovelty,
+      "the review view's novelty is the one the recorded idea carries",
+    );
     assert.equal(
       reviewed.finalIdea.literature?.length,
       1,
@@ -325,6 +338,143 @@ test("a revision delivered as a patch replays into exactly the same review view"
     "brainstorm-root/review-members/review-members-fanout/member[0]",
     "patch",
   );
+});
+
+test("a patch that leaves the novelty claim standing keeps it in the final version", () => {
+  // The common revision: the repair moves a step and a section, and the
+  // reviser correctly omits `novelty` because the claim still holds. The
+  // claim lives on the idea beside `output`, never inside the envelope, so
+  // a replay that looks for it in the envelope finds nothing and drops it —
+  // from the review inspector AND from the seat's .tex export.
+  assertReviewReconstruction(
+    "brainstorm-root/review-members/review-members-fanout/member[0]",
+    "patch-standing-novelty",
+  );
+});
+
+test("a later patch inherits the novelty an earlier round moved, not the first pass's", () => {
+  // Two rounds at one walk position: round 1 moves the claim, round 2 leaves
+  // it standing. The base each patch merges over is the version the PREVIOUS
+  // round left, so the surviving claim is round 1's — reseeding from the
+  // first pass every round would silently roll the claim back.
+  const workspace = mkdtempSync(join(tmpdir(), "stage-mapper-test-"));
+  try {
+    const sessionDir = join(workspace, "session");
+    const jobDir = join(workspace, "job");
+    mkdirSync(join(sessionDir, "artifacts"), { recursive: true });
+    mkdirSync(jobDir, { recursive: true });
+
+    const body = (method: string) => ({
+      abstract: [paragraph, paragraph, paragraph],
+      introduction: [paragraph, paragraph, paragraph],
+      method: [method, paragraph, paragraph],
+      discussion: [paragraph, paragraph, paragraph],
+      conclusion: [paragraph],
+    });
+    const roundPath = (round: number) =>
+      "brainstorm-root/review-members/review-members-fanout/member[0]" +
+      `/cotStep[1]/review-round-loop/iter[${round}]/review-round-body/maybe-redevelop/then/` +
+      "redevelop-idea-execute::result";
+
+    writeFileSync(
+      join(sessionDir, "checkpoint.json"),
+      JSON.stringify({
+        runId: "job-1",
+        workflowId: "brainstorm",
+        status: "completed",
+        input: {},
+        journal: [
+          {
+            key: roundPath(0),
+            kind: "agent",
+            value: {
+              taskId: "t-r1",
+              status: "ok",
+              output: {
+                steps: [{ index: 2, text: "Step two, first repair." }],
+                novelty: "Round one's sharpened claim.",
+              },
+            },
+          },
+          {
+            key: roundPath(1),
+            kind: "agent",
+            value: {
+              taskId: "t-r2",
+              status: "ok",
+              // No novelty: this repair left the standing claim alone.
+              output: {
+                steps: [{ index: 2, text: "Step two, second repair." }],
+                outputPatch: { paper: { method: ["A further repair.", paragraph, paragraph] } },
+              },
+            },
+          },
+        ],
+        pendingGates: [],
+        seq: 1,
+        updatedAt: Date.now(),
+      }),
+    );
+    writeFileSync(
+      join(sessionDir, "artifacts", "index.json"),
+      JSON.stringify({
+        refs: [
+          { id: "a-panel", metadata: { schema: "panel", path: "panel" } },
+          { id: "a-idea", metadata: { schema: "brainIdea", path: "ideas.member-1" } },
+        ],
+      }),
+    );
+    writeFileSync(
+      join(sessionDir, "artifacts", "a-panel"),
+      JSON.stringify({
+        members: [
+          { id: "member-1", department: "Physics", umbrella: "Quantum Optics", subfields: [] },
+          { id: "member-2", department: "Biology", umbrella: "Systems Biology", subfields: [] },
+        ],
+      }),
+    );
+    writeFileSync(
+      join(sessionDir, "artifacts", "a-idea"),
+      JSON.stringify({
+        output: { type: "research idea", paper: body("The original mechanism.") },
+        cot: ["Step one.", "Step two.", "Step three."],
+        novelty: "The first pass's claim.",
+        literature: [],
+      }),
+    );
+
+    const record: JobRecord = {
+      jobId: "job-1",
+      topic: "topic",
+      status: "completed",
+      runner: "local",
+      createdAt: 1,
+      updatedAt: 2,
+    };
+    const detail = buildJobDetail({
+      record,
+      status: "completed",
+      sessionDir,
+      jobDir,
+      settings,
+    });
+    const stage = detail.stages.find((candidate) => candidate.id === "review-members");
+    assert.ok(stage && stage.id === "review-members");
+    const reviewed = stage.members.find((member) => member.memberId === "member-1");
+    assert.equal(reviewed?.revisionCount, 2);
+    assert.equal(
+      reviewed?.finalIdea?.novelty,
+      "Round one's sharpened claim.",
+      "round two inherits round one's claim instead of reverting to the first pass",
+    );
+    assert.equal(reviewed?.finalIdea?.cot[1], "Step two, second repair.");
+    assert.ok(
+      reviewed?.finalIdea?.paper?.method.startsWith("A further repair."),
+      "the envelope carries both rounds' section repairs",
+    );
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
 });
 
 test("every submission type's first-pass output maps to its own view shape", () => {
