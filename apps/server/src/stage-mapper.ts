@@ -2047,7 +2047,7 @@ function buildReviews(
         rounds: views,
       };
     });
-    // The member's output as the review leaves it: with no redevelopments it
+    // The member's output as the review left it: with no redevelopments it
     // IS the first pass; otherwise the last revision's envelope over the
     // fully replayed chain, with the first pass's literature record riding
     // along (revisions rework reasoning, never its grounding record). This

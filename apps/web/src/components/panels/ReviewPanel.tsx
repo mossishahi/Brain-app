@@ -18,7 +18,7 @@
  *    red); the originating round keeps only a one-line note naming the step
  *    it rewrote.
  */
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import type {
   CommentView,
   FirstPassStage,
@@ -36,7 +36,7 @@ import {
   seatTexFileName,
 } from "../../latex";
 import { LATEX_STYLE } from "../../latex-style";
-import { DismissSeatButton, EvidenceBlock, TokenChip } from "../common";
+import { EvidenceBlock, TokenChip } from "../common";
 import { BackIcon, CopyIcon, DownloadIcon, ForwardIcon } from "../Icons";
 import { IdeaTabs } from "./FirstPassPanel";
 import {
@@ -54,7 +54,16 @@ function redevCount(step: ReviewStepView): number {
   return step.rounds.filter((r) => r.revision !== undefined).length;
 }
 
-function cellClass(step: ReviewStepView): string {
+/** A step a dismissed seat will never finish: it stopped where it stood. */
+function unreached(step: ReviewStepView): boolean {
+  return step.outcome === "pending" || step.outcome === "under-review";
+}
+
+function cellClass(step: ReviewStepView, dismissed = false): string {
+  // A dismissed seat is not working, so the step it stopped on must stop
+  // pulsing: a blinking cell on a seat that has left says work is in flight
+  // when none is. Everything it never finished is marked instead.
+  if (dismissed && unreached(step)) return "cell-dismissed";
   switch (step.outcome) {
     case "under-review":
       return "cell-under-review pulse";
@@ -70,12 +79,169 @@ function cellClass(step: ReviewStepView): string {
 function cellLabel(member: ReviewMemberView, step: ReviewStepView): string {
   const k = redevCount(step);
   const outcome =
-    step.outcome === "force-passed"
-      ? "force-passed at the round cap"
-      : step.outcome === "passed" && k > 0
-        ? `passed after ${k} redevelopment${k === 1 ? "" : "s"}`
-        : step.outcome;
+    member.dismissed !== undefined && unreached(step)
+      ? "never reviewed — the seat was dismissed"
+      : step.outcome === "force-passed"
+        ? "force-passed at the round cap"
+        : step.outcome === "passed" && k > 0
+          ? `passed after ${k} redevelopment${k === 1 ? "" : "s"}`
+          : step.outcome;
   return `${member.label}, step ${step.index}: ${outcome}`;
+}
+
+/**
+ * What a step's rounds add up to, in words.
+ *
+ * A round only counts once it reached a verdict. Counting every RECORDED round
+ * included one still gathering comments, so a step with three settled rounds and
+ * a fourth in flight read "4 rounds" beside a deck of three — and a dismissed
+ * seat's abandoned round read as progress that will never come.
+ */
+function roundsMeta(
+  step: ReviewStepView,
+  dismissed: boolean,
+  crossCount: number,
+): string {
+  const settled = step.rounds.filter((round) => round.decision !== undefined).length;
+  const pendingRound = step.rounds.length > settled;
+  const unfinished = dismissed
+    ? `round ${settled + 1} unfinished`
+    : `round ${settled + 1} in progress`;
+  if (settled > 0) {
+    return (
+      `${settled} round${settled === 1 ? "" : "s"}` +
+      (pendingRound ? ` · ${unfinished}` : "")
+    );
+  }
+  // With no settled rounds the pending card usually says so; when cross-rewrite
+  // cards fill the deck instead, the hint moves up here.
+  return pendingRound || (crossCount > 0 && step.outcome === "under-review")
+    ? unfinished
+    : "";
+}
+
+/** One phrase for what a seat is doing, shared by the pager chip and the popover. */
+function seatStateLabel(member: ReviewMemberView): string {
+  if (member.dismissed !== undefined) return "dismissed";
+  if (member.error !== undefined) return "failed";
+  if (member.progress !== undefined) return "under review";
+  return walkComplete(member) ? "done with thinking" : "waiting";
+}
+
+/**
+ * The seat's own control, reached by hovering (or focusing) its name in the
+ * matrix — the one place every seat is visible at once, so stopping one reads as
+ * an act on the panel rather than a button buried in a card.
+ *
+ * The popover is position:fixed and a DOM CHILD of the name, so moving the
+ * pointer from the name into the popover keeps it open (the matrix scrolls, and
+ * an anchored child would be clipped). It asks before acting: a dismissal cannot
+ * be undone, and the question says what it costs.
+ */
+function SeatStopPopover({
+  member,
+  seatState,
+  expertise,
+  onDismiss,
+}: {
+  member: ReviewMemberView;
+  seatState: string;
+  expertise: string;
+  onDismiss: (memberId: string) => Promise<void>;
+}) {
+  const [pop, setPop] = useState<CSSProperties | null>(null);
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const open = (target: HTMLElement): void => {
+    const rect = target.getBoundingClientRect();
+    setPop({
+      left: Math.max(8, rect.left),
+      ...(rect.bottom + 200 > window.innerHeight
+        ? { bottom: window.innerHeight - rect.top - 2 }
+        : { top: rect.bottom - 2 }),
+    });
+  };
+  const close = (): void => {
+    // A half-answered question must not persist into the next hover.
+    if (busy) return;
+    setPop(null);
+    setConfirming(false);
+    setError(null);
+  };
+  return (
+    <span
+      className="seat-stop"
+      onMouseEnter={(event) => open(event.currentTarget)}
+      onMouseLeave={close}
+      onFocus={(event) => open(event.currentTarget)}
+      onBlur={close}
+      tabIndex={0}
+    >
+      {member.label}
+      {pop && (
+        <span className="seat-stop-pop" style={pop} role="dialog">
+          <span className="seat-stop-head">
+            <span className="seat-stop-name">{member.label}</span>
+            <span className="dim">{seatState}</span>
+          </span>
+          {expertise !== "" && <span className="dim">{expertise}</span>}
+          {member.dismissed !== undefined ? (
+            <span className="dim">
+              Dismissed. What it recorded before then is kept below.
+            </span>
+          ) : confirming ? (
+            <>
+              <span>
+                Stop {member.label}? It contributes and reviews nothing further
+                for the rest of the run, and work in flight on the other seats
+                restarts from the last checkpoint.
+              </span>
+              {error !== null && <span className="error-text">{error}</span>}
+              <span className="inline-actions">
+                <button
+                  type="button"
+                  className="btn btn-danger btn-small"
+                  disabled={busy}
+                  onClick={() => {
+                    setBusy(true);
+                    setError(null);
+                    void onDismiss(member.memberId)
+                      .then(() => {
+                        setConfirming(false);
+                        setPop(null);
+                      })
+                      .catch((e: unknown) =>
+                        setError(e instanceof Error ? e.message : String(e)),
+                      )
+                      .finally(() => setBusy(false));
+                  }}
+                >
+                  {busy ? "Stopping…" : "Yes, stop it"}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-small"
+                  disabled={busy}
+                  onClick={() => setConfirming(false)}
+                >
+                  No
+                </button>
+              </span>
+            </>
+          ) : (
+            <button
+              type="button"
+              className="btn btn-small"
+              onClick={() => setConfirming(true)}
+            >
+              Stop this seat
+            </button>
+          )}
+        </span>
+      )}
+    </span>
+  );
 }
 
 /** A step has something to inspect once the review walk has reached it. */
@@ -549,7 +715,7 @@ function RoundDeck({
       />
     );
   const newest = position === deck.length - 1;
-  const versionMeta = newest ? "as the review leaves it" : "an earlier version";
+  const versionMeta = newest ? undefined : "an earlier version";
   // The pager arrows hug the card title — exactly the seat pager's pattern —
   // so paging a step's history reads the same as paging seats.
   const olderButton = (
@@ -642,7 +808,14 @@ function RoundDeck({
   }
 
   const round = entry.round;
-  const latest = step.rounds.reduce((max, r) => Math.max(max, r.round), 0);
+  // The highest round number IN THE DECK, not the highest that occurred: a round
+  // that rewrote nothing has no card of its own (its verdict sits under the
+  // version it read), so counting to it promised a card the pager cannot reach —
+  // "Round 3 / 4" with the next arrow disabled.
+  const latest = deck.reduce(
+    (max, e) => (e.kind === "round" ? Math.max(max, e.round.round) : max),
+    0,
+  );
   const computed = timeline.rounds.get(roundViewKey(step.index, round.round));
   const commentKey = `${member.memberId}:${step.index}:${entry.key}`;
   return (
@@ -667,7 +840,7 @@ function RoundDeck({
           <span className="review-step-meta">
             {[
               ...(!computed?.ownRewrite ? ["unchanged from the previous version"] : []),
-              versionMeta,
+              ...(versionMeta !== undefined ? [versionMeta] : []),
             ].join(" · ")}
           </span>
         )}
@@ -735,11 +908,16 @@ export function ReviewStagePanels({
   // No global cursor: each seat carries its own progress, so several seats can
   // be under review at once.
   const activeSeats = stage.members.filter((member) => member.progress !== undefined);
+  // Seats still in the review. A dismissed seat is not one of them, so counting
+  // it here would say "member 1/3" of a panel that now has two — the same
+  // mismatch between a total and what is actually happening that the round
+  // labels had.
+  const reviewing = stage.members.filter((member) => member.dismissed === undefined);
   const cursor =
     activeSeats.length === 1
       ? {
-          member: stage.members.indexOf(activeSeats[0]!) + 1,
-          memberCount: stage.members.length,
+          member: reviewing.indexOf(activeSeats[0]!) + 1,
+          memberCount: reviewing.length,
           step: activeSeats[0]!.progress!.step,
           stepCount: activeSeats[0]!.progress!.stepCount,
           round: activeSeats[0]!.progress!.round,
@@ -862,23 +1040,41 @@ export function ReviewStagePanels({
                       : expertise || member.label
                 }
               >
-                {member.label}
+                {/* The seat's name IS the control: hovering it opens the seat's
+                    own popover, which is where a seat can be stopped. */}
+                {onDismiss ? (
+                  <SeatStopPopover
+                    member={member}
+                    seatState={seatStateLabel(member)}
+                    expertise={expertise}
+                    onDismiss={onDismiss}
+                  />
+                ) : (
+                  member.label
+                )}
               </span>
               <div className="cells">
                 {member.steps.map((step) => {
                   const k = redevCount(step);
                   const active = reviewable(step);
                   const isShown = seat?.memberId === member.memberId;
+                  const stopped = member.dismissed !== undefined && unreached(step);
                   return (
                     <button
                       key={step.index}
                       type="button"
-                      className={`cell ${cellClass(step)}${isShown ? " cell-selected" : ""}`}
+                      className={`cell ${cellClass(step, member.dismissed !== undefined)}${isShown ? " cell-selected" : ""}`}
                       aria-label={cellLabel(member, step)}
                       disabled={!active}
                       onClick={() => onCellClick(member, step)}
                     >
-                      {k > 0 && <span className="cell-redev">×{k}</span>}
+                      {stopped ? (
+                        <span className="cell-stopped" aria-hidden>
+                          ×
+                        </span>
+                      ) : (
+                        k > 0 && <span className="cell-redev">×{k}</span>
+                      )}
                     </button>
                   );
                 })}
@@ -937,13 +1133,6 @@ export function ReviewStagePanels({
             ) : walkComplete(seat) ? (
               <span className="step-chip step-chip-ok">done with thinking</span>
             ) : null}
-            {onDismiss && (
-              <DismissSeatButton
-                label={seat.label}
-                dismissed={seat.dismissed !== undefined}
-                onDismiss={() => onDismiss(seat.memberId)}
-              />
-            )}
             <span className="seat-pager-expertise marquee" title={expertiseOf(seat)}>
               <span className="marquee-inner">{expertiseOf(seat)}</span>
             </span>
@@ -981,14 +1170,7 @@ export function ReviewStagePanels({
                         </span>
                         {k > 0 && <span className="badge">×{k} redeveloped</span>}
                         <span className="review-step-meta">
-                          {step.rounds.length > 0
-                            ? `${step.rounds.length} round${step.rounds.length === 1 ? "" : "s"}`
-                            : // With no rounds the pending card usually says it;
-                              // when cross-rewrite cards fill the deck instead,
-                              // the hint moves up here.
-                              crossCount > 0 && step.outcome === "under-review"
-                              ? "round 1 in progress"
-                              : ""}
+                          {roundsMeta(step, seat.dismissed !== undefined, crossCount)}
                         </span>
                       </div>
                       <RoundDeck
@@ -1010,7 +1192,7 @@ export function ReviewStagePanels({
                 })}
                 {seat.finalIdea &&
                   (() => {
-                    // The member's output as the review leaves it: the FINAL
+                    // The member's output as the review left it: the FINAL
                     // version once every step passed; the current version
                     // under review until then. Also saved as a readable copy
                     // under the session's final/ directory.

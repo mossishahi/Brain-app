@@ -160,19 +160,22 @@ Sections:
 Each section persists via PUT /api/settings carrying ONLY its own fields; the server keeps every
 section the request omits, so one panel's save can never disturb another's.
 
-### Dismissing a panel seat mid-run
+### Stopping a panel seat mid-run
 
-Every seat card in **First pass** and the review inspector's seat pager carries a quiet `Dismiss`
-control while the run still has work ahead of it. It asks first — dismissal cannot be undone — and
-the question states the cost: the seat stops contributing and reviewing for the rest of the run,
-and work in flight on the other seats restarts from the last checkpoint (the server stops the
-worker and resumes the run without that seat).
+The control lives in ONE place: the **review** stage's progress matrix, on the seat's own name.
+Hovering (or focusing) `Seat N` opens the seat's popover — its state and expertise, and a
+`Stop this seat` button that expands into a confirm. Dismissal cannot be undone, so it always asks,
+and the question states the cost: the seat contributes and reviews nothing further for the rest of
+the run, and work in flight on the other seats restarts from the last checkpoint (the server stops
+the worker and resumes the run without that seat). A 409 — dismissing this one would leave fewer
+than two seats — is shown inside the popover.
 
 A dismissed seat is **struck through and dimmed, never removed**: everything it produced up to that
-moment stays on the dashboard exactly as it was, its matrix row stays in place, and its chip reads
-`dismissed`. It shows no live position, stops holding the first-pass and review stages open, and
-leaves the seat counts in the progress summary. The server refuses a dismissal that would leave
-fewer than two seats, and answers 409 with the reason, which the control shows in place.
+moment stays exactly as it was. In its matrix row the steps it finished keep their colors and
+redevelopment counts, and every step it never finished — including the one it was stopped on — stops
+pulsing and carries a dim `×`: a blinking cell on a seat that has left would claim work in flight
+where there is none. The seat shows no live position, stops holding the first-pass and review stages
+open, and leaves the review's seat counts and cursor line, which count the seats still taking part.
 
 ## View 2 — Job dashboard (`#/jobs/:id`)
 
@@ -408,9 +411,11 @@ content).
 horizontal bar scaled to the longest stage + ms), and agent-task count. One line, dim: session
 directory path.
 
-The **capability & tool usage receipt** (`GET /api/jobs/:id/tool-usage`) sits below the stage
-pager for EVERY run that has started — not inside the Done stage. It reports which tools each role
-actually called, calls by stage, and the capability-resolution matrix (per declared operation: how
+The **capability & tool usage receipt** appears on the Done page only — below the stage frame rather
+than inside it, because a run that failed, was cancelled, or credit-blocked never reaches a completed
+Done stage and a pending frame renders no body, which would hide the receipt from exactly the runs
+whose agents were most likely missing something. It (`GET /api/jobs/:id/tool-usage`) reports which
+tools each role actually called, calls by stage, and the capability-resolution matrix (per declared operation: how
 many tasks resolved it provider-native, host-tool, or unavailable), and it leads with two warnings
 when they apply:
 

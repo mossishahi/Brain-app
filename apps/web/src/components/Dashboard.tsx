@@ -480,10 +480,7 @@ export function Dashboard({
       case "first-pass": {
         const stage = stageOf(job, id);
         return stage && stage.members.length > 0 ? (
-          <FirstPassBody
-            members={stage.members}
-            {...(dismissable ? { onDismiss: onDismissMember } : {})}
-          />
+          <FirstPassBody members={stage.members} />
         ) : null;
       }
       case "review-members":
@@ -500,8 +497,7 @@ export function Dashboard({
       }
       case "done": {
         const stage = stageOf(job, id);
-        if (!stage?.summary) return null;
-        return <DoneBody summary={stage.summary} />;
+        return stage?.summary ? <DoneBody summary={stage.summary} /> : null;
       }
     }
   };
@@ -728,6 +724,21 @@ export function Dashboard({
               ) : (
                 frame(renderBody(selected))
               )}
+              {/*
+                The capability & tool usage receipt: one page, the last one, and
+                below the stage frame rather than inside it. A run that failed,
+                was cancelled, or credit-blocked never reaches a completed Done
+                stage, and a pending frame renders no body at all — so putting
+                the receipt in that body would hide it from exactly the runs whose
+                agents are most likely to have been missing something.
+              */}
+              {selected === "done" && (
+                <ToolUsagePanel
+                  jobId={jobId}
+                  updatedAt={job.updatedAt}
+                  active={job.status === "running"}
+                />
+              )}
             </div>
             <div className="stage-pager-nav">
               <button
@@ -757,25 +768,6 @@ export function Dashboard({
         );
       })()}
 
-      {/*
-        The capability & tool usage receipt: which tools each role actually
-        called, per stage, and how the broker resolved every declared capability
-        operation — provider-native, host tool, or honest unavailability.
-
-        Mounted here, for EVERY run that has started, rather than inside the done
-        stage's body. Gated on the done summary it only ever appeared on a run
-        that finished cleanly, so a run that failed, was cancelled, or
-        credit-blocked never showed the one record that says whether the agents
-        could do what they were asked — which is how a deployment where nothing
-        could read the submitted files went unnoticed.
-      */}
-      {job.status !== "queued" && (
-        <ToolUsagePanel
-          jobId={jobId}
-          updatedAt={job.updatedAt}
-          active={job.status === "running"}
-        />
-      )}
     </div>
   );
 }

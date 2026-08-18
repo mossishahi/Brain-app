@@ -201,13 +201,22 @@ interface SeenTask {
 class FakeBrainstormExecutor implements AgentExecutor {
   readonly seen: SeenTask[] = [];
   readonly judgeOrder: string[] = [];
+  /**
+   * Stops the run at a chosen task, standing in for the worker being killed
+   * mid-flight — which is exactly what a mid-run dismissal does.
+   */
+  failOn?: (task: SeenTask) => boolean;
 
   async execute(task: AgentTask): Promise<AgentResult> {
     const input = object(task.input, "task input");
     const bindings = object(input.bindings, "task bindings");
     const role = input.role as string;
     const agentId = task.agentId ?? role;
-    this.seen.push({ role, agentId, bindings, task });
+    const entry: SeenTask = { role, agentId, bindings, task };
+    this.seen.push(entry);
+    if (this.failOn?.(entry) === true) {
+      throw new Error(`fixture stopped the run at ${role}/${agentId}`);
+    }
 
     let output: JsonValue;
     switch (role) {
@@ -689,6 +698,75 @@ test("a run with nothing dismissed seats and walks the full panel, list or no li
       `dismissedMembers ${JSON.stringify(empty)} changed which tasks ran`,
     );
   }
+});
+
+test("a seat dismissed while commenting on another member never resumes that comment", async () => {
+  // The case a submitter actually hits: at the moment a seat is stopped it is
+  // usually mid-flight COMMENTING on somebody else's chain. The worker is killed,
+  // which ends that call, and the question is what the resume does with it — the
+  // round it belonged to is already journalled WITH that seat in its fan-out, so
+  // the branch is re-entered and only the guard can keep the call from being
+  // bought a second time for a seat that has left.
+  const executor = new FakeBrainstormExecutor();
+  // Stop the run inside exactly that call: the dismissed seat commenting on
+  // another member's step. Its own walk is untouched at this point.
+  // Every commentor task this seat runs is by definition on ANOTHER member's
+  // chain: the round's fan-out excludes the thinker from its own review.
+  executor.failOn = (entry) =>
+    entry.agentId === DISMISSED && entry.role === "commentor";
+  const app = runtime(executor);
+  const stopped = await app.run({
+    runId: "dismiss-mid-comment",
+    submission: SUBMISSION,
+    params: { panelSize: 3 },
+  });
+  assert.equal(stopped.status, "failed", "the fixture stopped the run mid-comment");
+  const killedComment = executor.seen.find(
+    (entry) => entry.agentId === DISMISSED && entry.role === "commentor",
+  );
+  assert.ok(killedComment, "the dismissed seat was mid-comment when the run stopped");
+  const journalled = executor.seen
+    .filter((entry) => entry.task.taskId !== killedComment.task.taskId)
+    .map((entry) => entry.task.taskId);
+
+  // Now the dismissal, exactly as the server delivers it: same stores, same
+  // pinned workflow, the seat named on the resume. Everything before this line
+  // is work the run had already bought and is entitled to keep.
+  const boughtBefore = executor.seen.length;
+  executor.failOn = undefined;
+  const resumed = await runtime(executor, [DISMISSED], undefined, {
+    checkpoints: app.checkpoints,
+    artifacts: app.artifacts,
+  }).resume("dismiss-mid-comment");
+  completed(resumed);
+  const afterDismissal = executor.seen.slice(boughtBefore);
+
+  // Nothing further is bought for the dismissed seat: not the comment the
+  // dismissal interrupted, not another comment on anybody else's chain, and
+  // nothing on its own walk either.
+  assert.deepEqual(
+    afterDismissal
+      .filter((entry) => entry.agentId === DISMISSED)
+      .map((entry) => `${entry.role} ${entry.task.taskId}`),
+    [],
+    "the dismissed seat bought work after the dismissal",
+  );
+  // Work already journalled replays instead of being paid for twice.
+  for (const taskId of journalled) {
+    assert.equal(
+      afterDismissal.filter((entry) => entry.task.taskId === taskId).length,
+      0,
+      `task ${taskId} was re-executed after the dismissal`,
+    );
+  }
+  // And the seats still in the review finish their walks, judged on the comments
+  // they did receive — one fewer, from a seat that no longer sits.
+  assert.deepEqual(
+    executor.tasks("chair").length > 0
+      ? Object.keys(object(executor.tasks("chair")[0]!.bindings.ideas, "chair ideas")).sort()
+      : [],
+    [...remainingSeats()],
+  );
 });
 
 test("a dismissal cannot reach back into a finished run's record", async () => {

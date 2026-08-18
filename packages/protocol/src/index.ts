@@ -552,7 +552,7 @@ export interface ReviewMemberView {
   readonly umbrella?: string;
   readonly steps: readonly ReviewStepView[];
   /**
-   * The member's output as the review leaves it: the first pass with every
+   * The member's output as the review left it: the first pass with every
    * redevelopment applied. Once every step has passed (or force-passed) this
    * IS the member's final version — the record the integrator, the chair,
    * and the session's `final/` copies work from; while the walk is still

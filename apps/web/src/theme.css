@@ -3707,6 +3707,63 @@ section.drawer-section:not(.drawer-updates) {
   text-decoration: line-through;
 }
 
+/* The seat's name is its control: hovering it opens the seat popover. */
+.seat-stop {
+  position: relative;
+  cursor: default;
+  outline: none;
+  border-bottom: 1px dotted var(--border);
+}
+
+.seat-stop:hover,
+.seat-stop:focus-visible {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.seat-stop-pop {
+  position: fixed;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 240px;
+  max-width: min(360px, calc(100vw - 24px));
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.45;
+  text-decoration: none;
+  cursor: auto;
+  white-space: normal;
+}
+
+.seat-stop-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.seat-stop-name {
+  font-weight: 600;
+}
+
+/* A step a dismissed seat never finished: marked, and never pulsing. */
+.cell-dismissed {
+  border-style: dashed;
+  border-color: var(--border);
+  background: transparent;
+}
+
+.cell-stopped {
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1;
+}
+
 .matrix-label-dismissed {
   color: var(--text-dim);
   text-decoration: line-through;
