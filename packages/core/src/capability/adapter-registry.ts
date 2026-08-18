@@ -72,3 +72,45 @@ export const CURSOR_AGENT_ADAPTER: ProviderAdapterDescriptor = {
 };
 
 
+
+/** Every adapter this build knows, by provider id. */
+const ADAPTERS: readonly ProviderAdapterDescriptor[] = [
+  ANTHROPIC_ADAPTER,
+  CLAUDE_AGENT_ADAPTER,
+  CURSOR_AGENT_ADAPTER,
+];
+
+export function adapterFor(
+  providerId: string,
+): ProviderAdapterDescriptor | undefined {
+  return ADAPTERS.find((adapter) => adapter.providerId === providerId);
+}
+
+/**
+ * The provider-native operations a RUN may resolve against — what the adapter
+ * declares, minus anything this run has nothing behind.
+ *
+ * Web search, web fetch and code execution run natively wherever the backend
+ * offers them. Attachment reads are conditional: both agent-SDK adapters serve
+ * them through the SDK's own file tools, which the executor scopes to the run's
+ * attachment roots. Offering them for a run with no roots resolves
+ * attachment-access as AVAILABLE and then denies every real path — the agent is
+ * told it can read the submission's files, tries, and is refused, which is worse
+ * than being told plainly that there are none. A provider offer outranks host
+ * tools and ignores enablement, so withdrawing it here is the only way to keep
+ * the broker's verdict truthful.
+ *
+ * This lives beside the descriptors, and not in the worker that wires a run,
+ * because the server's readiness probe answers the same question before any job
+ * exists. Two copies of this rule would let the pre-submission promise drift
+ * away from what a run actually does — which is exactly how a deployment came to
+ * report attachment access green while every resumed run had none.
+ */
+export function nativeOffersFor(
+  providerId: string,
+  options: { readonly attachmentRootsPresent: boolean },
+): readonly ProviderNativeOffer[] {
+  const declared = adapterFor(providerId)?.staticOffers ?? [];
+  if (options.attachmentRootsPresent) return declared;
+  return declared.filter((offer) => !offer.operationId.startsWith("attachment."));
+}

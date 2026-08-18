@@ -1131,6 +1131,7 @@ export class ToolLoopAgentExecutor<
       context.reportProgress?.({
         kind: "tool_end",
         toolName: call.name,
+        ...(result.isError === true ? { failed: true } : {}),
         message:
           result.isError === true
             ? `${call.name} rejected an out-of-order or empty step`
@@ -1168,11 +1169,15 @@ export class ToolLoopAgentExecutor<
         signal: context.signal,
       });
       throwIfAborted(context.signal);
+      // A tool that answers isError has FAILED without throwing (a refused
+      // path, a timed-out script); only a thrown error took the catch below.
+      const refused = result.isError === true;
       context.reportProgress?.({
         kind: "tool_end",
         toolName: call.name,
         elapsedMs: Date.now() - startedAt,
-        message: `${call.name} completed${hint ? ` — ${hint}` : ""}`,
+        ...(refused ? { failed: true } : {}),
+        message: `${call.name} ${refused ? "failed" : "completed"}${hint ? ` — ${hint}` : ""}`,
         ...detailData,
       });
       return toolResultBlock(call, result);
@@ -1187,6 +1192,7 @@ export class ToolLoopAgentExecutor<
         kind: "tool_end",
         toolName: call.name,
         elapsedMs: Date.now() - startedAt,
+        failed: true,
         message: `${call.name} failed`,
         ...detailData,
       });

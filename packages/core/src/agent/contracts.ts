@@ -127,6 +127,17 @@ export interface AgentProgress {
   readonly turn?: number;
   readonly elapsedMs?: number;
   /**
+   * Whether a finished tool call FAILED — refused by a permission hook, or
+   * errored. Meaningful on `tool_end` only.
+   *
+   * A first-class field rather than a phrase inside `message`, because the
+   * aggregate the dashboard shows counts these events: with the outcome legible
+   * only to a reader, a run whose every attachment read was denied reported the
+   * same tool-call counts as one that read them all, positively suggesting the
+   * files had been read.
+   */
+  readonly failed?: boolean;
+  /**
    * Optional structured payload for machine aggregation (e.g. the resolved
    * capability plan at task start). Same sanitation rules as `message`:
    * operational facts only, never content.

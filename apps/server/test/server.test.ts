@@ -30,6 +30,7 @@ import {
 } from "@brainstorm-agentic/protocol";
 
 import {
+  aggregateToolUsage,
   buildOrchestrationCommand,
   applyAppUpdate,
   buildUpdaterScript,
@@ -4515,6 +4516,46 @@ test("a per-section settings save keeps every other section and re-verifies noth
     await server.close();
     await removeWorkspace(workspace);
   }
+});
+
+test("the usage receipt separates calls that were refused from calls that worked", async () => {
+  // A run whose every attachment read was denied reported the same tool-call
+  // counts as one that read them all, because the outcome lived only inside the
+  // human-readable message. The dashboard therefore suggested the files had been
+  // read. The refusal is now a field, and it is counted apart.
+  const workspace = tempRoot();
+  const jobDir = join(workspace, "job");
+  mkdirSync(jobDir, { recursive: true });
+  const event = (progress: Record<string, unknown>): string =>
+    `${JSON.stringify({
+      type: "agent:progress",
+      runId: "usage",
+      seq: 1,
+      at: Date.now(),
+      path: "brainstorm-root/review-members/member[0]/cotStep[0]/judge-step",
+      taskId: "usage:judge",
+      taskKind: "brainstorm.judge",
+      progress,
+    })}\n`;
+  writeFileSync(
+    join(jobDir, "events.jsonl"),
+    [
+      event({ kind: "tool_end", toolName: "Read", message: "read a file", failed: true }),
+      event({ kind: "tool_end", toolName: "Read", message: "read a file", failed: true }),
+      event({ kind: "tool_end", toolName: "Read", message: "read a file" }),
+      event({ kind: "tool_end", toolName: "Bash", message: "ran a script" }),
+    ].join(""),
+  );
+
+  const report = aggregateToolUsage(jobDir);
+  // Every call still counts as a call — the agent did spend a turn on it.
+  assert.equal(report.totals.Read, 3);
+  assert.equal(report.totals.Bash, 1);
+  // And the two that came back with nothing are legible as such.
+  assert.equal(report.failures.Read, 2);
+  assert.equal(report.failures.Bash, undefined, "a tool with no failures has no entry");
+  assert.equal(report.byRole.judge?.Read, 3);
+  rmSync(workspace, { recursive: true, force: true });
 });
 
 test("switching telemetry off survives the save and reaches the worker", async () => {

@@ -69,3 +69,4 @@ export {
   type RelaunchCommand,
   type StartedAppUpdate,
 } from "./self-update.js";
+export { aggregateToolUsage } from "./tool-usage.js";

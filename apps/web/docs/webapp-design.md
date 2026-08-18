@@ -406,11 +406,25 @@ content).
 
 **8. Done** — the receipt. Body: total duration, a per-stage duration bar list (label + thin
 horizontal bar scaled to the longest stage + ms), and agent-task count. One line, dim: session
-directory path. Below a hairline, the **capability & tool usage receipt** (`GET
-/api/jobs/:id/tool-usage`): which tools each role actually called, calls by stage, and the
-capability-resolution matrix (per declared operation: how many tasks resolved it
-provider-native, host-tool, or unavailable — with a dim note naming any operation that ran in
-"unavailable" honesty mode).
+directory path.
+
+The **capability & tool usage receipt** (`GET /api/jobs/:id/tool-usage`) sits below the stage
+pager for EVERY run that has started — not inside the Done stage. It reports which tools each role
+actually called, calls by stage, and the capability-resolution matrix (per declared operation: how
+many tasks resolved it provider-native, host-tool, or unavailable), and it leads with two warnings
+when they apply:
+
+- **Ran without** — the operations that resolved unavailable, and how many tasks were told so. Those
+  agents were instructed not to work around the gap, so their conclusions have to be read in that
+  light.
+- **Refused calls** — calls that were made and failed, whether denied by a permission hook or
+  errored, counted apart from the totals beneath them.
+
+Both are warnings rather than dim asides, and the receipt is not gated on a run finishing. Gated on
+the Done stage's summary it appeared only after a clean finish, so a run that failed, was cancelled,
+or credit-blocked never showed the one record of what its agents could actually do — which is how a
+deployment whose agents could not open any submitted file went unnoticed until a judge said so in
+prose.
 
 ### Failure & cancellation
 

@@ -23,9 +23,7 @@ import { join } from "node:path";
 import process from "node:process";
 
 import {
-  ANTHROPIC_ADAPTER,
-  CLAUDE_AGENT_ADAPTER,
-  CURSOR_AGENT_ADAPTER,
+  nativeOffersFor,
   resolveCapabilityPlan,
   type CapabilityDeclaration,
 } from "@brainstorm-agentic/core";
@@ -338,14 +336,14 @@ export function defaultReadinessProbes(
       // degraded prompts at best, a failed required-capability task at
       // worst — so it blocks submissions instead.
       const provider = context.settings.llm.provider;
-      const providerOffers =
-        provider === "anthropic"
-          ? ANTHROPIC_ADAPTER.staticOffers
-          : provider === "claude-agent"
-            ? CLAUDE_AGENT_ADAPTER.staticOffers
-            : provider === "cursor-agent"
-              ? CURSOR_AGENT_ADAPTER.staticOffers
-              : [];
+      // The SAME rule the worker wires a run with, from the same place, so this
+      // promise cannot drift from what a run does. Modelled with attachment
+      // roots PRESENT because that is the question a deployment check answers:
+      // if a submission carries files, can the panel read them? A submission
+      // with nothing attached has no attachment access and needs none.
+      const providerOffers = nativeOffersFor(provider, {
+        attachmentRootsPresent: true,
+      });
       const hostTools = [...ATTACHMENT_MANIFESTS, ...TAXONOMY_MANIFESTS];
       const enabledHostToolIds = new Set<string>(
         context.settings.hostTools?.enabledToolIds ??
@@ -401,8 +399,20 @@ export function defaultReadinessProbes(
       const summary = coreCapabilities
         .map((capability) => {
           const sources = byCapability.get(capability.capabilityId) ?? new Set<string>();
-          const source = sources.has("provider") ? "provider" : "host tools";
-          return `${capability.capabilityId}: ${source}`;
+          // Name every source the capability actually resolves through. The old
+          // collapse — "provider" whenever ANY operation was native — reported
+          // attachment-access as provider-backed while advertising as host-backed
+          // the one operation (search) no provider offers, hiding the split.
+          const named = [
+            ...(sources.has("provider") ? ["provider"] : []),
+            ...(sources.has("host") ? ["host tools"] : []),
+          ];
+          const source = named.length > 0 ? named.join(" + ") : "nothing";
+          const scope =
+            capability.capabilityId === "attachment-access"
+              ? " (when a submission carries files)"
+              : "";
+          return `${capability.capabilityId}: ${source}${scope}`;
         })
         .join(" · ");
       return { message: summary, detail };

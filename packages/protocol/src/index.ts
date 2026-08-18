@@ -1745,6 +1745,14 @@ export type ServerEvent =
 export interface ToolUsageReport {
   /** tool name -> completed calls, across the whole job. */
   readonly totals: Readonly<Record<string, number>>;
+  /**
+   * tool name -> calls that FAILED: refused by a permission hook, or errored.
+   * Counted separately because a call and a successful call are not the same
+   * fact: a run whose every attachment read was denied used to report the same
+   * totals as one that read them all, which read as evidence the files had been
+   * seen. Absent keys mean no failures for that tool.
+   */
+  readonly failures: Readonly<Record<string, number>>;
   /** role (task kind minus the workflow prefix) -> tool name -> calls. */
   readonly byRole: Readonly<Record<string, Readonly<Record<string, number>>>>;
   /** dashboard stage id (or "other") -> tool name -> calls. */

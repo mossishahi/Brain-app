@@ -1141,6 +1141,10 @@ function reportSdkMessage(
         kind: "tool_end",
         toolName: pending.name,
         elapsedMs,
+        // The outcome also rides as a field, not only inside this sentence: a
+        // denied read must be countable, or the usage receipt reports it as a
+        // read that happened.
+        ...(block.is_error === true ? { failed: true } : {}),
         message:
           `${label} ${outcome} · ${formatElapsed(elapsedMs)}` +
           (remaining > 0

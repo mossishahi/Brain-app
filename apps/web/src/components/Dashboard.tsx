@@ -501,20 +501,7 @@ export function Dashboard({
       case "done": {
         const stage = stageOf(job, id);
         if (!stage?.summary) return null;
-        return (
-          <div>
-            <DoneBody summary={stage.summary} />
-            {/* The capability & tool usage receipt: which tools each role
-                actually called, per stage, and how the broker resolved every
-                declared capability operation (provider-native, host tool, or
-                honest unavailability). */}
-            <ToolUsagePanel
-              jobId={jobId}
-              updatedAt={job.updatedAt}
-              active={job.status === "running"}
-            />
-          </div>
-        );
+        return <DoneBody summary={stage.summary} />;
       }
     }
   };
@@ -769,6 +756,26 @@ export function Dashboard({
           </div>
         );
       })()}
+
+      {/*
+        The capability & tool usage receipt: which tools each role actually
+        called, per stage, and how the broker resolved every declared capability
+        operation — provider-native, host tool, or honest unavailability.
+
+        Mounted here, for EVERY run that has started, rather than inside the done
+        stage's body. Gated on the done summary it only ever appeared on a run
+        that finished cleanly, so a run that failed, was cancelled, or
+        credit-blocked never showed the one record that says whether the agents
+        could do what they were asked — which is how a deployment where nothing
+        could read the submitted files went unnoticed.
+      */}
+      {job.status !== "queued" && (
+        <ToolUsagePanel
+          jobId={jobId}
+          updatedAt={job.updatedAt}
+          active={job.status === "running"}
+        />
+      )}
     </div>
   );
 }

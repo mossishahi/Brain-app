@@ -111,16 +111,34 @@ export function ToolUsagePanel({
   const unavailable = Object.entries(report.capabilityResolution)
     .filter(([, sources]) => (sources.unavailable ?? 0) > 0)
     .map(([operation, sources]) => ({ operation, tasks: sources.unavailable ?? 0 }));
+  const refused = Object.entries(report.failures ?? {})
+    .filter(([, count]) => count > 0)
+    .sort((a, b) => b[1] - a[1]);
 
   return (
     <div className="tool-usage">
+      {/*
+        Both of these used to be a dim aside, or nothing at all. They are the
+        two ways a run can look like it did the work and not have: an ability the
+        agents were told they did not have, and calls they made and were refused.
+        A run whose files could not be read said so only in a judge's prose.
+      */}
       {unavailable.length > 0 && (
-        <p className="dim small">
-          resolved as unavailable:{" "}
+        <p className="callout callout-warn" role="status">
+          <strong>Ran without:</strong>{" "}
           {unavailable
             .map((entry) => `${entry.operation} (${entry.tasks} tasks)`)
-            .join(", ")}{" "}
-          — those agents were instructed not to fabricate the missing capability
+            .join(", ")}
+          . Those agents were told the ability was missing and instructed not to
+          work around it — read their conclusions with that in mind.
+        </p>
+      )}
+      {refused.length > 0 && (
+        <p className="callout callout-warn" role="status">
+          <strong>Refused calls:</strong>{" "}
+          {refused.map(([tool, count]) => `${tool} × ${count}`).join(", ")}. These
+          were attempted and failed, so the counts below include calls that
+          returned nothing.
         </p>
       )}
       {totalCalls === 0 ? (

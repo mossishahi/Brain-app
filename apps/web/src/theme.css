@@ -3298,6 +3298,15 @@ section.drawer-section:not(.drawer-updates) {
   font-size: 13px;
 }
 
+/* A degradation the reader has to weigh, not a footnote: an ability the agents
+   were told they did not have, or calls they made and were refused. */
+.callout-warn {
+  border-left-color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
+  padding: 8px 10px 8px 12px;
+  border-radius: 0 var(--radius) var(--radius) 0;
+}
+
 /* Itemized act findings: critique issues, interpretation candidates, misconceptions. */
 .issue-list {
   list-style: none;
@@ -4070,6 +4079,12 @@ section.drawer-section:not(.drawer-updates) {
   margin-top: 16px;
   padding-top: 12px;
   border-top: 1px solid var(--border);
+}
+
+/* The matrices scroll; a callout must not, or a long list of refused tools
+   would hide its own text behind a scrollbar. */
+.tool-usage > .callout {
+  overflow-x: visible;
 }
 
 /* Wide matrices (one column per tool) scroll inside their own box. */

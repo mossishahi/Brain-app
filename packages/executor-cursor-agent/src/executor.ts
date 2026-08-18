@@ -922,6 +922,8 @@ function reportSdkMessage(
         kind: "tool_end",
         toolName: name,
         elapsedMs,
+        // Countable, not merely readable: see AgentProgress.failed.
+        ...(message.status === "error" ? { failed: true } : {}),
         message:
           `${label} ${outcome} · ${formatElapsed(elapsedMs)}` +
           (remaining > 0
@@ -1001,6 +1003,7 @@ function reported(
         kind: "tool_end",
         toolName: name,
         elapsedMs,
+        ...(failed ? { failed: true } : {}),
         message: `${TOOL_END_LABELS[name] ?? name} ${failed ? "failed" : "finished"} · ${formatElapsed(elapsedMs)}`,
         ...(detail ? { data: { detail: { ...detail } } } : {}),
       });

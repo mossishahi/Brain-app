@@ -21,9 +21,7 @@ import {
   type SkillResolver,
 } from "@brainstorm-agentic/brainstorm-runtime";
 import {
-  ANTHROPIC_ADAPTER,
-  CLAUDE_AGENT_ADAPTER,
-  CURSOR_AGENT_ADAPTER,
+  nativeOffersFor,
   CreditBlockedError,
   InMemoryToolRegistry,
   isCreditBlocked,
@@ -492,38 +490,6 @@ class ThinkingArtifactAgentExecutor implements AgentExecutor {
   }
 }
 
-/**
- * The provider-native operations the capability broker may resolve against for
- * this run: what the adapter declares, minus anything this run has no backing
- * for.
- *
- * Web search, web fetch and code execution run natively wherever the backend
- * offers them. Attachment reads are different: both agent-SDK adapters serve
- * them through the SDK's OWN file tools, which the executor scopes to the run's
- * attachment roots. A run with no roots that still offered them would resolve
- * attachment-access as AVAILABLE and then deny every real path — the agent is
- * told it can read the submission's files, tries, and is refused, which is worse
- * than being told plainly that there are none. A provider offer outranks host
- * tools and ignores enablement, so withdrawing it here is the only way to keep
- * the broker's verdict truthful; it is the same rule that removes the attachment
- * HOST tools when there are no roots.
- */
-export function nativeOffersFor(
-  provider: ProviderConfig["provider"],
-  hasAttachmentRoots: boolean,
-): readonly ProviderNativeOffer[] {
-  const declared =
-    provider === "anthropic"
-      ? ANTHROPIC_ADAPTER.staticOffers
-      : provider === "claude-agent"
-        ? CLAUDE_AGENT_ADAPTER.staticOffers
-        : provider === "cursor-agent"
-          ? CURSOR_AGENT_ADAPTER.staticOffers
-          : [];
-  if (hasAttachmentRoots) return declared;
-  return declared.filter((offer) => !offer.operationId.startsWith("attachment."));
-}
-
 export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
   const attachmentRoots = options.attachmentRoots ?? [];
   // The Claude Agent SDK path serves attachment access through Claude Code's
@@ -589,10 +555,11 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
   // web fetch, and code execution run natively on both provider paths (as
   // Anthropic server tools, or as Claude Code's own built-ins). Offline runs
   // offer nothing and fall back to the capability catalog's honesty rules.
-  const providerOffers = nativeOffersFor(
-    options.providerConfig.provider,
-    attachmentRoots.length > 0,
-  );
+  // The rule lives in core, beside the adapter descriptors, because the server's
+  // readiness probe has to answer the same question before a job exists.
+  const providerOffers = nativeOffersFor(options.providerConfig.provider, {
+    attachmentRootsPresent: attachmentRoots.length > 0,
+  });
 
   /**
    * The roots the EXECUTOR is given, which is a narrower question than which

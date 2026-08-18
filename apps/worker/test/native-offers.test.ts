@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { nativeOffersFor } from "../src/wiring.js";
+import { nativeOffersFor } from "@brainstorm-agentic/core";
 
 /**
  * What the capability broker is allowed to resolve natively for a run.
@@ -33,12 +33,12 @@ const otherOps = (
 test("an agent SDK offers native attachment reads only when the run has roots to read", () => {
   for (const provider of ["claude-agent", "cursor-agent"] as const) {
     assert.deepEqual(
-      attachmentOps(nativeOffersFor(provider, true)),
+      attachmentOps(nativeOffersFor(provider, { attachmentRootsPresent: true })),
       ["attachment.list", "attachment.read"],
       `${provider} serves attachment reads through its own file tools`,
     );
     assert.deepEqual(
-      attachmentOps(nativeOffersFor(provider, false)),
+      attachmentOps(nativeOffersFor(provider, { attachmentRootsPresent: false })),
       [],
       `${provider} must withdraw them when there is nothing to read: offering them ` +
         "resolves the capability available and then denies every path",
@@ -46,11 +46,11 @@ test("an agent SDK offers native attachment reads only when the run has roots to
     // Withdrawing the attachment offers must not disturb the rest: search,
     // fetch and execution do not depend on an attachment store.
     assert.deepEqual(
-      otherOps(nativeOffersFor(provider, false)),
+      otherOps(nativeOffersFor(provider, { attachmentRootsPresent: false })),
       ["code.execute", "web.fetch", "web.search"],
     );
     assert.deepEqual(
-      otherOps(nativeOffersFor(provider, true)),
+      otherOps(nativeOffersFor(provider, { attachmentRootsPresent: true })),
       ["code.execute", "web.fetch", "web.search"],
     );
   }
@@ -60,18 +60,18 @@ test("the developer API serves attachments host-side, so its offers never change
   // The Messages API path has no file tools of its own — attachment access is
   // the registered host tools there, which buildRuntime removes when there are
   // no roots. Its native offers are the same either way.
-  assert.deepEqual(attachmentOps(nativeOffersFor("anthropic", true)), []);
+  assert.deepEqual(attachmentOps(nativeOffersFor("anthropic", { attachmentRootsPresent: true })), []);
   assert.deepEqual(
-    otherOps(nativeOffersFor("anthropic", false)),
+    otherOps(nativeOffersFor("anthropic", { attachmentRootsPresent: false })),
     ["code.execute", "web.fetch", "web.search"],
   );
   assert.deepEqual(
-    nativeOffersFor("anthropic", true),
-    nativeOffersFor("anthropic", false),
+    nativeOffersFor("anthropic", { attachmentRootsPresent: true }),
+    nativeOffersFor("anthropic", { attachmentRootsPresent: false }),
   );
 });
 
 test("an offline run offers nothing natively and falls back to the honesty rules", () => {
-  assert.deepEqual(nativeOffersFor("offline", true), []);
-  assert.deepEqual(nativeOffersFor("offline", false), []);
+  assert.deepEqual(nativeOffersFor("offline", { attachmentRootsPresent: true }), []);
+  assert.deepEqual(nativeOffersFor("offline", { attachmentRootsPresent: false }), []);
 });

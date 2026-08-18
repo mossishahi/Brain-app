@@ -32,6 +32,7 @@ function bump(matrix: Matrix, row: string, column: string): void {
 
 export function aggregateToolUsage(jobDir: string): ToolUsageReport {
   const totals: Counts = {};
+  const failures: Counts = {};
   const byRole: Matrix = {};
   const byStage: Matrix = {};
   const capabilityResolution: Matrix = {};
@@ -62,6 +63,12 @@ export function aggregateToolUsage(jobDir: string): ToolUsageReport {
     if (progress.kind === "tool_end" && typeof progress.toolName === "string") {
       const tool = progress.toolName;
       totals[tool] = (totals[tool] ?? 0) + 1;
+      // A refused or errored call is counted too — a call was made — but also
+      // tallied apart, so "12 attachment reads" cannot stand for twelve reads
+      // that were all denied.
+      if (progress.failed === true) {
+        failures[tool] = (failures[tool] ?? 0) + 1;
+      }
       bump(byRole, role, tool);
       bump(byStage, stage, tool);
       continue;
@@ -80,5 +87,5 @@ export function aggregateToolUsage(jobDir: string): ToolUsageReport {
     }
   }
 
-  return { totals, byRole, byStage, capabilityResolution };
+  return { totals, failures, byRole, byStage, capabilityResolution };
 }
