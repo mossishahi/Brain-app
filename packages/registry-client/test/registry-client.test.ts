@@ -76,6 +76,40 @@ function fixturePin(): ContentRegistryPin {
   };
 }
 
+test("a declared app floor rides the manifest; a malformed one is refused", () => {
+  const raw = JSON.parse(
+    readFileSync(join(versionRoot, "manifest.json"), "utf8"),
+  ) as Record<string, unknown>;
+
+  // Published bundles predate the field, so its absence must stay legal —
+  // the floor only binds hosts once a publisher declares one.
+  assert.equal(
+    parseContentRegistryManifest({ ...raw }, "brainstorm", FIXTURE_VERSION).minAppVersion,
+    undefined,
+  );
+
+  assert.equal(
+    parseContentRegistryManifest(
+      { ...raw, minAppVersion: "0.2.46" },
+      "brainstorm",
+      FIXTURE_VERSION,
+    ).minAppVersion,
+    "0.2.46",
+  );
+
+  // A floor nobody can compare against is worse than none: it would parse,
+  // ride into the pin, and quietly never turn anything away.
+  assert.throws(
+    () =>
+      parseContentRegistryManifest(
+        { ...raw, minAppVersion: "0.2" },
+        "brainstorm",
+        FIXTURE_VERSION,
+      ),
+    /minAppVersion must be a plain semver/,
+  );
+});
+
 test("pin roundtrip rejects modified manifest metadata", () => {
   const root = mkdtempSync(join(tmpdir(), "registry-pin-"));
   const path = join(root, "pin.json");

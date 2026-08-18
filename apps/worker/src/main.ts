@@ -13,8 +13,9 @@ import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { appendFile, mkdir } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 
 import { scoreExpertiseTree } from "@brainstorm-agentic/brainstorm-runtime";
 import { loadContent } from "@brainstorm-agentic/content";
@@ -592,14 +593,30 @@ async function recordRunSummary(options: {
   }
 }
 
-/** Read from package.json so the version is declared in exactly one place. */
+/**
+ * The APP's release version, declared in exactly one place: the repo-root
+ * package.json named "brainstorm-agentic-app". Resolved by walking up rather
+ * than by a fixed relative path — the worker's own package.json carries the
+ * workspace version (0.1.0), which is not what a release, a telemetry record,
+ * or a bundle's declared app floor is talking about.
+ */
 const APP_VERSION: string = (() => {
-  try {
-    return (
-      createRequire(import.meta.url)("../../package.json") as { version?: string }
-    ).version ?? "0.0.0";
-  } catch {
-    return "0.0.0";
+  let dir = dirname(fileURLToPath(import.meta.url));
+  for (;;) {
+    try {
+      const parsed = JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as {
+        name?: string;
+        version?: string;
+      };
+      if (parsed.name === "brainstorm-agentic-app" && typeof parsed.version === "string") {
+        return parsed.version;
+      }
+    } catch {
+      // Missing or unreadable candidate; keep walking up.
+    }
+    const parent = resolve(dir, "..");
+    if (parent === dir) return "0.0.0";
+    dir = parent;
   }
 })();
 
@@ -747,6 +764,7 @@ async function main(): Promise<void> {
           registryUrl: contentRegistryUrl,
           contentDir: contentDir!,
           resume: pinExists,
+          appVersion: APP_VERSION,
           ...(!pinExists && contentRegistryVersion
             ? { version: contentRegistryVersion }
             : {}),
@@ -834,6 +852,7 @@ async function main(): Promise<void> {
           registryUrl: contentRegistryUrl,
           contentDir: contentDir!,
           resume: true,
+          appVersion: APP_VERSION,
         })
       : undefined;
     // A resume that carries an explicit gate answer must compile the gate as a

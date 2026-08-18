@@ -1,3 +1,5 @@
+import { atLeastVersion } from "./semver.js";
+
 /**
  * The one Node.js floor of the whole app, enforced at runtime.
  *
@@ -13,22 +15,12 @@
  */
 export const MINIMUM_NODE_VERSION = "22.13.0";
 
-function parts(version: string): number[] {
-  return version.split(".").map((part) => Number.parseInt(part, 10) || 0);
-}
-
 /** True when `version` (e.g. process.versions.node) is at/above the floor. */
 export function isSupportedNodeVersion(
   version: string,
   minimum: string = MINIMUM_NODE_VERSION,
 ): boolean {
-  const [candidate, floor] = [parts(version), parts(minimum)];
-  for (let index = 0; index < 3; index += 1) {
-    const a = candidate[index] ?? 0;
-    const b = floor[index] ?? 0;
-    if (a !== b) return a > b;
-  }
-  return true;
+  return atLeastVersion(version, minimum);
 }
 
 /**

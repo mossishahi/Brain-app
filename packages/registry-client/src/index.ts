@@ -48,6 +48,15 @@ export interface ContentRegistryManifest {
   readonly bundle: string;
   readonly version: string;
   readonly runtimeProtocol: string;
+  /**
+   * The oldest app release that can run this bundle, when the publisher
+   * declared one. The runtime protocol names the CONTRACT the content speaks;
+   * this names the app that actually implements the parts this version uses —
+   * a bundle may bind a field or an output schema an older app never knew,
+   * which its content validator cannot see because the reference itself is
+   * well-formed. Absent on every bundle published before the field existed.
+   */
+  readonly minAppVersion?: string;
   readonly entrypoints: ContentRegistryEntrypoints;
   readonly files: readonly ContentRegistryManifestFile[];
 }
@@ -154,6 +163,15 @@ export function parseContentRegistryManifest(
     );
   }
   const runtimeProtocol = string(raw.runtimeProtocol, "manifest.runtimeProtocol");
+  const minAppVersion =
+    raw.minAppVersion === undefined
+      ? undefined
+      : string(raw.minAppVersion, "manifest.minAppVersion");
+  if (minAppVersion !== undefined && !/^\d+\.\d+\.\d+$/.test(minAppVersion)) {
+    throw new Error(
+      `content-registry manifest.minAppVersion must be a plain semver, got "${minAppVersion}"`,
+    );
+  }
   const rawEntrypoints = object(raw.entrypoints, "manifest.entrypoints");
   const workflow = safeRegistryPath(
     rawEntrypoints.workflow,
@@ -203,6 +221,7 @@ export function parseContentRegistryManifest(
     bundle,
     version,
     runtimeProtocol,
+    ...(minAppVersion !== undefined ? { minAppVersion } : {}),
     entrypoints: { workflow, controls },
     files,
   };

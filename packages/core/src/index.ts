@@ -51,3 +51,4 @@ export * from "./util/concurrency.js";
 
 // Runtime Node.js floor (enforced by every process entry point)
 export * from "./util/node-version.js";
+export * from "./util/semver.js";

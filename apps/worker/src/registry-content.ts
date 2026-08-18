@@ -11,6 +11,7 @@ import {
   type Skill,
   type ValidationIssue,
 } from "@brainstorm-agentic/content";
+import { atLeastVersion } from "@brainstorm-agentic/core";
 import type {
   ResolvedRole,
   SkillResolver,
@@ -84,6 +85,12 @@ export async function openLazyRegistryContent(options: {
   readonly resume: boolean;
   readonly bundle?: string;
   readonly version?: string;
+  /**
+   * This app's release version, checked against any floor the bundle
+   * declares. Omitted only where no build identifies itself (tests), which
+   * skips the check rather than inventing a version to compare.
+   */
+  readonly appVersion?: string;
 }): Promise<LazyRegistryContent> {
   const pinPath = join(options.contentDir, "content-pin.json");
   const client = new ContentRegistryClient(options.registryUrl);
@@ -115,6 +122,25 @@ export async function openLazyRegistryContent(options: {
       `bundle ${pin.bundle}@${pin.version} targets runtime protocol ` +
         `"${pin.manifest.runtimeProtocol}", which this app does not implement ` +
         `(supported: ${[...SUPPORTED_RUNTIME_PROTOCOLS].join(", ")}). Update the app.`,
+    );
+  }
+
+  // Refuse a bundle that needs a newer app than this one. The protocol above
+  // says which dialect the content speaks; this says which app implements the
+  // parts this version actually uses. Without it the mismatch surfaces as a
+  // content error at compile — or, worse, as a bind that resolves to nothing
+  // partway through a run, after the panel has already been paid for, and the
+  // journaled artifact then replays into the same failure on every resume.
+  const floor = pin.manifest.minAppVersion;
+  if (
+    floor !== undefined &&
+    options.appVersion !== undefined &&
+    !atLeastVersion(options.appVersion, floor)
+  ) {
+    throw new Error(
+      `bundle ${pin.bundle}@${pin.version} needs app ${floor} or newer; this app is ` +
+        `${options.appVersion}. Update the app, or pin an older bundle version in ` +
+        `settings.json (contentRegistry.version).`,
     );
   }
 
