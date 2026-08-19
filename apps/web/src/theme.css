@@ -2738,6 +2738,60 @@ section.drawer-section:not(.drawer-updates) {
   flex: 0 0 72px;
 }
 
+/* WHAT / WHO / WHERE, between the timestamp and the message. Fixed bases, so
+   the messages line up down the whole feed and the eye can read one column at a
+   time; each truncates rather than pushing the message around. */
+.activity-entry > .activity-role,
+.activity-entry > .activity-actor,
+.activity-entry > .activity-where {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.activity-entry > .activity-role {
+  /* Measured against the longest label the bundle has ("Pool builder") in small
+     caps, plus a few pixels: the reader's font stack is not this machine's, and
+     a cell that overflows ellipsises rather than shoving the message. */
+  flex: 0 0 88px;
+  /* The role is the row's category, so it carries the small-caps treatment the
+     rest of the app gives labels. */
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.activity-entry > .activity-actor {
+  /* Wide enough for a two-digit seat: a panel can seat thirteen. */
+  flex: 0 0 60px;
+  /* Who is working reads as the row's subject: full weight, normal text. */
+  color: var(--text);
+  font-family: var(--mono);
+}
+
+.activity-entry > .activity-where {
+  /* Measured against the widest this can say — "Seat 13 → step 9 > round 10",
+     a full panel on a nine-step chain at the round cap — with slack. */
+  flex: 0 0 180px;
+  font-family: var(--mono);
+}
+
+/* Narrow panes: the columns are worth less than the message, so they go first.
+   Below 900px only WHO survives, and below 700px the row is time + message. */
+@media (max-width: 900px) {
+  .activity-entry > .activity-role,
+  .activity-entry > .activity-where {
+    display: none;
+  }
+}
+
+@media (max-width: 700px) {
+  .activity-entry > .activity-actor {
+    display: none;
+  }
+}
+
 .activity-entry > .activity-marker {
   flex: 0 0 8px;
 }

@@ -227,6 +227,59 @@ function CapabilityBadge({ entry }: { entry: StageActivityEntry }) {
   );
 }
 
+/**
+ * Where a row happened: whose chain, which step, which round. The seat is the
+ * one under REVIEW, which is not always the one working — a commenter's row
+ * names itself in the actor column and the seat it is commenting on here.
+ */
+function Where({ where }: { where: NonNullable<StageActivityEntry["where"]> }) {
+  return (
+    <>
+      {where.seat}
+      {where.step !== undefined && (
+        <>
+          <span className="dim"> → step </span>
+          {where.step}
+        </>
+      )}
+      {where.round !== undefined && (
+        <>
+          <span className="dim"> {">"} round </span>
+          {where.round}
+        </>
+      )}
+    </>
+  );
+}
+
+/**
+ * What a role means, for the roles whose one-word label does not say it. The
+ * label has to fit a narrow column; the hover is where the sentence goes.
+ */
+const ROLE_HINTS: Readonly<Record<string, string>> = {
+  Thinker: "the seat developing its own chain",
+  Commenter: "a seat reading another seat's chain",
+  Bridge: "the interdisciplinary seat, commenting across the fields between the others",
+  Judge: "rules on the round's comments; not a seat",
+  Redeveloper: "the seat revising its own chain after a verdict",
+  Integrator: "reads every seat's final version; not a seat",
+  Chair: "writes the proposal from the integration; not a seat",
+};
+
+function roleTitle(role: string | undefined): string {
+  if (role === undefined) return "no agent role recorded for this row";
+  const hint = ROLE_HINTS[role];
+  return hint === undefined ? role : `${role} — ${hint}`;
+}
+
+function whereTitle(where: StageActivityEntry["where"]): string {
+  if (!where) return "outside the panel's walk — the stage itself is the place";
+  const parts = [where.seat ?? "the panel"];
+  if (where.step !== undefined) parts.push(`chain step ${where.step}`);
+  if (where.round !== undefined) parts.push(`review round ${where.round}`);
+  return `${parts.join(", ")} — the chain being worked on, which is not always the agent's own`;
+}
+
 export function ActivityFeed({
   entries,
   active,
@@ -275,6 +328,27 @@ export function ActivityFeed({
                 second: "2-digit",
               })}
             </time>
+            {/* WHAT, WHO, WHERE — three fixed columns, so the messages beside
+                them stay in one line down the feed even when a row has none of
+                the three (a pre-panel stage, a run-level event). An empty column
+                renders a dim dash rather than nothing, because a blank gap reads
+                as a rendering fault. */}
+            <span className="activity-role" title={roleTitle(entry.role)}>
+              {entry.role ?? "—"}
+            </span>
+            <span
+              className="activity-actor"
+              title={
+                entry.actor !== undefined
+                  ? `${entry.actor} is doing this`
+                  : "not a seat — the role alone says who is working"
+              }
+            >
+              {entry.actor ?? "—"}
+            </span>
+            <span className="activity-where" title={whereTitle(entry.where)}>
+              {entry.where ? <Where where={entry.where} /> : "—"}
+            </span>
             <span className="activity-marker" aria-hidden />
             <span className="activity-message">{entry.message}</span>
             {entry.turn !== undefined && (

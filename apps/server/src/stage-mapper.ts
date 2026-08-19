@@ -113,9 +113,23 @@ interface StageTiming {
    * prose (`where`) is filled in later, once the panel is known.
    */
   errors: StageErrorView[];
-  activity: StageActivityEntry[];
+  activity: ActivityRow[];
   /** Total token spend of the stage's agent tasks; stamped after timings(). */
   usage?: TokenUsageView;
+}
+
+/**
+ * An activity row while the mapper still holds it: the wire shape plus the two
+ * things the annotation is derived from. Both are stripped on the way out — the
+ * client is shown who and where, not the execution path they were read from.
+ *
+ * They are carried rather than resolved on the spot because the ROSTER is not
+ * known yet when the rows are built: the panel the run executed depends on the
+ * confirmation gate's answer, which is read further down.
+ */
+interface ActivityRow extends StageActivityEntry {
+  readonly path: string;
+  readonly taskKind?: string;
 }
 
 /** Failures kept per stage and attempt; older ones roll off first. */
@@ -546,6 +560,8 @@ function timings(
           at: event.at,
           kind: event.progress.kind,
           message: event.progress.message,
+          path: event.path,
+          ...(event.taskKind !== undefined ? { taskKind: event.taskKind } : {}),
           ...(event.progress.toolName
             ? { toolName: event.progress.toolName }
             : {}),
@@ -571,6 +587,8 @@ function timings(
           id: String(eventIndex),
           at: event.at,
           kind: "status",
+          path: event.path,
+          taskKind: event.taskKind,
           message:
             event.type === "agent:started"
               ? `${role} agent started`
@@ -682,6 +700,92 @@ function coordinates(path: string): Coordinates {
     step: number(/cotStep\[(\d+)\]/),
     round: number(/iter\[(\d+)\]/),
     commentor: number(/commentor\[(\d+)\]/),
+  };
+}
+
+/**
+ * The panel's own word for each agent, for the Activity feed's role column.
+ *
+ * The bundle's role ids are what the event carries (`brainstorm.commentor`), and
+ * they are not all self-explaining: `brain` is the seat THINKING, which is the
+ * one a reader is most likely to misread. Anything unlisted falls back to the id
+ * with a capital, so a bundle that adds a role is legible before this table
+ * learns about it.
+ */
+const ROLE_LABELS: Readonly<Record<string, string>> = {
+  brain: "Thinker",
+  commentor: "Commenter",
+  // "Bridge" rather than "Interdisciplinary": the seat is named in the next
+  // column anyway, and the full word needs a third of the row to itself. It is
+  // the workflow's own word for this path (comment-step-bridge).
+  "interdisciplinary-commentor": "Bridge",
+  judge: "Judge",
+  redeveloper: "Redeveloper",
+  integrator: "Integrator",
+  chair: "Chair",
+  processor: "Processor",
+  classifier: "Classifier",
+  "code-annotator": "Annotator",
+  "pool-builder": "Pool builder",
+  placer: "Placer",
+};
+
+function roleLabel(taskKind: string | undefined): string | undefined {
+  if (taskKind === undefined || taskKind === "") return undefined;
+  const id = taskKind.replace(/^brainstorm\./, "");
+  return ROLE_LABELS[id] ?? `${id.charAt(0).toUpperCase()}${id.slice(1)}`;
+}
+
+/** Roles whose actor is the seat whose chain is being worked on, not another. */
+const OWN_CHAIN_ROLES = new Set(["brain", "redeveloper"]);
+
+/**
+ * Who is working, and where, for one activity row.
+ *
+ * The three answers come from different places, which is the whole reason this
+ * exists: the ROLE is in the event's task kind, the PLACE is in its path, and
+ * the ACTOR is in neither on its own — a commentor's path names its index in the
+ * round's fan-out, and that fan-out is the panel minus the seat under review, so
+ * the index only becomes a seat once it is projected back over the roster.
+ */
+function activityAnnotation(
+  path: string,
+  taskKind: string | undefined,
+  panel: readonly PanelMemberView[],
+): {
+  readonly role?: string;
+  readonly actor?: string;
+  readonly where?: { readonly seat?: string; readonly step?: number; readonly round?: number };
+} {
+  const role = roleLabel(taskKind);
+  const at = coordinates(path);
+  const firstPass = /first-pass(?:\/first-pass-fanout)?\/member\[(\d+)\]/.exec(path);
+  const subject = at.member ?? (firstPass ? Number(firstPass[1]) : undefined);
+  const seatName = (index: number | undefined): string | undefined =>
+    index === undefined ? undefined : `Seat ${index + 1}`;
+  const id = taskKind?.replace(/^brainstorm\./, "");
+
+  let actor = OWN_CHAIN_ROLES.has(id ?? "") ? seatName(subject) : undefined;
+  if (at.commentor !== undefined && at.member !== undefined) {
+    // The same projection the review reconstruction and the failure locator
+    // use: commentors are the panel minus the seat under review, in seat order.
+    const thinker = panel[at.member];
+    const author = panel.filter((member) => member.id !== thinker?.id)[at.commentor];
+    if (author !== undefined) actor = seatName(panel.indexOf(author));
+  }
+  const where =
+    subject === undefined
+      ? undefined
+      : {
+          ...(seatName(subject) !== undefined ? { seat: seatName(subject)! } : {}),
+          // 1-based, like every step and round a reader is shown.
+          ...(at.step !== undefined ? { step: at.step + 1 } : {}),
+          ...(at.round !== undefined ? { round: at.round + 1 } : {}),
+        };
+  return {
+    ...(role !== undefined ? { role } : {}),
+    ...(actor !== undefined ? { actor } : {}),
+    ...(where !== undefined ? { where } : {}),
   };
 }
 
@@ -2288,7 +2392,9 @@ function base(
     ...(timing.finishedAt !== undefined ? { finishedAt: timing.finishedAt } : {}),
     ...(timing.error ? { error: timing.error } : {}),
     ...(timing.errors.length > 0 ? { errors: timing.errors } : {}),
-    ...(timing.activity.length > 0 ? { activity: timing.activity } : {}),
+    ...(timing.activity.length > 0
+      ? { activity: timing.activity.map(({ path: _path, taskKind: _kind, ...row }) => row) }
+      : {}),
     ...(timing.usage !== undefined ? { usage: timing.usage } : {}),
   };
 }
@@ -2416,6 +2522,16 @@ export function buildJobDetail(input: MapperInput): JobDetail {
   // added at confirmation (they exist only once the gate was answered).
   const finalPanel =
     gate.action !== undefined ? [...keptPanel, ...gate.added] : keptPanel;
+  // With the executed roster known, every activity row can say who was working
+  // and where. Done here rather than where the rows are built because that is
+  // before the confirmation gate's answer has been read, and the roster is what
+  // turns a commentor's fan-out index into a seat.
+  for (const timing of stageTimings.values()) {
+    timing.activity = timing.activity.map((row) => ({
+      ...row,
+      ...activityAnnotation(row.path, row.taskKind, finalPanel),
+    }));
+  }
   const removedMemberIds =
     gate.action === "shrink"
       ? selectedPanel.filter((member) => !retained.has(member.id)).map((member) => member.id)

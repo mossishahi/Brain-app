@@ -91,6 +91,33 @@ export interface StageActivityEntry {
   readonly detail?: ActivityDetailView;
   /** Present on task-completion rows: what the finished task spent. */
   readonly usage?: TokenUsageView;
+  /**
+   * WHAT this agent is, as the panel's own vocabulary names it: "Thinker",
+   * "Commenter", "Judge", "Redeveloper". Absent only when the event carries no
+   * task kind at all.
+   */
+  readonly role?: string;
+  /**
+   * WHO is doing it, when the actor is a seat: "Seat 2". Absent for an agent
+   * that is not seated — the judge, the integrator, the chair, and every
+   * pre-panel stage — where the role alone says who is working.
+   *
+   * For a comment this is NOT the seat under review: a round's commentors are
+   * the panel minus the thinker, in seat order, so the index in the path has to
+   * be projected back over the roster to name the author.
+   */
+  readonly actor?: string;
+  /**
+   * WHERE in the run it is happening: whose chain, which step of it, which
+   * review round. Step and round are 1-based, as they are everywhere a reader
+   * sees them. Absent outside the review and the first pass, where the stage
+   * itself is the whole answer.
+   */
+  readonly where?: {
+    readonly seat?: string;
+    readonly step?: number;
+    readonly round?: number;
+  };
 }
 
 /**

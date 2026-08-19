@@ -210,6 +210,21 @@ One stage shows at a time, and the two steppers under the panel — "← First p
 hovered, when the name underlines. They sit outside every panel, on the page background, where a
 bordered button read as a control belonging to the panel above it rather than as a way out of it.
 
+Every Activity row is annotated with three fixed columns between the timestamp and the message,
+because a review's feed is otherwise a wall of messages with no way to tell whose work is whose:
+**what** the agent is (`COMMENTER`, `JUDGE`, `THINKER`, `REDEVELOPER`, `BRIDGE` — small caps, the
+row's category), **who** is doing it (`Seat 2`, mono, full weight — the row's subject), and **where**
+it is happening (`Seat 4 → step 5 > round 3`). The columns are sized against the widest thing each
+can say, measured rather than guessed, and truncate with a hover rather than pushing the message
+around; a row with none of the three (a pre-panel stage) shows a dim dash, since a blank gap reads as
+a rendering fault. Below 900px the role and place drop, below 700px the actor too — the message is
+worth more than any of them.
+
+The **who** and the **where** are different questions, and for a commenter they have different
+answers: the actor is the seat writing, the place is the seat being read. A round's commentors are
+the panel minus the seat under review, in seat order, so the index in an execution path only becomes
+a seat once it is projected back over the roster — the server does that, and sends no paths.
+
 The Activity feed's cap RESERVES its newest rows for entries without a capability icon — model
 turns, agent starts and completions. Tool rows otherwise win the whole cap (a live review was
 observed holding 200 rows, all 200 of them capability rows), and since the quiet-period warning is

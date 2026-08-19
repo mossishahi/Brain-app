@@ -2006,3 +2006,166 @@ test("a dismissed seat keeps its whole record and leaves the review to the seats
   assert.equal(undismissed.progress?.review?.membersComplete, 2);
   assert.equal(undismissed.dismissedMembers, undefined);
 });
+
+test("every activity row says what the agent is, who it is, and where it is working", () => {
+  // The three columns the feed shows beside the timestamp. Only the ROLE is
+  // carried by the event; the PLACE has to be read out of the execution path,
+  // and the ACTOR is in neither — a round's commentors are the panel minus the
+  // seat under review, in seat order, so a commentor's fan-out index only
+  // becomes a seat once it is projected back over the roster. Getting that
+  // projection wrong would attribute one seat's words to another.
+  const workspace = mkdtempSync(join(tmpdir(), "stage-mapper-test-"));
+  try {
+    const sessionDir = join(workspace, "session");
+    const jobDir = join(workspace, "job");
+    mkdirSync(join(sessionDir, "artifacts"), { recursive: true });
+    mkdirSync(jobDir, { recursive: true });
+    writeFileSync(
+      join(sessionDir, "checkpoint.json"),
+      JSON.stringify({
+        runId: "job-1",
+        workflowId: "brainstorm",
+        status: "running",
+        input: {},
+        journal: [],
+        pendingGates: [],
+        seq: 1,
+        updatedAt: Date.now(),
+      }),
+    );
+    writeFileSync(
+      join(sessionDir, "artifacts", "index.json"),
+      JSON.stringify({
+        refs: [{ id: "a-panel", metadata: { schema: "panel", path: "panel" } }],
+      }),
+    );
+    // Four seats, so a commentor index and a seat number cannot coincide by luck.
+    writeFileSync(
+      join(sessionDir, "artifacts", "a-panel"),
+      JSON.stringify({
+        members: [1, 2, 3, 4].map((n) => ({
+          id: `member-${n}`,
+          department: "Physics",
+          umbrella: `Field ${n}`,
+          subfields: [],
+        })),
+      }),
+    );
+
+    // Seat 3 is under review (member[2]), on chain step 5 (cotStep[4]), in
+    // review round 2 (iter[1]). Its commentors are seats 1, 2 and 4 in that
+    // order, so commentor[2] is SEAT 4 — not seat 3, and not seat 2.
+    const reviewPath =
+      "brainstorm-root/review-members/review-members-fanout/member[2]/review-steps/cotStep[4]" +
+      "/review-round-loop/iter[1]/review-round-body";
+    const lines = [
+      {
+        type: "agent:progress",
+        seq: 1,
+        at: 1,
+        path: `${reviewPath}/gather-comments/gather-comments-fanout/commentor[2]/dispatch-comment/else/comment-step-execute`,
+        taskKind: "brainstorm.commentor",
+        progress: { kind: "model", message: "reading the chain", turn: 1 },
+      },
+      {
+        type: "agent:progress",
+        seq: 2,
+        at: 2,
+        path: `${reviewPath}/judge-step-execute`,
+        taskKind: "brainstorm.judge",
+        progress: { kind: "model", message: "weighing the comments" },
+      },
+      {
+        type: "agent:progress",
+        seq: 3,
+        at: 3,
+        path: `${reviewPath}/maybe-redevelop/then/redevelop-idea-execute`,
+        taskKind: "brainstorm.redeveloper",
+        progress: { kind: "tool", message: "ran a check", toolName: "Bash" },
+      },
+      {
+        type: "agent:progress",
+        seq: 4,
+        at: 4,
+        path: "brainstorm-root/first-pass/first-pass-fanout/member[3]/develop-idea-execute",
+        taskKind: "brainstorm.brain",
+        progress: { kind: "model", message: "thinking it through" },
+      },
+      {
+        type: "agent:progress",
+        seq: 5,
+        at: 5,
+        path: "brainstorm-root/process-input/process-input-execute",
+        taskKind: "brainstorm.processor",
+        progress: { kind: "model", message: "structuring the submission" },
+      },
+    ];
+    writeFileSync(
+      join(jobDir, "events.jsonl"),
+      lines.map((line) => JSON.stringify(line)).join("\n") + "\n",
+    );
+
+    const record: JobRecord = {
+      jobId: "job-1",
+      topic: "topic",
+      status: "running",
+      runner: "local",
+      createdAt: 1,
+      updatedAt: 2,
+    };
+    const detail = buildJobDetail({
+      record,
+      status: "running",
+      sessionDir,
+      jobDir,
+      settings,
+    });
+    const rowsOf = (id: string) =>
+      detail.stages.find((stage) => stage.id === id)?.activity ?? [];
+    const review = rowsOf("review-members");
+
+    const comment = review.find((row) => row.message === "reading the chain");
+    assert.deepEqual(
+      { role: comment?.role, actor: comment?.actor, where: comment?.where },
+      { role: "Commenter", actor: "Seat 4", where: { seat: "Seat 3", step: 5, round: 2 } },
+      "a commenter names ITSELF in the actor column and the seat it is reviewing in where",
+    );
+
+    const judge = review.find((row) => row.message === "weighing the comments");
+    assert.equal(judge?.role, "Judge");
+    assert.equal(judge?.actor, undefined, "the judge is not a seat; its role says who it is");
+    assert.deepEqual(judge?.where, { seat: "Seat 3", step: 5, round: 2 });
+
+    const redeveloper = review.find((row) => row.message === "ran a check");
+    assert.deepEqual(
+      { role: redeveloper?.role, actor: redeveloper?.actor, where: redeveloper?.where },
+      { role: "Redeveloper", actor: "Seat 3", where: { seat: "Seat 3", step: 5, round: 2 } },
+      "a seat revising its own chain is both the actor and the place",
+    );
+
+    const thinking = rowsOf("first-pass").find((row) => row.message === "thinking it through");
+    assert.deepEqual(
+      { role: thinking?.role, actor: thinking?.actor, where: thinking?.where },
+      { role: "Thinker", actor: "Seat 4", where: { seat: "Seat 4" } },
+      "the first pass has a seat but no step or round yet",
+    );
+
+    const processor = rowsOf("process-input").find(
+      (row) => row.message === "structuring the submission",
+    );
+    assert.equal(processor?.role, "Processor", "a pre-panel stage still says what ran");
+    assert.equal(processor?.actor, undefined);
+    assert.equal(processor?.where, undefined, "and the stage itself is the whole place");
+
+    // The path the annotation was read from is never sent to the client.
+    for (const row of [...review, ...rowsOf("first-pass")]) {
+      assert.equal(
+        (row as unknown as { path?: string }).path,
+        undefined,
+        "execution paths stay server-side",
+      );
+    }
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
