@@ -9,6 +9,7 @@ import type {
 
 import {
   computeSeatTimeline,
+  crossEntryKey,
   deckEntries,
   diffWords,
   reviewedBy,
@@ -278,5 +279,42 @@ test("a rewrite that preserves length still invalidates the timeline", () => {
       ["v0 original"],
     ),
     before,
+  );
+});
+
+test("the origin card's link names a card the affected step actually has", () => {
+  // The one-line note on the round that caused a rewrite links into the
+  // AFFECTED step's deck. If the two sides ever built that key differently the
+  // link would silently open nothing, so the key has one definition and this
+  // is the assertion that it lands.
+  const stepOne: ReviewStepView = {
+    index: 1,
+    outcome: "passed",
+    rounds: [
+      round(1, "step one v0", {
+        verdict: "Build",
+        rewrote: [
+          { index: 1, text: "step one v1" },
+          { index: 2, text: "step two, rewritten from position 1" },
+        ],
+      }),
+    ],
+  };
+  const stepTwo: ReviewStepView = { index: 2, outcome: "pending", rounds: [] };
+  const timeline = computeSeatTimeline(
+    { memberId: "member-jump", label: "Seat 2", steps: [stepOne, stepTwo] },
+    ["step one v0", "step two v0"],
+  );
+
+  const origin = timeline.rounds.get(roundViewKey(1, 1));
+  assert.deepEqual(
+    origin?.crossChanges.map((change) => change.index),
+    [2],
+    "the round records the rewrite it applied to the other step",
+  );
+  const target = crossEntryKey(1, 1);
+  assert.ok(
+    deckEntries(stepTwo, timeline).some((entry) => entry.key === target),
+    `step 2's deck has the card the link opens (${target})`,
   );
 });

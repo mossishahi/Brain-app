@@ -40,6 +40,7 @@ import { EvidenceBlock, TokenChip } from "../common";
 import { BackIcon, CopyIcon, DownloadIcon, ForwardIcon } from "../Icons";
 import { IdeaTabs } from "./FirstPassPanel";
 import {
+  crossEntryKey,
   deckEntries,
   reviewedBy,
   roundViewKey,
@@ -603,7 +604,9 @@ function bugReportText(
     lines.push(`step text out of round ${round.round}:`, computed.outText);
   }
   for (const change of computed.crossChanges) {
-    lines.push(`also rewrote step ${change.index}:`, change.after);
+    // Same words the card shows, so a pasted report reads like the screen.
+    const direction = change.index > step.index ? "prospectively" : "retroactively";
+    lines.push(`${direction} edited step ${change.index}:`, change.after);
   }
   return lines.join("\n");
 }
@@ -657,8 +660,9 @@ function isProspective(cross: CrossRewriteView, affectedStep: number): boolean {
 
 function crossOriginText(cross: CrossRewriteView, affectedStep: number): string {
   return (
-    `${isProspective(cross, affectedStep) ? "prospective" : "retroactive"} rewrite ` +
-    `during step ${cross.byStep} · round ${cross.byRound} — not by this step's own review`
+    `edited ${isProspective(cross, affectedStep) ? "prospectively" : "retroactively"} ` +
+    `during the review of step ${cross.byStep}, round ${cross.byRound} — ` +
+    `not by this step's own review`
   );
 }
 
@@ -687,6 +691,7 @@ function RoundDeck({
   timeline,
   selectedEntry,
   onSelectEntry,
+  onJump,
   commentState,
 }: {
   member: ReviewMemberView;
@@ -694,6 +699,8 @@ function RoundDeck({
   timeline: SeatTimeline;
   selectedEntry: string | undefined;
   onSelectEntry: (key: string) => void;
+  /** Open another step's deck at one of its cards, and scroll to it. */
+  onJump: (stepIndex: number, entryKey: string) => void;
   commentState: {
     open: (key: string) => boolean;
     toggle: (key: string) => void;
@@ -732,7 +739,6 @@ function RoundDeck({
       />
     );
   const newest = position === deck.length - 1;
-  const versionMeta = newest ? undefined : "an earlier version";
   // The pager arrows hug the card title — exactly the seat pager's pattern —
   // so paging a step's history reads the same as paging seats.
   const olderButton = (
@@ -774,7 +780,6 @@ function RoundDeck({
             Original thought
           </span>
           {newerButton}
-          {deck.length > 1 && <span className="review-step-meta">{versionMeta}</span>}
           <span className="round-card-actions">
             <CopyButton
               label="copy the original thought"
@@ -799,16 +804,18 @@ function RoundDeck({
       <div className="round-card" key={entry.key}>
         <div className="round-card-head">
           {olderButton}
-          <span
-            className={`review-fold-name ${
-              prospective ? "cross-origin-prospective" : "cross-origin-retroactive"
-            }`}
-            title={crossOriginText(entry.cross, step.index)}
-          >
-            changed by step {entry.cross.byStep}
+          <span className="review-fold-name" title={crossOriginText(entry.cross, step.index)}>
+            edited{" "}
+            <span
+              className={
+                prospective ? "cross-origin-prospective" : "cross-origin-retroactive"
+              }
+            >
+              {prospective ? "prospectively" : "retroactively"}
+            </span>{" "}
+            during the review of step {entry.cross.byStep}
           </span>
           {newerButton}
-          {deck.length > 1 && <span className="review-step-meta">{versionMeta}</span>}
           <span className="round-card-actions">
             <CopyButton
               label="copy this rewrite for a bug report"
@@ -853,13 +860,8 @@ function RoundDeck({
         {/* Whether THIS version was sent back — a fact about the review shown
             on this card, not about the round that wrote the text. */}
         {review?.revision && <span className="badge badge-warn">redeveloped</span>}
-        {deck.length > 1 && (
-          <span className="review-step-meta">
-            {[
-              ...(!computed?.ownRewrite ? ["unchanged from the previous version"] : []),
-              ...(versionMeta !== undefined ? [versionMeta] : []),
-            ].join(" · ")}
-          </span>
+        {deck.length > 1 && computed?.ownRewrite !== true && (
+          <span className="review-step-meta">unchanged from the previous version</span>
         )}
         <span className="round-card-actions">
           <CopyButton
@@ -873,22 +875,28 @@ function RoundDeck({
       )}
       {computed !== undefined && computed.crossChanges.length > 0 && (
         <div className="round-cross-note">
-          {computed.crossChanges.map((change) => (
-            <span
-              key={change.index}
-              // Same color language as the affected step's card: blue when
-              // this round rewrote a LATER step (prospective), red when it
-              // reached back to an earlier one (retroactive).
-              className={`detail-label ${
-                change.index > step.index
-                  ? "detail-label-prospective"
-                  : "detail-label-bad"
-              }`}
-            >
-              also rewrote step {change.index} this round
-              <span className="dim"> — see step {change.index}</span>
-            </span>
-          ))}
+          {computed.crossChanges.map((change) => {
+            // Same color language as the affected step's card: blue when this
+            // round rewrote a LATER step (prospective), red when it reached
+            // back to an earlier one (retroactive) — carried here by the step
+            // it names, which is also the link to that step's own card.
+            const prospective = change.index > step.index;
+            return (
+              <span key={change.index} className="detail-label">
+                {prospective ? "prospectively" : "retroactively"} edited{" "}
+                <button
+                  type="button"
+                  className={`cross-jump ${
+                    prospective ? "detail-label-prospective" : "detail-label-bad"
+                  }`}
+                  title={`open step ${change.index} at the version this round wrote`}
+                  onClick={() => onJump(change.index, crossEntryKey(step.index, round.round))}
+                >
+                  step {change.index}
+                </button>
+              </span>
+            );
+          })}
         </div>
       )}
       {reviewFold(commentKey)}
@@ -1181,7 +1189,6 @@ export function ReviewStagePanels({
                   const stepRefKey = `${seat.memberId}:${step.index}`;
                   const crossCount = (timeline.crossRewrites.get(step.index) ?? []).length;
                   const choiceKey = stepRefKey;
-                  const k = redevCount(step);
                   return (
                     <section
                       key={step.index}
@@ -1198,7 +1205,6 @@ export function ReviewStagePanels({
                           Step {step.index}
                           <span className="dim"> / {seat.steps.length}</span>
                         </span>
-                        {k > 0 && <span className="badge">×{k} redeveloped</span>}
                         <span className="review-step-meta">
                           {roundsMeta(step, seat.dismissed !== undefined, crossCount)}
                         </span>
@@ -1215,6 +1221,15 @@ export function ReviewStagePanels({
                             return next;
                           })
                         }
+                        onJump={(stepIndex, entryKey) => {
+                          const targetKey = `${seat.memberId}:${stepIndex}`;
+                          setRoundChoices((prev) => {
+                            const next = new Map(prev);
+                            next.set(targetKey, entryKey);
+                            return next;
+                          });
+                          scrollToStep(targetKey);
+                        }}
                         commentState={commentState}
                       />
                     </section>

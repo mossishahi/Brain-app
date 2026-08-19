@@ -457,6 +457,15 @@ function fingerprint(text: string): string {
   return (hash >>> 0).toString(36);
 }
 
+/**
+ * The deck key of the card an origin round's rewrite left on ANOTHER step —
+ * the one definition, because the origin card links to exactly that card and a
+ * second copy of the format would silently link nowhere.
+ */
+export function crossEntryKey(byStep: number, byRound: number): string {
+  return `x${byStep}:${byRound}`;
+}
+
 export function roundViewKey(stepIndex: number, round: number): string {
   return `${stepIndex}:${round}`;
 }
@@ -583,7 +592,7 @@ export function deckEntries(step: ReviewStepView, timeline: SeatTimeline): DeckE
   const crosses = timeline.crossRewrites.get(step.index) ?? [];
   const crossEntry = (view: CrossRewriteView): DeckEntry => ({
     kind: "cross",
-    key: `x${view.byStep}:${view.byRound}`,
+    key: crossEntryKey(view.byStep, view.byRound),
     cross: view,
   });
   const rounds = [...step.rounds]

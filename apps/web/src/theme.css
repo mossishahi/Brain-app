@@ -3999,6 +3999,25 @@ section.drawer-section:not(.drawer-updates) {
   color: var(--prospective);
 }
 
+/* The step a round's rewrite landed on: the colored, clickable half of the
+   origin card's one-line note, which opens that step's own card for the same
+   rewrite. Styled as text rather than as a control, like .reviewer-name. */
+.cross-jump {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+}
+
+.cross-jump:hover,
+.cross-jump:focus-visible {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
 .detail-label-bad {
   color: var(--bad);
 }

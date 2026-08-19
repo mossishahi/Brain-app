@@ -332,8 +332,10 @@ activity feed, fold), and the *walk inspector* sits below in its own panel.
   header). The header packs the pager arrows tight around the title — "← Seat 1 / 3 →" — then
   the state chip ("under review" pulse / "done with thinking" `--ok`), and balances the seat's
   full expertise (department / umbrella · subfields) on the right. One seat visible at a time.
-  Inside, one card per chain step stacks vertically ("Step i / N" colored by its outcome, plus
-  the ×k redeveloped badge).
+  Inside, one card per chain step stacks vertically: "Step i / N" colored by its outcome, and
+  beside it only what is still happening. A redevelopment count used to sit there as a
+  "×k redeveloped" badge; it now rides the title's hover, since the step's own cards already
+  show every version it went through.
 - Round deck: one sub-card per VERSION of the step, not per round. A round that rewrote nothing
   wrote no version, so it gets no card — its review rides the version it actually read, which is
   why a position that ends on a Pass has no trailing card repeating the previous text. Every
@@ -356,14 +358,19 @@ activity feed, fold), and the *walk inspector* sits below in its own panel.
   and Round 1 is compared against the original like any other version (a round that rewrote
   nothing renders fully dimmed with an "unchanged this round" note). The base card joins only
   decks that have at least one round or cross-rewrite; an untouched step keeps its pending card.
+- No card says which of a step's versions it is. Every card that was not the newest used to carry
+  "an earlier version", which restated what the pager arrows already show and labeled most of the
+  deck for no decision it helped anyone make.
 - Round text: the step text as it came OUT of that round (its number is an identity, not a
   verdict — that round's verdict rides with its comments, one card back), full height, never
   clamped or scrolled. Words carried from earlier rounds render dimmed; the round's own changes
   render at full weight (round 1 is all full-weight — nothing was reviewed before it). When the
-  round's
-  revision also rewrote OTHER steps, the card carries only a one-line note per rewritten step
-  ("also rewrote step 5 this round — see step 5"); the rewritten text itself is shown on the
-  affected step, never here.
+  round's revision also rewrote OTHER steps, the card carries one line per rewritten step —
+  "prospectively edited step 5" — and the STEP is the colored, clickable half: it takes the
+  direction's color and OPENS step 5's own card for that very rewrite, selecting it in that
+  step's deck and scrolling to it. The rewritten text itself is never shown here. The deck key
+  the two sides agree on has ONE definition (`crossEntryKey`), because a second copy of the
+  format would link nowhere and read as a dead control.
 - **A version's length never costs it its highlighting.** The diff has no token ceiling: a
   common prefix and suffix are matched off linearly, the exact word LCS runs while its table fits
   the cell budget, and past that the two versions are aligned clause by clause and each gap
@@ -380,12 +387,14 @@ activity feed, fold), and the *walk inspector* sits below in its own panel.
   and a running job re-renders on every progress event.
 - A cross-step rewrite is ITS OWN card in the AFFECTED step's round deck, placed in true
   chronological position — before the step's own rounds when an earlier walk position caused
-  it, after them when a later one did. The card is labeled "changed by step N" (hover names the
-  exact origin round and the direction) and shows the step's updated text with the changed
-  words colored — color only, no background tint, no underline — and carried words dimmed.
-  The DIRECTION is the color: `--prospective` dark blue when an EARLIER position's review
-  rewrote this later step (prospective), `--bad` red when a LATER position reached back
-  (retroactive); the origin card's one-line notes use the same two colors. A step's own-round
+  it, after them when a later one did. The card is labeled "edited prospectively/retroactively
+  during the review of step N" (hover names the exact origin round) and shows the step's updated
+  text with the changed words colored — color only, no background tint, no underline — and
+  carried words dimmed. The DIRECTION is the color, and it colors exactly ONE word, the adverb:
+  `--prospective` dark blue when an EARLIER position's review rewrote this later step
+  (prospective), `--bad` red when a LATER position reached back (retroactive). The rest of the
+  label is ordinary text, so a deck of these cards reads as sentences instead of as colored
+  headings. A step's own-round
   changes keep the normal full-weight-over-dimmed treatment. The step's own "Round k / K"
   numbering never shifts around these cards, and older cards keep the step's history
   untouched. The "redeveloped" badge belongs to the review shown on the card — it says THIS
