@@ -448,7 +448,9 @@ activity feed, fold), and the *walk inspector* sits below in its own panel.
   clamped or scrolled. Words carried from earlier rounds render dimmed; the round's own changes
   render at full weight (round 1 is all full-weight — nothing was reviewed before it). When the
   round's revision also rewrote OTHER steps, the card carries one line per rewritten step —
-  "prospectively edited step 5" — and the STEP is the colored, clickable half: it takes the
+  "prospectively edited step 5", at the CARD's text size rather than the small-label size, because
+  it is a sentence about the card and not a label prefixing a value — and the STEP is the colored,
+  clickable half: it takes the
   direction's color and OPENS step 5's own card for that very rewrite, selecting it in that
   step's deck and scrolling to it. The rewritten text itself is never shown here. The deck key
   the two sides agree on has ONE definition (`crossEntryKey`), because a second copy of the

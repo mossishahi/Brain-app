@@ -4054,7 +4054,15 @@ section.drawer-section:not(.drawer-updates) {
   margin-top: 6px;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 3px;
+}
+
+/* Each note is a SENTENCE about the card, not a label prefixing a value, so it
+   reads at the card's own text size (.round-text) rather than the small-label
+   size .detail-label carries elsewhere. The linked step inherits it. */
+.round-cross-note .detail-label {
+  font-size: 13px;
+  line-height: 1.5;
 }
 
 /* Cross-step rewrites carry their DIRECTION in the color — plain colored
