@@ -566,7 +566,11 @@ export interface ReviewMemberView {
   /**
    * Present when this seat's walk FAILED and has not been restarted: the
    * failure message. The other seats keep reviewing in parallel; a resume
-   * re-executes exactly this seat's failed task.
+   * re-executes exactly this seat's failed task — UNLESS the seat has since been
+   * dismissed, in which case the resume skips it and this is the record of where
+   * it stopped, not of something waiting to be retried. Read it beside
+   * `dismissed`; a reader that trusts this field alone will describe a seat that
+   * has left as pending work.
    */
   readonly error?: string;
   /**

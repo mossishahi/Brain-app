@@ -1047,7 +1047,10 @@ export function ReviewStagePanels({
                 }`}
                 title={
                   member.dismissed !== undefined
-                    ? `${member.label} was dismissed — what it recorded before then is kept`
+                    ? `${member.label} was dismissed — what it recorded before then is kept` +
+                      (member.error !== undefined
+                        ? `; it had failed here, and a dismissed seat is not retried`
+                        : "")
                     : member.error !== undefined
                       ? `${member.label} failed: ${member.error}`
                       : expertise || member.label
@@ -1152,8 +1155,18 @@ export function ReviewStagePanels({
           </div>
           {seat.error !== undefined && (
             <div className="stage-error">
-              This seat&apos;s walk failed and is waiting for a retry; the other
-              seats keep reviewing. {seat.error}
+              {seat.dismissed !== undefined ? (
+                <>
+                  This seat failed here before it was dismissed. Nothing is
+                  waiting on it — a dismissed seat is not retried, so the failure
+                  no longer holds the run up. {seat.error}
+                </>
+              ) : (
+                <>
+                  This seat&apos;s walk failed and is waiting for a retry; the
+                  other seats keep reviewing. {seat.error}
+                </>
+              )}
             </div>
           )}
           {(() => {

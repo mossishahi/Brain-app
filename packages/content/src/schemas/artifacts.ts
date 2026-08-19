@@ -1067,12 +1067,28 @@ export type Panel = z.infer<typeof panelSchema>;
 export const evidenceSchema = z
   .object({
     kind: z.enum(["none", "script", "math", "reference"]),
-    code: z.string(),
-    result: z.string(),
-    derivation: z.string(),
-    citation: z.string(),
-    locator: z.string(),
-    shows: z.string(),
+    // The six detail fields default to the empty string an omission MEANS.
+    //
+    // Which of them must be filled is decided by `kind` in the refinement
+    // below, and for `kind: "none"` every one of them must be exactly "" — an
+    // empty string carries no information, so requiring a model to type six of
+    // them is ceremony that fails on shape rather than on substance. A judge
+    // that wrote a second issue as `evidence: { kind: "none" }` spent all three
+    // validation attempts on "issues.1.evidence.shows: expected string,
+    // received undefined" and took the run down with it.
+    //
+    // Nothing is loosened by this. The generated JSON Schema is built with
+    // `io: "output"`, so the model is still told every field is required (now
+    // with its default alongside), and the refinement still rejects a `script`
+    // evidence whose code or result is empty — which is a claim about substance
+    // and reads as one. Only the runtime's own canonical value stops being
+    // something the model has to spell out.
+    code: z.string().default(""),
+    result: z.string().default(""),
+    derivation: z.string().default(""),
+    citation: z.string().default(""),
+    locator: z.string().default(""),
+    shows: z.string().default(""),
   })
   .strict()
   .superRefine((evidence, ctx) => {

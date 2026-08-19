@@ -324,6 +324,14 @@ const MAX_CRASH_RETRIES = 2;
 const DEFAULT_QUOTA_RETRY_DELAY_MS = 30_000;
 
 /**
+ * How long a run parks when the upstream quota is still empty after the quick
+ * retries. Long enough that a refill window has plausibly passed, short enough
+ * that a run is not idle for hours; the server resumes it when it comes due,
+ * and parks it again if the wall is still there.
+ */
+const QUOTA_BLOCK_RETRY_MS = 10 * 60_000;
+
+/**
  * How many times one session is asked to hand over its result before the
  * attempt is abandoned.
  *
@@ -1377,8 +1385,34 @@ function isRetryableInfrastructure(error: unknown): boolean {
   const value = record(error);
   if (value.isRetryable === true) return true;
   if (isResourceExhausted(error)) return true;
+  if (isTransientAuth(error)) return true;
   const message = error instanceof Error ? error.message : String(error);
   return /local runtime (?:crashed|exited|terminated)|transport (?:closed|error)|ECONNRESET|socket hang up/i.test(
+    message,
+  );
+}
+
+/**
+ * A 401 from the Cursor backend mid-run.
+ *
+ * Treated as infrastructure, not as a verdict on the credential, because that is
+ * what the evidence says: one overnight run took four of these HOURS apart
+ * ("Authentication error If you are logged in, try logging out and back in.")
+ * while authenticating successfully before and after each one, and each killed a
+ * redeveloper task and with it the whole run. A token exchange that fails and
+ * then works again is a hiccup; a revoked key fails every attempt and still
+ * surfaces, because the restarts are bounded and the message below names the fix.
+ *
+ * Recognized structurally where the SDK gives us structure — it raises a typed
+ * `AuthenticationError` carrying `status: 401` — and by message otherwise, since
+ * errors reach us wrapped and re-serialized across process boundaries.
+ */
+function isTransientAuth(error: unknown): boolean {
+  const value = record(error);
+  if (value.status === 401) return true;
+  if (typeof value.name === "string" && value.name === "AuthenticationError") return true;
+  const message = error instanceof Error ? error.message : String(error);
+  return /authentication error|unauthenticated|not logged in|logging out and back in/i.test(
     message,
   );
 }
@@ -2188,18 +2222,54 @@ export class CursorAgentExecutor implements AgentExecutor {
         if (isRetryableInfrastructure(error) && crashRetries < MAX_CRASH_RETRIES) {
           crashRetries += 1;
           attempt -= 1;
-          const quotaWaitMs = isResourceExhausted(error)
-            ? (this.config.quotaRetryDelayMs ?? DEFAULT_QUOTA_RETRY_DELAY_MS) * crashRetries
-            : 0;
+          // Two kinds of transient need TIME rather than a fresh session: an
+          // empty quota window has to refill, and a failed token exchange has
+          // to be retried after the backend settles. A crash needs neither.
+          const waitMs =
+            isResourceExhausted(error) || isTransientAuth(error)
+              ? (this.config.quotaRetryDelayMs ?? DEFAULT_QUOTA_RETRY_DELAY_MS) * crashRetries
+              : 0;
           progress(context, {
             kind: "retry",
             message:
-              quotaWaitMs > 0
-                ? `Cursor backend reports resource_exhausted; waiting ${Math.round(quotaWaitMs / 1000)}s, then retry ${crashRetries}/${MAX_CRASH_RETRIES}`
-                : `Cursor SDK infrastructure error; restarting the task, retry ${crashRetries}/${MAX_CRASH_RETRIES}`,
+              isResourceExhausted(error)
+                ? `Cursor backend reports resource_exhausted; waiting ${Math.round(waitMs / 1000)}s, then retry ${crashRetries}/${MAX_CRASH_RETRIES}`
+                : isTransientAuth(error)
+                  ? `Cursor backend refused the credential; waiting ${Math.round(waitMs / 1000)}s, then retry ${crashRetries}/${MAX_CRASH_RETRIES}`
+                  : `Cursor SDK infrastructure error; restarting the task, retry ${crashRetries}/${MAX_CRASH_RETRIES}`,
           });
-          if (quotaWaitMs > 0) await delayForRetry(quotaWaitMs, context.signal);
+          if (waitMs > 0) await delayForRetry(waitMs, context.signal);
           continue;
+        }
+        // An exhausted quota that outlived the quick retries is a WALL, not a
+        // defect: the window refills on the provider's clock, which is minutes
+        // to hours away, and the two waits above bought at most 90 seconds.
+        // Parking the run is what this codebase already does with a provider
+        // limit — the checkpoint records `credit_blocked`, the scheduler claims
+        // it once when it comes due, and the dashboard shows the countdown — so
+        // an overnight quota dip costs a pause instead of the whole run.
+        if (isResourceExhausted(error)) {
+          throw new CreditBlockedError(
+            Date.now() + QUOTA_BLOCK_RETRY_MS,
+            message,
+            "deterministic",
+          );
+        }
+        // A credential the backend refused through every bounded retry needs a
+        // person, so the failure says which person and what to do.
+        if (isTransientAuth(error)) {
+          return {
+            taskId: task.taskId,
+            status: "error",
+            error: serializeError(
+              new Error(
+                `${message} — the Cursor backend refused this run's credential on every ` +
+                  `attempt; re-enter the Cursor API key in Settings, then retry this run ` +
+                  `from its checkpoint.`,
+              ),
+            ),
+            usage,
+          };
         }
         return {
           taskId: task.taskId,

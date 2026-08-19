@@ -4,6 +4,7 @@ import { test } from "node:test";
 import {
   brainIdeaSchema,
   commentSchema,
+  evidenceSchema,
   expertsTreeSchema,
   finalProposalSchema,
   ignoredFilesSchema,
@@ -591,6 +592,46 @@ test("comment: targets a step; Build requires a suggestion; Interrupt requires s
     }).success,
     false,
     "a reference must say where to find it and what it shows",
+  );
+});
+
+test("evidence: an omitted detail field IS the empty string the runtime writes", () => {
+  // A judge wrote its second issue as `evidence: { kind: "none" }` and spent all
+  // three validation attempts on "issues.1.evidence.shows: expected string,
+  // received undefined", failing the task and the run. For kind "none" every
+  // detail field must be exactly "" — an empty string carries no information, so
+  // requiring the model to type six of them fails on shape, never on substance.
+  const parsed = evidenceSchema.safeParse({ kind: "none" });
+  assert.ok(parsed.success, "a bare none-kind evidence is accepted");
+  assert.deepEqual(
+    parsed.success ? parsed.data : undefined,
+    {
+      kind: "none",
+      code: "",
+      result: "",
+      derivation: "",
+      citation: "",
+      locator: "",
+      shows: "",
+    },
+    "the runtime writes the canonical fields the model left out",
+  );
+  // Nothing about substance is loosened: a kind that PROMISES content still has
+  // to carry it, and now says so instead of complaining about a missing type.
+  const scriptWithoutCode = evidenceSchema.safeParse({ kind: "script" });
+  assert.equal(scriptWithoutCode.success, false);
+  assert.match(
+    (scriptWithoutCode.success ? [] : scriptWithoutCode.error.issues)
+      .map((issue: { path: (string | number | symbol)[]; message: string }) =>
+        `${issue.path.join(".")}: ${issue.message}`)
+      .join(" | "),
+    /code: script evidence requires code/,
+  );
+  // And a field that must stay empty for its kind is still refused when filled.
+  assert.equal(
+    evidenceSchema.safeParse({ kind: "none", shows: "something" }).success,
+    false,
+    "none-kind evidence may not smuggle content into a detail field",
   );
 });
 

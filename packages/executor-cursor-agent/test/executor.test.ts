@@ -1111,6 +1111,108 @@ test("resource_exhausted waits briefly and restarts instead of failing the task"
   );
 });
 
+test("a transient 401 restarts the task instead of failing the run", async () => {
+  // Observed overnight: four of these HOURS apart on a run that authenticated
+  // fine before and after each one, every time killing a redeveloper task and
+  // with it the whole run. A token exchange that fails and then works again is
+  // infrastructure, so it takes the bounded restart lane with a wait.
+  const state = newState();
+  const events: string[] = [];
+  const authError = Object.assign(
+    new Error("Authentication error If you are logged in, try logging out and back in."),
+    { status: 401, name: "AuthenticationError" },
+  );
+  const executor = new CursorAgentExecutor({
+    apiKey: "cursor-key",
+    listModels: async () => CATALOG,
+    maxValidationAttempts: 1,
+    quotaRetryDelayMs: 5,
+    agentFactory: fakeFactory(
+      [
+        { sendError: authError, result: finished("") },
+        {
+          callTools: async (tools) => {
+            await tools.submit_result!.execute({ answer: "after the hiccup" }, {});
+          },
+          result: finished(""),
+        },
+      ],
+      state,
+    ),
+  });
+  const result = await executor.execute(structuredTask, {
+    runId: "run-1",
+    nodePath: "root/review/redevelop",
+    reportProgress: (progress) => {
+      if (progress.kind === "retry") events.push(progress.message);
+    },
+  });
+  assert.equal(result.status, "ok");
+  assert.deepEqual(result.status === "ok" ? result.output : undefined, {
+    answer: "after the hiccup",
+  });
+  assert.equal(state.options.length, 2, "the task restarted in a fresh session");
+  assert.match(events.join(" | "), /refused the credential; waiting/);
+});
+
+test("a credential refused on every attempt fails with the fix, not the SDK's sentence", async () => {
+  // The other half of the rule: a revoked key must still surface, and say what
+  // to do about it rather than leaving the SDK's "try logging out and back in".
+  const state = newState();
+  const executor = new CursorAgentExecutor({
+    apiKey: "cursor-key",
+    listModels: async () => CATALOG,
+    maxValidationAttempts: 1,
+    quotaRetryDelayMs: 5,
+    agentFactory: fakeFactory(
+      [{ sendError: new Error("Authentication error"), result: finished("") }],
+      state,
+    ),
+  });
+  const result = await executor.execute(structuredTask, {
+    runId: "run-1",
+    nodePath: "root/review/redevelop",
+  });
+  assert.equal(result.status, "error");
+  const message = result.status === "error" ? result.error.message : "";
+  assert.match(message, /re-enter the Cursor API key in Settings/);
+  assert.match(message, /retry this run/);
+  // Bounded: the initial attempt plus MAX_CRASH_RETRIES restarts, no more.
+  assert.equal(state.options.length, 3);
+});
+
+test("a quota wall that outlives the quick retries parks the run instead of failing it", async () => {
+  // 30s + 60s of waiting is all the quick lane can buy, and an upstream window
+  // refills on the provider's clock. Parking reuses the credit-block lane the
+  // scheduler already claims when it comes due, so an overnight dip costs a
+  // pause rather than the run.
+  const state = newState();
+  const executor = new CursorAgentExecutor({
+    apiKey: "cursor-key",
+    listModels: async () => CATALOG,
+    maxValidationAttempts: 1,
+    quotaRetryDelayMs: 5,
+    agentFactory: fakeFactory(
+      [{ sendError: new Error("[resource_exhausted] Error"), result: finished("") }],
+      state,
+    ),
+  });
+  const before = Date.now();
+  const blocked = await executor
+    .execute(structuredTask, { runId: "run-1", nodePath: "root/review/redevelop" })
+    .then(() => undefined)
+    .catch((error: unknown) => error);
+  assert.ok(isCreditBlocked(blocked), "an exhausted quota parks the run");
+  const block = blocked as { retryAt?: number; source?: string };
+  assert.equal(block.source, "deterministic");
+  assert.ok(
+    (block.retryAt ?? 0) > before,
+    "the block names a time to come back, so the scheduler can claim it",
+  );
+  // It still tried the quick restarts first: a brief dip never reaches here.
+  assert.equal(state.options.length, 3);
+});
+
 test("cancellation propagates as an AbortError and cancels the run", async () => {
   const state = newState();
   const controller = new AbortController();
