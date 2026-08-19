@@ -863,3 +863,64 @@ test("a dismissal arriving on a resume skips the seat without re-buying journall
     [...remainingSeats()],
   );
 });
+
+test("the interdisciplinary seat, dismissed, stops commenting like any other", async () => {
+  // The seat the live run actually dismissed. It comments through its own skill
+  // on a separate branch of the fan-out (dispatch-comment/then, not /else), and
+  // the tests above all dismiss a disciplinary seat — so nothing covered the
+  // branch that a submitter reported still running an hour after they stopped it.
+  const BRIDGE = PANEL_SEATS[PANEL_SEATS.length - 1];
+  const executor = new FakeBrainstormExecutor();
+  const app = runtime(executor, [BRIDGE]);
+  completed(
+    await app.run({
+      runId: "dismissed-bridge",
+      submission: SUBMISSION,
+      params: { panelSize: 3 },
+    }),
+  );
+  assert.equal(
+    executor.tasks("interdisciplinary-commentor").length,
+    0,
+    "the bridge skill is never dispatched once its seat is gone",
+  );
+  assert.deepEqual(
+    executor.seen.filter((entry) => entry.agentId === BRIDGE).map((entry) => entry.role),
+    [],
+    "and nothing else is bought for it either",
+  );
+  // The disciplinary seats still review each other, one commentor fewer.
+  const seated = PANEL_SEATS.filter((id) => id !== BRIDGE);
+  assert.equal(
+    executor.comments().length,
+    seated.length * CHAIN_STEPS * (seated.length - 1),
+  );
+});
+
+test("two seats dismissed at once both stop, and the panel keeps reviewing", async () => {
+  // The live shape: a disciplinary seat and the bridge, dismissed an hour apart,
+  // both named on every later resume.
+  const BRIDGE = PANEL_SEATS[PANEL_SEATS.length - 1];
+  const executor = new FakeBrainstormExecutor();
+  const app = runtime(executor, [DISMISSED, BRIDGE]);
+  completed(
+    await app.run({
+      runId: "dismissed-pair",
+      submission: SUBMISSION,
+      params: { panelSize: 3 },
+    }),
+  );
+  for (const gone of [DISMISSED, BRIDGE]) {
+    assert.deepEqual(
+      executor.seen.filter((entry) => entry.agentId === gone).map((entry) => entry.role),
+      [],
+      `${gone} bought work after being dismissed`,
+    );
+  }
+  const seated = PANEL_SEATS.filter((id) => id !== DISMISSED && id !== BRIDGE);
+  assert.ok(seated.length >= 2, "the fixture panel still has a review to run");
+  assert.equal(
+    executor.comments().length,
+    seated.length * CHAIN_STEPS * (seated.length - 1),
+  );
+});
