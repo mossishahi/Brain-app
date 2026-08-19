@@ -205,6 +205,11 @@ DESIGNED FOR THAT STAGE'S TASK AND ARTIFACTS. All artifact text is selectable; l
 to 4 lines with "more". Panels render skeleton lines while the stage is active and its artifact
 has not landed yet, and render nothing (collapsed row) when pending.
 
+One stage shows at a time, and the two steppers under the panel — "← First pass" and
+"Integration audit →" flanking the page count — are plain text: no border, no fill, dim until
+hovered, when the name underlines. They sit outside every panel, on the page background, where a
+bordered button read as a control belonging to the panel above it rather than as a way out of it.
+
 While an agent is active, the frame also shows a bounded **Activity** feed (latest 20 of up to 200
 stored events): agent start/completion, model turns, WebSearch/WebFetch/Read/Glob/Grep/Bash starts,
 five-second tool heartbeats, API retries, context compaction, and artifact validation. These are

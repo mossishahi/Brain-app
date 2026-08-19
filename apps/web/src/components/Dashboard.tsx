@@ -743,7 +743,7 @@ export function Dashboard({
             <div className="stage-pager-nav">
               <button
                 type="button"
-                className="btn btn-small"
+                className="stage-pager-btn"
                 disabled={selectedIndex === 0}
                 onClick={() => onSelectStage(STAGE_IDS[selectedIndex - 1]!)}
               >
@@ -754,7 +754,7 @@ export function Dashboard({
               </span>
               <button
                 type="button"
-                className="btn btn-small"
+                className="stage-pager-btn"
                 disabled={selectedIndex === STAGE_IDS.length - 1}
                 onClick={() => onSelectStage(STAGE_IDS[selectedIndex + 1]!)}
               >

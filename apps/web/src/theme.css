@@ -747,6 +747,25 @@ select:disabled {
   margin: 10px 0;
 }
 
+/* The two stage steppers flanking the page count: plain text, no chrome. They
+   sit outside every panel, on the page background, where a bordered button
+   read as a control belonging to the panel above it. Hover underlines the
+   name — the only affordance, like every other text control here. */
+.stage-pager-btn {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.stage-pager-btn:hover:not(:disabled) {
+  color: var(--text);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.stage-pager-btn:disabled {
+  opacity: 0.5;
+}
+
 /*
  * Unrolled job cards on the landing: the prompt beside the live step flow.
  */
