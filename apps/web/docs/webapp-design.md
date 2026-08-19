@@ -364,6 +364,20 @@ activity feed, fold), and the *walk inspector* sits below in its own panel.
   revision also rewrote OTHER steps, the card carries only a one-line note per rewritten step
   ("also rewrote step 5 this round — see step 5"); the rewritten text itself is shown on the
   affected step, never here.
+- **A version's length never costs it its highlighting.** The diff has no token ceiling: a
+  common prefix and suffix are matched off linearly, the exact word LCS runs while its table fits
+  the cell budget, and past that the two versions are aligned clause by clause and each gap
+  between two matched clauses is diffed on its own. A flat 1200-token ceiling used to sit there,
+  and above it every word came back marked changed — which renders as a card with NO dimming, so
+  the treatment silently inverted its meaning on exactly the late-round versions whose changes
+  matter most (a step's text carries no length limit and grows with every redevelopment; the
+  early, short versions highlighted correctly, which is why it read as "highlighting stops
+  working after round 1"). Segments are exact SLICES of the version — the space after a word
+  travels with it — so the spans reassemble the text as the model wrote it, spacing included.
+- A diff is computed when a card is opened, never in advance, and a seat's timeline is memoized
+  against a fingerprint of its recorded text. The deck shows one version at a time, so diffing
+  every version of every step to paint seven cards would spend the whole walk's work per render —
+  and a running job re-renders on every progress event.
 - A cross-step rewrite is ITS OWN card in the AFFECTED step's round deck, placed in true
   chronological position — before the step's own rounds when an earlier walk position caused
   it, after them when a later one did. The card is labeled "changed by step N" (hover names the

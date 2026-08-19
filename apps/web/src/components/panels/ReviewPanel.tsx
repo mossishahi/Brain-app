@@ -40,10 +40,10 @@ import { EvidenceBlock, TokenChip } from "../common";
 import { BackIcon, CopyIcon, DownloadIcon, ForwardIcon } from "../Icons";
 import { IdeaTabs } from "./FirstPassPanel";
 import {
-  computeSeatTimeline,
   deckEntries,
   reviewedBy,
   roundViewKey,
+  seatTimeline,
   type CrossRewriteView,
   type DiffSegment,
   type RoundComputedView,
@@ -339,10 +339,14 @@ function CopyButton({ text, label }: { text: () => string; label: string }) {
   );
 }
 
+/**
+ * The version's text, one span per run. A segment is an exact slice of the
+ * version — the space between two words belongs to the run it follows — so
+ * the spans reassemble the text as the model wrote it, spacing included.
+ */
 function segmentSpans(segments: readonly DiffSegment[], changedClass: string) {
   return segments.map((segment, index) => (
     <span key={index} className={segment.changed ? changedClass : "diff-keep"}>
-      {index > 0 ? " " : ""}
       {segment.text}
     </span>
   ));
@@ -1170,7 +1174,7 @@ export function ReviewStagePanels({
             </div>
           )}
           {(() => {
-            const timeline = computeSeatTimeline(seat, firstPassCot(seat.memberId));
+            const timeline = seatTimeline(seat, firstPassCot(seat.memberId));
             return (
               <div className="review-cards">
                 {seat.steps.map((step) => {

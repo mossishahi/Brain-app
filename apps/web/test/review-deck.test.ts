@@ -13,6 +13,7 @@ import {
   diffWords,
   reviewedBy,
   roundViewKey,
+  seatTimeline,
 } from "../src/components/panels/review-diff.js";
 
 function round(
@@ -155,10 +156,9 @@ test("a step nobody has reviewed yet has no deck at all", () => {
 
 test("word diff marks only what the later version changed", () => {
   const segments = diffWords("the bound holds here", "the bound fails here");
-  // Each segment is one space-joined RUN of same-status words; the single
-  // space between runs is re-inserted by the renderer, so reassembling the
-  // sentence joins on a space rather than concatenating.
-  assert.equal(segments.map((s) => s.text).join(" "), "the bound fails here");
+  // Each segment is an exact SLICE of the later version, so concatenating
+  // every segment reproduces it — the renderer rebuilds no whitespace.
+  assert.equal(segments.map((s) => s.text).join(""), "the bound fails here");
   assert.ok(
     segments.some((s) => s.changed && s.text.includes("fails")),
     "the replaced word is marked changed",
@@ -166,5 +166,117 @@ test("word diff marks only what the later version changed", () => {
   assert.ok(
     segments.some((s) => !s.changed && s.text.includes("bound")),
     "carried words are not",
+  );
+});
+
+/** A step text of `words` tokens, with `edits` of them replaced. */
+function longText(words: number, edits: readonly number[]): string {
+  const out: string[] = [];
+  for (let k = 0; k < words; k += 1) {
+    out.push(edits.includes(k) ? `replacement${k}` : `word${k % 400}`);
+    // Clause punctuation every ninth token, so the anchored fallback has the
+    // breaks real prose gives it.
+    if (k % 9 === 8) out[out.length - 1] += ";";
+  }
+  return out.join(" ");
+}
+
+function changedFraction(segments: readonly { text: string; changed: boolean }[]): number {
+  const count = (only: boolean): number =>
+    segments
+      .filter((s) => s.changed === only)
+      .reduce((n, s) => n + s.text.trim().split(/\s+/).filter(Boolean).length, 0);
+  return count(true) / (count(true) + count(false));
+}
+
+test("a long version's changes are marked, not the whole card", () => {
+  // The reported bug: a step's text grows with every redevelopment, and past a
+  // flat token ceiling the diff gave up and marked EVERY word changed — which
+  // renders as a card with no dimming at all, i.e. no diff. These are the
+  // sizes late rounds actually reach.
+  const before = longText(1600, []);
+  const after = longText(1600, [500, 501, 900]);
+  const segments = diffWords(before, after);
+  assert.equal(segments.map((s) => s.text).join(""), after, "the text is reproduced exactly");
+  assert.ok(
+    changedFraction(segments) < 0.05,
+    `only the edits are marked changed, not the card (was ${changedFraction(segments)})`,
+  );
+  assert.ok(
+    segments.some((s) => s.changed && s.text.includes("replacement500")),
+    "the replaced words are the ones marked",
+  );
+});
+
+test("versions too large to align word by word still diff by clause", () => {
+  // Past the exact LCS budget the anchored fallback takes over: clauses match
+  // first, then each gap between two matched clauses is diffed on its own.
+  const before = `opening ${longText(2400, [])} closing`;
+  const after = `different ${longText(2400, [1200, 1201])} ending`;
+  const segments = diffWords(before, after);
+  assert.equal(segments.map((s) => s.text).join(""), after, "the text is reproduced exactly");
+  assert.ok(
+    changedFraction(segments) < 0.05,
+    `the fallback still marks only what changed (was ${changedFraction(segments)})`,
+  );
+  assert.ok(
+    segments.some((s) => s.changed && s.text.includes("replacement1200")),
+    "including an edit in the middle of the range",
+  );
+});
+
+test("a version's own spacing survives the diff", () => {
+  const before = "one two\nthree  four";
+  const after = "one TWO\nthree  four";
+  const segments = diffWords(before, after);
+  assert.equal(segments.map((s) => s.text).join(""), after);
+});
+
+test("a seat's timeline is reused until its recorded text changes", () => {
+  // The panel re-renders on every progress event of a live run; recomputing
+  // the timeline each time would discard the diffs already computed for the
+  // cards on screen.
+  const first = seatTimeline(seat([threeRoundStep()]), ["v0 original"]);
+  assert.equal(
+    seatTimeline(seat([threeRoundStep()]), ["v0 original"]),
+    first,
+    "an unchanged seat gets the same timeline back",
+  );
+
+  const withFourth: ReviewStepView = {
+    ...threeRoundStep(),
+    rounds: [
+      ...threeRoundStep().rounds.slice(0, 2),
+      round(3, "v2 after second repair", {
+        verdict: "Build",
+        rewrote: [{ index: 1, text: "v3 after a third repair" }],
+      }),
+    ],
+  };
+  assert.notEqual(
+    seatTimeline(seat([withFourth]), ["v0 original"]),
+    first,
+    "a round that landed invalidates it",
+  );
+});
+
+test("a rewrite that preserves length still invalidates the timeline", () => {
+  // A fingerprint of the text, not its length: same shape, same lengths, one
+  // different word.
+  const step = (text: string): ReviewStepView => ({
+    index: 1,
+    outcome: "passed",
+    rounds: [round(1, "v0 original", { verdict: "Build", rewrote: [{ index: 1, text }] })],
+  });
+  const before = seatTimeline(
+    { memberId: "member-len", label: "Seat 9", steps: [step("aaaa bbbb")] },
+    ["v0 original"],
+  );
+  assert.notEqual(
+    seatTimeline(
+      { memberId: "member-len", label: "Seat 9", steps: [step("aaaa cccc")] },
+      ["v0 original"],
+    ),
+    before,
   );
 });
