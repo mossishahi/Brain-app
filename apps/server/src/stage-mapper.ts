@@ -121,6 +121,18 @@ interface StageTiming {
 /** Failures kept per stage and attempt; older ones roll off first. */
 const MAX_STAGE_ERRORS = 20;
 
+/** Activity rows kept per stage; the newest survive. */
+const ACTIVITY_CAP = 200;
+
+/**
+ * Of that cap, how many newest rows are held for entries WITHOUT a capability
+ * icon — model turns, agent starts and completions, heartbeats. They are the
+ * only evidence that the run is moving at all, and the client's quiet-period
+ * warning is measured from the newest row it was sent, so starving them makes
+ * a working run look stalled.
+ */
+const RESERVED_PLAIN_ROWS = 60;
+
 /**
  * Records one node:failed event on its stage, collapsing the propagation
  * chain: a failure deep in a branch re-emits node:failed at every ancestor
@@ -566,24 +578,28 @@ function timings(
           ...(usage !== undefined ? { usage } : {}),
         });
       }
-      if (timing.activity.length > 200) {
+      if (timing.activity.length > ACTIVITY_CAP) {
         // Trim to the cap, but evict icon-less progress ticks FIRST: the
         // capability rows (file reads, searches, commands) are the feed's
         // audit trail, and a busy review otherwise flushes them out with
         // heartbeats — observed as "the capability icons disappear by the
-        // time the run finishes". Capability rows only yield when they
-        // alone exceed the cap.
+        // time the run finishes".
+        //
+        // The newest plain rows are RESERVED from that rule, because they are
+        // what says the run is alive. Without the reserve, a stage that has
+        // ever made ACTIVITY_CAP tool calls keeps nothing else — a live review
+        // was observed holding 200 rows, all 200 of them capability rows — so
+        // the feed's clock ticked only on tool calls and any long stretch of
+        // pure model turns rendered as "no new events for 26m", which the
+        // reader is invited to read as a stall.
         const capability = timing.activity.filter(
           (entry) => entry.capability !== undefined,
         );
-        const keptCapability = capability.slice(-200);
-        const budget = 200 - keptCapability.length;
-        const keptPlain =
-          budget > 0
-            ? timing.activity
-                .filter((entry) => entry.capability === undefined)
-                .slice(-budget)
-            : [];
+        const plain = timing.activity.filter((entry) => entry.capability === undefined);
+        const keptPlain = plain.slice(
+          -Math.max(RESERVED_PLAIN_ROWS, ACTIVITY_CAP - capability.length),
+        );
+        const keptCapability = capability.slice(-(ACTIVITY_CAP - keptPlain.length));
         const kept = [...keptCapability, ...keptPlain].sort(
           (a, b) => Number(a.id) - Number(b.id),
         );

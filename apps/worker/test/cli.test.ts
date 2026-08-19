@@ -113,6 +113,48 @@ test("per-run disabled capabilities parse from the submit environment", () => {
   assert.equal(absent.disabledCapabilities, undefined);
 });
 
+test("a dismissal reaches the runtime the worker builds", () => {
+  // Regression, and the most expensive kind of silent one: RuntimeWiringOptions
+  // did not declare dismissedMembers, so buildRuntime DROPPED it. Both worker
+  // commands passed it in through a conditional spread, which TypeScript does
+  // not excess-property-check, so it compiled — and every real dismissal was a
+  // no-op while the dashboard, the final outputs and every runtime unit test
+  // (all of which construct BrainstormRuntime directly) said otherwise. One
+  // live run bought 51 further model calls for two seats it had dismissed.
+  const root = tempRoot();
+  try {
+    const runtime = buildRuntime({
+      providerConfig: { provider: "offline" },
+      checkpoints: new FsCheckpointStore(root),
+      artifacts: new FsArtifactStore(root, "bsa_test_dismissed"),
+      autoApproveGates: true,
+      ...testTaxonomy(root),
+      bundle: registryBundle,
+      dismissedMembers: ["member-2"],
+    });
+    const guard = runtime.compiled.isAgentDismissed;
+    assert.ok(guard !== undefined, "the compiled workflow carries the dismissal guards");
+    // And it answers for the seat that was named, in the position that broke in
+    // production: the dismissed seat COMMENTING on somebody else's chain.
+    const scope = (bound: Record<string, unknown>) => ({
+      has: (name: string) => name in bound,
+      get: (name: string) => bound[name] as never,
+    });
+    assert.equal(
+      guard("comment-step-execute", scope({ commentor: { id: "member-2" } }) as never),
+      true,
+      "a dismissed seat's comment is skipped",
+    );
+    assert.equal(
+      guard("comment-step-execute", scope({ commentor: { id: "member-3" } }) as never),
+      false,
+      "a seated member's comment is not",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("offline run completes end to end with file-backed stores and auto-approved gate", async () => {
   const root = tempRoot();
   try {

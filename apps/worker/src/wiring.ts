@@ -138,6 +138,20 @@ export interface RuntimeWiringOptions {
   readonly bundle: ContentBundle;
   readonly skillResolver?: SkillResolver;
   readonly onEvent?: RunEventListener;
+  /**
+   * Panel members the submitter dismissed mid-run. Forwarded to the runtime,
+   * which compiles the guards that stop a dismissed seat from thinking,
+   * commenting, or being judged (see dismissal.ts).
+   *
+   * This option was MISSING here while both worker commands passed it in, and
+   * a conditional spread (`...(list.length > 0 ? { dismissedMembers } : {})`)
+   * is exempt from TypeScript's excess-property check — so every real
+   * dismissal was dropped on the floor while the dashboard, the final
+   * outputs, and every unit test (which build the runtime directly) said the
+   * feature worked. Both call sites now assign through this type explicitly,
+   * so the next option to arrive cannot be silently discarded.
+   */
+  readonly dismissedMembers?: readonly string[];
 }
 
 /** Reads the model id the brainstorm compiler resolved into the task description. */
@@ -603,7 +617,7 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
         })
       : executorStack;
 
-  return new BrainstormRuntime({
+  const runtime = new BrainstormRuntime({
     agentExecutor,
     bundle: options.bundle,
     skillResolver: options.skillResolver,
@@ -627,7 +641,26 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
     checkpoints: options.checkpoints,
     artifacts: options.artifacts,
     onEvent: options.onEvent,
+    ...(options.dismissedMembers !== undefined
+      ? { dismissedMembers: options.dismissedMembers }
+      : {}),
   });
+  // A dismissal that does not reach the compiler is a silent, expensive lie:
+  // the seat keeps thinking and commenting, the dashboard shows it dismissed,
+  // and the submitter pays for work they cancelled. That is exactly what
+  // happened while this option went undeclared, so the seam now asserts
+  // itself rather than trusting that the value arrived.
+  if (
+    (options.dismissedMembers?.length ?? 0) > 0 &&
+    runtime.compiled.isAgentDismissed === undefined
+  ) {
+    throw new Error(
+      "dismissed members were requested but the compiled workflow carries no " +
+        "dismissal guards — refusing to run the full panel behind the " +
+        "submitter's back",
+    );
+  }
+  return runtime;
 }
 
 /**

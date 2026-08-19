@@ -37,6 +37,7 @@ import {
 } from "@brainstorm-agentic/host-tools";
 
 import { defaultSessionRoot, loadDotEnv, workspaceRootFromSessionRoot } from "./env.js";
+import { scheduleFinishedExit } from "./exit.js";
 import { configureOutboundHttp } from "./proxy.js";
 import {
   atomicWriteFile,
@@ -1046,7 +1047,7 @@ async function appendFatalEvent(error: unknown): Promise<void> {
   }
 }
 
-main().catch(async (error: unknown) => {
+main().then(() => scheduleFinishedExit(), async (error: unknown) => {
   console.error(error instanceof Error ? error.message : String(error));
   await appendFatalEvent(error);
   // Exit decisively: a worker that failed because storage or a subprocess

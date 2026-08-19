@@ -821,6 +821,101 @@ test("the activity cap evicts plain progress ticks before capability rows", () =
   }
 });
 
+test("a stage past the cap in tool calls still shows its newest model turns", () => {
+  // The other side of the eviction rule, and a live defect: a review that has
+  // made more tool calls than the whole cap kept NOTHING else — 200 rows, all
+  // 200 of them capability rows. The client measures its quiet-period warning
+  // from the newest row it was sent, so the feed's clock ticked only on tool
+  // calls and a long stretch of pure model turns rendered as "no new events for
+  // 26m" on a run that was working.
+  const workspace = mkdtempSync(join(tmpdir(), "stage-mapper-test-"));
+  try {
+    const sessionDir = join(workspace, "session");
+    const jobDir = join(workspace, "job");
+    mkdirSync(join(sessionDir, "artifacts"), { recursive: true });
+    mkdirSync(jobDir, { recursive: true });
+    writeFileSync(
+      join(sessionDir, "checkpoint.json"),
+      JSON.stringify({
+        runId: "job-1",
+        workflowId: "brainstorm",
+        status: "running",
+        input: {},
+        journal: [],
+        pendingGates: [],
+        seq: 1,
+        updatedAt: Date.now(),
+      }),
+    );
+    writeFileSync(join(sessionDir, "artifacts", "index.json"), JSON.stringify({ refs: [] }));
+
+    const path = "brainstorm-root/review-members/member[0]";
+    const lines: string[] = [];
+    let seq = 0;
+    for (let i = 0; i < 400; i += 1) {
+      seq += 1;
+      lines.push(
+        JSON.stringify({
+          type: "agent:progress",
+          seq,
+          at: seq,
+          path,
+          progress: { kind: "tool", message: `ran a command ${i}`, toolName: "Bash" },
+        }),
+      );
+    }
+    // Then the redeveloper reasons for a while without touching a tool.
+    for (let i = 0; i < 20; i += 1) {
+      seq += 1;
+      lines.push(
+        JSON.stringify({
+          type: "agent:progress",
+          seq,
+          at: seq,
+          path,
+          progress: { kind: "model", message: `turn ${i}`, turn: i },
+        }),
+      );
+    }
+    writeFileSync(join(jobDir, "events.jsonl"), lines.join("\n") + "\n");
+
+    const record: JobRecord = {
+      jobId: "job-1",
+      topic: "topic",
+      status: "running",
+      runner: "local",
+      createdAt: 1,
+      updatedAt: 2,
+    };
+    const detail = buildJobDetail({
+      record,
+      status: "running",
+      sessionDir,
+      jobDir,
+      settings,
+    });
+    const review = detail.stages.find((candidate) => candidate.id === "review-members");
+    assert.ok(review);
+    const activity = review.activity ?? [];
+    assert.equal(activity.length, 200, "the cap still bounds the feed");
+    const plain = activity.filter((entry) => entry.capability === undefined);
+    assert.equal(plain.length, 20, "every model turn since the last tool call survives");
+    const newest = activity[activity.length - 1]!;
+    assert.equal(
+      newest.kind,
+      "model",
+      "the feed ends on the newest EVENT, so the client's quiet clock is honest",
+    );
+    assert.equal(Number(newest.id), 419);
+    assert.ok(
+      activity.some((entry) => entry.capability !== undefined),
+      "and the capability audit trail is still there",
+    );
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("a resumed run's feed stays chronological — per-attempt seqs never reorder it", () => {
   const workspace = mkdtempSync(join(tmpdir(), "stage-mapper-test-"));
   try {

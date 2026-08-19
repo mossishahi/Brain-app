@@ -3712,6 +3712,96 @@ fs.writeFileSync(checkpointPath, JSON.stringify(checkpoint, null, 2));
   rmSync(workspace, { recursive: true, force: true });
 });
 
+test("a resubmission ends the host the record still names, before submitting the next", async () => {
+  // The live failure: a worker failed, hung, and kept its SLURM job RUNNING.
+  // The submitter then continued the run from its checkpoint, the record's
+  // slurmJobId was overwritten with the new host, and the previous one — still
+  // alive, now unreferenced — ran the same session directory alongside it.
+  // Whatever the record's status says, the id it carries has to be ended first.
+  const workspace = tempRoot();
+  const bin = join(workspace, "bin");
+  mkdirSync(bin, { recursive: true });
+  const trace = join(workspace, "scheduler-trace.txt");
+  // Both stubs append to ONE file, so the ORDER is what the test reads.
+  writeFileSync(
+    join(bin, "scancel"),
+    "#!/usr/bin/env bash\nprintf 'scancel %s\\n' \"$*\" >> \"$TRACE\"\n",
+  );
+  writeFileSync(
+    join(bin, "sbatch"),
+    "#!/usr/bin/env bash\nprintf 'sbatch\\n' >> \"$TRACE\"\necho 'Submitted batch job 222'\n",
+  );
+  // A failed record is reconciled before the retry; the scheduler must answer
+  // that the old job is no longer listed, exactly as a real queue would once
+  // it has been cancelled.
+  for (const name of ["squeue", "sacct"]) {
+    writeFileSync(join(bin, name), "#!/usr/bin/env bash\nexit 0\n");
+    chmodSync(join(bin, name), 0o755);
+  }
+  chmodSync(join(bin, "scancel"), 0o755);
+  chmodSync(join(bin, "sbatch"), 0o755);
+  const now = Date.now();
+  const manager = new JobManager({
+    workspace,
+    workerPath: join(workspace, "unused.mjs"),
+    now: () => now,
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}`, TRACE: trace },
+  });
+  const settings = await manager.settings.put({
+    ...manager.settings.get(),
+    runner: "slurm",
+    llm: { provider: "offline" },
+  });
+  const jobId = "double-host";
+  const jobDir = join(workspace, "workspace", "jobs", jobId);
+  const sessionDir = join(workspace, "workspace", "sessions", jobId);
+  mkdirSync(jobDir, { recursive: true });
+  mkdirSync(sessionDir, { recursive: true });
+  writeFileSync(
+    join(jobDir, "job.json"),
+    JSON.stringify({
+      jobId,
+      topic: "a worker that failed and then hung",
+      status: "failed",
+      runner: "slurm",
+      slurmJobId: "111",
+      createdAt: now - 60_000,
+      updatedAt: now - 30_000,
+      submissionCount: 1,
+      executionSettings: settings,
+    }),
+  );
+  writeFileSync(
+    join(sessionDir, "checkpoint.json"),
+    JSON.stringify({
+      runId: jobId,
+      workflowId: "brainstorm",
+      status: "failed",
+      input: {},
+      journal: [
+        { key: "brainstorm-root/process-input::result", kind: "agent", value: { status: "ok", output: {} } },
+      ],
+      pendingGates: [],
+      error: { name: "AgentTaskFailedError", message: "[resource_exhausted] Error" },
+      seq: 9,
+      updatedAt: now - 30_000,
+    }),
+  );
+  manager.reload();
+  try {
+    assert.equal(await manager.retryFailed(jobId), "queued");
+    const lines = readFileSync(trace, "utf8").trim().split("\n");
+    assert.match(lines[0] ?? "", /^scancel .*111/, "the previous host is cancelled FIRST");
+    assert.equal(lines[1], "sbatch", "and only then is the next one submitted");
+    const record = JSON.parse(readFileSync(join(jobDir, "job.json"), "utf8")) as {
+      slurmJobId?: string;
+    };
+    assert.equal(record.slurmJobId, "222", "the record now names the new host alone");
+  } finally {
+    await removeWorkspace(workspace);
+  }
+});
+
 test("failed jobs retry from their last checkpoint and re-run only the failed task", async () => {
   const workspace = tempRoot();
   const marker = join(workspace, "failed-retry-marker.txt");

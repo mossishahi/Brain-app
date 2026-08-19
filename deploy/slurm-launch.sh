@@ -17,9 +17,13 @@
 #   updater to finish, rebuilds, and relaunches — the browser tab reloads
 #   itself into the new version exactly like on a workstation.
 # - GRACEFUL WALLTIME: --signal delivers an early TERM so the server closes
-#   cleanly before the hard kill; resubmitting simply adopts all jobs and
-#   state from the workspace. --dependency=singleton guarantees two copies
-#   never fight over the port.
+#   cleanly before the hard kill, and the job SUBMITS ITS OWN SUCCESSOR well
+#   before that (see deploy/slurm-renew.sh) so the deployment survives its
+#   walltime unattended — a run's host job is protected by the server, and this
+#   is what protects the server. --dependency=singleton guarantees two copies
+#   never fight over the port: the successor waits in PD until this one is gone.
+#   An operator's scancel is told apart from the walltime and takes the queued
+#   successor with it, so stopping the deployment still stops it.
 #
 #SBATCH --job-name=brain
 # Logs land in the repo's git-kept logs/ dir (relative to the submit dir);
@@ -90,9 +94,57 @@ build_if_needed() {
   return 0
 }
 
+# shellcheck source=deploy/slurm-renew.sh
+. "$(dirname "$0")/slurm-renew.sh" 2>/dev/null || . "$APP/deploy/slurm-renew.sh"
+
+# How long before the walltime the successor is queued. Generous on purpose: the
+# successor only has to be PENDING by the handover, and queue latency on a busy
+# partition is minutes, not seconds.
+RENEW_LEAD_S="${BRAIN_RENEW_LEAD_S:-1800}"
+JOB_END_EPOCH="$(brain_job_end_epoch || true)"
+SUCCESSOR_ID=""
+SUCCESSOR_FILE="$(mktemp -t brain-successor.XXXXXX)"
+
+# Queues the successor once, at the lead point, from a background subshell: the
+# wrapper itself must stay in `wait` on the server. One scontrol call has already
+# told us when this job ends, so this costs the scheduler nothing further.
+renew_watchdog() {
+  [ -n "$JOB_END_EPOCH" ] || {
+    echo "[renew] no SLURM end time visible; this job will not renew itself" >&2
+    return 0
+  }
+  local wait_s=$(( JOB_END_EPOCH - RENEW_LEAD_S - $(date +%s) ))
+  if [ "$wait_s" -le 0 ]; then
+    # A job shorter than the lead is a probe or a hand-limited run, not a
+    # deployment: renewing it immediately would chain short jobs forever.
+    echo "[renew] this job ends within the ${RENEW_LEAD_S}s lead; not renewing" >&2
+    return 0
+  fi
+  echo "[renew] will queue the successor in ${wait_s}s (job ends $(date -d "@$JOB_END_EPOCH" 2>/dev/null || echo "@$JOB_END_EPOCH"))"
+  sleep "$wait_s"
+  # The REPO's copy, never "$0": under SLURM the batch script runs from a
+  # per-job spool copy that disappears with the job.
+  brain_submit_successor "$APP/deploy/slurm-launch.sh" brain > "$SUCCESSOR_FILE"
+}
+renew_watchdog &
+RENEW_PID=$!
+
 SERVER_PID=""
 finish() {
-  echo "[wrapper] job ending; stopping the server"
+  # SLURM sends TERM for the walltime AND for scancel. Only the walltime hands
+  # over; a cancelled deployment must not be replaced by its own successor.
+  [ -f "$SUCCESSOR_FILE" ] && SUCCESSOR_ID="$(cat "$SUCCESSOR_FILE" 2>/dev/null)"
+  if brain_term_is_walltime "$JOB_END_EPOCH"; then
+    echo "[wrapper] walltime reached; stopping the server${SUCCESSOR_ID:+ (successor $SUCCESSOR_ID takes over)}"
+  else
+    echo "[wrapper] cancelled; stopping the server"
+    if [ -n "$SUCCESSOR_ID" ]; then
+      echo "[wrapper] cancelling the queued successor $SUCCESSOR_ID"
+      scancel "$SUCCESSOR_ID" 2>/dev/null || true
+    fi
+  fi
+  kill "$RENEW_PID" 2>/dev/null || true
+  rm -f "$SUCCESSOR_FILE" 2>/dev/null || true
   [ -n "$SERVER_PID" ] && kill -TERM "$SERVER_PID" 2>/dev/null
   wait "$SERVER_PID" 2>/dev/null
   exit 0

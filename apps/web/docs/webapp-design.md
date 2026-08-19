@@ -210,6 +210,12 @@ One stage shows at a time, and the two steppers under the panel — "← First p
 hovered, when the name underlines. They sit outside every panel, on the page background, where a
 bordered button read as a control belonging to the panel above it rather than as a way out of it.
 
+The Activity feed's cap RESERVES its newest rows for entries without a capability icon — model
+turns, agent starts and completions. Tool rows otherwise win the whole cap (a live review was
+observed holding 200 rows, all 200 of them capability rows), and since the quiet-period warning is
+measured from the newest row the client was sent, the feed's clock then ticked only on tool calls:
+a long stretch of pure reasoning rendered as "no new events for 26m" on a run that was working.
+
 While an agent is active, the frame also shows a bounded **Activity** feed (latest 20 of up to 200
 stored events): agent start/completion, model turns, WebSearch/WebFetch/Read/Glob/Grep/Bash starts,
 five-second tool heartbeats, API retries, context compaction, and artifact validation. These are

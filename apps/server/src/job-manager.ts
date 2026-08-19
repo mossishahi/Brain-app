@@ -511,11 +511,42 @@ export class JobManager {
     );
   }
 
+  /**
+   * Ends the host the record still names before a replacement is submitted.
+   *
+   * Every resubmission — retry, credit resume, interrupted resume, dismissal —
+   * overwrites `slurmJobId` with the new host, so anything the previous id
+   * referred to becomes unreachable the moment the new one lands. If that host
+   * was still alive, the run now has TWO of them over one session directory,
+   * and the orphan is invisible to the dashboard, to cancellation and to every
+   * liveness check.
+   *
+   * That is not hypothetical: a worker that failed and then hung kept its SLURM
+   * job RUNNING for hours, the submitter ordered a resume, and the two hosts ran
+   * side by side until they were found by hand in the queue.
+   *
+   * A worker that failed of its own accord has to be reaped too, because the
+   * hosting JOB can outlive it, so this asks the scheduler rather than the
+   * record's status. Cancelling an id that has already finished is a no-op that
+   * scancel reports as an error and stopWorker() swallows, which is the right
+   * trade: one wasted call against a duplicated run.
+   */
+  private async reapPreviousHost(record: JobRecord): Promise<void> {
+    const hadHost =
+      record.runner === "slurm"
+        ? record.slurmJobId !== undefined
+        : record.pid !== undefined;
+    if (!hadHost) return;
+    await this.stopWorker(record);
+    await this.awaitWorkerExit(record);
+  }
+
   private async submitScript(
     record: JobRecord,
     script: string,
     settings: ServerSettings,
   ): Promise<void> {
+    await this.reapPreviousHost(record);
     const executionEnv = this.settings.executionEnvironment(this.env, settings);
     if (record.runner === "slurm") {
       if (this.pilotPoolDir !== undefined) {
@@ -1701,8 +1732,10 @@ export class JobManager {
         return this.detail(jobId);
       }
 
-      await this.stopWorker(record);
-      await this.awaitWorkerExit(record);
+      // The worker is stopped by the submission itself (reapPreviousHost),
+      // which every resubmission now goes through — a dismissal was the only
+      // path that reaped its predecessor, which is why the others could leave
+      // one running.
 
       const settings = record.executionSettings ?? this.settings.get();
       // A run that died before its first checkpoint has nothing to resume from
