@@ -31,7 +31,7 @@ import { nodeSegment } from "./ast.js";
 import type { PendingGate } from "./checkpoint.js";
 import type { NodeExecutor } from "./registry.js";
 import { NodeExecutorRegistry } from "./registry.js";
-import { SuspendSignal, TerminalSignal } from "./signals.js";
+import { SuspendSignal, TerminalSignal, WindDownSignal } from "./signals.js";
 import type { Settled } from "../util/concurrency.js";
 import { settleWithConcurrency } from "../util/concurrency.js";
 
@@ -46,13 +46,26 @@ function combineSettledBranches(settled: readonly Settled<JsonValue | undefined>
   const cancellations = rejections.filter((reason) => isCancellation(reason));
   if (cancellations.length > 0) throw cancellations[0];
   const hardErrors = rejections.filter(
-    (reason) => !(reason instanceof SuspendSignal) && !(reason instanceof TerminalSignal),
+    (reason) =>
+      !(reason instanceof SuspendSignal) &&
+      !(reason instanceof TerminalSignal) &&
+      !(reason instanceof WindDownSignal),
   );
   if (hardErrors.length > 0) throw hardErrors[0];
   const terminals = rejections.filter((reason): reason is TerminalSignal => reason instanceof TerminalSignal);
   if (terminals.length > 0) throw terminals[0];
   const suspensions = rejections.filter((reason): reason is SuspendSignal => reason instanceof SuspendSignal);
-  throw new SuspendSignal(suspensions.flatMap((signal) => signal.pendingGates));
+  if (suspensions.length > 0) {
+    throw new SuspendSignal(suspensions.flatMap((signal) => signal.pendingGates));
+  }
+  // Last of all: a wind-down says only "there was no time to start more". Any
+  // other outcome in the fan-out is a fact about the WORK and outranks it — a
+  // real failure still fails the run, a terminal node still ends it, and a gate
+  // still suspends it, each of which the resume would reach again anyway.
+  const windDowns = rejections.filter(
+    (reason): reason is WindDownSignal => reason instanceof WindDownSignal,
+  );
+  throw windDowns[0]!;
 }
 
 const executeSequence: NodeExecutor = async (node, context) => {

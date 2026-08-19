@@ -20,6 +20,16 @@ export type RunEventBody =
   | { readonly type: "run:suspended"; readonly pendingGates: readonly PendingGate[] }
   | { readonly type: "run:cancelled" }
   | {
+      /**
+       * The host asked the run to stop starting work before its allocation ran
+       * out; the checkpoint is resumable and nothing was in flight. Recorded so
+       * a handover is visible in the log as a handover, not as a gap.
+       */
+      readonly type: "run:wound_down";
+      readonly deadline: number;
+      readonly reason: string;
+    }
+  | {
       readonly type: "run:credit_blocked";
       /** Absent when the block awaits a manual resume (no reset time known). */
       readonly retryAt?: number;

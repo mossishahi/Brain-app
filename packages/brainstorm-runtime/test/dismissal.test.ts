@@ -924,3 +924,71 @@ test("two seats dismissed at once both stop, and the panel keeps reviewing", asy
     seated.length * CHAIN_STEPS * (seated.length - 1),
   );
 });
+
+test("a run out of host time finishes what is in flight, starts nothing new, and stays resumable", async () => {
+  // Proactive walltime survival. A scheduler kills its jobs at the allocation
+  // boundary, mid-task, and every unjournalled call is bought again on the
+  // resume — on a review fan-out that is the whole panel's round. Told when its
+  // host expires, the run stops STARTING work instead.
+  const executor = new FakeBrainstormExecutor();
+  // The deadline passes while the panel is mid-review: the first-pass fan-out
+  // has been bought, and the next agent task to start is refused.
+  let deadlinePassed = false;
+  const firstPassSeen = () => executor.tasks("brain").length;
+  const app = new BrainstormRuntime({
+    bundle: loadContent(registryContentDir),
+    agentExecutor: executor,
+    humanGateMode: "autoApproveSkippable",
+    activities: taxonomyActivities(new StubTaxonomy()),
+    routeResolver: new StaticBrainstormRouteResolver({
+      reasoning: { modelId: "configured-reasoner", providerId: "fake" },
+      writing: { modelId: "configured-writer", providerId: "fake" },
+      balanced: { modelId: "configured-balanced", providerId: "fake" },
+    }),
+    hostTools: TEST_HOST_TOOLS,
+    enabledHostToolIds: new Set(TEST_HOST_TOOLS.map((manifest) => manifest.toolId)),
+    windDown: { at: 1_000, reason: "the host job ends" },
+    // The clock crosses the deadline once every seat has thought once, so the
+    // wind-down lands inside the review rather than before anything happened.
+    now: () => (deadlinePassed ? 2_000 : 0),
+  });
+  executor.failOn = (entry) => {
+    if (entry.role === "brain" && firstPassSeen() >= PANEL_SEATS.length) deadlinePassed = true;
+    return false;
+  };
+  const result = await app.run({
+    runId: "wind-down",
+    submission: SUBMISSION,
+    params: { panelSize: 3 },
+  });
+
+  assert.equal(result.status, "wound_down", "the run reports the handover, not a failure");
+  assert.equal(
+    result.status === "wound_down" && result.reason,
+    "the host job ends",
+    "carrying what the host said",
+  );
+  // Resumable, and by the ordinary route: the checkpoint is a `running` one, so
+  // the host's existing resume path continues it with nothing new to understand.
+  const checkpoint = await app.checkpoints.load("wind-down");
+  assert.equal(checkpoint?.status, "running");
+  assert.ok((checkpoint?.journal.length ?? 0) > 0, "with the work so far journalled");
+
+  // Every task that started finished: the fan-out settles all its branches
+  // before deciding the outcome, so nothing was abandoned half-bought.
+  const started = executor.seen.length;
+  assert.ok(started > 0, "work happened before the deadline");
+
+  // And the resume — no deadline this time — completes the run, re-executing
+  // nothing it had already paid for.
+  const boughtBefore = executor.seen.map((entry) => entry.task.taskId);
+  const resumed = await runtime(executor, undefined, undefined, {
+    checkpoints: app.checkpoints,
+    artifacts: app.artifacts,
+  }).resume("wind-down");
+  completed(resumed);
+  const rebought = executor.seen
+    .slice(started)
+    .filter((entry) => boughtBefore.includes(entry.task.taskId));
+  assert.deepEqual(rebought, [], "the resume re-bought nothing the wind-down had journalled");
+});

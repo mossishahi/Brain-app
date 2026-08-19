@@ -98,11 +98,57 @@ test("an unlimited or unknown walltime yields no --time flag rather than a broke
   }
 });
 
+test("each generation is named for its number, so handovers are countable", () => {
+  const h = harness();
+  try {
+    h.stub("scontrol", `echo "JobId=4242 TimeLimit=12:00:00"`);
+    // A hand-submitted job is generation 1, whatever it is called.
+    assert.equal(h.run("brain_next_name brain").trim(), "brain-2");
+    assert.equal(h.run("brain_next_name brain-2").trim(), "brain-3");
+    assert.equal(h.run("brain_next_name brain-9").trim(), "brain-10");
+    // A name that ends in something that is not a generation is not mistaken
+    // for one.
+    assert.equal(h.run("brain_next_name brain-internal").trim(), "brain-internal-2");
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("one server per port survives the renaming that singleton used to cover", () => {
+  const h = harness();
+  try {
+    h.stub("scontrol", `echo "JobId=4242 TimeLimit=12:00:00"`);
+    // Every generation of ours, plus somebody else's job and our own worker
+    // jobs, which must not be mistaken for a server.
+    h.stub(
+      "squeue",
+      `printf '%s\n' "111 brain R" "222 brain-3 R" "333 b9-db4f75 R" "444 brain-4 PD"`,
+    );
+    assert.match(
+      h.run(`brain_other_server_running brain 4242`),
+      /^111 brain$/m,
+      "a running generation is found, whatever it is numbered",
+    );
+    assert.equal(
+      h.run(`brain_other_server_running brain 111 | head -1`).trim(),
+      "222 brain-3",
+      "and the job asking is never itself the answer",
+    );
+    assert.match(
+      h.run(`brain_successor_pending brain && echo pending || echo none`),
+      /pending/,
+      "a queued successor is seen by prefix, not by an exact name",
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
 test("the successor is submitted once, with the job's walltime, and never duplicated", () => {
   const h = harness();
   try {
     h.stub("scontrol", `echo "JobId=4242 TimeLimit=24:00:00 EndTime=2026-08-19T22:00:00"`);
-    h.stub("squeue", "exit 0"); // nothing pending
+    h.stub("squeue", "exit 0"); // nothing of ours in the queue
     h.stub("sbatch", `printf '%s\\n' "$*" >> "$SBATCH_LOG"; echo "Submitted batch job 777"`);
     const log = join(h.root, "sbatch.log");
     const id = h.run(`brain_submit_successor /repo/deploy/slurm-launch.sh brain 2>/dev/null`, {
@@ -111,13 +157,14 @@ test("the successor is submitted once, with the job's walltime, and never duplic
     assert.equal(id.trim(), "777", "the id is returned for the trap to cancel if needed");
     assert.match(
       execFileSync("cat", [log], { encoding: "utf8" }).trim(),
-      /^--time=24:00:00 \/repo\/deploy\/slurm-launch\.sh$/,
-      "submitted with the inherited walltime and the REPO script, not the spool copy",
+      /^--time=24:00:00 --job-name=brain-2 --dependency=afterany:4242 \/repo\/deploy\/slurm-launch\.sh$/,
+      "inherited walltime, the next generation's name, held behind THIS job by id, " +
+        "and the REPO script rather than the per-job spool copy",
     );
 
-    // With one already pending, a second is not queued: singleton would hold it
-    // forever and the queue would fill with successors.
-    h.stub("squeue", `echo 999`);
+    // With one already pending, a second is not queued: the queue would
+    // otherwise fill with successors that can never all run.
+    h.stub("squeue", `printf '%s\n' "999 brain-2 PD"`);
     const again = h.run(`brain_submit_successor /repo/deploy/slurm-launch.sh brain 2>/dev/null`, {
       SBATCH_LOG: log,
     });

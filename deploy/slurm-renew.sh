@@ -54,20 +54,56 @@ brain_time_limit_flag() {
   esac
 }
 
+# The next generation's name: brain -> brain-2 -> brain-3. The number is what
+# makes the handovers countable in one squeue column, which is the whole reason
+# the name changes at all; `brain` with no suffix is generation 1.
+brain_next_name() {
+  local current="${1:-brain}" base generation
+  base="${current%%-[0-9]*}"
+  [ -n "$base" ] || base=brain
+  generation="${current##*-}"
+  case "$generation" in
+    "$current" | *[!0-9]* | "") generation=1 ;;
+  esac
+  printf '%s-%s' "$base" "$(( generation + 1 ))"
+}
+
+# Our own server jobs, one "<id> <name> <state>" per line. The name is matched by
+# PREFIX because each generation carries its own: `--dependency=singleton` keys
+# on an exact name, so it stopped being the thing that keeps two servers off one
+# port the moment the names started differing.
+brain_server_jobs() {
+  local base="${1:-brain}"
+  command -v squeue >/dev/null 2>&1 || return 0
+  squeue -h -u "${USER:-$(id -un)}" -o '%i %j %t' 2>/dev/null |
+    awk -v base="$base" '$2 == base || index($2, base "-") == 1'
+}
+
 # True when a successor is already waiting, so a second one is never queued.
 brain_successor_pending() {
-  local name="${1:-brain}"
-  command -v squeue >/dev/null 2>&1 || return 1
-  local pending
-  pending=$(squeue -h -u "${USER:-$(id -un)}" -n "$name" -t PD -o '%i' 2>/dev/null | wc -l | tr -d ' ')
+  local base="${1:-brain}" pending
+  pending=$(brain_server_jobs "$base" | awk '$3 == "PD"' | wc -l | tr -d ' ')
   [ "${pending:-0}" -gt 0 ]
+}
+
+# Another generation of the server already serving. Prints "<id> <name>" for the
+# first one found, so the caller can name it in its own refusal.
+brain_other_server_running() {
+  local base="${1:-brain}" self="${2:-${SLURM_JOB_ID:-}}"
+  brain_server_jobs "$base" |
+    awk -v self="$self" '$3 == "R" && $1 != self { print $1, $2; exit }'
 }
 
 # Submits the next server job and echoes its id. Never fatal: a deployment that
 # cannot renew must keep serving and say so, not fall over.
+#
+# The successor is named for its generation and depends on THIS job by id rather
+# than on a shared name: afterany holds it until this one has terminated however
+# it terminates, which is the guarantee singleton used to give and does not give
+# once every generation has a different name.
 brain_submit_successor() {
-  local script="$1" name="${2:-brain}"
-  if brain_successor_pending "$name"; then
+  local script="$1" base="${2:-brain}" self="${3:-${SLURM_JOB_ID:-}}"
+  if brain_successor_pending "$base"; then
     echo "[renew] a successor is already queued; not submitting another" >&2
     return 0
   fi
@@ -75,16 +111,19 @@ brain_submit_successor() {
     echo "[renew] sbatch is not available here; this job will NOT be renewed" >&2
     return 0
   }
-  local out
-  # shellcheck disable=SC2046  # the flag is one word or empty by construction
-  out=$(sbatch $(brain_time_limit_flag) "$script" 2>&1) || {
+  local next dependency out
+  next=$(brain_next_name "${SLURM_JOB_NAME:-$base}")
+  dependency=""
+  [ -n "$self" ] && dependency="--dependency=afterany:$self"
+  # shellcheck disable=SC2046,SC2086  # each flag is one word or empty by construction
+  out=$(sbatch $(brain_time_limit_flag) --job-name="$next" $dependency "$script" 2>&1) || {
     echo "[renew] sbatch refused the successor: $out" >&2
     return 0
   }
   local id
   id=$(printf '%s' "$out" | sed -n 's/^Submitted batch job \([0-9]*\).*/\1/p' | head -1)
   [ -n "$id" ] || { echo "[renew] unrecognized sbatch answer: $out" >&2; return 0; }
-  echo "[renew] queued successor job $id (starts when this one ends)" >&2
+  echo "[renew] queued successor job $id as $next (starts when this one ends)" >&2
   printf '%s' "$id"
 }
 

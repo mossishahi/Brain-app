@@ -412,8 +412,63 @@ export class JobManager {
     template: string,
   ): string {
     const path = join(this.jobDir(record.jobId), filename);
-    atomicWriteFile(path, renderSlurmTemplate(template, command), 0o755);
+    atomicWriteFile(
+      path,
+      renderSlurmTemplate(template, `${this.windDownPrologue()}${command}`),
+      0o755,
+    );
     return path;
+  }
+
+  /**
+   * The shell that tells the worker when its host expires, prepended to the
+   * command inside the operator's own template — which is where the command tag
+   * already sits, safely after the last #SBATCH directive.
+   *
+   * The job's end time is asked for ONCE, at job start, because only then is it
+   * known: a job's walltime starts when it starts, and this one may have waited
+   * hours in the queue. Everything is conditional and nothing is fatal — a
+   * workstation run, a scheduler that will not say, or a `date` that cannot parse
+   * the stamp all simply leave the variable unset, and the run behaves exactly as
+   * it did before this existed.
+   */
+  private windDownPrologue(): string {
+    const lead = this.windDownLeadSeconds;
+    if (lead <= 0) return "";
+    return [
+      "# The run stops STARTING work this long before the allocation ends, so it",
+      "# exits with nothing in flight instead of being killed mid-task and buying",
+      "# every unjournalled call again on the resume.",
+      "_bsa_lead=__LEAD__",
+      "if [ -n \"${SLURM_JOB_ID:-}\" ] && command -v scontrol >/dev/null 2>&1; then",
+      "  _bsa_end=$(scontrol -o show job \"$SLURM_JOB_ID\" 2>/dev/null | tr ' ' '\\n' | sed -n 's/^EndTime=//p' | head -1)",
+      "  if [ -n \"${_bsa_end:-}\" ] && [ \"$_bsa_end\" != \"Unknown\" ]; then",
+      "    _bsa_epoch=$(date -d \"$_bsa_end\" +%s 2>/dev/null || true)",
+      "    if [ -n \"${_bsa_epoch:-}\" ]; then",
+      "      export BRAINSTORM_AGENTIC_WIND_DOWN_AT_MS=$(( (_bsa_epoch - _bsa_lead) * 1000 ))",
+      "      export BRAINSTORM_AGENTIC_WIND_DOWN_REASON=\"the host job ends at $_bsa_end\"",
+      "      echo \"[submit] host ends $_bsa_end; winding down ${_bsa_lead}s before that\"",
+      "    fi",
+      "  fi",
+      "fi",
+      "",
+    ].join("\n").replace("__LEAD__", String(lead));
+  }
+
+  /**
+   * A submission's own name in the queue: the index first, so it survives
+   * squeue's narrow NAME column, then the run it belongs to.
+   *
+   * Taken from the script FILENAME, which every submission path already numbers
+   * uniquely (submit.sh, submit-resume-2.sh, submit-retry-3.sh,
+   * submit-interrupted-resume-9.sh) — so the name in the queue and the file on
+   * disk carry the same number, and counting handovers is reading one column.
+   */
+  private static jobNameFor(record: JobRecord, scriptPath: string): string {
+    const file = scriptPath.slice(scriptPath.lastIndexOf("/") + 1);
+    const index = /-(\d+)\.sh$/.exec(file)?.[1] ?? "1";
+    const suffix = record.jobId.slice(-6);
+    return `b${index}-${suffix}`;
   }
 
   /**
@@ -553,11 +608,18 @@ export class JobManager {
         await this.submitViaPilot(record, script, executionEnv);
         return;
       }
-      const result = await execute("sbatch", [script], {
-        cwd: this.jobDir(record.jobId),
-        env: executionEnv,
-        timeout: 10_000,
-      });
+      // --job-name on the command line beats the template's directive, so the
+      // operator keeps owning the template and the queue still shows which
+      // submission this is.
+      const result = await execute(
+        "sbatch",
+        ["--job-name", JobManager.jobNameFor(record, script), script],
+        {
+          cwd: this.jobDir(record.jobId),
+          env: executionEnv,
+          timeout: 10_000,
+        },
+      );
       const match = /Submitted batch job\s+(\S+)/.exec(result.stdout);
       if (!match) {
         throw new Error(`sbatch returned an unrecognized response: ${result.stdout.trim()}`);
@@ -787,6 +849,27 @@ export class JobManager {
    * staying welcome on the host cluster.
    */
   private static readonly DEFAULT_SLURM_ACTIVITY_FRESHNESS_MS = 600_000;
+
+  /**
+   * How long before its allocation ends a worker stops starting new tasks.
+   *
+   * It has to exceed the longest single agent task, because the wind-down waits
+   * for what is already running: a redeveloper writing a full chain revision, or
+   * a judge verifying with a script, runs for many minutes. Twenty is generous
+   * against that and costs 1.4% of a 24-hour allocation. Set
+   * BRAINSTORM_AGENTIC_WIND_DOWN_LEAD_S to 0 to switch the whole mechanism off.
+   */
+  private static readonly DEFAULT_WIND_DOWN_LEAD_SECONDS = 1_200;
+
+  private get windDownLeadSeconds(): number {
+    const raw = this.env.BRAINSTORM_AGENTIC_WIND_DOWN_LEAD_S?.trim();
+    if (raw === undefined || raw === "") return JobManager.DEFAULT_WIND_DOWN_LEAD_SECONDS;
+    const value = Number(raw);
+    return Number.isSafeInteger(value) && value >= 0
+      ? value
+      : JobManager.DEFAULT_WIND_DOWN_LEAD_SECONDS;
+  }
+
   private static readonly DEFAULT_SLURM_PROBE_TTL_MS = 600_000;
   private readonly slurmAliveCache = new Map<
     string,

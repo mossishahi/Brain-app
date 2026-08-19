@@ -38,6 +38,11 @@
 # Override per submission without editing: sbatch --time=... deploy/slurm-launch.sh
 #SBATCH --time=12:00:00
 #SBATCH --signal=B:TERM@120
+# Holds a hand-submitted `brain` behind another one. Each successor is named for
+# its generation instead (brain-2, brain-3, ...) so handovers are countable in
+# the queue, and carries --dependency=afterany:<predecessor> — which is the same
+# guarantee by job id rather than by name. The wrapper also refuses to serve when
+# another generation is already running.
 #SBATCH --dependency=singleton
 #SBATCH --nice=10000
 ##SBATCH --nodelist=cpusrv20        # optional: pin the node so the URL never changes
@@ -105,6 +110,17 @@ JOB_END_EPOCH="$(brain_job_end_epoch || true)"
 SUCCESSOR_ID=""
 SUCCESSOR_FILE="$(mktemp -t brain-successor.XXXXXX)"
 
+# One server per port, still. Generations carry different names, so
+# --dependency=singleton no longer answers this question and the check is
+# explicit: another generation already serving means this job has nothing to do
+# except get out of the way — quietly, because a duplicate that keeps trying is
+# worse than one that says which job holds the port.
+OTHER_SERVER="$(brain_other_server_running brain || true)"
+if [ -n "$OTHER_SERVER" ]; then
+  echo "[wrapper] another server is already running (job $OTHER_SERVER); exiting"
+  exit 0
+fi
+
 # Queues the successor once, at the lead point, from a background subshell: the
 # wrapper itself must stay in `wait` on the server. One scontrol call has already
 # told us when this job ends, so this costs the scheduler nothing further.
@@ -124,7 +140,7 @@ renew_watchdog() {
   sleep "$wait_s"
   # The REPO's copy, never "$0": under SLURM the batch script runs from a
   # per-job spool copy that disappears with the job.
-  brain_submit_successor "$APP/deploy/slurm-launch.sh" brain > "$SUCCESSOR_FILE"
+  brain_submit_successor "$APP/deploy/slurm-launch.sh" brain "${SLURM_JOB_ID:-}" > "$SUCCESSOR_FILE"
 }
 renew_watchdog &
 RENEW_PID=$!

@@ -19,6 +19,7 @@ import {
   type RunEventListener,
   type RunResult,
   type ScopeReader,
+  WindDownSignal,
 } from "@brainstorm-agentic/core";
 
 import {
@@ -63,6 +64,16 @@ export interface BrainstormRuntimeOptions {
    * is permanent and each replay reaches the same decisions.
    */
   readonly dismissedMembers?: readonly string[];
+  /**
+   * When the host wants the run to stop starting work, and why.
+   *
+   * A scheduler kills its jobs at the allocation boundary, mid-task, and every
+   * unjournaled call is bought again on the resume — on a review fan-out that is
+   * the whole panel's round. Told when its host expires, the run instead lets
+   * what is running finish, writes an ordinary resumable checkpoint, and exits
+   * with nothing in flight.
+   */
+  readonly windDown?: { readonly at: number; readonly reason: string };
 }
 
 export interface StartBrainstormOptions {
@@ -80,27 +91,48 @@ export interface ResumeBrainstormOptions {
 }
 
 /**
- * The node-executor table a run with dismissed seats needs, or undefined when
- * nothing is dismissed (then the runner uses the builtin table untouched).
+ * The node-executor table a run needs when something has to be withheld from an
+ * agent node — a dismissed seat, or a host that is out of time. Undefined when
+ * neither applies, and then the runner uses the builtin table untouched.
  *
  * The `agent` kind is overridden rather than wrapped in a guard NODE on
  * purpose: journal keys are execution paths, so an extra node would move every
  * key beneath it and a resumed run would miss — and re-buy — its own completed
- * work. Skipping inside the executor records no journal entry at all, which is
- * indistinguishable from never having reached the node, so the seat's history
- * stays exactly as the dismissal found it.
+ * work. Deciding inside the executor records no journal entry at all, which is
+ * indistinguishable from never having reached the node, so the run's history
+ * stays exactly as the guard found it.
+ *
+ * The two guards are deliberately different in kind. A dismissal returns
+ * `undefined`: that seat has no work, ever again, and the run carries on without
+ * it. A wind-down THROWS, because the run itself must stop — and it throws from
+ * the one place that only work not yet started passes through, so the tasks
+ * already in flight are left to finish and journal.
  */
-function dismissalExecutors(
-  isAgentDismissed: ((nodeId: string, scope: ScopeReader) => boolean) | undefined,
-): NodeExecutorRegistry | undefined {
-  if (isAgentDismissed === undefined) return undefined;
+function guardedExecutors(options: {
+  readonly isAgentDismissed?: ((nodeId: string, scope: ScopeReader) => boolean) | undefined;
+  readonly windDown?: { readonly at: number; readonly reason: string; readonly now: () => number };
+}): NodeExecutorRegistry | undefined {
+  const { isAgentDismissed, windDown } = options;
+  if (isAgentDismissed === undefined && windDown === undefined) return undefined;
   const executors = createBuiltinExecutorRegistry();
   const runAgent = executors.get("agent");
   executors.register(
     "agent",
     async (node, context) => {
       const id = node.id;
-      if (id !== undefined && isAgentDismissed(id, context.scope)) return undefined;
+      if (
+        isAgentDismissed !== undefined &&
+        id !== undefined &&
+        isAgentDismissed(id, context.scope)
+      ) {
+        return undefined;
+      }
+      // Checked HERE, not once per run: a run that has been going for hours
+      // crosses the deadline in the middle of a fan-out, and the question is
+      // always about the next task rather than about the run as a whole.
+      if (windDown !== undefined && windDown.now() >= windDown.at) {
+        throw new WindDownSignal(windDown.at, windDown.reason);
+      }
       return runAgent(node, context);
     },
     { override: true },
@@ -145,7 +177,18 @@ export class BrainstormRuntime {
         ? checkpoints
         : new MigratingCheckpointStore(checkpoints, this.compiled.content);
     this.artifacts = options.artifacts ?? new InMemoryArtifactStore();
-    const executors = dismissalExecutors(this.compiled.isAgentDismissed);
+    const executors = guardedExecutors({
+      isAgentDismissed: this.compiled.isAgentDismissed,
+      ...(options.windDown !== undefined
+        ? {
+            windDown: {
+              at: options.windDown.at,
+              reason: options.windDown.reason,
+              now: options.now ?? (() => Date.now()),
+            },
+          }
+        : {}),
+    });
     this.runner = new WorkflowRunner({
       functions: this.compiled.functions,
       checkpoints: this.checkpoints,

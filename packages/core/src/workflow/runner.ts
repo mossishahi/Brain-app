@@ -36,7 +36,7 @@ import { RunJournal } from "./journal.js";
 import { createBuiltinExecutorRegistry } from "./nodes.js";
 import type { EffectResult, NodeExecutionContext, NodeExecutorRegistry } from "./registry.js";
 import { Scope } from "./scope.js";
-import { SuspendSignal, TerminalSignal } from "./signals.js";
+import { SuspendSignal, TerminalSignal, WindDownSignal } from "./signals.js";
 import { WorkflowFunctions } from "./functions.js";
 
 /**
@@ -152,7 +152,19 @@ export type RunResult =
       readonly source: "deterministic" | "openrouter" | "manual";
     }
   | { readonly status: "failed"; readonly runId: string; readonly error: SerializedError }
-  | { readonly status: "cancelled"; readonly runId: string };
+  | { readonly status: "cancelled"; readonly runId: string }
+  | {
+      /**
+       * The host ran out of time and the run stopped starting work. Its
+       * checkpoint is an ordinary `running` one, so this is resumed exactly like
+       * an interrupted run — with the difference that nothing was in flight when
+       * it stopped, so nothing is bought twice.
+       */
+      readonly status: "wound_down";
+      readonly runId: string;
+      readonly deadline: number;
+      readonly reason: string;
+    };
 
 let runIdCounter = 0;
 
@@ -366,6 +378,19 @@ class RunExecution {
         this.emit({ type: "run:cancelled" });
         return { status: "cancelled", runId };
       }
+      if (error instanceof WindDownSignal) {
+        // Deliberately a `running` checkpoint: the run is not finished, not
+        // suspended and not blocked — it is exactly where an interrupted run
+        // would be, minus the work an interruption would have thrown away. The
+        // host's existing resume path takes it from here.
+        await this.saveCheckpoint("running");
+        this.emit({
+          type: "run:wound_down",
+          deadline: error.deadline,
+          reason: error.reason,
+        });
+        return { status: "wound_down", runId, deadline: error.deadline, reason: error.reason };
+      }
       return await this.fail(serializeError(error));
     }
   }
@@ -395,6 +420,7 @@ class RunExecution {
       if (
         error instanceof SuspendSignal ||
         error instanceof TerminalSignal ||
+        error instanceof WindDownSignal ||
         isCancellation(error) ||
         isCreditBlocked(error)
       ) {

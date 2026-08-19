@@ -38,6 +38,7 @@ import {
 
 import { defaultSessionRoot, loadDotEnv, workspaceRootFromSessionRoot } from "./env.js";
 import { scheduleFinishedExit } from "./exit.js";
+import { windDownFromEnv } from "./wind-down.js";
 import { configureOutboundHttp } from "./proxy.js";
 import {
   atomicWriteFile,
@@ -189,6 +190,16 @@ function gpuRunForRun(
   }
 }
 
+/**
+ * When the host wants the run to stop starting work, from the environment its
+ * submit script exports.
+ *
+ * The submit script asks the scheduler once, at job start, for this job's own
+ * end time and subtracts a lead — the deadline therefore accounts for however
+ * long the job waited in the queue, which no value computed at submission time
+ * could. Absent (a workstation run, or a scheduler that would not say) means no
+ * wind-down: the run behaves exactly as it did before.
+ */
 /**
  * Per-run workflow-param overrides from the server's settings snapshot (the
  * environment is the submission channel). Read only by `run`: a resume
@@ -733,6 +744,16 @@ function reportResult(result: RunResult, sessionRoot: string): void {
     process.exitCode = 1;
     return;
   }
+  if (result.status === "wound_down") {
+    // Not a failure and not a finish: the host is out of time and the run
+    // stopped cleanly with nothing in flight. Exit 0 — its checkpoint is an
+    // ordinary running one, which is what the server's resume path looks for.
+    console.log(
+      `Run ${result.runId} wound down before its host expired: ${result.reason}`,
+    );
+    console.log("Nothing was in flight; the brain server resumes it from this checkpoint.");
+    return;
+  }
   console.log(`Run ${result.runId} cancelled.`);
 }
 
@@ -800,6 +821,14 @@ async function main(): Promise<void> {
     process.env.BRAIN_CONTENT_REGISTRY_URL?.trim();
   const contentRegistryVersion = stringFlag(args, "content-registry-version");
   const dismissedMembers = dismissedMembersFlag(args);
+  const windDown = windDownFromEnv(process.env);
+  if (windDown !== undefined) {
+    console.log(
+      `[worker] will stop starting new tasks at ${new Date(windDown.at).toISOString()} ` +
+        `(${Math.round((windDown.at - Date.now()) / 60_000)} minutes from now); ` +
+        "whatever is running then finishes first",
+    );
+  }
   const eventLog = eventListener(verbose, eventsFile);
 
   if (args.command === "list") {
@@ -860,6 +889,7 @@ async function main(): Promise<void> {
       artifacts,
       autoApproveGates: autoApprove,
       ...(dismissedMembers.length > 0 ? { dismissedMembers } : {}),
+      ...(windDown !== undefined ? { windDown } : {}),
       ...(manifest ? { attachmentRoots: [manifest.baseDir] } : {}),
       ...(taxonomy ? { taxonomy } : {}),
       ...(codeEnvironment ? { codeEnvironment } : {}),
@@ -961,6 +991,7 @@ async function main(): Promise<void> {
       artifacts,
       autoApproveGates: resumeAutoApprove,
       ...(dismissedMembers.length > 0 ? { dismissedMembers } : {}),
+      ...(windDown !== undefined ? { windDown } : {}),
       ...(manifest ? { attachmentRoots: [manifest.baseDir] } : {}),
       ...(taxonomy ? { taxonomy } : {}),
       ...(codeEnvironment ? { codeEnvironment } : {}),
