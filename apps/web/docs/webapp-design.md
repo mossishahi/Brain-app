@@ -403,10 +403,11 @@ activity feed, fold), and the *walk inspector* sits below in its own panel.
   A round is handed a text, gathers comments on it, and only then redevelops, so round k's
   comments describe the version the PREVIOUS card shows: every card carries the review of the
   version it displays, which puts round 1's comments under "Original thought" and leaves the
-  newest version unreviewed until a later round reads it. The summary row names the round the
-  review came from, because the card it sits on is numbered for the round that WROTE the text,
-  not the one that judged it. The reviewer names ride ON the
-  summary row itself, right after the "Comments & judgement · round k" label — Judge first,
+  newest version unreviewed until a later round reads it. The summary row names no round: the panel already
+  sits on the version its review was made against, so a number there only invited comparison
+  with the card's own numbering, which counts the round that WROTE the text rather than the one
+  that judged it. The reviewer names ride ON the
+  summary row itself, right after the "Comments & judgement" label — Judge first,
   then each commentor — each name colored by its verdict (`--ok` Pass, `--warn` Build,
   `--bad` Interrupt, dim pending), so the row is a verdict summary even while folded. Clicking a
   name opens the

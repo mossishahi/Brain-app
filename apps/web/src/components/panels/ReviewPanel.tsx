@@ -521,10 +521,9 @@ function CommentsPanel({
           onToggle();
         }}
       >
-        <span className="review-fold-name">
-          Comments & judgement
-          <span className="dim"> · round {round.round}</span>
-        </span>
+        {/* No round number: the panel sits on the version that round read, so
+            the number restated the card's own position in the deck. */}
+        <span className="review-fold-name">Comments &amp; judgement</span>
         <span className="reviewer-names" role="tablist" aria-label="reviewer">
           <button
             type="button"
