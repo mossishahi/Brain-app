@@ -318,3 +318,100 @@ test("the origin card's link names a card the affected step actually has", () =>
     `step 2's deck has the card the link opens (${target})`,
   );
 });
+
+test("every version is a round, whoever wrote it, numbered in order", () => {
+  // The complaint this answers: a step whose deck already showed three
+  // prospective edits had a header reading "round 1 in progress", because only
+  // the review loop's own iterations were counted. An edit is an edit.
+  const stepOne: ReviewStepView = {
+    index: 1,
+    outcome: "passed",
+    rounds: [
+      // Position 1 rewrites step 2 twice before step 2's review ever opens.
+      round(1, "one v0", {
+        verdict: "Build",
+        rewrote: [
+          { index: 1, text: "one v1" },
+          { index: 2, text: "two, edited from position 1" },
+        ],
+      }),
+      round(2, "one v1", {
+        verdict: "Build",
+        rewrote: [
+          { index: 1, text: "one v2" },
+          { index: 2, text: "two, edited again from position 1" },
+        ],
+      }),
+      round(3, "one v2", { verdict: "Pass" }),
+    ],
+  };
+  const stepTwo: ReviewStepView = {
+    index: 2,
+    outcome: "passed",
+    rounds: [
+      round(1, "two, edited again from position 1", {
+        verdict: "Build",
+        rewrote: [{ index: 2, text: "two, after its own first review" }],
+      }),
+      round(2, "two, after its own first review", { verdict: "Pass" }),
+    ],
+  };
+  const member = { memberId: "member-1", label: "Seat 1", steps: [stepOne, stepTwo] };
+  const timeline = computeSeatTimeline(member, ["one v0", "two v0"]);
+
+  const deck = deckEntries(stepTwo, timeline);
+  // Two prospective edits, then the step's own first review — which is therefore
+  // the THIRD edit of this step, not the first.
+  assert.deepEqual(
+    deck.map((entry) => [entry.kind, entry.editRound]),
+    [
+      ["original", undefined],
+      ["cross", 1],
+      ["cross", 2],
+      ["round", 3],
+    ],
+    "the base card is not an edit; every version after it is a numbered round",
+  );
+
+  // And the step that WAS the editor numbers its own versions the same way.
+  assert.deepEqual(
+    deckEntries(stepOne, timeline).map((entry) => [entry.kind, entry.editRound]),
+    [
+      ["original", undefined],
+      ["round", 1],
+      ["round", 2],
+    ],
+  );
+});
+
+test("a round that rewrote nothing takes no number", () => {
+  // It is another review of the card before it, not a new version — and a
+  // numbered card the pager cannot justify is what made "Round 3 / 4" wrong.
+  const step: ReviewStepView = {
+    index: 1,
+    outcome: "passed",
+    rounds: [
+      round(1, "v0", { verdict: "Build", rewrote: [{ index: 1, text: "v1" }] }),
+      // Round 2 reviews v1 and rewrites a DIFFERENT step, so it writes no
+      // version here; round 3 then reads v1 again.
+      round(2, "v1", { verdict: "Build", rewrote: [{ index: 9, text: "elsewhere" }] }),
+      round(3, "v1", { verdict: "Pass" }),
+    ],
+  };
+  const timeline = computeSeatTimeline(seat([step]), ["v0"]);
+  const deck = deckEntries(step, timeline);
+  assert.deepEqual(
+    deck.map((entry) => [entry.kind, entry.editRound]),
+    [
+      ["original", undefined],
+      ["round", 1],
+      ["round", undefined],
+    ],
+  );
+  // Every round's review is still shown exactly once — the unnumbered card is
+  // carrying one.
+  const shown = deck
+    .map((_, index) => reviewedBy(deck, index)?.round)
+    .filter((n): n is number => n !== undefined);
+  assert.deepEqual(shown, [1, 2, 3]);
+});

@@ -671,7 +671,11 @@ select:disabled {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 0 16px;
+  /* Air under the spine: the stages row and the first panel were nearly
+     touching, which read as one block — the pipeline is a separate thing you
+     navigate WITH, not the panel's own header. Scoped to the dashboard's spine
+     so the landing card's embedded graph keeps its own tighter spacing. */
+  margin: 0 16px 22px;
 }
 
 .graph-nav-row > .graph-wrap {
@@ -2700,6 +2704,7 @@ section.drawer-section:not(.drawer-updates) {
   border-radius: var(--radius);
   background: var(--bg);
   margin-bottom: 14px;
+  /* The header stays put; the list below is what scrolls, in both directions. */
   overflow: hidden;
 }
 
@@ -2719,7 +2724,16 @@ section.drawer-section:not(.drawer-updates) {
   margin: 0;
   padding: 4px 0;
   max-height: 260px;
+  /* BOTH axes: rows no longer wrap, so a long message — a file path, a command,
+     a whole search query — is read by scrolling sideways instead of being folded
+     into two lines that break the column alignment. */
   overflow: auto;
+}
+
+/* A row is as wide as its content needs; the list scrolls to reach the rest. */
+.activity-entry {
+  width: max-content;
+  min-width: 100%;
 }
 
 .activity-entry {
@@ -2728,10 +2742,13 @@ section.drawer-section:not(.drawer-updates) {
      wrapped onto its own line. */
   display: flex;
   align-items: center;
-  gap: 8px;
+  /* Half of what it was: five columns of small text read as a table, and the
+     wide gutters were doing more separating than the eye needs. */
+  gap: 4px;
   min-height: 28px;
   padding: 4px 10px;
   font-size: 12px;
+  white-space: nowrap;
 }
 
 .activity-entry > time {
@@ -2795,7 +2812,10 @@ section.drawer-section:not(.drawer-updates) {
 }
 
 .activity-entry > .activity-message {
-  flex: 1 1 auto;
+  /* No shrinking and no wrapping: the row grows and the list scrolls, which is
+     what lets a long line be read in full. */
+  flex: 0 0 auto;
+  margin-right: 8px;
 }
 
 .activity-entry > .activity-meta,

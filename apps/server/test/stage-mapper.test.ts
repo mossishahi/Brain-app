@@ -7,7 +7,7 @@ import { test } from "node:test";
 import type { FirstPassStage, ServerSettings } from "@brainstorm-agentic/protocol";
 
 import type { JobRecord } from "../src/model.js";
-import { buildJobDetail } from "../src/stage-mapper.js";
+import { buildJobDetail, editRoundIndex } from "../src/stage-mapper.js";
 
 const settings: ServerSettings = {
   slurmTemplate: "{{BRAIN_COMMAND}}",
@@ -2168,4 +2168,79 @@ test("every activity row says what the agent is, who it is, and where it is work
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
+});
+
+test("the activity feed's round is the edit round, so it agrees with the deck", () => {
+  // The two-numbers-disagreeing bug, from the feed's side: the judge was shown
+  // working on "step 5 > round 1" while that step's card deck already displayed
+  // three edits. An edit is an edit, whoever wrote it, and both surfaces now
+  // count the same way — this asserts the rule the deck implements in the client.
+  const member = {
+    memberId: "member-1",
+    label: "Seat 1",
+    steps: [
+      {
+        index: 1,
+        outcome: "passed" as const,
+        rounds: [
+          {
+            round: 1,
+            comments: [],
+            // Position 1's first round rewrites itself AND step 2.
+            revision: {
+              touchedSteps: [1, 2],
+              rewritten: [
+                { index: 1, text: "one v1" },
+                { index: 2, text: "two, edited from position 1" },
+              ],
+            },
+          },
+          {
+            round: 2,
+            comments: [],
+            revision: { touchedSteps: [2], rewritten: [{ index: 2, text: "two, again" }] },
+          },
+        ],
+      },
+      {
+        index: 2,
+        outcome: "under-review" as const,
+        rounds: [{ round: 1, comments: [] }],
+      },
+    ],
+  };
+  const index = editRoundIndex([member]);
+  assert.equal(
+    index.get("member-1:1:1"),
+    1,
+    "a step's own first round is its first edit when nothing touched it before",
+  );
+  assert.equal(index.get("member-1:1:2"), 2, "and its second round its second");
+  assert.equal(
+    index.get("member-1:2:1"),
+    3,
+    "but step 2 was edited twice from position 1, so its own first round is round 3",
+  );
+});
+
+test("edit rounds count each seat separately", () => {
+  const seatWith = (memberId: string, rewrites: number) => ({
+    memberId,
+    label: memberId,
+    steps: [
+      {
+        index: 1,
+        outcome: "passed" as const,
+        rounds: Array.from({ length: rewrites }, (_, i) => ({
+          round: i + 1,
+          comments: [],
+          revision: { touchedSteps: [1], rewritten: [{ index: 1, text: `v${i + 1}` }] },
+        })),
+      },
+    ],
+  });
+  const index = editRoundIndex([seatWith("member-1", 3), seatWith("member-2", 1)]);
+  assert.equal(index.get("member-1:1:3"), 3);
+  assert.equal(index.get("member-2:1:1"), 1, "one seat's edits never number another's");
+  assert.equal(index.get("member-2:1:3"), undefined);
 });

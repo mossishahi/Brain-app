@@ -103,16 +103,28 @@ function settledRounds(step: ReviewStepView): number {
 }
 
 /**
+ * How many versions of the step exist: every edit, whoever wrote it.
+ *
+ * Its own review is only one source — a redevelopment at any position may rewrite
+ * it — so this is what the deck numbers its cards by, and what the round in
+ * flight is working toward.
+ */
+function versionCount(step: ReviewStepView, crossCount: number): number {
+  const ownRewrites = step.rounds.filter((round) =>
+    (round.revision?.rewritten ?? []).some((entry) => entry.index === step.index),
+  ).length;
+  return crossCount + ownRewrites;
+}
+
+/**
  * What is still happening to this step — and nothing about what already did.
  *
  * A count of rounds used to sit here, and it read as a contradiction however it
- * was computed: the deck holds one card per VERSION of the step, and the last
- * round of a position never writes one (it either passed or hit the cap), so a
- * step reviewed four times pages to "Round 3 / 3" and a header saying "4 rounds"
- * looks like a missing card. The two numbers count different things, and putting
- * them side by side invited exactly that comparison. How many times the step was
- * reviewed now rides the step title's hover, where nothing indexes against it,
- * and the deck's own numbering is the only count on screen.
+ * was computed. The number that remains is the EDIT round in flight: the version
+ * being worked toward, counted the way the deck counts its cards, so the header
+ * and the cards below it cannot disagree. Numbering the review loop's own
+ * iterations instead put "round 1 in progress" above a deck already showing three
+ * edits, which is what made a reader distrust both.
  */
 function roundsMeta(
   step: ReviewStepView,
@@ -122,9 +134,8 @@ function roundsMeta(
   const settled = settledRounds(step);
   const pendingRound = step.rounds.length > settled;
   if (!pendingRound && !(crossCount > 0 && step.outcome === "under-review")) return "";
-  return dismissed
-    ? `round ${settled + 1} unfinished`
-    : `round ${settled + 1} in progress`;
+  const next = versionCount(step, crossCount) + 1;
+  return dismissed ? `round ${next} unfinished` : `round ${next} in progress`;
 }
 
 /** One phrase for what a seat is doing, shared by the pager chip and the popover. */
@@ -842,6 +853,7 @@ function RoundDeck({
         <div className="round-card-head">
           {olderButton}
           <span className="review-fold-name" title={crossOriginText(entry.cross, step.index)}>
+            {entry.editRound !== undefined && <>Round {entry.editRound}: </>}
             edited{" "}
             <span
               className={
@@ -869,37 +881,36 @@ function RoundDeck({
   }
 
   const round = entry.round;
-  // The highest round number IN THE DECK, not the highest that occurred: a round
-  // that rewrote nothing has no card of its own (its verdict sits under the
-  // version it read), so counting to it promised a card the pager cannot reach —
-  // "Round 3 / 4" with the next arrow disabled.
-  const latest = deck.reduce(
-    (max, e) => (e.kind === "round" ? Math.max(max, e.round.round) : max),
-    0,
-  );
   const computed = timeline.rounds.get(roundViewKey(step.index, round.round));
   const commentKey = `${member.memberId}:${step.index}:${entry.key}`;
   return (
     <div className="round-card" key={entry.key}>
       <div className="round-card-head">
         {olderButton}
+        {/* No total: the deck counts VERSIONS, and a round that rewrote nothing
+            writes none — so a denominator promised a card the pager could not
+            reach. A card with no number of its own is another review of the
+            version before it, and says that instead. */}
         <span className="review-fold-name">
-          Round{" "}
-          <span
-            className="round-num-active"
-            title="the text this round left standing; its own verdict sits with the review of the version before it"
-          >
-            {round.round}
-          </span>
-          <span className="dim"> / {latest}</span>
+          {entry.editRound !== undefined ? (
+            <>
+              Round{" "}
+              <span
+                className="round-num-active"
+                title="the version this round left standing; its own verdict sits with the review of the version before it"
+              >
+                {entry.editRound}
+              </span>
+            </>
+          ) : (
+            <span className="dim">reviewed again, unchanged</span>
+          )}
         </span>
         {newerButton}
         {/* Whether THIS version was sent back — a fact about the review shown
             on this card, not about the round that wrote the text. */}
         {review?.revision && <span className="badge badge-warn">redeveloped</span>}
-        {deck.length > 1 && computed?.ownRewrite !== true && (
-          <span className="review-step-meta">unchanged from the previous version</span>
-        )}
+
         <span className="round-card-actions">
           <CopyButton
             label="copy this round for a bug report"

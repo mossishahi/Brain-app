@@ -574,7 +574,20 @@ export function computeSeatTimeline(
  * WROTE the text and `review` the round that then read it — a different
  * round, because a round comments before it redevelops.
  */
-export type DeckEntry = { readonly review?: ReviewRoundView } & (
+export type DeckEntry = {
+  readonly review?: ReviewRoundView;
+  /**
+   * Which EDIT ROUND this card is: the Nth version of the step, whoever wrote it.
+   *
+   * A step's versions do not come only from its own review — a redevelopment at
+   * any position may rewrite it — so numbering only the review loop's iterations
+   * put "round 1" on a deck that already showed three edits. One rule for both:
+   * every version is a round, counted in the order they happened. Absent on the
+   * base card (the first pass is not an edit) and on a round that wrote no
+   * version of this step (it is another review of the card before it).
+   */
+  readonly editRound?: number;
+} & (
   | { readonly kind: "original"; readonly key: string; readonly text: string }
   | { readonly kind: "round"; readonly key: string; readonly round: ReviewRoundView }
   | { readonly kind: "cross"; readonly key: string; readonly cross: CrossRewriteView }
@@ -615,12 +628,25 @@ export function deckEntries(step: ReviewStepView, timeline: SeatTimeline): DeckE
     return next?.kind === "round" ? { ...entry, review: next.round } : entry;
   });
 
+  // Number the versions, in the order they happened. A cross rewrite is a
+  // version by definition; a round is one only when it rewrote THIS step.
+  let version = 0;
+  const numbered = withReview.map((entry) => {
+    const writesVersion =
+      entry.kind === "cross" ||
+      (entry.kind === "round" &&
+        timeline.rounds.get(roundViewKey(step.index, entry.round.round))?.ownRewrite === true);
+    if (!writesVersion) return entry;
+    version += 1;
+    return { ...entry, editRound: version };
+  });
+
   // A round that wrote no new version of THIS step gets no card of its own —
   // its review rides the version it actually read. The last round of a
   // position never redevelops (it either passed or hit the cap), so without
   // this the deck always ended on a card repeating the previous text with
   // nothing of its own to show.
-  return withReview.filter((entry) => {
+  return numbered.filter((entry) => {
     if (entry.kind !== "round") return true;
     const computed = timeline.rounds.get(roundViewKey(step.index, entry.round.round));
     return computed?.ownRewrite === true || entry.review !== undefined;

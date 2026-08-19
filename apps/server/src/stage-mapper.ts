@@ -752,13 +752,57 @@ export function activityAnnotation(
   path: string,
   taskKind: string | undefined,
   panel: readonly PanelMemberView[],
+  editRounds?: ReadonlyMap<string, number>,
 ): {
   readonly role?: string;
   readonly actor?: string;
   readonly where?: { readonly seat?: string; readonly step?: number; readonly round?: number };
 } {
-  const { actorId: _actorId, seatId: _seatId, ...shown } = agentIdentity(path, taskKind, panel);
+  const { actorId: _actorId, seatId: _seatId, ...shown } = agentIdentity(
+    path,
+    taskKind,
+    panel,
+    editRounds,
+  );
   return shown;
+}
+
+/**
+ * Which EDIT ROUND each review round belongs to, keyed `<member>:<step>:<round>`.
+ *
+ * A step's versions do not come only from its own review: a redevelopment at any
+ * position may rewrite it, so by the time its own review opens it may already
+ * have been edited three times. Numbering only the review loop's iterations
+ * therefore said "round 1 in progress" on a card deck that already showed three
+ * edits — two numbers for the same thing, disagreeing.
+ *
+ * One rule, used here and by the deck: an edit round is a VERSION of the step,
+ * whoever wrote it, counted in the order they happened. A review round's number
+ * is the version it is working toward — which, when it produces one, is that
+ * version's own number.
+ *
+ * The walk is sequential over steps, so replaying steps ascending and rounds
+ * ascending IS chronological order; the deck's own replay does the same.
+ */
+export function editRoundIndex(
+  members: readonly ReviewMemberView[],
+): ReadonlyMap<string, number> {
+  const index = new Map<string, number>();
+  for (const member of members) {
+    const versions = new Map<number, number>();
+    for (const step of [...member.steps].sort((a, b) => a.index - b.index)) {
+      for (const round of [...step.rounds].sort((a, b) => a.round - b.round)) {
+        index.set(
+          `${member.memberId}:${step.index}:${round.round}`,
+          (versions.get(step.index) ?? 0) + 1,
+        );
+        for (const entry of round.revision?.rewritten ?? []) {
+          versions.set(entry.index, (versions.get(entry.index) ?? 0) + 1);
+        }
+      }
+    }
+  }
+  return index;
 }
 
 /**
@@ -772,6 +816,7 @@ export function agentIdentity(
   path: string,
   taskKind: string | undefined,
   panel: readonly PanelMemberView[],
+  editRounds?: ReadonlyMap<string, number>,
 ): {
   readonly role?: string;
   readonly actor?: string;
@@ -800,6 +845,15 @@ export function agentIdentity(
       actorId = author.id;
     }
   }
+  // The round a reader is shown is the EDIT round — the version this work is
+  // producing — so the feed and the step's card deck count the same thing. The
+  // loop's own iteration number is the fallback for a run whose review view is
+  // not reconstructable (an old artifact shape), where it is better than nothing.
+  const seatId = subject !== undefined ? panel[subject]?.id : undefined;
+  const editRound =
+    seatId !== undefined && at.step !== undefined && at.round !== undefined
+      ? editRounds?.get(`${seatId}:${at.step + 1}:${at.round + 1}`)
+      : undefined;
   const where =
     subject === undefined
       ? undefined
@@ -807,9 +861,8 @@ export function agentIdentity(
           ...(seatName(subject) !== undefined ? { seat: seatName(subject)! } : {}),
           // 1-based, like every step and round a reader is shown.
           ...(at.step !== undefined ? { step: at.step + 1 } : {}),
-          ...(at.round !== undefined ? { round: at.round + 1 } : {}),
+          ...(at.round !== undefined ? { round: editRound ?? at.round + 1 } : {}),
         };
-  const seatId = subject !== undefined ? panel[subject]?.id : undefined;
   return {
     ...(role !== undefined ? { role } : {}),
     ...(actor !== undefined ? { actor } : {}),
@@ -2552,16 +2605,6 @@ export function buildJobDetail(input: MapperInput): JobDetail {
   // added at confirmation (they exist only once the gate was answered).
   const finalPanel =
     gate.action !== undefined ? [...keptPanel, ...gate.added] : keptPanel;
-  // With the executed roster known, every activity row can say who was working
-  // and where. Done here rather than where the rows are built because that is
-  // before the confirmation gate's answer has been read, and the roster is what
-  // turns a commentor's fan-out index into a seat.
-  for (const timing of stageTimings.values()) {
-    timing.activity = timing.activity.map((row) => ({
-      ...row,
-      ...activityAnnotation(row.path, row.taskKind, finalPanel),
-    }));
-  }
   const removedMemberIds =
     gate.action === "shrink"
       ? selectedPanel.filter((member) => !retained.has(member.id)).map((member) => member.id)
@@ -2704,6 +2747,19 @@ export function buildJobDetail(input: MapperInput): JobDetail {
     taskUsage,
     dismissedSeat,
   );
+
+  // With the executed roster AND the review's own rounds known, every activity
+  // row can say who was working and where. Done here rather than where the rows
+  // are built: the roster needs the confirmation gate's answer, and the round
+  // number needs the review view, because a reader is shown the EDIT round (see
+  // editRoundIndex) so the feed and a step's card deck count the same thing.
+  const editRounds = editRoundIndex(review.members);
+  for (const timing of stageTimings.values()) {
+    timing.activity = timing.activity.map((row) => ({
+      ...row,
+      ...activityAnnotation(row.path, row.taskKind, finalPanel, editRounds),
+    }));
+  }
   const bridgeOutput =
     bridgeReport(artifact(artifacts, "bridgeReport")) ??
     bridgeReport(journalAgent(entries, (key) =>

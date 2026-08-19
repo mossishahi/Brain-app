@@ -258,6 +258,11 @@ observed holding 200 rows, all 200 of them capability rows), and since the quiet
 measured from the newest row the client was sent, the feed's clock then ticked only on tool calls:
 a long stretch of pure reasoning rendered as "no new events for 26m" on a run that was working.
 
+The Activity feed scrolls in BOTH directions: rows never wrap, so a long line — a command with its
+flags, a file path, a whole search query — is read by scrolling sideways rather than folded into two
+lines that break the column alignment. The column gutters are tight (4px) because five columns of
+small text read as a table, not as prose.
+
 While an agent is active, the frame also shows a bounded **Activity** feed (latest 20 of up to 200
 stored events): agent start/completion, model turns, WebSearch/WebFetch/Read/Glob/Grep/Bash starts,
 five-second tool heartbeats, API retries, context compaction, and artifact validation. These are
@@ -381,6 +386,10 @@ activity feed, fold), and the *walk inspector* sits below in its own panel.
   the front-most card is always the lightest. The deepest level — the walk panel the seat card
   rests on — carries no stroke: it reads as ground, not as a card. No stacked-deck peeking
   anywhere.
+- The pipeline spine carries air beneath it (22px): the stages row and the first panel were nearly
+  touching, which read as one block — the pipeline is a thing you navigate WITH, not the panel's
+  header. Scoped to the dashboard's spine, so the landing card's embedded graph keeps its own
+  spacing.
 - Walk inspector: everything belonging to ONE seat lives in one outer card (no rule under its
   header). The header packs the pager arrows tight around the title — "← Seat 1 / 3 →" — then
   the state chip ("under review" pulse / "done with thinking" `--ok`), and balances the seat's
@@ -389,6 +398,16 @@ activity feed, fold), and the *walk inspector* sits below in its own panel.
   beside it only what is still happening. A redevelopment count used to sit there as a
   "×k redeveloped" badge; it now rides the title's hover, since the step's own cards already
   show every version it went through.
+- **Every version is an EDIT ROUND, whoever wrote it, numbered in the order they happened.** A
+  step's versions do not come only from its own review — a redevelopment at any position may rewrite
+  it — so a step whose deck already showed three prospective edits used to head itself "round 1 in
+  progress", counting only the review loop's iterations. One rule now serves the deck, the step
+  header and the activity feed's round column, so no two of them can disagree: an edit is a round.
+  A cross-step edit is titled "Round 3: edited prospectively during the review of step 4" (only the
+  adverb takes the direction's colour); the step's own rounds are titled "Round 4" with NO total,
+  because a round that rewrote nothing writes no version and a denominator promised a card the pager
+  could not reach. Such a round keeps its card — it carries a review — and says "reviewed again,
+  unchanged" instead of taking a number.
 - Round deck: one sub-card per VERSION of the step, not per round. A round that rewrote nothing
   wrote no version, so it gets no card — its review rides the version it actually read, which is
   why a position that ends on a Pass has no trailing card repeating the previous text. Every
