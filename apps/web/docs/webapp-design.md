@@ -5,6 +5,12 @@ drawer. It is deliberately minimal: generous whitespace, one accent color, subtl
 no gradients, no shadows, no decorative icons. System font stack. Every color comes from a token so
 light and dark themes are complete, not approximate.
 
+**Nothing is set in capitals, anywhere.** Labels, section heads, column titles, badges and detail
+labels are sentence case: a small-caps run reads as shouting at every size this app uses, and the
+tracking that has to accompany it makes lowercase text look loose when the transform is dropped.
+Hierarchy comes from size, weight and colour only. (Nine rules carried `text-transform: uppercase`
+and were removed together; a DOM sweep asserts nothing renders transformed.)
+
 ## Design tokens
 
 ```
@@ -405,6 +411,10 @@ activity feed, fold), and the *walk inspector* sits below in its own panel.
   header and the activity feed's round column, so no two of them can disagree: an edit is a round.
   A cross-step edit is titled "Round 3: edited prospectively during the review of step 4" (only the
   adverb takes the direction's colour); the step's own rounds are titled "Round 4" with NO total,
+  and NOTHING sits beside the step's own title — a round counter lived there through three shapes
+  (a total, a settled count, the edit round in flight) and every one of them invited a comparison
+  with the deck's numbering an inch below. That a round is running is already said by the pulsing
+  cell in the matrix, the activity feed, and the seat's state chip;
   because a round that rewrote nothing writes no version and a denominator promised a card the pager
   could not reach. Such a round keeps its card — it carries a review — and says "reviewed again,
   unchanged" instead of taking a number.

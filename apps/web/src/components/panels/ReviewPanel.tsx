@@ -102,41 +102,14 @@ function settledRounds(step: ReviewStepView): number {
   return step.rounds.filter((round) => round.decision !== undefined).length;
 }
 
-/**
- * How many versions of the step exist: every edit, whoever wrote it.
- *
- * Its own review is only one source — a redevelopment at any position may rewrite
- * it — so this is what the deck numbers its cards by, and what the round in
- * flight is working toward.
+/*
+ * Nothing sits beside a step's title. A round counter lived here through three
+ * shapes — a total, then a settled count, then the edit round in flight — and
+ * every one of them invited the reader to compare it with the deck's own
+ * numbering an inch below. The cards say which round each version is; that a
+ * round is RUNNING is already said by the pulsing cell in the matrix, by the
+ * activity feed, and by the seat's own state chip.
  */
-function versionCount(step: ReviewStepView, crossCount: number): number {
-  const ownRewrites = step.rounds.filter((round) =>
-    (round.revision?.rewritten ?? []).some((entry) => entry.index === step.index),
-  ).length;
-  return crossCount + ownRewrites;
-}
-
-/**
- * What is still happening to this step — and nothing about what already did.
- *
- * A count of rounds used to sit here, and it read as a contradiction however it
- * was computed. The number that remains is the EDIT round in flight: the version
- * being worked toward, counted the way the deck counts its cards, so the header
- * and the cards below it cannot disagree. Numbering the review loop's own
- * iterations instead put "round 1 in progress" above a deck already showing three
- * edits, which is what made a reader distrust both.
- */
-function roundsMeta(
-  step: ReviewStepView,
-  dismissed: boolean,
-  crossCount: number,
-): string {
-  const settled = settledRounds(step);
-  const pendingRound = step.rounds.length > settled;
-  if (!pendingRound && !(crossCount > 0 && step.outcome === "under-review")) return "";
-  const next = versionCount(step, crossCount) + 1;
-  return dismissed ? `round ${next} unfinished` : `round ${next} in progress`;
-}
 
 /** One phrase for what a seat is doing, shared by the pager chip and the popover. */
 function seatStateLabel(member: ReviewMemberView): string {
@@ -1242,7 +1215,6 @@ export function ReviewStagePanels({
               <div className="review-cards">
                 {seat.steps.map((step) => {
                   const stepRefKey = `${seat.memberId}:${step.index}`;
-                  const crossCount = (timeline.crossRewrites.get(step.index) ?? []).length;
                   const liveFor = live?.get(seat.memberId) ?? [];
                   const choiceKey = stepRefKey;
                   return (
@@ -1260,9 +1232,6 @@ export function ReviewStagePanels({
                         >
                           Step {step.index}
                           <span className="dim"> / {seat.steps.length}</span>
-                        </span>
-                        <span className="review-step-meta">
-                          {roundsMeta(step, seat.dismissed !== undefined, crossCount)}
                         </span>
                       </div>
                       {liveFor.length > 0 && (
