@@ -216,8 +216,18 @@ the words the model is producing, appended as they arrive, readable as prose and
 capped box (168px — the card never grows). It follows the newest words until the reader scrolls back,
 and then stays where they put it.
 
+The text is **revealed at a steady pace, not appended in the chunks it arrives in**: a frame delivers
+about a second of writing, and landing it whole reads as jumps — several lines, then nothing. A
+shown-length walks toward the real length every animation frame, spreading each frame's backlog over
+~700ms, so what a reader sees is writing. Two cases stay instant: the first text a card ever shows (a
+reader opening the page mid-task should not watch a minute of backlog type itself out) and a repair
+frame shorter than what is displayed. A backlog past ~1200 characters — a tab that was in a background
+window, where animation frames stop — is skipped to within the bound rather than typed out after the
+model has moved on.
+
 It is **not** the chain of thought and is styled so it cannot be mistaken for one — dashed border,
-dim monospace, and a header that says "live, replaced by the result". The moment the task's real
+dim monospace, sentence-case labels (nothing shouted), and a header that says "live, replaced by the
+result". The moment the task's real
 output exists the thread is DELETED and the output takes its place: the first-pass card switches to
 its idea tabs, the review card to its version deck. Nothing about it is stored, nothing reads it back,
 and no view is derived from it.

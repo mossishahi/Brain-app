@@ -2752,14 +2752,12 @@ section.drawer-section:not(.drawer-updates) {
 }
 
 .activity-entry > .activity-role {
-  /* Measured against the longest label the bundle has ("Pool builder") in small
-     caps, plus a few pixels: the reader's font stack is not this machine's, and
-     a cell that overflows ellipsises rather than shoving the message. */
+  /* Measured against the longest label the bundle has ("Pool builder"), plus a
+     few pixels: the reader's font stack is not this machine's, and a cell that
+     overflows ellipsises rather than shoving the message. Sentence case, not
+     small caps — a column of shouted words down a busy feed reads as noise, and
+     the dim colour already says "label". */
   flex: 0 0 88px;
-  /* The role is the row's category, so it carries the small-caps treatment the
-     rest of the app gives labels. */
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
 }
 
 .activity-entry > .activity-actor {
@@ -5283,9 +5281,8 @@ section.drawer-section:not(.drawer-updates) {
   align-items: center;
   gap: 6px;
   padding: 5px 8px;
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+  font-size: 11px;
+  font-weight: 400;
   color: var(--text-dim);
 }
 

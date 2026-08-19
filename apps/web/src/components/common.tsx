@@ -1,5 +1,6 @@
 /** Shared UI primitives used across panels: dots, clamps, chips, evidence. */
-import { useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { revealStep } from "./live-threads";
 import type { CSSProperties } from "react";
 import type {
   ActivityDetailView,
@@ -645,6 +646,42 @@ export function DismissSeatButton({
 }
 
 /**
+ * Reveals text at a steady pace instead of in the chunks it arrives in.
+ *
+ * The pacing rule itself is `revealStep`, in the pure module beside this one.
+ * Here it is only driven: a shown-length walks toward the real length every
+ * frame, so what a reader sees is writing rather than delivery.
+ *
+ * Two cases are deliberately NOT paced: the first text this component ever sees
+ * (a reader opening the page mid-task should not watch a minute of backlog type
+ * itself out) and a replacement shorter than what is already shown (a repair
+ * frame, which must land at once or the thread would read as corrupt).
+ */
+function useRevealed(text: string): string {
+  const [shown, setShown] = useState(() => text.length);
+  const target = useRef(text.length);
+  target.current = text.length;
+  useEffect(() => {
+    let frame = 0;
+    let previous = 0;
+    const tick = (now: number): void => {
+      const elapsed = previous === 0 ? 16 : Math.min(now - previous, 250);
+      previous = now;
+      setShown((current) =>
+        // Identical state means React re-renders nothing, so an idle thread
+        // costs a function call per frame and no more.
+        current >= target.current ? current : revealStep(current, target.current, elapsed),
+      );
+      frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, []);
+  // A shorter text is a repair, not a rewind.
+  return text.length < shown ? text : text.slice(0, shown);
+}
+
+/**
  * The words a model is producing right now, as a thread to read while waiting.
  *
  * NOT the chain of thought, and deliberately styled so it cannot be mistaken for
@@ -658,10 +695,11 @@ export function DismissSeatButton({
 export function LiveThread({ text, label }: { text: string; label?: string }) {
   const ref = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
+  const shown = useRevealed(text);
   useLayoutEffect(() => {
     const box = ref.current;
     if (box && pinned.current) box.scrollTop = box.scrollHeight;
-  }, [text]);
+  }, [shown]);
   if (text.trim().length === 0) return null;
   return (
     <div className="live-thread">
@@ -678,7 +716,7 @@ export function LiveThread({ text, label }: { text: string; label?: string }) {
           pinned.current = box.scrollHeight - box.scrollTop - box.clientHeight < 24;
         }}
       >
-        {text}
+        {shown}
       </div>
     </div>
   );

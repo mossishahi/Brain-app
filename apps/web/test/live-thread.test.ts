@@ -3,7 +3,12 @@ import test from "node:test";
 
 import type { LiveTextEntry } from "@brainstorm-agentic/protocol";
 
-import { applyLiveEntries, type LiveThread } from "../src/components/live-threads.js";
+import {
+  MAX_REVEAL_LAG_CHARS,
+  applyLiveEntries,
+  revealStep,
+  type LiveThread,
+} from "../src/components/live-threads.js";
 
 const empty: ReadonlyMap<string, LiveThread> = new Map();
 
@@ -58,4 +63,57 @@ test("who is talking travels with the thread, so a card can claim it", () => {
 test("an empty frame changes nothing, identically", () => {
   const live = applyLiveEntries(empty, [{ id: "t1", append: "a" }]);
   assert.equal(applyLiveEntries(live, []), live, "the same map, so React re-renders nothing");
+});
+
+/* ------------------------------------------------- the pace of the reveal */
+
+test("text is revealed as writing, not in the chunks it arrives in", () => {
+  // The complaint this answers: a frame delivers about a second of writing at
+  // once, and appending it whole makes the thread land in visible jumps —
+  // several lines, then nothing. Paced, one frame's backlog takes many steps.
+  const target = 200;
+  let shown = 0;
+  let steps = 0;
+  while (shown < target && steps < 500) {
+    shown = revealStep(shown, target, 16); // one animation frame
+    steps += 1;
+  }
+  assert.equal(shown, target, "it does arrive, in full");
+  assert.ok(steps > 8, `a frame's words take many steps to appear, not one (took ${steps})`);
+});
+
+test("a bigger backlog is revealed faster, and the display never trails far", () => {
+  // Falling behind must not compound. Catch-up is proportional, which alone
+  // approaches zero asymptotically — so a reader handed a large block (a tab in
+  // a background window, where animation frames stop) would otherwise watch it
+  // type for many seconds after the model had moved on.
+  assert.ok(
+    revealStep(0, 10_000, 16) > revealStep(0, 100, 16) * 10,
+    "ten times the backlog reveals far more per frame",
+  );
+  assert.ok(
+    revealStep(0, 50_000, 16) >= 50_000 - MAX_REVEAL_LAG_CHARS,
+    "and a backlog past the lag bound is skipped to within it in one step",
+  );
+  // From the bound, the rest is paced: still many steps, still bounded time.
+  let shown = 50_000 - MAX_REVEAL_LAG_CHARS;
+  let elapsed = 0;
+  let steps = 0;
+  while (shown < 50_000 && elapsed < 10_000) {
+    shown = revealStep(shown, 50_000, 16);
+    elapsed += 16;
+    steps += 1;
+  }
+  assert.equal(shown, 50_000, "it does arrive");
+  assert.ok(steps > 8, "as writing, not in one jump");
+  assert.ok(elapsed < 4_000, `and within a few seconds (took ${elapsed}ms)`);
+});
+
+test("a thread never rewinds, never overshoots, and never stalls", () => {
+  assert.equal(revealStep(50, 50, 16), 50, "caught up stays caught up");
+  assert.equal(revealStep(80, 50, 16), 50, "a shorter target is honoured, not overshot");
+  assert.equal(revealStep(0, 3, 1_000), 3, "a long frame cannot exceed what exists");
+  assert.equal(revealStep(9, 10, 1), 10, "one character left still lands, whatever the maths");
+  assert.equal(revealStep(0, 100, 0), 1, "a zero-length frame still moves by one");
+  assert.ok(revealStep(0, 100, -5) >= 1, "a clock that went backwards does not");
 });
