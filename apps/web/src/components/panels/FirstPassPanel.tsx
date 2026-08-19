@@ -22,7 +22,7 @@ import type {
   VerifyOutputView,
 } from "@brainstorm-agentic/protocol";
 import type { DotState } from "../../format";
-import { Clamp, Dot, EvidenceBlock, TokenChip } from "../common";
+import { Clamp, Dot, EvidenceBlock, LiveThread, TokenChip } from "../common";
 
 type TabId = "primary" | "requested" | "chain" | "novelty" | "papers";
 
@@ -634,7 +634,14 @@ export function IdeaTabs({ idea }: { idea: BrainIdeaView }) {
   );
 }
 
-function MemberCard({ member }: { member: FirstPassMemberView }) {
+function MemberCard({
+  member,
+  live,
+}: {
+  member: FirstPassMemberView;
+  /** What this seat is saying while it thinks; absent once its idea exists. */
+  live?: string;
+}) {
   const status = memberStatus(member.status);
   return (
     <div className={`member-card${member.dismissed ? " member-dismissed" : ""}`}>
@@ -647,20 +654,31 @@ function MemberCard({ member }: { member: FirstPassMemberView }) {
           {status.text}
         </span>
       </div>
-      {member.idea && <IdeaTabs idea={member.idea} />}
+      {member.idea ? (
+        <IdeaTabs idea={member.idea} />
+      ) : (
+        live !== undefined && <LiveThread text={live} />
+      )}
     </div>
   );
 }
 
 export function FirstPassBody({
   members,
+  live,
 }: {
   members: readonly FirstPassMemberView[];
+  /** Live text per seat id, for the seats still thinking. */
+  live?: ReadonlyMap<string, string>;
 }) {
   return (
     <div className="member-grid">
       {members.map((m) => (
-        <MemberCard key={m.memberId} member={m} />
+        <MemberCard
+          key={m.memberId}
+          member={m}
+          {...(live?.get(m.memberId) !== undefined ? { live: live.get(m.memberId)! } : {})}
+        />
       ))}
     </div>
   );

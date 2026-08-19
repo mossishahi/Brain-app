@@ -37,6 +37,8 @@ import {
   type JobDetail,
   type JobStatus,
   type JobSummary,
+  type LiveTextEntry,
+  type PanelMemberView,
   type ServerSettings,
   type TrashJobResponse,
 } from "@brainstorm-agentic/protocol";
@@ -49,6 +51,7 @@ import {
   shellQuote,
 } from "./command.js";
 import { atomicWriteFile, atomicWriteJson, readJsonFile } from "./files.js";
+import { LiveTextStore } from "./live-text.js";
 import { readJsonCached, statStamp } from "./read-cache.js";
 import type { JobRecord } from "./model.js";
 import {
@@ -57,7 +60,7 @@ import {
   type ClaudeAgentConnectionValidator,
   type CursorAgentConnectionValidator,
 } from "./settings.js";
-import { buildJobDetail, compactJobDetail } from "./stage-mapper.js";
+import { agentIdentity, buildJobDetail, compactJobDetail } from "./stage-mapper.js";
 
 export interface JobManagerOptions {
   readonly workspace: string;
@@ -227,6 +230,10 @@ export class JobManager {
   private readonly startedAt: number;
   private static readonly DEFAULT_GATE_GRACE_MS = 180_000;
   private readonly autoResuming = new Set<string>();
+  /** One live-text reader per job, created when a reader first asks. */
+  private readonly liveStores = new Map<string, LiveTextStore>();
+  /** Cached roster per job, for placing live threads. See livePanel(). */
+  private readonly livePanels = new Map<string, { at: number; panel: readonly PanelMemberView[] }>();
   private readonly summaryCache = new Map<
     string,
     { key: string; value: JobSummary }
@@ -586,6 +593,92 @@ export class JobManager {
    * scancel reports as an error and stopWorker() swallows, which is the right
    * trade: one wasted call against a duplicated run.
    */
+  /**
+   * What the models are SAYING right now, framed for one reader.
+   *
+   * The store tails the worker's live-text file and holds only threads that are
+   * still live; `seen` is this reader's own position in each, so a frame carries
+   * the characters written since its last one and nothing else. A thread that has
+   * ended is reported ended — the task's OUTPUT exists now, and that is what the
+   * page shows instead.
+   *
+   * Nothing here is stored, and nothing reads it back. The annotation (who is
+   * talking, and where) is the activity feed's, so the page can put a thread where
+   * that agent already appears; the roster it needs is cached, because live frames
+   * are frequent and a roster changes once per run.
+   */
+  async liveText(
+    jobId: string,
+    seen: Map<string, number>,
+  ): Promise<readonly LiveTextEntry[]> {
+    let store = this.liveStores.get(jobId);
+    if (store === undefined) {
+      store = new LiveTextStore(join(this.jobDir(jobId), "live-text.jsonl"), this.now);
+      this.liveStores.set(jobId, store);
+    }
+    store.poll();
+    const deltas = store.deltas(seen);
+    if (deltas.length === 0) return [];
+    const panel = await this.livePanel(jobId, deltas.map((delta) => delta.path));
+    return deltas.map((delta) => ({
+      id: delta.path,
+      ...(delta.append !== undefined ? { append: delta.append } : {}),
+      ...(delta.text !== undefined ? { text: delta.text } : {}),
+      ...(delta.ended === true ? { ended: true as const } : {}),
+      ...agentIdentity(delta.path, this.liveTaskKind(delta.path), panel),
+    }));
+  }
+
+  /**
+   * The role behind a live thread, from the leaf of its execution path — the one
+   * thing a live record does not carry, because the worker writes only fragments.
+   */
+  private liveTaskKind(path: string): string | undefined {
+    const leaf = /([^/]+)-execute$/.exec(path)?.[1];
+    switch (leaf) {
+      case "develop-idea":
+        return "brainstorm.brain";
+      case "comment-step":
+        return "brainstorm.commentor";
+      case "comment-step-bridge":
+        return "brainstorm.interdisciplinary-commentor";
+      case "judge-step":
+        return "brainstorm.judge";
+      case "redevelop-idea":
+        return "brainstorm.redeveloper";
+      default:
+        return leaf === undefined ? undefined : `brainstorm.${leaf}`;
+    }
+  }
+
+  /**
+   * The roster the live annotation needs, cached. Rebuilt only when a path turns
+   * up that the cache cannot place — a handful of times per run — because
+   * building it means building the whole job detail.
+   */
+  private async livePanel(
+    jobId: string,
+    paths: readonly string[],
+  ): Promise<readonly PanelMemberView[]> {
+    const cached = this.livePanels.get(jobId);
+    const unplaceable = paths.some(
+      (path) => /member\[(\d+)\]/.test(path) && (cached?.panel.length ?? 0) === 0,
+    );
+    if (cached !== undefined && !unplaceable) return cached.panel;
+    if (cached !== undefined && this.now() - cached.at < 30_000) return cached.panel;
+    let panel: readonly PanelMemberView[] = [];
+    try {
+      const detail = await this.detail(jobId);
+      for (const stage of detail.stages) {
+        if (stage.id === "select-panel" && stage.panel !== undefined) panel = stage.panel;
+      }
+    } catch {
+      // A job whose detail cannot be built yet simply has no names to attach.
+    }
+    this.livePanels.set(jobId, { at: this.now(), panel });
+    return panel;
+  }
+
   private async reapPreviousHost(record: JobRecord): Promise<void> {
     const hadHost =
       record.runner === "slurm"

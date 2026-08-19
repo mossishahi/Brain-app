@@ -1068,7 +1068,19 @@ function reportStreamEvent(
     if (label !== undefined && state.phase?.label !== label) {
       state.phase = { label, startedAt: now };
     }
-  } else if (event.type !== "content_block_delta") {
+  } else if (event.type === "content_block_delta") {
+    // The fragment itself, for the live thread the host shows while the task
+    // runs. The heartbeat below stays exactly as it was — content-free — because
+    // it goes into the event log, and that channel carries no content.
+    const delta = record(event.delta);
+    const fragment =
+      typeof delta.thinking === "string"
+        ? delta.thinking
+        : typeof delta.text === "string"
+          ? delta.text
+          : undefined;
+    if (fragment !== undefined && fragment.length > 0) context.reportLive?.(fragment);
+  } else {
     return;
   }
   const phase = state.phase;

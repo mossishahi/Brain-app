@@ -34,7 +34,12 @@ import type { RunEvent, RunEventBody, RunEventListener } from "./events.js";
 import type { JournalEntryKind } from "./journal.js";
 import { RunJournal } from "./journal.js";
 import { createBuiltinExecutorRegistry } from "./nodes.js";
-import type { EffectResult, NodeExecutionContext, NodeExecutorRegistry } from "./registry.js";
+import type {
+  EffectResult,
+  LivePreviewSink,
+  NodeExecutionContext,
+  NodeExecutorRegistry,
+} from "./registry.js";
 import { Scope } from "./scope.js";
 import { SuspendSignal, TerminalSignal, WindDownSignal } from "./signals.js";
 import { WorkflowFunctions } from "./functions.js";
@@ -121,7 +126,15 @@ export interface WorkflowRunnerOptions {
   readonly journalFormat?: number;
   /** Retry ladder for failed checkpoint writes; see the policy type. */
   readonly checkpointWriteRetry?: CheckpointWriteRetryPolicy;
+  /**
+   * Where an agent's LIVE TEXT goes — deliberately not the event stream. See
+   * AgentExecutionContext.reportLive: it is what the model is saying as it says
+   * it, kept only until the task's output exists, and never journalled, never an
+   * artifact, never read back.
+   */
+  readonly onLivePreview?: LivePreviewSink;
 }
+
 
 export interface RunOptions {
   readonly runId?: string;
@@ -187,6 +200,7 @@ export class WorkflowRunner {
   private readonly now: () => number;
   private readonly journalFormat: number;
   private readonly checkpointWriteRetry: ResolvedCheckpointWriteRetry;
+  private readonly onLivePreview: LivePreviewSink | undefined;
 
   constructor(options: WorkflowRunnerOptions = {}) {
     this.functions = options.functions ?? new WorkflowFunctions();
@@ -197,6 +211,7 @@ export class WorkflowRunner {
     this.now = options.now ?? (() => Date.now());
     this.journalFormat = options.journalFormat ?? JOURNAL_FORMAT;
     this.checkpointWriteRetry = resolveCheckpointWriteRetry(options.checkpointWriteRetry);
+    this.onLivePreview = options.onLivePreview;
     if (options.onEvent) this.listeners.push(options.onEvent);
   }
 
@@ -233,6 +248,7 @@ export class WorkflowRunner {
       now: this.now,
       journalFormat: this.journalFormat,
       checkpointWriteRetry: this.checkpointWriteRetry,
+      onLivePreview: this.onLivePreview,
     });
     return execution.execute();
   }
@@ -285,6 +301,7 @@ export class WorkflowRunner {
       now: this.now,
       journalFormat: this.journalFormat,
       checkpointWriteRetry: this.checkpointWriteRetry,
+      onLivePreview: this.onLivePreview,
     });
     return execution.execute();
   }
@@ -311,6 +328,7 @@ interface ExecutionConfig {
   readonly now: () => number;
   readonly journalFormat: number;
   readonly checkpointWriteRetry: ResolvedCheckpointWriteRetry;
+  readonly onLivePreview: LivePreviewSink | undefined;
 }
 
 interface CheckpointExtras {
@@ -440,6 +458,7 @@ class RunExecution {
       functions: this.cfg.functions,
       artifacts: this.cfg.artifacts,
       agentExecutor: this.cfg.agentExecutor,
+      livePreview: this.cfg.onLivePreview,
       child: (node, segment, childScope) => this.executeNode(node, `${path}/${segment}`, childScope ?? scope),
       effect: (slot, kind, produce) => this.effect(path, slot, kind, produce),
       journalKey: (slot) => journalKeyFor(path, slot),

@@ -1731,6 +1731,11 @@ async function executeAttempt(
           // Consecutive fragments concatenate into one trace segment so the
           // captured reasoning summary reads as prose, not confetti.
           const text = typeof message.text === "string" ? message.text : "";
+          // Live text gets every delta, whether or not this route captures a
+          // trace: a reader watching a task that runs for minutes reads along
+          // with it. The host owns the thread — appending the fragments, then
+          // discarding them when the output lands — so nothing accumulates here.
+          if (text.length > 0) context.reportLive?.(text);
           if (text.length === 0) {
             thinkingOpen = false;
           } else if (capture.wantsTrace) {

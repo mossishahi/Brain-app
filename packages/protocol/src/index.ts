@@ -1764,7 +1764,47 @@ export type ServerEvent =
   | { readonly type: "jobs"; readonly jobs: readonly JobSummary[] }
   | { readonly type: "job"; readonly job: JobDetail }
   | { readonly type: "readiness"; readonly readiness: ReadinessReport }
-  | { readonly type: "error"; readonly message: string };
+  | { readonly type: "error"; readonly message: string }
+  | {
+      /**
+       * What the models are SAYING right now, for the places that would
+       * otherwise show the word "thinking". Frames carry only what was written
+       * since this connection's last one.
+       *
+       * Not a transcript: nothing is stored, nothing reads it back, and a
+       * thread ends — is deleted — the moment its task's real output exists,
+       * which is when the page has something true to show instead.
+       */
+      readonly type: "live";
+      readonly jobId: string;
+      readonly entries: readonly LiveTextEntry[];
+    };
+
+export interface LiveTextEntry {
+  /** The task, named by its execution path as every other channel names it. */
+  readonly id: string;
+  /** Characters written since this connection's previous frame. */
+  readonly append?: string;
+  /** The whole thread: this connection's first frame for it, or a repair. */
+  readonly text?: string;
+  /** The task is over — drop the thread; its output is the truth now. */
+  readonly ended?: true;
+  /** Who is talking, on the same terms the activity feed names them. */
+  readonly role?: string;
+  readonly actor?: string;
+  /**
+   * The same two answers as member IDS, so a thread can be attached to a card
+   * without parsing its label: `actorId` is the agent talking (absent when it is
+   * not a seat), `seatId` the seat whose chain is being worked on.
+   */
+  readonly actorId?: string;
+  readonly seatId?: string;
+  readonly where?: {
+    readonly seat?: string;
+    readonly step?: number;
+    readonly round?: number;
+  };
+}
 
 /**
  * Aggregated capability/tool usage of one job, computed from the event log.

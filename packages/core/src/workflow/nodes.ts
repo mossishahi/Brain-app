@@ -128,6 +128,21 @@ const executeAgent: NodeExecutor = async (node, context) => {
           taskKind: task.kind,
           progress,
         }),
+      // Deliberately NOT context.emit: live text must not enter the event log,
+      // the journal or the artifact store. It goes straight to the host's own
+      // sink, which appends it while the task runs and discards it once the
+      // task's output exists.
+      ...(context.livePreview !== undefined
+        ? {
+            reportLive: (text: string) =>
+              context.livePreview?.({
+                path: context.path,
+                taskId: task.taskId,
+                taskKind: task.kind,
+                text,
+              }),
+          }
+        : {}),
     });
     context.emit({
       type: "agent:completed",

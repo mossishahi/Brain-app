@@ -44,6 +44,7 @@ import {
   isCreditLimitMessage,
   resolveCreditReset,
 } from "@brainstorm-agentic/credit-recovery";
+import type { LivePreviewSink } from "@brainstorm-agentic/core";
 import type { ContentBundle, LoadedInputTypes } from "@brainstorm-agentic/content";
 import { ClaudeAgentExecutor } from "@brainstorm-agentic/executor-claude-agent";
 import { CursorAgentExecutor } from "@brainstorm-agentic/executor-cursor-agent";
@@ -152,6 +153,11 @@ export interface RuntimeWiringOptions {
    * so the next option to arrive cannot be silently discarded.
    */
   readonly dismissedMembers?: readonly string[];
+  /**
+   * Where an agent's live text goes while its task runs (see
+   * AgentExecutionContext.reportLive). Omitted on a host that shows none.
+   */
+  readonly onLivePreview?: LivePreviewSink;
 }
 
 /** Reads the model id the brainstorm compiler resolved into the task description. */
@@ -643,6 +649,9 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
     onEvent: options.onEvent,
     ...(options.dismissedMembers !== undefined
       ? { dismissedMembers: options.dismissedMembers }
+      : {}),
+    ...(options.onLivePreview !== undefined
+      ? { onLivePreview: options.onLivePreview }
       : {}),
   });
   // A dismissal that does not reach the compiler is a silent, expensive lie:

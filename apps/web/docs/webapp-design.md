@@ -210,6 +210,23 @@ One stage shows at a time, and the two steppers under the panel — "← First p
 hovered, when the name underlines. They sit outside every panel, on the page background, where a
 bordered button read as a control belonging to the panel above it rather than as a way out of it.
 
+**A task that is working shows what it is saying, not the word "thinking".** While a first-pass seat
+develops its idea, or a commenter/judge/redeveloper works on a step, the card carries a LIVE THREAD:
+the words the model is producing, appended as they arrive, readable as prose and scrollable inside a
+capped box (168px — the card never grows). It follows the newest words until the reader scrolls back,
+and then stays where they put it.
+
+It is **not** the chain of thought and is styled so it cannot be mistaken for one — dashed border,
+dim monospace, and a header that says "live, replaced by the result". The moment the task's real
+output exists the thread is DELETED and the output takes its place: the first-pass card switches to
+its idea tabs, the review card to its version deck. Nothing about it is stored, nothing reads it back,
+and no view is derived from it.
+
+It costs the browser no requests at all: the worker appends fragments to one file per run, the server
+tails it and holds only live threads, and each SSE frame carries the characters written since **that
+connection's** last frame. A reader who opens the page mid-task gets the thread whole — the part of
+the conversation they walked in on — and deltas after that.
+
 Every Activity row is annotated with three fixed columns between the timestamp and the message,
 because a review's feed is otherwise a wall of messages with no way to tell whose work is whose:
 **what** the agent is (`COMMENTER`, `JUDGE`, `THINKER`, `REDEVELOPER`, `BRIDGE` — small caps, the

@@ -1,5 +1,5 @@
 /** View 2 — the job dashboard: header, pipeline graph, and per-stage panels. */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useMemo } from "react";
 import type { ReactNode } from "react";
 import { STAGE_IDS } from "@brainstorm-agentic/protocol";
 import type {
@@ -11,6 +11,7 @@ import type {
   StageStatus,
   StageView,
   TokenUsageView,
+  LiveTextEntry,
 } from "@brainstorm-agentic/protocol";
 import {
   answerGate,
@@ -48,6 +49,7 @@ import {
 import { DecomposeBody } from "./panels/DecomposePanel";
 import { SelectPanelBody } from "./panels/SelectPanelPanel";
 import { GateCard, GateDecided } from "./panels/ConfirmPanelPanel";
+import { applyLiveEntries, type LiveThread } from "./live-threads";
 import { FirstPassBody } from "./panels/FirstPassPanel";
 import { ReviewStagePanels } from "./panels/ReviewPanel";
 import { BridgeAuditBody } from "./panels/BridgeAuditPanel";
@@ -262,13 +264,51 @@ export function Dashboard({
     };
   }, [jobId]);
 
+  /**
+   * What the models are saying right now, per task, for the places that would
+   * otherwise say "thinking". Frames carry only new characters, so this appends;
+   * a thread ENDS when its task's real output exists, and then it is deleted —
+   * the output is what the page shows from that moment on.
+   *
+   * Never persisted, never cached with the job detail: it is the wait, not the
+   * work.
+   */
+  const [live, setLive] = useState<ReadonlyMap<string, LiveThread>>(new Map());
   const connected = useServerEvents(jobStreamUrl(jobId), (ev) => {
     if (ev.type === "job" && ev.job.jobId === jobId) {
       setJob(ev.job);
       cacheJobDetail(ev.job);
       setLoadError(null);
     }
+    if (ev.type === "live" && ev.jobId === jobId) {
+      setLive((previous) => applyLiveEntries(previous, ev.entries));
+    }
   });
+
+  /**
+   * Live threads addressed by what the page is showing: a first-pass card is a
+   * SEAT thinking about its own idea; a review card is a step being worked on by
+   * several agents at once, so those group by the seat under review.
+   */
+  const liveByThinker = useMemo(() => {
+    const out = new Map<string, string>();
+    for (const [id, thread] of live) {
+      if (thread.role !== "Thinker" || thread.actorId === undefined) continue;
+      if (!id.includes("first-pass")) continue;
+      out.set(thread.actorId, thread.text);
+    }
+    return out;
+  }, [live]);
+  const liveByReviewedSeat = useMemo(() => {
+    const out = new Map<string, LiveThread[]>();
+    for (const [id, thread] of live) {
+      if (thread.seatId === undefined || id.includes("first-pass")) continue;
+      const list = out.get(thread.seatId) ?? [];
+      list.push(thread);
+      out.set(thread.seatId, list);
+    }
+    return out;
+  }, [live]);
 
   const activeStage: StageId = job ? pickDefaultStage(job) : "process-input";
   const selected: StageId = pinned ?? activeStage;
@@ -480,7 +520,7 @@ export function Dashboard({
       case "first-pass": {
         const stage = stageOf(job, id);
         return stage && stage.members.length > 0 ? (
-          <FirstPassBody members={stage.members} />
+          <FirstPassBody members={stage.members} live={liveByThinker} />
         ) : null;
       }
       case "review-members":
@@ -715,6 +755,7 @@ export function Dashboard({
                 // tracking so every diff reaches back to the original chain.
                 <ReviewStagePanels
                   stage={reviewStage}
+                  live={liveByReviewedSeat}
                   firstPass={stageOf(job, "first-pass")}
                   expanded={!collapsed.has(selected)}
                   frame={frame}

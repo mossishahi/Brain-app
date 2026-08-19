@@ -36,7 +36,7 @@ import {
   seatTexFileName,
 } from "../../latex";
 import { LATEX_STYLE } from "../../latex-style";
-import { EvidenceBlock, TokenChip } from "../common";
+import { EvidenceBlock, LiveThread, TokenChip } from "../common";
 import { BackIcon, CopyIcon, DownloadIcon, ForwardIcon } from "../Icons";
 import { IdeaTabs } from "./FirstPassPanel";
 import {
@@ -684,6 +684,44 @@ function crossReportText(
  * are their own cards, labeled with the walk position that caused them; the
  * step's own "Round k / K" numbering never shifts around them.
  */
+/** One live thread as the review panel needs it. */
+export interface LiveReviewThread {
+  readonly text: string;
+  readonly role?: string;
+  readonly actor?: string;
+  readonly where?: { readonly seat?: string; readonly step?: number; readonly round?: number };
+}
+
+/**
+ * The threads for one step of one seat: every agent currently working on it,
+ * each labelled with what it is and who. This is what a reader watches instead
+ * of an unmoving "round 3 in progress" — and each thread vanishes the moment its
+ * task's output exists, replaced by the card that shows the output.
+ */
+function LiveThreads({
+  threads,
+  step,
+}: {
+  threads: readonly LiveReviewThread[];
+  step: number;
+}) {
+  const here = threads.filter(
+    (thread) => thread.where?.step === undefined || thread.where.step === step,
+  );
+  if (here.length === 0) return null;
+  return (
+    <div className="review-live">
+      {here.map((thread, index) => (
+        <LiveThread
+          key={`${thread.actor ?? thread.role ?? "agent"}:${index}`}
+          text={thread.text}
+          label={[thread.role, thread.actor].filter(Boolean).join(" · ") || "thinking aloud"}
+        />
+      ))}
+    </div>
+  );
+}
+
 function RoundDeck({
   member,
   step,
@@ -917,6 +955,7 @@ export function ReviewStagePanels({
   expanded,
   topic,
   onDismiss,
+  live,
 }: {
   stage: ReviewStage;
   firstPass?: FirstPassStage;
@@ -928,6 +967,12 @@ export function ReviewStagePanels({
   topic?: string;
   /** Absent on a finished or trashed run: there is nothing left to dismiss. */
   onDismiss?: (memberId: string) => Promise<void>;
+  /**
+   * What the agents working on each seat's chain are SAYING right now, keyed by
+   * the seat under review. Threads disappear as their tasks' outputs land, which
+   * is when the cards below have the real thing to show.
+   */
+  live?: ReadonlyMap<string, readonly LiveReviewThread[]>;
 }) {
   // No global cursor: each seat carries its own progress, so several seats can
   // be under review at once.
@@ -1187,6 +1232,7 @@ export function ReviewStagePanels({
                 {seat.steps.map((step) => {
                   const stepRefKey = `${seat.memberId}:${step.index}`;
                   const crossCount = (timeline.crossRewrites.get(step.index) ?? []).length;
+                  const liveFor = live?.get(seat.memberId) ?? [];
                   const choiceKey = stepRefKey;
                   return (
                     <section
@@ -1208,6 +1254,9 @@ export function ReviewStagePanels({
                           {roundsMeta(step, seat.dismissed !== undefined, crossCount)}
                         </span>
                       </div>
+                      {liveFor.length > 0 && (
+                        <LiveThreads threads={liveFor} step={step.index} />
+                      )}
                       <RoundDeck
                         member={seat}
                         step={step}

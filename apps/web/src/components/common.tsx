@@ -643,3 +643,43 @@ export function DismissSeatButton({
     </span>
   );
 }
+
+/**
+ * The words a model is producing right now, as a thread to read while waiting.
+ *
+ * NOT the chain of thought, and deliberately styled so it cannot be mistaken for
+ * one: dim, monospaced, boxed, and labelled as live. It exists because a task
+ * that runs for minutes used to show the word "thinking" and nothing else. When
+ * the task's real output arrives this disappears and the output takes its place —
+ * so nothing here is ever the record of anything.
+ *
+ * Pinned to the newest words unless the reader scrolls back to read.
+ */
+export function LiveThread({ text, label }: { text: string; label?: string }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const pinned = useRef(true);
+  useLayoutEffect(() => {
+    const box = ref.current;
+    if (box && pinned.current) box.scrollTop = box.scrollHeight;
+  }, [text]);
+  if (text.trim().length === 0) return null;
+  return (
+    <div className="live-thread">
+      <div className="live-thread-head">
+        <span className="dot dot-accent pulse" aria-hidden />
+        <span>{label ?? "thinking aloud"}</span>
+        <span className="dim">— live, replaced by the result</span>
+      </div>
+      <div
+        className="live-thread-body"
+        ref={ref}
+        onScroll={(event) => {
+          const box = event.currentTarget;
+          pinned.current = box.scrollHeight - box.scrollTop - box.clientHeight < 24;
+        }}
+      >
+        {text}
+      </div>
+    </div>
+  );
+}

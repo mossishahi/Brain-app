@@ -748,13 +748,35 @@ const OWN_CHAIN_ROLES = new Set(["brain", "redeveloper"]);
  * round's fan-out, and that fan-out is the panel minus the seat under review, so
  * the index only becomes a seat once it is projected back over the roster.
  */
-function activityAnnotation(
+export function activityAnnotation(
   path: string,
   taskKind: string | undefined,
   panel: readonly PanelMemberView[],
 ): {
   readonly role?: string;
   readonly actor?: string;
+  readonly where?: { readonly seat?: string; readonly step?: number; readonly round?: number };
+} {
+  const { actorId: _actorId, seatId: _seatId, ...shown } = agentIdentity(path, taskKind, panel);
+  return shown;
+}
+
+/**
+ * The same three answers, plus the member IDS behind the labels.
+ *
+ * The activity feed wants labels ("Seat 4"); a live thread has to be attached to
+ * the card of a particular seat, and matching a label back to a card would mean
+ * parsing prose. Both come from one derivation so they can never disagree.
+ */
+export function agentIdentity(
+  path: string,
+  taskKind: string | undefined,
+  panel: readonly PanelMemberView[],
+): {
+  readonly role?: string;
+  readonly actor?: string;
+  readonly actorId?: string;
+  readonly seatId?: string;
   readonly where?: { readonly seat?: string; readonly step?: number; readonly round?: number };
 } {
   const role = roleLabel(taskKind);
@@ -766,12 +788,17 @@ function activityAnnotation(
   const id = taskKind?.replace(/^brainstorm\./, "");
 
   let actor = OWN_CHAIN_ROLES.has(id ?? "") ? seatName(subject) : undefined;
+  let actorId =
+    OWN_CHAIN_ROLES.has(id ?? "") && subject !== undefined ? panel[subject]?.id : undefined;
   if (at.commentor !== undefined && at.member !== undefined) {
     // The same projection the review reconstruction and the failure locator
     // use: commentors are the panel minus the seat under review, in seat order.
     const thinker = panel[at.member];
     const author = panel.filter((member) => member.id !== thinker?.id)[at.commentor];
-    if (author !== undefined) actor = seatName(panel.indexOf(author));
+    if (author !== undefined) {
+      actor = seatName(panel.indexOf(author));
+      actorId = author.id;
+    }
   }
   const where =
     subject === undefined
@@ -782,9 +809,12 @@ function activityAnnotation(
           ...(at.step !== undefined ? { step: at.step + 1 } : {}),
           ...(at.round !== undefined ? { round: at.round + 1 } : {}),
         };
+  const seatId = subject !== undefined ? panel[subject]?.id : undefined;
   return {
     ...(role !== undefined ? { role } : {}),
     ...(actor !== undefined ? { actor } : {}),
+    ...(actorId !== undefined ? { actorId } : {}),
+    ...(seatId !== undefined ? { seatId } : {}),
     ...(where !== undefined ? { where } : {}),
   };
 }

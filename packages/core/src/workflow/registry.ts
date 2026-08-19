@@ -18,6 +18,19 @@ export interface EffectResult {
  * Runtime services handed to a NodeExecutor. Custom node kinds get exactly
  * the same API the builtin executors are implemented with.
  */
+/**
+ * Receives the fragments of an agent's live text as the model produces them.
+ * `path` identifies the task the way everything else does (its execution path),
+ * so a host can append each fragment to the thread it shows for that task and
+ * discard the thread once the task's output exists.
+ */
+export type LivePreviewSink = (update: {
+  readonly path: string;
+  readonly taskId: string;
+  readonly taskKind: string;
+  readonly text: string;
+}) => void;
+
 export interface NodeExecutionContext {
   readonly runId: string;
   /** Deterministic execution path of the current node, e.g. "root/loop/item[2]/draft". */
@@ -28,6 +41,11 @@ export interface NodeExecutionContext {
   readonly functions: WorkflowFunctions;
   readonly artifacts?: ArtifactStore | undefined;
   readonly agentExecutor?: AgentExecutor | undefined;
+  /**
+   * Where an agent node forwards a task's liveness preview, when the host wants
+   * one. Separate from `emit` on purpose — see AgentExecutionContext.reportLive.
+   */
+  readonly livePreview?: LivePreviewSink | undefined;
   /**
    * Recursively executes a child node. `segment` must be deterministic and
    * unique among the node's children (include iteration indices); it becomes

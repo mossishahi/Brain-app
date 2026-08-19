@@ -412,6 +412,12 @@ class SseConnection {
    * replaces the older one (only the latest state matters).
    */
   private readonly pending = new Map<string, () => Promise<ServerEvent>>();
+  /**
+   * This reader's own position in each live thread — how many characters of it
+   * have been sent. Held per CONNECTION so a frame carries only what this reader
+   * has not seen, whatever the thread has grown to.
+   */
+  readonly liveSeen = new Map<string, number>();
   private closed = false;
   private sending = false;
   readonly heartbeat: NodeJS.Timeout;
@@ -661,6 +667,22 @@ export async function startBrainServer(
       }
     }
   };
+  /**
+   * Live text goes out on the same tick as everything else, under its own kind so
+   * it coalesces separately: a frame that only carries new words does not have to
+   * wait for a job detail to be rebuilt. Each connection frames its own delta.
+   */
+  const broadcastLive = (): void => {
+    for (const [jobId, streams] of detailStreams) {
+      for (const stream of streams) {
+        stream.schedule("live", async () => ({
+          type: "live",
+          jobId,
+          entries: await manager.liveText(jobId, stream.liveSeen),
+        }));
+      }
+    }
+  };
   const broadcastReadiness = (): void => {
     for (const stream of jobStreams) {
       stream.schedule("readiness", async () => ({
@@ -672,6 +694,7 @@ export async function startBrainServer(
   const broadcast = (): void => {
     broadcastJobs();
     broadcastDetails();
+    broadcastLive();
   };
 
   manager = new JobManager({
@@ -1206,6 +1229,14 @@ export async function startBrainServer(
         streams.add(connection);
         res.once("close", () => connection.close());
         connection.schedule("job", async () => ({ type: "job", job: await manager.detail(jobId) }));
+        // A reader that has just opened the page has seen nothing, so its first
+        // live frame carries each thread whole — the part of the conversation it
+        // walked in on.
+        connection.schedule("live", async () => ({
+          type: "live",
+          jobId,
+          entries: await manager.liveText(jobId, connection.liveSeen),
+        }));
         return;
       }
 

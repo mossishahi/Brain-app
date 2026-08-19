@@ -705,6 +705,10 @@ export class ToolLoopAgentExecutor<
       for (const block of response.content) {
         if (block.type === "thinking" && block.text.trim().length > 0) {
           thinkingSegments.push({ turn, text: block.text });
+          // This path does not stream, so the live thread grows a whole block at
+          // a time instead of a fragment at a time — later than the SDK paths,
+          // but the same thread and the same discard rule.
+          context.reportLive?.(block.text);
         }
       }
       // Server tools ran inside the provider; surface each use as a tool

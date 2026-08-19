@@ -20,6 +20,7 @@ import {
   type RunResult,
   type ScopeReader,
   WindDownSignal,
+  type LivePreviewSink,
 } from "@brainstorm-agentic/core";
 
 import {
@@ -45,6 +46,12 @@ export interface BrainstormRuntimeOptions {
   readonly checkpoints?: CheckpointStore;
   readonly artifacts?: ArtifactStore;
   readonly onEvent?: RunEventListener;
+  /**
+   * Where an agent's live text goes while a task runs — see
+   * AgentExecutionContext.reportLive. Omitted on hosts that show none, and then
+   * the executors produce none.
+   */
+  readonly onLivePreview?: LivePreviewSink;
   readonly now?: () => number;
   /** Provider-native operation offers for the capability broker. */
   readonly providerOffers?: readonly ProviderNativeOffer[];
@@ -194,6 +201,9 @@ export class BrainstormRuntime {
       checkpoints: this.checkpoints,
       artifacts: this.artifacts,
       agentExecutor: options.agentExecutor,
+      ...(options.onLivePreview !== undefined
+        ? { onLivePreview: options.onLivePreview }
+        : {}),
       ...(executors !== undefined ? { executors } : {}),
       onEvent: options.onEvent,
       now: options.now,

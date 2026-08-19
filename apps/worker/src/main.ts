@@ -38,6 +38,7 @@ import {
 
 import { defaultSessionRoot, loadDotEnv, workspaceRootFromSessionRoot } from "./env.js";
 import { scheduleFinishedExit } from "./exit.js";
+import { createLiveTextLog, noLiveText } from "./live-text.js";
 import { windDownFromEnv } from "./wind-down.js";
 import { configureOutboundHttp } from "./proxy.js";
 import {
@@ -830,6 +831,25 @@ async function main(): Promise<void> {
     );
   }
   const eventLog = eventListener(verbose, eventsFile);
+  // Live text rides its own file beside the event log, and only when the host
+  // asked for one: an events file means a server is watching this run, which is
+  // the only reader there is.
+  const liveText =
+    eventsFile !== undefined && process.env.BRAINSTORM_AGENTIC_LIVE_TEXT !== "off"
+      ? createLiveTextLog(join(dirname(eventsFile), "live-text.jsonl"))
+      : noLiveText();
+  /**
+   * The run's event listener, plus the one thing live text needs from the event
+   * stream: a task's completion is when its thread stops being what is happening
+   * and starts being nothing at all, because its OUTPUT now exists.
+   */
+  const runEventListener =
+    eventLog.onEvent === undefined
+      ? undefined
+      : (event: Parameters<NonNullable<typeof eventLog.onEvent>>[0]) => {
+          eventLog.onEvent?.(event);
+          if (event.type === "agent:completed") liveText.end(event.path);
+        };
 
   if (args.command === "list") {
     const store = new FsCheckpointStore(sessionRoot);
@@ -896,7 +916,8 @@ async function main(): Promise<void> {
       ...(gpuRun ? { gpuRun } : {}),
       bundle: lazy?.bundle ?? loadContent(contentDir!),
       ...(lazy ? { skillResolver: lazy.skillResolver } : {}),
-      ...(eventLog.onEvent !== undefined ? { onEvent: eventLog.onEvent } : {}),
+      ...(runEventListener !== undefined ? { onEvent: runEventListener } : {}),
+      onLivePreview: ({ path, text }) => liveText.note(path, text),
     });
     const params = workflowParamsFromEnv(process.env);
     try {
@@ -912,6 +933,7 @@ async function main(): Promise<void> {
       const finals = await writeFinalOutputs(artifacts, sessionRoot, runId, dismissedMembers);
       // Queued event appends must land before the log is read back.
       await eventLog.flush();
+      await liveText.close();
       // Opt-out is honored here: with telemetry off, no record is produced at
       // all rather than one written and then withheld.
       if (process.env.BRAINSTORM_AGENTIC_TELEMETRY !== "off") {
@@ -998,7 +1020,8 @@ async function main(): Promise<void> {
       ...(gpuRun ? { gpuRun } : {}),
       bundle: lazy?.bundle ?? loadContent(contentDir!),
       ...(lazy ? { skillResolver: lazy.skillResolver } : {}),
-      ...(eventLog.onEvent !== undefined ? { onEvent: eventLog.onEvent } : {}),
+      ...(runEventListener !== undefined ? { onEvent: runEventListener } : {}),
+      onLivePreview: ({ path, text }) => liveText.note(path, text),
     });
     try {
       const result = await runtime.resume(runId, {
@@ -1008,6 +1031,7 @@ async function main(): Promise<void> {
       const finals = await writeFinalOutputs(artifacts, sessionRoot, runId, dismissedMembers);
       // Queued event appends must land before the log is read back.
       await eventLog.flush();
+      await liveText.close();
       // Opt-out is honored here: with telemetry off, no record is produced at
       // all rather than one written and then withheld.
       if (process.env.BRAINSTORM_AGENTIC_TELEMETRY !== "off") {

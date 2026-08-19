@@ -152,6 +152,27 @@ export interface AgentExecutionContext {
   readonly signal?: AbortSignal;
   /** Streams sanitized operational progress into the workflow event log. */
   readonly reportProgress?: (progress: AgentProgress) => void;
+  /**
+   * Words the model is producing RIGHT NOW, in the order it produces them, so a
+   * reader watching a task that runs for minutes can read along instead of
+   * watching the word "thinking".
+   *
+   * Called with each fragment as it arrives. The host APPENDS them, so what a
+   * reader sees is one continuous thread for this task — and drops the whole
+   * thread the moment the task's real output exists, because the output is what
+   * the run is made of and this was only ever the wait.
+   *
+   * It is NOT the chain of thought and must never be treated as one. It reaches
+   * no other consumer: not the workflow event log, not the journal, not the
+   * artifact store, not the telemetry record, and no decision anywhere. Nothing
+   * reads it back after the task ends, because by then it does not exist. The
+   * chain of thought a run is BUILT from is the task's output, which travels the
+   * ordinary way and is kept.
+   *
+   * Absent on hosts that show no live text, and then executors must not spend
+   * anything producing it.
+   */
+  readonly reportLive?: (text: string) => void;
 }
 
 /**
