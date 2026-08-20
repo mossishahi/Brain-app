@@ -211,3 +211,39 @@ test("a walltime TERM hands over; a scancel TERM does not", () => {
     h.cleanup();
   }
 });
+
+test("the wrapper can tell that its own script has been superseded on disk", () => {
+  // The failure this exists for: the relaunch loop restarts the SERVER when a
+  // release lands, but bash keeps the code it was started with and a #SBATCH
+  // script is only re-read by a NEW job. A twelve-hour job that began before the
+  // walltime handover existed rebuilt the server five times as releases landed,
+  // ran the newest server all day, and still died at its walltime with no
+  // successor — the renewal was on disk beside it the whole time. The wrapper now
+  // execs its new copy, and this is the comparison that tells it to.
+  const h = harness();
+  try {
+    const a = join(h.root, "launch.sh");
+    const b = join(h.root, "renew.sh");
+    writeFileSync(a, "one\n");
+    writeFileSync(b, "two\n");
+    const fingerprint = () => h.run(`brain_wrapper_fingerprint ${a} ${b}`);
+    const before = fingerprint();
+    assert.ok(before.trim().length > 0, "a fingerprint is taken");
+    assert.equal(fingerprint(), before, "unchanged files fingerprint identically");
+
+    writeFileSync(b, "two, revised\n");
+    assert.notEqual(fingerprint(), before, "a changed source changes it");
+
+    // A fingerprint that cannot be taken must read as UNCHANGED, never as
+    // changed, or a job would re-exec itself in a loop.
+    const missing = h.run(`brain_wrapper_fingerprint ${join(h.root, "gone.sh")}`);
+    assert.equal(missing.trim(), "", "a missing source contributes nothing");
+    assert.equal(
+      h.run(`brain_wrapper_fingerprint ${a} ${join(h.root, "gone.sh")}`),
+      h.run(`brain_wrapper_fingerprint ${a}`),
+      "and never makes an otherwise identical set look different",
+    );
+  } finally {
+    h.cleanup();
+  }
+});

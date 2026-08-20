@@ -137,3 +137,27 @@ brain_term_is_walltime() {
   [ -n "$end" ] || return 1
   [ "$(( end - now ))" -le "$slack" ]
 }
+
+# A fingerprint of the wrapper's OWN sources, so a job can tell that the script
+# it is running has been superseded on disk.
+#
+# WHY THIS IS NEEDED: the relaunch loop restarts the SERVER when a release lands,
+# but it cannot restart the wrapper — bash keeps the code it was started with, and
+# a #SBATCH script is only re-read when a new job starts. A twelve-hour job that
+# began before this file existed therefore ran all day with the release that adds
+# self-renewal sitting unused on disk beside it, and died at its walltime with no
+# successor. That is exactly what happened; the fix is for the wrapper to exec the
+# new copy of itself, and this is how it knows to.
+#
+# Missing files contribute nothing rather than failing: a fingerprint that cannot
+# be taken must read as "unchanged", never as "changed", or a job would re-exec
+# itself in a loop.
+brain_wrapper_fingerprint() {
+  local out=""
+  local file
+  for file in "$@"; do
+    [ -r "$file" ] || continue
+    out="$out $(cksum <"$file" 2>/dev/null || echo unreadable)"
+  done
+  printf '%s' "$out"
+}

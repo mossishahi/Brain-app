@@ -24,6 +24,14 @@
 #   never fight over the port: the successor waits in PD until this one is gone.
 #   An operator's scancel is told apart from the walltime and takes the queued
 #   successor with it, so stopping the deployment still stops it.
+# - SELF-UPDATING: the loop below restarts the SERVER when a release lands, but a
+#   running bash keeps the code it was started with, so a change to THIS script
+#   would otherwise only take effect one job later — and the first job after such
+#   a change is the one that runs without it. Observed exactly that: a 12-hour job
+#   started before the walltime handover existed rebuilt the server five times as
+#   releases landed, ran the new server all day, and still died at its walltime
+#   with no successor. So when its own sources change on disk, the wrapper execs
+#   the new copy IN PLACE — same job, same allocation, watchdog re-armed.
 #
 #SBATCH --job-name=brain
 # Logs land in the repo's git-kept logs/ dir (relative to the submit dir);
@@ -108,7 +116,13 @@ build_if_needed() {
 RENEW_LEAD_S="${BRAIN_RENEW_LEAD_S:-1800}"
 JOB_END_EPOCH="$(brain_job_end_epoch || true)"
 SUCCESSOR_ID=""
-SUCCESSOR_FILE="$(mktemp -t brain-successor.XXXXXX)"
+# Survives a re-exec, so a successor queued before an update is still known to
+# the trap afterwards (and is never queued twice).
+SUCCESSOR_FILE="${BRAIN_SUCCESSOR_FILE:-$(mktemp -t brain-successor.XXXXXX)}"
+export BRAIN_SUCCESSOR_FILE="$SUCCESSOR_FILE"
+# What this script IS, as of now. Compared after every rebuild; see the loop.
+WRAPPER_SOURCES=("$APP/deploy/slurm-launch.sh" "$APP/deploy/slurm-renew.sh")
+WRAPPER_FINGERPRINT="$(brain_wrapper_fingerprint "${WRAPPER_SOURCES[@]}")"
 
 # One server per port, still. Generations carry different names, so
 # --dependency=singleton no longer answers this question and the check is
@@ -136,6 +150,10 @@ renew_watchdog() {
     echo "[renew] this job ends within the ${RENEW_LEAD_S}s lead; not renewing" >&2
     return 0
   fi
+  if [ -s "$SUCCESSOR_FILE" ]; then
+    echo "[renew] a successor was already queued before this restart ($(cat "$SUCCESSOR_FILE"))" >&2
+    return 0
+  fi
   echo "[renew] will queue the successor in ${wait_s}s (job ends $(date -d "@$JOB_END_EPOCH" 2>/dev/null || echo "@$JOB_END_EPOCH"))"
   sleep "$wait_s"
   # The REPO's copy, never "$0": under SLURM the batch script runs from a
@@ -161,6 +179,7 @@ finish() {
   fi
   kill "$RENEW_PID" 2>/dev/null || true
   rm -f "$SUCCESSOR_FILE" 2>/dev/null || true
+  unset BRAIN_SUCCESSOR_FILE
   [ -n "$SERVER_PID" ] && kill -TERM "$SERVER_PID" 2>/dev/null
   wait "$SERVER_PID" 2>/dev/null
   exit 0
@@ -185,6 +204,22 @@ while true; do
     previous=$(cat .build-stamp 2>/dev/null)
     echo "[wrapper] rebuild failed; restoring last built revision ${previous:-<none>}"
     [ -n "$previous" ] && git checkout --quiet "$previous" && build_if_needed
+  fi
+  # The release may have changed THIS script. A running bash cannot adopt that by
+  # itself, so hand the job over to the new copy: exec replaces the process image
+  # inside the same allocation, which re-arms the walltime watchdog from the new
+  # code instead of leaving it a job behind. The successor already queued (if any)
+  # travels in the environment; the watchdog is stopped first so only one runs.
+  current_fingerprint="$(brain_wrapper_fingerprint "${WRAPPER_SOURCES[@]}")"
+  if [ "$current_fingerprint" != "$WRAPPER_FINGERPRINT" ]; then
+    if [ -x "$APP/deploy/slurm-launch.sh" ]; then
+      echo "[wrapper] the launcher's own script changed; re-executing it in this job"
+      kill "$RENEW_PID" 2>/dev/null || true
+      trap - TERM INT
+      exec "$APP/deploy/slurm-launch.sh"
+    fi
+    echo "[wrapper] the launcher changed but $APP/deploy/slurm-launch.sh is not executable; staying on the running copy"
+    WRAPPER_FINGERPRINT="$current_fingerprint"
   fi
   sleep 5
 done
