@@ -375,7 +375,10 @@ export class JobManager {
       ...(mode === "run" ? { topic: record.topic } : {}),
       // Every mode: the attachment store is a resource of the job, and a resume
       // launched without it runs the rest of the pipeline with the submitted
-      // files reported unavailable.
+      // files reported unavailable. When there is no manifest the builder says
+      // so explicitly (--attachments none) instead of staying silent, so the
+      // worker can tell "this submission had no files" from "this host cannot
+      // see the ones it had".
       ...(existsSync(this.manifestPath(record.jobId))
         ? { attachmentsManifest: this.manifestPath(record.jobId) }
         : {}),

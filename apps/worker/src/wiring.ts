@@ -118,6 +118,21 @@ export interface RuntimeWiringOptions {
   /** Ingested attachment store roots; scoped file tools are exposed when set. */
   readonly attachmentRoots?: readonly string[];
   /**
+   * What is KNOWN about this run's attachment store, which the roots array
+   * cannot say: an empty array means the same thing for a run that attached
+   * nothing and for a run whose store this host could not open, and telling
+   * those apart is the difference between a review that legitimately has no
+   * files and 442 reviews that quietly stopped reading them.
+   *
+   * - "present": a store was named and opened.
+   * - "declared-none": the submission declared it carries no files. An
+   *   assertion by the party that owns the fact — never inferred here.
+   * - "unusable": a store was named and could not be opened on this host.
+   * - "undeclared": nobody said anything, which after the migration window is
+   *   itself a defect (see the broker's "unwired").
+   */
+  readonly attachmentStore?: "present" | "declared-none" | "unusable" | "undeclared";
+  /**
    * Shared-taxonomy access (registry-backed in production, local seed as
    * fallback). Powers the deterministic taxonomy activities and the placer's
    * taxonomy-access capability tools.
@@ -562,6 +577,40 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
     }
   }
 
+  /**
+   * What this host is willing to VOUCH for as legitimately empty.
+   *
+   * Every entry is a fact asserted by whoever owns it, never a conclusion drawn
+   * from finding no tool — that inference is what let a broken deployment look
+   * exactly like an ordinary run. Anything absent from this map and unresolved
+   * is "unwired" to the broker, which is a defect a required capability will
+   * refuse to run through. Taxonomy is deliberately NOT vouchable: it is
+   * deployment infrastructure the placer hard-requires, so its absence must
+   * stay loud.
+   */
+  const vacantCapabilities = new Map<string, string>();
+  if (options.attachmentStore === "declared-none") {
+    vacantCapabilities.set(
+      "attachment-access",
+      "This submission carries no attached files.",
+    );
+  }
+  if (options.gpuRun === undefined) {
+    vacantCapabilities.set(
+      "gpu-execution",
+      "This deployment configured no GPU submission template.",
+    );
+  }
+  if (options.providerConfig.provider === "offline") {
+    // --offline is an explicit choice made at launch, so it is an assertion in
+    // exactly the way "no tool was found" is not.
+    vacantCapabilities.set("web-search", "This run was launched offline: it has no network.");
+    vacantCapabilities.set(
+      "code-execution",
+      "This run was launched offline: it has no interpreter.",
+    );
+  }
+
   // Per-run capability disables from the submission. taxonomy-access is
   // deliberately exempt: it is runtime infrastructure (the placer hard-requires
   // it), not a user-facing ability of the panel.
@@ -643,6 +692,7 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
     hostTools: ALL_HOST_TOOL_MANIFESTS,
     enabledHostToolIds,
     disabledCapabilityIds,
+    vacantCapabilities,
     humanGateMode: options.autoApproveGates ? "autoApproveSkippable" : "manual",
     checkpoints: options.checkpoints,
     artifacts: options.artifacts,

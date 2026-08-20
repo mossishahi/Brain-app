@@ -60,6 +60,15 @@ Anything *executable* — web search, sandboxed code execution, attachment acces
 text but a **capability requirement** (`capabilities:` in front matter) resolved against the
 registry's `capabilities.json`, whose `contract` states what the host runtime must provide.
 
+**Load-bearing capabilities** (`requiredCapabilities:` in front matter, a subset of
+`capabilities:`): the task fails loudly, before any model call, rather than running without the
+ability. Safe to declare on ANY capability, because the runtime distinguishes an absence somebody
+vouched for from one nobody will: a submission that declares it carries no files, a deployment that
+configured no GPU template, and `--offline` each ASSERT their emptiness, and the guard passes. An
+absence nobody claims is a wiring defect and the guard fails on it — as is a capability the
+submitter switched off, which is a request the run cannot honour. Only roles may declare it: a
+technique's list would be silently ignored (the guard reads the role's), so the schema rejects it.
+
 **Artifact schemas** (`src/schemas/artifacts.ts`): `processorOutput`, `experts`, `panel`,
 `brainIdea`, `comment`, `judgeDecision`, `redevelopment`, `finalProposal`. Every agent node names
 the schema its output must satisfy; activity outputs are validated the same way. `experts` is the

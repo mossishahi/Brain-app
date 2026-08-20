@@ -245,6 +245,39 @@ test("rejects a technique var the including role does not cover as a non-payload
   expectIssue(bundle, "TECHNIQUE_VAR_UNCOVERED");
 });
 
+test("a technique cannot require a capability, because nothing would enforce it", () => {
+  // The trap: the guard reads the ROLE's requiredCapabilities, and a technique
+  // is folded into a role's instructions without its metadata being unioned in.
+  // Written on a technique, a load-bearing declaration would be accepted,
+  // ignored, and believed — no protection and no error.
+  const parsed = skillMetaSchema.safeParse({
+    name: "deep-understanding",
+    kind: "technique",
+    description: "read the material closely",
+    vars: [],
+    capabilities: ["attachment-access"],
+    requiredCapabilities: ["attachment-access"],
+  });
+  assert.equal(parsed.success, false);
+  assert.match(
+    parsed.error?.issues.map((issue) => issue.message).join(" ") ?? "",
+    /technique skills cannot require capabilities/,
+  );
+});
+
+test("a role may require a capability it declares", () => {
+  const parsed = skillMetaSchema.safeParse({
+    name: "commentor",
+    kind: "role",
+    description: "comment on one step",
+    vars: [],
+    output: "comment",
+    capabilities: ["attachment-access"],
+    requiredCapabilities: ["attachment-access"],
+  });
+  assert.equal(parsed.success, true, JSON.stringify(parsed.error?.issues));
+});
+
 test("rejects a skill that requires a capability missing from the catalog", () => {
   const bundle = freshBundle();
   delete bundle.capabilities.capabilities["code-execution"];

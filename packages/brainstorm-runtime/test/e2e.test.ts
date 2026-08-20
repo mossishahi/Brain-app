@@ -1907,3 +1907,91 @@ test("a classification outside the input-type catalog fails the run with a named
     /brilliant brainstorm.*not a type of the loaded input-type catalog/,
   );
 });
+
+/**
+ * The rule that makes `requiredCapabilities` usable for anything beyond
+ * taxonomy: a hard requirement must survive a run that legitimately has
+ * nothing behind the capability, and must stop a run whose wiring lost it.
+ *
+ * Before this, both looked identical to the guard — every attachment operation
+ * without a tool — so declaring attachment-access on a review role would have
+ * failed every topic-only submission, and NOT declaring it let a deployment
+ * that had lost its attachment store run 442 review tasks that quietly reasoned
+ * from metadata instead of reading the files they were given.
+ */
+function requiringAttachments(): ContentBundle {
+  const bundle = loadContent(registryContentDir);
+  const processor = bundle.skills["processor"]!;
+  assert.ok(
+    processor.meta.capabilities.includes("attachment-access"),
+    "the processor is the earliest role that uses attachments",
+  );
+  processor.meta.requiredCapabilities = ["attachment-access"];
+  return bundle;
+}
+
+test("a hard requirement passes when the host vouches that there is nothing behind it", async () => {
+  const executor = new FakeBrainstormExecutor();
+  const app = new BrainstormRuntime({
+    bundle: requiringAttachments(),
+    agentExecutor: executor,
+    humanGateMode: "autoApproveSkippable",
+    activities: taxonomyActivities(new StubTaxonomy()),
+    routeResolver: new StaticBrainstormRouteResolver({
+      reasoning: { modelId: "configured-reasoner", providerId: "fake" },
+      writing: { modelId: "configured-writer", providerId: "fake" },
+      balanced: { modelId: "configured-balanced", providerId: "fake" },
+    }),
+    hostTools: TEST_HOST_TOOLS,
+    enabledHostToolIds: new Set(TEST_HOST_TOOLS.map((manifest) => manifest.toolId)),
+    // The submission itself says it carries no files — the one party that owns
+    // that fact, saying so out loud.
+    vacantCapabilities: new Map([
+      ["attachment-access", "This submission carries no attached files."],
+    ]),
+  });
+  const result = await app.run({
+    runId: "vacant-attachments",
+    submission: { prompt: "Investigate the mechanism", attachments: [] },
+    params: { panelSize: 3 },
+  });
+  assert.equal(
+    result.status,
+    "completed",
+    result.status === "failed" ? `${result.error.name}: ${result.error.message}` : undefined,
+  );
+});
+
+test("the same requirement stops a run whose wiring lost the capability", async () => {
+  const executor = new FakeBrainstormExecutor();
+  const app = new BrainstormRuntime({
+    bundle: requiringAttachments(),
+    agentExecutor: executor,
+    humanGateMode: "autoApproveSkippable",
+    activities: taxonomyActivities(new StubTaxonomy()),
+    routeResolver: new StaticBrainstormRouteResolver({
+      reasoning: { modelId: "configured-reasoner", providerId: "fake" },
+      writing: { modelId: "configured-writer", providerId: "fake" },
+      balanced: { modelId: "configured-balanced", providerId: "fake" },
+    }),
+    hostTools: TEST_HOST_TOOLS,
+    enabledHostToolIds: new Set(TEST_HOST_TOOLS.map((manifest) => manifest.toolId)),
+    // Nobody vouches for the absence: identical runtime state to the test
+    // above, and the opposite verdict, because that is the only difference
+    // that ever mattered.
+  });
+  const result = await app.run({
+    runId: "unwired-attachments",
+    submission: { prompt: "Investigate the mechanism", attachments: [] },
+    params: { panelSize: 3 },
+  });
+  assert.equal(result.status, "failed");
+  assert.match(
+    result.status === "failed" ? result.error.message : "",
+    /requires "attachment-access"/,
+  );
+  assert.match(
+    result.status === "failed" ? result.error.message : "",
+    /nothing declared its absence/,
+  );
+});

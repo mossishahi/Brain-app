@@ -1,7 +1,9 @@
 import type {
+  CapabilityAvailability,
   HostToolManifest,
   ProviderNativeOffer,
   ResolvedCapabilityPlan,
+  ResolvedCapabilityStatus,
   ResolvedOperation,
 } from "./types.js";
 import type { ToolDefinition } from "../model/tools.js";
@@ -34,6 +36,16 @@ export interface BrokerInput {
    * agent must not claim the ability was missing, only switched off.
    */
   readonly disabledCapabilityIds?: ReadonlySet<string>;
+  /**
+   * Capabilities the host AFFIRMS are legitimately empty, mapped to the fact it
+   * is affirming ("This submission carries no attached files."). Only the party
+   * that owns a fact may assert it — the job record knows what was submitted,
+   * the deployment knows whether it configured a GPU, `--offline` knows there is
+   * no network by choice — so nothing here can be inferred from the absence of
+   * a tool, which is precisely the inference that let a lost attachment store
+   * pass for an empty one.
+   */
+  readonly vacantCapabilities?: ReadonlyMap<string, string>;
 }
 
 // ---------------------------------------------------------------------------
@@ -50,6 +62,7 @@ export interface BrokerInput {
  */
 export function resolveCapabilityPlan(input: BrokerInput): ResolvedCapabilityPlan {
   const operations: ResolvedOperation[] = [];
+  const statuses: ResolvedCapabilityStatus[] = [];
   const hostToolDefs: ToolDefinition[] = [];
   const providerNativeKeys: string[] = [];
   const unavailableInstructions: string[] = [];
@@ -75,6 +88,11 @@ export function resolveCapabilityPlan(input: BrokerInput): ResolvedCapabilityPla
       unavailableInstructions.push(
         `[${capability.capabilityId}] The user disabled this capability for this run. ${capability.whenUnavailable}`,
       );
+      statuses.push({
+        capabilityId: capability.capabilityId,
+        availability: "withheld",
+        unavailableOperations: [...capability.operations],
+      });
       continue;
     }
 
@@ -127,14 +145,40 @@ export function resolveCapabilityPlan(input: BrokerInput): ResolvedCapabilityPla
     // only, say, deterministic search is missing tells an agent holding a
     // working file-read tool to stop reading files and to report itself blind.
     // A partial outage names what is actually missing instead.
+    const vacancy = input.vacantCapabilities?.get(capability.capabilityId);
+    const availability: CapabilityAvailability =
+      capUnavailableOps.length === 0
+        ? "available"
+        : capUnavailableOps.length < capability.operations.length
+          ? "degraded"
+          // Nothing resolved. Whether that is a fact or a fault is not the
+          // broker's to guess: it is whether anyone vouched for it.
+          : vacancy !== undefined
+            ? "vacant"
+            : "unwired";
+    statuses.push({
+      capabilityId: capability.capabilityId,
+      availability,
+      unavailableOperations: [...capUnavailableOps],
+      ...(availability === "vacant" && vacancy !== undefined
+        ? { reason: vacancy }
+        : {}),
+    });
+
     if (capUnavailableOps.length > 0) {
-      const partial = capUnavailableOps.length < capability.operations.length;
       unavailableInstructions.push(
-        partial
+        availability === "degraded"
           ? `[${capability.capabilityId}] ${capUnavailableOps.join(", ")} ${
               capUnavailableOps.length === 1 ? "is" : "are"
             } unavailable; the rest of this capability works. Use the operations you do have, and report only the missing ones as missing — do not treat the capability as unavailable.`
-          : `[${capability.capabilityId}] ${capability.whenUnavailable}`,
+          : availability === "vacant"
+            // NOT the catalog's whenUnavailable prose. That sentence tells an
+            // agent to report the ability as missing, which is false here and
+            // reads to a reviewer as a broken run: there is simply nothing to
+            // work on, and saying so plainly is what stops a task from hunting
+            // for files that were never submitted.
+            ? `[${capability.capabilityId}] ${vacancy} Nothing is broken and nothing is missing — work from the input you were given, and do not report this capability as unavailable.`
+            : `[${capability.capabilityId}] ${capability.whenUnavailable}`,
       );
     }
   }
@@ -143,6 +187,7 @@ export function resolveCapabilityPlan(input: BrokerInput): ResolvedCapabilityPla
     operations,
     hostToolDefinitions: hostToolDefs,
     providerNativeKeys,
+    capabilities: statuses,
     unavailableInstructions: unavailableInstructions.length > 0
       ? "## Unavailable capabilities\n\n" + unavailableInstructions.join("\n\n")
       : "",

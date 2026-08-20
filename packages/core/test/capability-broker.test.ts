@@ -221,6 +221,95 @@ describe("resolveCapabilityPlan", () => {
     assert.match(plan.unavailableInstructions ?? "", /reason from metadata only/);
   });
 
+  it("an absence nobody vouches for is a defect, not a fact", () => {
+    // The incident this encodes: a worker came up unable to reach the run's
+    // attachment store, and the plan said exactly what a run with no
+    // attachments says. 442 review tasks then reasoned from metadata.
+    const input: BrokerInput = {
+      requiredCapabilities: [attachmentAccess],
+      providerOffers: [],
+      hostTools: [],
+      enabledHostToolIds: new Set<string>(),
+    };
+    const plan = resolveCapabilityPlan(input);
+    const status = plan.capabilities.find((c) => c.capabilityId === "attachment-access");
+    assert.equal(status?.availability, "unwired");
+    assert.deepEqual(status?.unavailableOperations, ["attachment.list", "attachment.read"]);
+  });
+
+  it("the same absence, vouched for by the host, is vacant", () => {
+    const input: BrokerInput = {
+      requiredCapabilities: [attachmentAccess],
+      providerOffers: [],
+      hostTools: [],
+      enabledHostToolIds: new Set<string>(),
+      vacantCapabilities: new Map([
+        ["attachment-access", "This submission carries no attached files."],
+      ]),
+    };
+    const plan = resolveCapabilityPlan(input);
+    const status = plan.capabilities.find((c) => c.capabilityId === "attachment-access");
+    assert.equal(status?.availability, "vacant");
+    assert.equal(status?.reason, "This submission carries no attached files.");
+    // And the agent is told the truth rather than the catalog's total-loss line.
+    assert.match(plan.unavailableInstructions, /carries no attached files/);
+    assert.doesNotMatch(plan.unavailableInstructions, /reason from metadata only/);
+    assert.match(plan.unavailableInstructions, /do not report this capability as unavailable/);
+  });
+
+  it("a vacancy claim cannot make a working capability look empty", () => {
+    // Vouching is only ever consulted when nothing resolved: a host that
+    // wrongly claims vacancy for a capability it actually serves must not be
+    // able to talk the plan out of the tools it found.
+    const input: BrokerInput = {
+      requiredCapabilities: [attachmentAccess],
+      providerOffers: [],
+      hostTools: [hostAttachmentList, hostAttachmentRead],
+      enabledHostToolIds: new Set(["attachment_list", "attachment_read"]),
+      vacantCapabilities: new Map([["attachment-access", "nothing here, honest"]]),
+    };
+    const plan = resolveCapabilityPlan(input);
+    const status = plan.capabilities.find((c) => c.capabilityId === "attachment-access");
+    assert.equal(status?.availability, "available");
+    assert.equal(plan.unavailableInstructions, "");
+  });
+
+  it("a switched-off capability is withheld, never merely missing", () => {
+    const input: BrokerInput = {
+      requiredCapabilities: [attachmentAccess],
+      providerOffers: [],
+      hostTools: [hostAttachmentList, hostAttachmentRead],
+      enabledHostToolIds: new Set(["attachment_list", "attachment_read"]),
+      disabledCapabilityIds: new Set(["attachment-access"]),
+    };
+    const plan = resolveCapabilityPlan(input);
+    assert.equal(
+      plan.capabilities.find((c) => c.capabilityId === "attachment-access")?.availability,
+      "withheld",
+    );
+  });
+
+  it("a partial outage is degraded, and vouching does not enter into it", () => {
+    const searchable: CapabilityDeclaration = {
+      capabilityId: "attachment-access",
+      operations: ["attachment.list", "attachment.read", "attachment.search"],
+      whenUnavailable: "Do NOT read attachments; reason from metadata only.",
+    };
+    const plan = resolveCapabilityPlan({
+      requiredCapabilities: [searchable],
+      providerOffers: [
+        { operationId: "attachment.list", nativeKey: "glob" },
+        { operationId: "attachment.read", nativeKey: "read" },
+      ],
+      hostTools: [],
+      enabledHostToolIds: new Set<string>(),
+      vacantCapabilities: new Map([["attachment-access", "nothing attached"]]),
+    });
+    const status = plan.capabilities.find((c) => c.capabilityId === "attachment-access");
+    assert.equal(status?.availability, "degraded");
+    assert.deepEqual(status?.unavailableOperations, ["attachment.search"]);
+  });
+
   it("does not duplicate host tool definitions for shared operations", () => {
     const multiOpTool: HostToolManifest = {
       toolId: "multi_tool",

@@ -520,6 +520,13 @@ test("gpu-capable tasks get the gpu_run MCP tool; tasks and deployments without 
       ],
       hostToolDefinitions: [],
       providerNativeKeys: [],
+      capabilities: [
+        {
+          capabilityId: "gpu-execution",
+          availability: "available",
+          unavailableOperations: [],
+        },
+      ],
       unavailableInstructions: "",
     },
   };
@@ -596,6 +603,22 @@ test("a per-run-disabled attachment capability removes builtin and MCP attachmen
         ],
         hostToolDefinitions: [],
         providerNativeKeys: ["WebSearch"],
+        capabilities: [
+          {
+            capabilityId: "attachment-access",
+            availability: "withheld",
+            unavailableOperations: [
+              "attachment.list",
+              "attachment.read",
+              "attachment.search",
+            ],
+          },
+          {
+            capabilityId: "web-search",
+            availability: "available",
+            unavailableOperations: [],
+          },
+        ],
         unavailableInstructions:
           "## Unavailable capabilities\n\n[attachment-access] disabled",
       },

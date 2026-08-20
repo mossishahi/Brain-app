@@ -34,6 +34,15 @@ reading its files because of a fallback is a launcher bug survived, not a thing 
 the launcher DOES name always wins, and a run with no store recovers nothing (inventing a path
 would make the broker lie in the other direction).
 
+The same distinction is what the worker now asserts for every capability it can speak for. It
+tells the broker which capabilities are legitimately empty and why — `--attachments none` means the
+submission declared it carries no files, an unconfigured GPU template means this deployment has no
+GPU, `--offline` means no network and no interpreter by choice — and nothing else may claim it. An
+absence nobody vouches for is `unwired`, which a role's `requiredCapabilities` refuses to run
+through. That is what makes the declaration safe to add: a topic-only run passes, and a run whose
+store this host cannot open stops at the first task that needed it. Taxonomy is deliberately not
+vouchable — it is deployment infrastructure the placer hard-requires, so its absence stays loud.
+
 Related, in the broker: a capability that lost only SOME of its operations is no longer announced
 as gone. The catalog's `whenUnavailable` prose is written for total loss ("state explicitly that
 attachment access was unavailable"), so injecting it when only deterministic search is missing told

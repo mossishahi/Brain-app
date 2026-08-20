@@ -613,6 +613,20 @@ export const skillMetaSchema = z
     if (meta.kind === "technique" && meta.payload.length > 0) {
       ctx.addIssue({ code: "custom", path: ["payload"], message: "technique skills cannot declare payload vars" });
     }
+    // A technique's requiredCapabilities would be silently ignored: the guard
+    // reads the ROLE's list, and techniques are folded into a role's
+    // instructions without their metadata being unioned in. An author writing
+    // it there would believe a load-bearing capability was protected and get
+    // no protection and no error, which is the worst of the three outcomes.
+    if (meta.kind === "technique" && meta.requiredCapabilities.length > 0) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["requiredCapabilities"],
+        message:
+          "technique skills cannot require capabilities — the guard reads the role's list, " +
+          "so this would be silently ignored; declare it on every role that folds this technique in",
+      });
+    }
     for (const name of meta.payload) {
       if (!meta.vars.includes(name)) {
         ctx.addIssue({

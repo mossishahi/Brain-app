@@ -107,6 +107,13 @@ export interface CompileContentWorkflowOptions {
   readonly enabledHostToolIds?: ReadonlySet<string>;
   /** Capability ids the user disabled for THIS run (per-submission override). */
   readonly disabledCapabilityIds?: ReadonlySet<string>;
+  /**
+   * Capabilities the host affirms are legitimately empty, mapped to the fact
+   * being affirmed. See CapabilityAvailability: an absence nobody vouches for
+   * is treated as a defect, so this is how a run says "there is genuinely
+   * nothing here" without a required capability failing the task.
+   */
+  readonly vacantCapabilities?: ReadonlyMap<string, string>;
   /** Resolves role/technique files on first execution; defaults to bundle.skills. */
   readonly skillResolver?: SkillResolver;
   /**
@@ -1137,6 +1144,7 @@ class ContentCompiler {
   private readonly hostTools: readonly HostToolManifest[];
   private readonly enabledHostToolIds: ReadonlySet<string>;
   private readonly disabledCapabilityIds: ReadonlySet<string>;
+  private readonly vacantCapabilities: ReadonlyMap<string, string>;
   private readonly skillResolver: SkillResolver;
   /** Journal layout being compiled for (see CompileContentWorkflowOptions). */
   private readonly journalFormat: 1 | 2;
@@ -1181,6 +1189,7 @@ class ContentCompiler {
     this.hostTools = options.hostTools ?? [];
     this.enabledHostToolIds = options.enabledHostToolIds ?? new Set();
     this.disabledCapabilityIds = options.disabledCapabilityIds ?? new Set();
+    this.vacantCapabilities = options.vacantCapabilities ?? new Map();
     this.skillResolver =
       options.skillResolver ?? new BundleSkillResolver(this.bundle);
     this.journalFormat = options.journalFormat ?? 2;
@@ -1715,6 +1724,7 @@ class ContentCompiler {
         hostTools: this.hostTools,
         enabledHostToolIds: this.enabledHostToolIds,
         disabledCapabilityIds: this.disabledCapabilityIds,
+        vacantCapabilities: this.vacantCapabilities,
       };
       const capabilityPlan: ResolvedCapabilityPlan = resolveCapabilityPlan(brokerInput);
       // The tool list follows the PLAN: an operation that resolved to a host
@@ -1748,18 +1758,33 @@ class ContentCompiler {
       // is visible, diagnosable, and retryable after the deployment is
       // fixed. Degradable capabilities keep the catalog's whenUnavailable
       // prompt treatment.
+      //
+      // What it reads is the capability's VERDICT, not whether some operation
+      // found no tool. Those differ in the case that matters: a run that
+      // attached no files and a run whose attachment store this host cannot
+      // reach both leave every attachment operation without a tool, and only
+      // the second is a reason to stop. Reading the source alone is why no role
+      // could safely require attachment-access — declaring it would have failed
+      // every topic-only run — and why the one deployment that lost its store
+      // ran 442 review tasks that quietly reasoned from metadata instead.
+      //
+      // Fails on "unwired" (nobody will vouch for the absence, so it is a
+      // defect) and on "withheld" (the submitter switched off something this
+      // task cannot work without — an answerable request, not a silent
+      // degradation). Passes on "vacant" (there is legitimately nothing) and on
+      // "degraded" (part of it still works, and the prompt says which part).
       const mustHave = role.meta.requiredCapabilities ?? [];
       if (mustHave.length > 0) {
-        const missing = mustHave.filter((capabilityId) =>
-          capabilityPlan.operations.some(
-            (operation) =>
-              operation.capabilityId === capabilityId &&
-              operation.source === "unavailable",
-          ),
+        const verdicts = new Map(
+          capabilityPlan.capabilities.map((status) => [status.capabilityId, status]),
         );
+        const missing = mustHave.filter((capabilityId) => {
+          const availability = verdicts.get(capabilityId)?.availability;
+          return availability === "unwired" || availability === "withheld";
+        });
         if (missing.length > 0) {
-          const disabledByUser = missing.filter((capabilityId) =>
-            this.disabledCapabilityIds.has(capabilityId),
+          const disabledByUser = missing.filter(
+            (capabilityId) => verdicts.get(capabilityId)?.availability === "withheld",
           );
           throw new BrainstormRuntimeError(
             `node "${node.id}" (skill "${node.skill}") requires ${missing
@@ -1769,8 +1794,9 @@ class ContentCompiler {
                 ? `${disabledByUser
                     .map((capabilityId) => `"${capabilityId}"`)
                     .join(", ")} was disabled for this run; re-enable it and resubmit`
-                : "enable the backing host tools in the server settings (or run on a backend " +
-                  "that provides them)") +
+                : "nothing on this deployment backs it and nothing declared its absence, so " +
+                  "this run was wired wrong: enable the backing host tools in the server " +
+                  "settings, or run on a backend that provides them, then resume") +
               "; this task refuses to run degraded",
             "REQUIRED_CAPABILITY_UNAVAILABLE",
           );

@@ -59,6 +59,8 @@ export interface BrainstormRuntimeOptions {
   readonly hostTools?: readonly HostToolManifest[];
   /** User-enabled host tool IDs for the capability broker. */
   readonly enabledHostToolIds?: ReadonlySet<string>;
+  /** Capabilities the host affirms are legitimately empty; see the broker. */
+  readonly vacantCapabilities?: ReadonlyMap<string, string>;
   /** Capability ids the user disabled for THIS run (per-submission override). */
   readonly disabledCapabilityIds?: ReadonlySet<string>;
   /** Journal layout to compile for; see CompileContentWorkflowOptions. */
@@ -168,6 +170,7 @@ export class BrainstormRuntime {
       providerOffers: options.providerOffers,
       hostTools: options.hostTools,
       enabledHostToolIds: options.enabledHostToolIds,
+      vacantCapabilities: options.vacantCapabilities,
       disabledCapabilityIds: options.disabledCapabilityIds,
       skillResolver: options.skillResolver,
       journalFormat: options.journalFormat,

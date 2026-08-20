@@ -1978,6 +1978,15 @@ export class CursorAgentExecutor implements AgentExecutor {
             source: operation.source,
             tools: [...operation.toolNames],
           })),
+          // The verdict beside the sources, because the sources alone cannot
+          // answer the question anyone reading this record later actually has:
+          // was this task's capability legitimately empty, or was the run wired
+          // wrong? Reconstructing that from agent prose took two days once.
+          capabilityAvailability: task.capabilityPlan.capabilities.map((status) => ({
+            capability: status.capabilityId,
+            availability: status.availability,
+            ...(status.reason !== undefined ? { reason: status.reason } : {}),
+          })),
         },
       });
     }

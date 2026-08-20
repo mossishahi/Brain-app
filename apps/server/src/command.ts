@@ -91,6 +91,14 @@ export function buildOrchestrationCommand(
   // replays it from the checkpoint — but this is not.
   if (options.attachmentsManifest !== undefined) {
     args.push("--attachments-manifest", shellQuote(options.attachmentsManifest));
+  } else {
+    // The submission SAYS it carries no files, rather than leaving the worker to
+    // conclude it from finding no store. The two look identical on disk — a
+    // pruned store, a workspace the compute node cannot see, a launcher that
+    // forgot the flag — and only one of them is a run that should carry on.
+    // With the declaration, an absence nobody claims is a defect the capability
+    // guard can fail on.
+    args.push("--attachments", "none");
   }
   args.push(
     "--run-id",

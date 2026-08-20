@@ -301,6 +301,18 @@ interface AttachmentsManifestFile {
 }
 
 /**
+ * What this launch knows about the run's attachment store. Four answers, not
+ * one, because "no roots" was being asked to mean both "this submission had no
+ * files" and "this host could not open the store it was given" — and only the
+ * second is a reason to stop a run.
+ */
+type AttachmentStoreResult =
+  | { readonly store: "present"; readonly manifest: AttachmentsManifestFile }
+  | { readonly store: "declared-none" }
+  | { readonly store: "unusable" }
+  | { readonly store: "undeclared" };
+
+/**
  * Loads the server-ingested attachment manifest referenced by
  * --attachments-manifest.
  *
@@ -313,18 +325,49 @@ interface AttachmentsManifestFile {
  * pipeline: the code annotator, every panel member, and every commentor, judge
  * and reviser of the review.
  */
+/** The file entries a manifest claims it wrote, across every attachment. */
+function countDeclaredFiles(attachments: readonly unknown[]): number {
+  let total = 0;
+  for (const attachment of attachments) {
+    const files = (attachment as { files?: unknown }).files;
+    if (Array.isArray(files)) total += files.length;
+  }
+  return total;
+}
+
+/** One surviving snapshot is enough to prove the store is really there. */
+function anyDeclaredFileExists(attachments: readonly unknown[]): boolean {
+  for (const attachment of attachments) {
+    const files = (attachment as { files?: unknown }).files;
+    if (!Array.isArray(files)) continue;
+    for (const file of files) {
+      const path = (file as { path?: unknown }).path;
+      if (typeof path === "string" && existsSync(path)) return true;
+    }
+  }
+  return false;
+}
+
 /**
- * The manifest this launch will read through, recovering it from the job
- * directory when the command line forgot it — and saying so, because a
- * launcher that omits it would otherwise cost the run every file it was given
- * without a single line anywhere to show for it.
+ * The attachment store this launch will read through.
+ *
+ * `--attachments none` is the submission asserting it carries no files: the one
+ * party that owns that fact, saying it out loud, so the capability broker can
+ * treat the emptiness as legitimate instead of as a defect. Nothing else may
+ * assert it — an absence found by looking at disk is exactly the inference that
+ * made a lost store indistinguishable from an empty one.
  */
-function attachmentsManifest(args: CliArgs): string | undefined {
+function attachmentStoreFor(
+  args: CliArgs,
+  options: { readonly tolerant?: boolean } = {},
+): AttachmentStoreResult {
+  if (stringFlag(args, "attachments") === "none") return { store: "declared-none" };
   const choice = manifestPathFor(
     stringFlag(args, "attachments-manifest"),
     stringFlag(args, "events-file"),
   );
-  if (choice?.recovered === true) {
+  if (choice === undefined) return { store: "undeclared" };
+  if (choice.recovered) {
     console.error(
       `[attachments] this launch named no --attachments-manifest; using the store ` +
         `found in the job directory (${choice.path}). The submission that started ` +
@@ -332,7 +375,8 @@ function attachmentsManifest(args: CliArgs): string | undefined {
         `submitted files cannot be read.`,
     );
   }
-  return choice?.path;
+  const manifest = loadAttachmentsManifest(choice.path, options);
+  return manifest ? { store: "present", manifest } : { store: "unusable" };
 }
 
 function loadAttachmentsManifest(
@@ -376,6 +420,22 @@ function loadAttachmentsManifest(
     console.error(
       `[attachments] the manifest's store "${parsed.baseDir}" does not exist on this host; ` +
         "continuing with no attachment access rather than offering reads that must fail",
+    );
+    return undefined;
+  }
+  // A directory that survived its contents is the sharpest version of this
+  // whole failure: the store opens, the inventory comes back empty, and an
+  // empty inventory is indistinguishable from a submission that attached
+  // nothing — so a pruned or half-mounted store would read as legitimate and
+  // put the run back where it started, reasoning about files it cannot see.
+  // The manifest says how many files it wrote; if it wrote any, at least one
+  // has to still be there.
+  const declaredFiles = countDeclaredFiles(parsed.attachments);
+  if (declaredFiles > 0 && !anyDeclaredFileExists(parsed.attachments)) {
+    console.error(
+      `[attachments] the manifest declares ${declaredFiles} file(s) under ` +
+        `"${parsed.baseDir}" and none of them exist on this host; treating the store as ` +
+        "unusable rather than as an empty one — the run was given files it cannot read",
     );
     return undefined;
   }
@@ -898,9 +958,7 @@ async function main(): Promise<void> {
       process.exitCode = 2;
       return;
     }
-    const manifest = loadAttachmentsManifest(
-      attachmentsManifest(args),
-    );
+    const attachments = attachmentStoreFor(args);
     const runId = stringFlag(args, "run-id") ?? newRunId();
     mkdirSync(join(sessionRoot, runId), { recursive: true });
     // An interrupted job resubmitted before its first checkpoint arrives as a
@@ -933,7 +991,10 @@ async function main(): Promise<void> {
       autoApproveGates: autoApprove,
       ...(dismissedMembers.length > 0 ? { dismissedMembers } : {}),
       ...(windDown !== undefined ? { windDown } : {}),
-      ...(manifest ? { attachmentRoots: [manifest.baseDir] } : {}),
+      ...(attachments.store === "present"
+        ? { attachmentRoots: [attachments.manifest.baseDir] }
+        : {}),
+      attachmentStore: attachments.store,
       ...(taxonomy ? { taxonomy } : {}),
       ...(codeEnvironment ? { codeEnvironment } : {}),
       ...(gpuRun ? { gpuRun } : {}),
@@ -948,7 +1009,9 @@ async function main(): Promise<void> {
         runId,
         submission: {
           prompt: topic,
-          attachments: (manifest?.attachments ?? []) as unknown as JsonValue,
+          attachments: (attachments.store === "present"
+            ? attachments.manifest.attachments
+            : []) as unknown as JsonValue,
         },
         ...(params !== undefined ? { params } : {}),
       });
@@ -1016,12 +1079,13 @@ async function main(): Promise<void> {
     // The attachment store is a resource of the JOB, not an input of the first
     // submission: a resume must read through the same roots or every agent after
     // it is told the submitted files are unavailable.
-    const manifest = loadAttachmentsManifest(
-      attachmentsManifest(args),
-      // A resume carries journalled work: losing attachment access is a
-      // degradation to report, never a reason to strand the run.
-      { tolerant: true },
-    );
+    const attachments = attachmentStoreFor(args, {
+      // A resume carries journalled work: an unreadable manifest is reported
+      // rather than thrown, so the run reaches the capability guard — which
+      // fails it loudly at the first task that cannot work without files —
+      // instead of dying at startup with hours of journal behind it.
+      tolerant: true,
+    });
     const artifacts = new FsArtifactStore(sessionRoot, runId, fsStoreOptions(process.env));
     const taxonomy = taxonomyForRun(lazy, contentDir!, sessionRoot, runId);
     const codeEnvironment = await prepareRunCodeEnvironment(
@@ -1037,7 +1101,10 @@ async function main(): Promise<void> {
       autoApproveGates: resumeAutoApprove,
       ...(dismissedMembers.length > 0 ? { dismissedMembers } : {}),
       ...(windDown !== undefined ? { windDown } : {}),
-      ...(manifest ? { attachmentRoots: [manifest.baseDir] } : {}),
+      ...(attachments.store === "present"
+        ? { attachmentRoots: [attachments.manifest.baseDir] }
+        : {}),
+      attachmentStore: attachments.store,
       ...(taxonomy ? { taxonomy } : {}),
       ...(codeEnvironment ? { codeEnvironment } : {}),
       ...(gpuRun ? { gpuRun } : {}),
