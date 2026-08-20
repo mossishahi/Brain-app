@@ -96,3 +96,55 @@ export function revealStep(current: number, target: number, elapsedMs: number): 
   const perMs = Math.max((target - from) / REVEAL_CATCH_UP_MS, 0.03);
   return Math.min(target, from + Math.max(1, Math.round(perMs * Math.max(elapsedMs, 0))));
 }
+
+/** One live thread as a review card needs it. */
+export interface LiveReviewThread {
+  readonly text: string;
+  readonly role?: string;
+  readonly actor?: string;
+  readonly where?: { readonly seat?: string; readonly step?: number; readonly round?: number };
+}
+
+/**
+ * Where a step's live threads belong.
+ *
+ * THE RULE: live text never gets a place of its own — it occupies the place of
+ * the output it is producing, and is replaced by that output when it lands. A
+ * redeveloper is writing the step's NEXT version, so its words belong in the
+ * next card of the deck; a commenter or a judge is writing a comment or a
+ * judgement, so theirs belong in the panel where those appear, under the same
+ * name. Anything else puts a second copy of the work on screen, in a box that
+ * has to be mentally matched to the thing it will become.
+ */
+export function liveDestinations(
+  threads: readonly LiveReviewThread[],
+  step: number,
+): {
+  readonly writingNextVersion: LiveReviewThread | undefined;
+  readonly reviewers: readonly LiveReviewThread[];
+} {
+  const here = threads.filter(
+    (thread) => thread.where?.step === undefined || thread.where.step === step,
+  );
+  return {
+    writingNextVersion: here.find((thread) => thread.role === "Redeveloper"),
+    reviewers: here.filter((thread) => thread.role !== "Redeveloper"),
+  };
+}
+
+/**
+ * The reviewers whose live text still has something to say: the ones whose
+ * comment has NOT landed. Once it has, the comment is the thing to read and the
+ * thread is gone — the same rule as everywhere else, applied per reviewer
+ * rather than per card, because a round's comments land one at a time.
+ */
+export function pendingReviewers(
+  landedLabels: readonly string[],
+  threads: readonly LiveReviewThread[],
+): readonly LiveReviewThread[] {
+  const landed = new Set(landedLabels);
+  return threads.filter(
+    (thread) =>
+      thread.role !== "Judge" && thread.actor !== undefined && !landed.has(thread.actor),
+  );
+}

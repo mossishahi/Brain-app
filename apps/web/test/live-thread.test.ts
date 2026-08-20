@@ -6,6 +6,8 @@ import type { LiveTextEntry } from "@brainstorm-agentic/protocol";
 import {
   MAX_REVEAL_LAG_CHARS,
   applyLiveEntries,
+  liveDestinations,
+  pendingReviewers,
   revealStep,
   type LiveThread,
 } from "../src/components/live-threads.js";
@@ -116,4 +118,60 @@ test("a thread never rewinds, never overshoots, and never stalls", () => {
   assert.equal(revealStep(9, 10, 1), 10, "one character left still lands, whatever the maths");
   assert.equal(revealStep(0, 100, 0), 1, "a zero-length frame still moves by one");
   assert.ok(revealStep(0, 100, -5) >= 1, "a clock that went backwards does not");
+});
+
+/* --------------------------------------------- where live text is allowed to go */
+
+test("live text goes to the place its own output will take, never a new one", () => {
+  // The rule, stated as a test: a redeveloper is writing the step's NEXT
+  // version, so its words belong in the next card of the deck; a commenter or
+  // judge is writing a comment or a judgement, so theirs belong in the panel
+  // where those land. A box of its own would put the work on screen twice.
+  const threads = [
+    { text: "rewriting", role: "Redeveloper", actor: "Seat 4", where: { step: 7 } },
+    { text: "commenting", role: "Commenter", actor: "Seat 2", where: { step: 7 } },
+    { text: "judging", role: "Judge", where: { step: 7 } },
+  ];
+  const here = liveDestinations(threads, 7);
+  assert.equal(here.writingNextVersion?.actor, "Seat 4", "the redeveloper writes the next card");
+  assert.deepEqual(
+    here.reviewers.map((t) => t.role),
+    ["Commenter", "Judge"],
+    "everyone else is writing into the review panel",
+  );
+});
+
+test("a step only shows the threads that belong to it", () => {
+  const threads = [
+    { text: "on step 7", role: "Redeveloper", actor: "Seat 4", where: { step: 7 } },
+    { text: "on step 6", role: "Commenter", actor: "Seat 2", where: { step: 6 } },
+    { text: "no step recorded", role: "Commenter", actor: "Seat 3" },
+  ];
+  const six = liveDestinations(threads, 6);
+  assert.equal(six.writingNextVersion, undefined, "step 7's redeveloper is not step 6's");
+  assert.deepEqual(
+    six.reviewers.map((t) => t.actor),
+    ["Seat 2", "Seat 3"],
+    "a thread with no step recorded is shown rather than dropped",
+  );
+});
+
+test("a landed comment replaces its author's live thread, one reviewer at a time", () => {
+  // A round's comments land one at a time, so the rule applies per reviewer:
+  // the moment Seat 1's comment exists, its thread has nothing left to say.
+  const threads = [
+    { text: "…", role: "Commenter", actor: "Seat 1" },
+    { text: "…", role: "Commenter", actor: "Seat 2" },
+    { text: "…", role: "Judge" },
+  ];
+  assert.deepEqual(
+    pendingReviewers(["Seat 1"], threads).map((t) => t.actor),
+    ["Seat 2"],
+    "the landed author drops out; the judge is handled by its own tab",
+  );
+  assert.deepEqual(
+    pendingReviewers(["Seat 1", "Seat 2"], threads).map((t) => t.actor),
+    [],
+    "and when every comment has landed, no thread is left",
+  );
 });

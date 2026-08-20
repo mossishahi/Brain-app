@@ -216,6 +216,19 @@ One stage shows at a time, and the two steppers under the panel — "← First p
 hovered, when the name underlines. They sit outside every panel, on the page background, where a
 bordered button read as a control belonging to the panel above it rather than as a way out of it.
 
+**Live text never gets a place of its own — it occupies the place of the output it is producing, and
+is replaced by that output the moment it lands.** This is the rule, and it decides every position:
+- a first-pass seat's words fill the card its idea will fill;
+- a REDEVELOPER is writing the step's next version, so its words are the next CARD OF THE DECK,
+  titled with the round it will become and marked "being written now" — the deck opens on it, so a
+  reader watching a run is watching the version being written;
+- a COMMENTER or the JUDGE is writing a comment or a judgement, so their words sit in the comments
+  panel under their own name, beside the reviewers whose comments have already landed, each with a
+  live dot. A landed comment replaces its author's thread individually, because a round's comments
+  land one at a time.
+A box beside the card would put the same work on screen twice and leave the reader to match the
+preview to the thing it becomes.
+
 **A task that is working shows what it is saying, not the word "thinking".** While a first-pass seat
 develops its idea, or a commenter/judge/redeveloper works on a step, the card carries a LIVE THREAD:
 the words the model is producing, appended as they arrive, readable as prose and scrollable inside a

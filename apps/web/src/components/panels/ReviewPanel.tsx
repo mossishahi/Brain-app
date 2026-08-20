@@ -37,6 +37,11 @@ import {
 } from "../../latex";
 import { LATEX_STYLE } from "../../latex-style";
 import { EvidenceBlock, LiveThread, TokenChip } from "../common";
+import {
+  liveDestinations,
+  pendingReviewers,
+  type LiveReviewThread,
+} from "../live-threads";
 import { BackIcon, CopyIcon, DownloadIcon, ForwardIcon } from "../Icons";
 import { IdeaTabs } from "./FirstPassPanel";
 import {
@@ -466,6 +471,7 @@ function verdictClass(verdict: string | undefined): string {
 
 function CommentsPanel({
   round,
+  live,
   open,
   onToggle,
   selected,
@@ -476,18 +482,39 @@ function CommentsPanel({
    * the one that produced it. A round comments on the text it was handed and
    * only then redevelops, so pairing a card with its OWN round's comments
    * showed every reviewer against a version written in reply to them.
+   *
+   * Absent while the review of this version is still running and nothing has
+   * landed: the panel then holds only what is being written.
    */
-  round: ReviewRoundView;
+  round?: ReviewRoundView;
+  /**
+   * Reviewers WORKING on this version right now. A comment's place is this
+   * panel, so that is where its author's live text belongs — under the same
+   * name, in the same body, replaced by the comment the moment it lands.
+   */
+  live?: readonly LiveReviewThread[];
   open: boolean;
   onToggle: () => void;
   selected: string;
   onSelect: (tag: string) => void;
 }) {
+  const comments = round?.comments ?? [];
   const labelOf = (commentorId: string): string =>
-    round.comments.find((c) => c.commentorId === commentorId)?.commentorLabel ?? commentorId;
-  const active = selected === "judge" || round.comments.some((c) => c.commentorId === selected)
-    ? selected
-    : "judge";
+    comments.find((c) => c.commentorId === commentorId)?.commentorLabel ?? commentorId;
+  // A reviewer whose comment has landed is shown by its comment; only the ones
+  // still writing need a live tab, and the judge has its own.
+  const liveJudge = (live ?? []).find((thread) => thread.role === "Judge");
+  const liveReviewers = pendingReviewers(
+    comments.map((c) => c.commentorLabel),
+    live ?? [],
+  );
+  const liveTag = (thread: LiveReviewThread): string => `live:${thread.actor ?? "agent"}`;
+  const tags = new Set<string>([
+    "judge",
+    ...comments.map((c) => c.commentorId),
+    ...liveReviewers.map(liveTag),
+  ]);
+  const active = tags.has(selected) ? selected : "judge";
   // Selecting a name shows that reviewer — opening the panel if it was folded.
   const pick = (tag: string): void => {
     onSelect(tag);
@@ -513,14 +540,17 @@ function CommentsPanel({
             type="button"
             role="tab"
             aria-selected={open && active === "judge"}
-            className={`reviewer-name ${verdictClass(round.decision?.verdict)}${
+            className={`reviewer-name ${verdictClass(round?.decision?.verdict)}${
               open && active === "judge" ? " reviewer-name-selected" : ""
             }`}
             onClick={() => pick("judge")}
           >
             Judge
+            {liveJudge !== undefined && round?.decision === undefined && (
+              <span className="dot dot-accent pulse reviewer-live" aria-label="writing now" />
+            )}
           </button>
-          {round.comments.map((comment) => (
+          {comments.map((comment) => (
             <button
               key={comment.commentorId}
               type="button"
@@ -534,26 +564,49 @@ function CommentsPanel({
               {comment.commentorLabel}
             </button>
           ))}
+          {/* Still writing: the same row, the same place its comment will take. */}
+          {liveReviewers.map((thread) => (
+            <button
+              key={liveTag(thread)}
+              type="button"
+              role="tab"
+              aria-selected={open && active === liveTag(thread)}
+              className={`reviewer-name reviewer-name-dim${
+                open && active === liveTag(thread) ? " reviewer-name-selected" : ""
+              }`}
+              onClick={() => pick(liveTag(thread))}
+            >
+              {thread.actor}
+              <span className="dot dot-accent pulse reviewer-live" aria-label="writing now" />
+            </button>
+          ))}
         </span>
         <span className="round-card-actions">
           <CopyButton
             label="copy this view for a bug report"
-            text={() => commentCopyText(active, round)}
+            text={() => (round ? commentCopyText(active, round) : "nothing has landed yet")}
           />
         </span>
       </summary>
       {open && (
         <div className="review-fold-body">
           {active === "judge" ? (
-            round.decision ? (
+            round?.decision ? (
               <JudgeContent decision={round.decision} labelOf={labelOf} />
+            ) : liveJudge ? (
+              // The judgement is being written; this is where it will appear.
+              <LiveThread text={liveJudge.text} label="Judge" />
             ) : (
               <p className="dim small">judgement in progress — comments land first</p>
             )
           ) : (
             (() => {
-              const comment = round.comments.find((c) => c.commentorId === active);
-              return comment ? <CommentContent comment={comment} /> : null;
+              const comment = comments.find((c) => c.commentorId === active);
+              if (comment) return <CommentContent comment={comment} />;
+              const thread = liveReviewers.find((t) => liveTag(t) === active);
+              return thread ? (
+                <LiveThread text={thread.text} label={thread.actor ?? "reviewer"} />
+              ) : null;
             })()
           )}
         </div>
@@ -668,48 +721,11 @@ function crossReportText(
  * are their own cards, labeled with the walk position that caused them; the
  * step's own "Round k / K" numbering never shifts around them.
  */
-/** One live thread as the review panel needs it. */
-export interface LiveReviewThread {
-  readonly text: string;
-  readonly role?: string;
-  readonly actor?: string;
-  readonly where?: { readonly seat?: string; readonly step?: number; readonly round?: number };
-}
-
-/**
- * The threads for one step of one seat: every agent currently working on it,
- * each labelled with what it is and who. This is what a reader watches instead
- * of an unmoving "round 3 in progress" — and each thread vanishes the moment its
- * task's output exists, replaced by the card that shows the output.
- */
-function LiveThreads({
-  threads,
-  step,
-}: {
-  threads: readonly LiveReviewThread[];
-  step: number;
-}) {
-  const here = threads.filter(
-    (thread) => thread.where?.step === undefined || thread.where.step === step,
-  );
-  if (here.length === 0) return null;
-  return (
-    <div className="review-live">
-      {here.map((thread, index) => (
-        <LiveThread
-          key={`${thread.actor ?? thread.role ?? "agent"}:${index}`}
-          text={thread.text}
-          label={[thread.role, thread.actor].filter(Boolean).join(" · ") || "thinking aloud"}
-        />
-      ))}
-    </div>
-  );
-}
-
 function RoundDeck({
   member,
   step,
   timeline,
+  live,
   selectedEntry,
   onSelectEntry,
   onJump,
@@ -718,6 +734,8 @@ function RoundDeck({
   member: ReviewMemberView;
   step: ReviewStepView;
   timeline: SeatTimeline;
+  /** What is being written for this step right now; see liveDestinations. */
+  live?: readonly LiveReviewThread[];
   selectedEntry: string | undefined;
   onSelectEntry: (key: string) => void;
   /** Open another step's deck at one of its cards, and scroll to it. */
@@ -730,36 +748,57 @@ function RoundDeck({
   };
 }) {
   const deck = deckEntries(step, timeline);
+  const { writingNextVersion, reviewers } = liveDestinations(live ?? [], step.index);
   if (deck.length === 0) {
     const text = timeline.chain.get(step.index);
     return (
       <div className="round-card round-card-pending">
         <p className="dim small">{pendingNote(member, step)}</p>
-        {text !== undefined && <p className="round-text diff-keep-block">{text}</p>}
+        {writingNextVersion !== undefined ? (
+          <LiveThread text={writingNextVersion.text} label="being written" />
+        ) : (
+          text !== undefined && <p className="round-text diff-keep-block">{text}</p>
+        )}
       </div>
     );
   }
-  // Newest on top: the default card is the deck's last (most recent) entry —
-  // the step's standing text, whichever review wrote it.
+  // The version being written right now is a CARD of this deck, not a box
+  // beside it: the redeveloper's words occupy the place its output will take,
+  // and are replaced by that output the moment it lands. It sits last, so the
+  // deck opens on it — which is what a reader watching a run wants to see.
+  const pending = writingNextVersion;
+  const slots = pending === undefined ? deck.length : deck.length + 1;
+  const nextRound =
+    deck.reduce((max, e) => Math.max(max, e.editRound ?? 0), 0) + 1;
+  // Newest on top: the default card is the last slot — the step's standing
+  // text, or the version being written for it.
   const selectedIndex =
-    selectedEntry !== undefined
-      ? deck.findIndex((entry) => entry.key === selectedEntry)
-      : -1;
-  const position = selectedIndex >= 0 ? selectedIndex : deck.length - 1;
-  const entry = deck[position]!;
+    selectedEntry === "pending" && pending !== undefined
+      ? deck.length
+      : selectedEntry !== undefined
+        ? deck.findIndex((entry) => entry.key === selectedEntry)
+        : -1;
+  const position = selectedIndex >= 0 ? selectedIndex : slots - 1;
+  const entry = deck[position];
   // The review performed ON this version — see reviewedBy.
   const review = reviewedBy(deck, position);
+  const newest = position === slots - 1;
+  // Reviewers writing right now belong to the version they are READING, which
+  // is the newest card — the same panel their comments will land in.
+  const liveHere = newest ? reviewers : [];
   const reviewFold = (key: string): ReactNode =>
-    review === undefined ? undefined : (
+    review === undefined && liveHere.length === 0 ? undefined : (
       <CommentsPanel
-        round={review}
+        {...(review !== undefined ? { round: review } : {})}
+        {...(liveHere.length > 0 ? { live: liveHere } : {})}
         open={commentState.open(key)}
         onToggle={() => commentState.toggle(key)}
         selected={commentState.tag(key)}
         onSelect={(tag) => commentState.select(key, tag)}
       />
     );
-  const newest = position === deck.length - 1;
+  const keyAt = (index: number): string =>
+    index >= deck.length ? "pending" : deck[index]!.key;
   // The pager arrows hug the card title — exactly the seat pager's pattern —
   // so paging a step's history reads the same as paging seats.
   const olderButton = (
@@ -768,7 +807,7 @@ function RoundDeck({
       className="ghost-btn"
       aria-label="older version of this step"
       disabled={position === 0}
-      onClick={() => onSelectEntry(deck[position - 1]!.key)}
+      onClick={() => onSelectEntry(keyAt(position - 1))}
     >
       <BackIcon size={16} />
     </button>
@@ -779,11 +818,30 @@ function RoundDeck({
       className="ghost-btn"
       aria-label="newer version of this step"
       disabled={newest}
-      onClick={() => onSelectEntry(deck[position + 1]!.key)}
+      onClick={() => onSelectEntry(keyAt(position + 1))}
     >
       <ForwardIcon size={16} />
     </button>
   );
+
+  // The card for the version being written: the same frame its output will
+  // have, with the words as they arrive in the body the output will fill.
+  if (entry === undefined && pending !== undefined) {
+    return (
+      <div className="round-card" key="pending">
+        <div className="round-card-head">
+          {olderButton}
+          <span className="review-fold-name">
+            Round <span className="round-num-active">{nextRound}</span>
+          </span>
+          {newerButton}
+          <span className="review-step-meta">being written now</span>
+        </div>
+        <LiveThread text={pending.text} label={pending.actor ?? "redeveloper"} />
+      </div>
+    );
+  }
+  if (entry === undefined) return null;
 
   if (entry.kind === "original") {
     // The base every later version is measured against: the step's
@@ -1234,13 +1292,11 @@ export function ReviewStagePanels({
                           <span className="dim"> / {seat.steps.length}</span>
                         </span>
                       </div>
-                      {liveFor.length > 0 && (
-                        <LiveThreads threads={liveFor} step={step.index} />
-                      )}
                       <RoundDeck
                         member={seat}
                         step={step}
                         timeline={timeline}
+                        live={liveFor}
                         selectedEntry={roundChoices.get(choiceKey)}
                         onSelectEntry={(key) =>
                           setRoundChoices((prev) => {

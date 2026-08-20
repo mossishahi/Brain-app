@@ -5308,10 +5308,10 @@ section.drawer-section:not(.drawer-updates) {
   overflow-wrap: anywhere;
 }
 
-/* Live threads inside a review step card: stacked, one per agent working on it. */
-.review-live {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-bottom: 8px;
+/* A reviewer still writing: the same name row as one whose comment landed, with
+   a live dot after it. No separate place — the comment's own tab is its place. */
+.reviewer-live {
+  margin-left: 5px;
+  width: 5px;
+  height: 5px;
 }
