@@ -33,6 +33,7 @@ import {
   resumePausedJob,
 } from "../api";
 import { jobDot, jobStatusLine } from "../format";
+import { runIsLive } from "../liveness";
 import { Dot } from "./common";
 import {
   CopyIcon,
@@ -44,6 +45,7 @@ import {
   StopIcon,
 } from "./Icons";
 import { PipelineGraph } from "./PipelineGraph";
+import { RunScope } from "./run-liveness";
 import {
   ProviderOnboarding,
   onboardingDismissed,
@@ -76,11 +78,12 @@ function JobCard({ job }: { readonly job: JobSummary }) {
         .catch(() => undefined);
     };
     load();
-    const terminal =
-      job.status === "completed" ||
-      job.status === "failed" ||
-      job.status === "cancelled";
-    if (terminal) {
+    // One refresh always; the repeat only for a run that is actually moving.
+    // This used to name the terminal statuses by hand and so kept polling a
+    // paused run forever — five seconds of network, for ever, for a snapshot
+    // that cannot change until the submitter says so. The status is in the
+    // effect's deps, so a resume starts it again.
+    if (!runIsLive(job.status)) {
       return () => {
         live = false;
       };
@@ -175,7 +178,8 @@ function JobCard({ job }: { readonly job: JobSummary }) {
   };
 
   return (
-    <li className="job-card">
+    // The card scopes one run: its embedded flow stills when that run does.
+    <RunScope as="li" status={job.status} className="job-card">
       <button
         type="button"
         className={`job-card-main${expanded ? " job-expand-open" : ""}`}
@@ -326,7 +330,7 @@ function JobCard({ job }: { readonly job: JobSummary }) {
           />
         </div>
       </div>
-    </li>
+    </RunScope>
   );
 }
 

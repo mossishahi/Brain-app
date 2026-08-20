@@ -15,6 +15,7 @@ import {
 import { errorMessage } from "../../api";
 import { formatClock } from "../../format";
 import { SeatCard } from "../common";
+import { useRunAttended } from "../run-liveness";
 
 /**
  * The auto-approve countdown: a thin warn-colored bar filling toward the
@@ -31,11 +32,18 @@ export function AutoApproveBar({
   totalMs: number;
   onPause: () => void;
 }) {
+  // A deadline is only worth counting down while someone will act on it. The
+  // server passes over a paused (or stopped) run when it approves due gates,
+  // so on one of those this bar was a promise nothing would keep — and a
+  // 200ms interval kept re-rendering to make it.
+  const attended = useRunAttended();
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
+    if (!attended) return;
     const timer = window.setInterval(() => setNow(Date.now()), 200);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [attended]);
+  if (!attended) return null;
   const remainingMs = Math.max(0, deadlineAt - now);
   const progress = Math.min(100, Math.max(0, 100 * (1 - remainingMs / totalMs)));
   return (

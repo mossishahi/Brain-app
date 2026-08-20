@@ -4,6 +4,8 @@
  * tree the search grounded.
  */
 import { useState } from "react";
+
+import { useRunLive } from "../run-liveness";
 import type {
   DecomposeStage,
   DecomposeStepView,
@@ -19,13 +21,16 @@ import type {
  * grounding and tree exist.
  */
 function StepStrip({ steps }: { steps: readonly DecomposeStepView[] }) {
+  // The step keeps its "active" class (that is where the stage resumes) and
+  // loses the word that says it is moving.
+  const live = useRunLive();
   return (
     <ol className="decompose-steps">
       {steps.map((step) => (
         <li key={step.id} className={`decompose-step ${step.status}`}>
           <span className="decompose-step-dot" aria-hidden />
           <span className="decompose-step-label">{step.label}</span>
-          {step.status === "active" && (
+          {step.status === "active" && live && (
             <span className="decompose-step-live">running…</span>
           )}
           {step.detail && (

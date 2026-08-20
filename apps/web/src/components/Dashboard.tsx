@@ -39,6 +39,7 @@ import {
   stageDot,
   STAGE_TITLES,
 } from "../format";
+import { runIsLive } from "../liveness";
 import { ActivityFeed, Dot, SkeletonLines, TokenChip } from "./common";
 import {
   BackIcon,
@@ -50,6 +51,7 @@ import {
   StopIcon,
 } from "./Icons";
 import { PipelineGraph } from "./PipelineGraph";
+import { RunScope, useRunLive } from "./run-liveness";
 import { SendDiagnostics } from "./SendDiagnostics";
 import {
   ClassificationDecided,
@@ -73,6 +75,17 @@ function stageOf<K extends StageId>(
 ): Extract<StageView, { readonly id: K }> | undefined {
   return job.stages.find((s): s is Extract<StageView, { readonly id: K }> => s.id === id);
 }
+
+/**
+ * The dashboard frame with NO run inside it — the loading skeleton and the
+ * load error. Named, because the run's own frame is a <RunScope>, and a bare
+ * div carrying the dash class would be a run page that silently lost its
+ * liveness scope; test/liveness-wiring.test.ts forbids that literal.
+ */
+const NO_RUN_PAGE = "dash";
+
+/** One shared empty map, so a stopped run re-renders nothing per frame. */
+const NO_LIVE_THREADS: ReadonlyMap<string, LiveThread> = new Map();
 
 function useNow(enabled: boolean): number {
   const [now, setNow] = useState(() => Date.now());
@@ -157,6 +170,10 @@ function StageFrame({
   actions?: ReactNode;
   children: ReactNode;
 }) {
+  // A stage describes where the work stands; only the run knows whether it is
+  // moving. Both are needed here: an "active" stage on a paused run keeps its
+  // status word and loses its clock.
+  const live = useRunLive();
   if (status === "pending") {
     return (
       <section ref={refCb} className={`stage stage-collapsed${selected ? " stage-selected" : ""}`}>
@@ -165,7 +182,7 @@ function StageFrame({
       </section>
     );
   }
-  const running = status === "active" || status === "suspended";
+  const running = (status === "active" || status === "suspended") && live;
   const end = finishedAt ?? (running ? now : fallbackEnd);
   const elapsed = startedAt !== undefined ? Math.max(0, end - startedAt) : undefined;
   const bodyId = `stage-body-${id}`;
@@ -206,9 +223,9 @@ function StageFrame({
         {expanded && (
           <>
             <StageErrors errors={errors} error={error} />
-            <ActivityFeed entries={activity ?? []} active={status === "active"} now={now} />
+            <ActivityFeed entries={activity ?? []} active={status === "active" && live} now={now} />
             {children ??
-              (status === "active" && (activity?.length ?? 0) === 0 ? (
+              (status === "active" && live && (activity?.length ?? 0) === 0 ? (
                 <SkeletonLines />
               ) : null)}
           </>
@@ -220,7 +237,7 @@ function StageFrame({
 
 function DashboardSkeleton() {
   return (
-    <div className="dash">
+    <div className={NO_RUN_PAGE}>
       <div className="skeleton" style={{ marginTop: 48 }}>
         <div className="skeleton-line" style={{ width: "38%" }} />
         <div className="skeleton-line" style={{ width: "100%", height: 64 }} />
@@ -353,29 +370,39 @@ export function Dashboard({
   });
 
   /**
+   * Streamed text is liveness in data form: it exists only while an agent is
+   * mid-thought. The moment the run stops, the threads standing in the page are
+   * the last words of a worker that no longer exists — they are dropped, and
+   * the place they held goes back to the output that will replace them on the
+   * resume. Derived rather than cleared, so a frame arriving a beat after the
+   * pause cannot put them back.
+   */
+  const liveNow = job !== null && runIsLive(job.status) ? live : NO_LIVE_THREADS;
+
+  /**
    * Live threads addressed by what the page is showing: a first-pass card is a
    * SEAT thinking about its own idea; a review card is a step being worked on by
    * several agents at once, so those group by the seat under review.
    */
   const liveByThinker = useMemo(() => {
     const out = new Map<string, string>();
-    for (const [id, thread] of live) {
+    for (const [id, thread] of liveNow) {
       if (thread.role !== "Thinker" || thread.actorId === undefined) continue;
       if (!id.includes("first-pass")) continue;
       out.set(thread.actorId, thread.text);
     }
     return out;
-  }, [live]);
+  }, [liveNow]);
   const liveByReviewedSeat = useMemo(() => {
     const out = new Map<string, LiveThread[]>();
-    for (const [id, thread] of live) {
+    for (const [id, thread] of liveNow) {
       if (thread.seatId === undefined || id.includes("first-pass")) continue;
       const list = out.get(thread.seatId) ?? [];
       list.push(thread);
       out.set(thread.seatId, list);
     }
     return out;
-  }, [live]);
+  }, [liveNow]);
 
   const runControl = useRunControl(job, jobId);
 
@@ -505,7 +532,7 @@ export function Dashboard({
   if (!job) {
     if (loadError) {
       return (
-        <div className="dash">
+        <div className={NO_RUN_PAGE}>
           <div className="page-error">
             <p>Could not load this job: {loadError}</p>
             <a href="#/">← back to all jobs</a>
@@ -612,7 +639,9 @@ export function Dashboard({
   };
 
   return (
-    <div className="dash">
+    // Everything about this run hangs off one scope: the stylesheet stills its
+    // animations through data-run-live, components ask useRunLive().
+    <RunScope status={job.status} className="dash">
       {/* The state strip renders ONLY for attention states — amber shimmer
           while waiting for the queue, red when failed/interrupted — so a
           retry is VISIBLE the moment the server accepts it. Healthy states
@@ -950,6 +979,6 @@ export function Dashboard({
         );
       })()}
 
-    </div>
+    </RunScope>
   );
 }

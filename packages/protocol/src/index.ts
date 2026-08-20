@@ -860,6 +860,40 @@ export type JobStatus =
    */
   | "paused";
 
+/**
+ * Is this run executing right now?
+ *
+ * The one question behind every "something is happening" claim the UI makes —
+ * a pulsing dot, a blinking cell, a ticking clock, a streamed thought. It has
+ * to be asked of the RUN, because nothing else in a snapshot answers it: a
+ * paused run's stages still read "active" and its steps still read "under
+ * review", which is correct — that is where it resumes — and a stopped run's
+ * do too. Only the status changes.
+ *
+ * Stated here rather than in the app so the server and the page cannot drift:
+ * the server stops streaming live text on the same answer the page stops
+ * animating on.
+ */
+export function jobIsExecuting(status: JobStatus): boolean {
+  switch (status) {
+    case "running":
+      return true;
+    // Queued is not executing: the scheduler holds the job and no worker
+    // exists yet. Suspended and credit-blocked are waits, paused is the
+    // submitter's own, orphaned is a worker that died, and the last three are
+    // over.
+    case "queued":
+    case "paused":
+    case "suspended":
+    case "credit-blocked":
+    case "orphaned":
+    case "completed":
+    case "failed":
+    case "cancelled":
+      return false;
+  }
+}
+
 export type RunnerKind = "slurm" | "local";
 
 export interface JobSummary {

@@ -37,6 +37,7 @@ import {
 } from "../../latex";
 import { LATEX_STYLE } from "../../latex-style";
 import { EvidenceBlock, LiveThread, TokenChip } from "../common";
+import { useRunLive } from "../run-liveness";
 import {
   liveDestinations,
   pendingReviewers,
@@ -656,9 +657,17 @@ function bugReportText(
  * — the seat read as idle while six reviewers were mid-flight on it. The
  * seat's live position says otherwise, so it is what the card reports.
  */
-function pendingNote(member: ReviewMemberView, step: ReviewStepView): string {
+function pendingNote(
+  member: ReviewMemberView,
+  step: ReviewStepView,
+  live: boolean,
+): string {
   const at = member.progress;
   if (at?.step === step.index) {
+    // The seat's position survives a pause — that is where it resumes — so
+    // only the tense changes. "Unfinished", never "stopped": stopping is a
+    // different button and a different fate.
+    if (!live) return `round ${at.round} — unfinished`;
     const doing =
       at.phase === "judging"
         ? "the judge is ruling"
@@ -668,7 +677,9 @@ function pendingNote(member: ReviewMemberView, step: ReviewStepView): string {
     return `round ${at.round} in progress — ${doing}`;
   }
   if (step.outcome === "under-review") {
-    return "round 1 in progress — comments are being gathered";
+    return live
+      ? "round 1 in progress — comments are being gathered"
+      : "round 1 — unfinished";
   }
   return "not yet reviewed";
 }
@@ -748,12 +759,13 @@ function RoundDeck({
   };
 }) {
   const deck = deckEntries(step, timeline);
+  const runLive = useRunLive();
   const { writingNextVersion, reviewers } = liveDestinations(live ?? [], step.index);
   if (deck.length === 0) {
     const text = timeline.chain.get(step.index);
     return (
       <div className="round-card round-card-pending">
-        <p className="dim small">{pendingNote(member, step)}</p>
+        <p className="dim small">{pendingNote(member, step, runLive)}</p>
         {writingNextVersion !== undefined ? (
           <LiveThread text={writingNextVersion.text} label="being written" />
         ) : (

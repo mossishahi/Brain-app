@@ -68,6 +68,7 @@ import {
   type StageView,
   type TokenUsageView,
 } from "@brainstorm-agentic/protocol";
+import { jobIsExecuting } from "@brainstorm-agentic/protocol";
 
 import {
   mergeRedevelopment,
@@ -2651,10 +2652,13 @@ export function buildJobDetail(input: MapperInput): JobDetail {
   }
 
   const firstPassActive = activePaths(events);
-  // A task that was mid-flight when the run credit-blocked is paused, not
-  // thinking: nothing is executing until the auto-resume fires.
-  const creditBlocked =
-    checkpoint?.status === "credit_blocked" || input.status === "credit-blocked";
+  // A task that was mid-flight when the run stopped is paused, not thinking:
+  // nothing is executing until it starts again. This was written for the
+  // credit block alone, and so a run the submitter paused kept its seats
+  // saying "thinking…" — the chip for exactly this state already existed and
+  // only one status could reach it.
+  const notExecuting =
+    checkpoint?.status === "credit_blocked" || !jobIsExecuting(input.status);
   // What each seat's first-pass task(s) spent, summed over the member's
   // branch of the fan-out (develop-idea today; robust to added sub-tasks).
   const firstPassUsage = (index: number): TokenUsageView | undefined => {
@@ -2697,7 +2701,7 @@ export function buildJobDetail(input: MapperInput): JobDetail {
         : idea
           ? "completed"
           : thinking
-            ? creditBlocked
+            ? notExecuting
               ? "paused"
               : "thinking"
             : "pending",

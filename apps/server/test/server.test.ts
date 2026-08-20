@@ -3249,7 +3249,10 @@ test("a restarted stage sheds its recorded failure after credit-block resume", a
     now - 10_000,
     "elapsed time reflects the current attempt, not the one from yesterday",
   );
-  assert.equal(firstPass.members[0]?.status, "thinking");
+  // The stage is the subject here; the seat's own chip says "paused" because
+  // this fixture has no live worker (a local job with no pid reconciles to
+  // orphaned), and a seat whose run is not executing is not thinking.
+  assert.equal(firstPass.members[0]?.status, "paused");
   rmSync(workspace, { recursive: true, force: true });
 });
 
@@ -5038,6 +5041,62 @@ test("a paused run stops its worker and is left alone until the submitter resume
     assert.equal(record.slurmJobId, "900", "the record names the new host");
     assert.equal(record.pausedAt, undefined, "and no longer looks paused");
     assert.equal(record.submissionCount, 2);
+  } finally {
+    await removeWorkspace(workspace);
+  }
+});
+
+test("a stopped run streams no live text, and its readers are told so", async () => {
+  // The channel exists to show what an agent is saying WHILE it says it. Once
+  // the worker is gone those sentences are the last words of a process that no
+  // longer exists — a reader holding them would keep a thinking box on screen,
+  // and a reader arriving later would be handed the whole dead thread as if it
+  // were arriving now (the store's own expiry takes two minutes).
+  const workspace = tempRoot();
+  const now = Date.now();
+  const manager = new JobManager({ workspace, now: () => now });
+  const jobId = "streaming-job";
+  const dir = join(workspace, "workspace", "jobs", jobId);
+  mkdirSync(dir, { recursive: true });
+  const record = (status: string): void => {
+    writeFileSync(
+      join(dir, "job.json"),
+      JSON.stringify({
+        jobId, topic: "a run mid-thought", status, runner: "local",
+        createdAt: now - 10_000, updatedAt: now, submissionCount: 1,
+        pid: process.pid,
+      }),
+    );
+  };
+  record("running");
+  writeFileSync(
+    join(dir, "live-text.jsonl"),
+    JSON.stringify({ p: "brainstorm-root/first-pass/member[0]/develop-idea", t: "weighing two designs" }) + "\n",
+  );
+  manager.reload();
+  try {
+    const seen = new Map<string, number>();
+    const streaming = await manager.liveText(jobId, seen);
+    assert.equal(streaming.length, 1, "a running job streams what its agent is writing");
+    assert.match(streaming[0]?.append ?? streaming[0]?.text ?? "", /weighing two designs/);
+    assert.equal(seen.size, 1, "the reader is now carrying that thread");
+
+    record("paused");
+    manager.reload();
+    const stopped = await manager.liveText(jobId, seen);
+    assert.deepEqual(
+      stopped,
+      [{ id: "brainstorm-root/first-pass/member[0]/develop-idea", ended: true }],
+      "the pause ends every thread the reader still holds",
+    );
+    assert.equal(seen.size, 0, "and forgets it, so nothing is re-sent");
+    assert.deepEqual(await manager.liveText(jobId, seen), [], "nothing more while it stands still");
+
+    // Resuming puts the channel back exactly as it was.
+    record("running");
+    manager.reload();
+    const again = await manager.liveText(jobId, new Map());
+    assert.equal(again.length, 1, "a resumed run streams again");
   } finally {
     await removeWorkspace(workspace);
   }

@@ -352,9 +352,38 @@ textarea,
 @media (prefers-reduced-motion: reduce) {
   .pulse,
   .node-pulse,
-  .skeleton-line {
+  .skeleton-line,
+  .decompose-step-dot {
     animation: none !important;
   }
+}
+
+/*
+ * The run-liveness switch.
+ *
+ * Every animation above means one thing: work is in flight. That claim belongs
+ * to the RUN, not to the step or stage it is drawn on — a paused run's steps
+ * still say "under review", because that is where it resumes, and a stopped
+ * run's stages still say "active" for the same reason. So the claim is made in
+ * exactly one place: the element that scopes a run carries data-run-live, and
+ * when it reads "false" nothing under it may imply motion.
+ *
+ * `animation: none`, not `animation-play-state: paused` — a frozen pulse
+ * stops at whatever opacity it happened to be at, which reads as a third
+ * state. This returns each element to how it looks at rest.
+ *
+ * What is deliberately NOT here: the queue/suspended state strip (it says
+ * "waiting", which is exactly what a stopped run is doing), the button and
+ * settings spinners (a resume the user just clicked must keep spinning while
+ * the run is still stopped), and the environment probe (it checks the machine,
+ * not the run). A test in test/liveness-css.test.ts holds that line: every
+ * infinite animation in this file must be listed here or classified there.
+ */
+[data-run-live="false"] .pulse,
+[data-run-live="false"] .node-pulse,
+[data-run-live="false"] .skeleton-line,
+[data-run-live="false"] .decompose-step-dot {
+  animation: none;
 }
 
 /* ------------------------------------------------------------- small bits */

@@ -423,6 +423,27 @@ activity feed, fold), and the *walk inspector* sits below in its own panel.
   so pause and stop were labelled in the markup and silent on screen. The labels are right-anchored
   above the control (centred, a nowrap label at a card's right edge runs off the window), and the
   job card no longer clips its own overflow, which had been cutting them in half.
+- **Nothing may claim to be moving while the run is not — and one place decides it.**
+  A pulsing dot, a blinking review cell, a shimmering skeleton, a counting clock, a streamed
+  thought: each is the same claim, that work is in flight. Pausing a run makes every one of them
+  false at once, and NOTHING else in the snapshot says so — a paused step still reads "under
+  review" and its stage still reads "active", which is correct, because that is exactly where the
+  run resumes. So liveness cannot be read off a step, a stage or a seat. It is the run's, and it is
+  decided in `jobIsExecuting` (protocol, so the server and the page cannot drift: the server stops
+  streaming live text on the same answer the page stops animating on). It reaches the screen as one
+  attribute on the element that scopes a run — `<RunScope>`, which is what `.dash` and each
+  `.job-card` are — and the stylesheet hangs every in-flight animation off `[data-run-live="false"]`.
+  A new blinking thing inherits the behaviour instead of having to remember it, and two tests hold
+  the line: every endless animation in the stylesheet must be listed in that rule or classified as
+  not-a-run's (a spinner the user just pressed keeps spinning while the run stands still), and each
+  run root must be a `RunScope` rather than a bare element. What CSS cannot decide asks
+  `useRunLive()`: the stage clock stops where it stopped, the "no new events for Ns" banner goes
+  away (a stopped run is quiet by design), "round N in progress" becomes "round N — unfinished"
+  (never "stopped", which is a different button and a different fate), the landing card's five-second
+  poll stops, and the streamed threads are dropped — their place belongs to the output that will
+  replace them on the resume. Countdowns ask a narrower question, `useRunAttended()`: a suspended
+  run runs no agent and still has its gate auto-approved, while a paused one is passed over
+  entirely, so its card must stop promising a deadline nothing will act on.
 - Walk inspector: everything belonging to ONE seat lives in one outer card (no rule under its
   header). The header packs the pager arrows tight around the title — "← Seat 1 / 3 →" — then
   the state chip ("under review" pulse / "done with thinking" `--ok`), and balances the seat's

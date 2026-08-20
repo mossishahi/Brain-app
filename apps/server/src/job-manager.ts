@@ -31,6 +31,7 @@ import {
 import {
   ATTACHMENT_LIMITS,
   CLASSIFICATION_EDIT_LIMITS,
+  jobIsExecuting,
   PANEL_EDIT_LIMITS,
   type CustomSeatRequest,
   type GateAnswerRequest,
@@ -611,6 +612,19 @@ export class JobManager {
     jobId: string,
     seen: Map<string, number>,
   ): Promise<readonly LiveTextEntry[]> {
+    // Streamed text is what an agent is saying WHILE it says it, so a run that
+    // is not executing has none. Readers still carrying threads are told they
+    // ended — the alternative is a page holding a dead worker's last sentence
+    // for the two minutes the store takes to expire it, and a new reader being
+    // handed that whole sentence as if it were arriving now. Nothing is read
+    // from disk until the run moves again.
+    const record = this.jobs.get(jobId);
+    if (record === undefined || !jobIsExecuting(record.status)) {
+      if (seen.size === 0) return [];
+      const ended = [...seen.keys()].map((id) => ({ id, ended: true as const }));
+      seen.clear();
+      return ended;
+    }
     let store = this.liveStores.get(jobId);
     if (store === undefined) {
       store = new LiveTextStore(join(this.jobDir(jobId), "live-text.jsonl"), this.now);
