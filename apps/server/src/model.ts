@@ -37,6 +37,12 @@ export interface JobRecord {
    * Auto-resume pauses after repeated attempts without progress; a manual
    * resume always resets the counter.
    */
+  /**
+   * When the submitter paused the run. Its presence is not what stops the
+   * automatic paths — the STATUS does that — but it dates the decision for the
+   * dashboard and survives restarts with the record.
+   */
+  pausedAt?: number;
   interruptedResume?: {
     readonly submittedAt: number;
     readonly count: number;

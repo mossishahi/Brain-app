@@ -409,6 +409,12 @@ activity feed, fold), and the *walk inspector* sits below in its own panel.
   touching, which read as one block — the pipeline is a thing you navigate WITH, not the panel's
   header. Scoped to the dashboard's spine, so the landing card's embedded graph keeps its own
   spacing.
+- **A run can be paused, resumed and stopped — from the job card and from the dashboard header.**
+  The three are not one control: PAUSE keeps the run (its worker ends, its checkpoint stands, and
+  nothing automatic touches it until the submitter says so), RESUME continues from that checkpoint,
+  and STOP ends it for good. Only stop asks first, because only stop cannot be undone; pause costs
+  what any interruption costs — tasks in flight are re-executed on the resume, everything journalled
+  replays free. A paused run can still be stopped; a stopped one can never be resumed.
 - Walk inspector: everything belonging to ONE seat lives in one outer card (no rule under its
   header). The header packs the pager arrows tight around the title — "← Seat 1 / 3 →" — then
   the state chip ("under review" pulse / "done with thinking" `--ok`), and balances the seat's
@@ -496,6 +502,11 @@ activity feed, fold), and the *walk inspector* sits below in its own panel.
   numbering never shifts around these cards, and older cards keep the step's history
   untouched. The "redeveloped" badge belongs to the review shown on the card — it says THIS
   version was sent back — not to the round that wrote the text, so it travels with the comments.
+- A seat's output downloads as LaTeX from the first version onward, not only once its walk has
+  finished: the output exists as soon as the seat has thought, and a reader watching a run that will
+  take hours has every reason to want the current draft in hand. A mid-review copy names itself
+  `seat_3_draft.tex` so it cannot be confused with the `seat_3.tex` the same seat will produce when
+  the review closes.
 - Comments panel: under the text the comments were actually made against, collapsed by default.
   A round is handed a text, gathers comments on it, and only then redevelops, so round k's
   comments describe the version the PREVIOUS card shows: every card carries the review of the

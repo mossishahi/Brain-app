@@ -952,6 +952,19 @@ export class JobManager {
    * against that and costs 1.4% of a 24-hour allocation. Set
    * BRAINSTORM_AGENTIC_WIND_DOWN_LEAD_S to 0 to switch the whole mechanism off.
    */
+  /**
+   * What can be paused: anything still on its way somewhere. A completed,
+   * failed or cancelled run has nothing left to stop, and a paused one is
+   * already stopped.
+   */
+  private static readonly PAUSABLE_STATUSES: ReadonlySet<JobStatus> = new Set<JobStatus>([
+    "queued",
+    "running",
+    "suspended",
+    "credit-blocked",
+    "orphaned",
+  ]);
+
   private static readonly DEFAULT_WIND_DOWN_LEAD_SECONDS = 1_200;
 
   private get windDownLeadSeconds(): number {
@@ -1045,6 +1058,11 @@ export class JobManager {
 
   private async reconcile(record: JobRecord): Promise<JobStatus> {
     if (record.status === "cancelled") return "cancelled";
+    // A paused run is a DECISION, not a state to be inferred: its worker is gone
+    // and its checkpoint says running, which is exactly the shape of an
+    // interrupted run, and everything below would read it as one and hand it
+    // back to the poller that exists to resurrect those.
+    if (record.status === "paused") return "paused";
     if (await this.migrateLegacyCreditFailure(record)) {
       return "credit-blocked";
     }
@@ -1292,6 +1310,94 @@ export class JobManager {
     }
   }
 
+  /**
+   * Stops the run and keeps it: the worker is ended, the checkpoint stands, and
+   * NOTHING resumes it until the submitter does.
+   *
+   * That last part is the whole feature. A paused run looks exactly like an
+   * interrupted one on disk — a worker that is gone with a `running` checkpoint —
+   * and the interrupted-job poller exists precisely to resubmit those. So the
+   * pause is recorded as a STATUS, and every automatic path is taught to leave it
+   * alone: the poller, the credit scheduler, and reconcile(), which would
+   * otherwise read the missing worker as an orphan and hand it straight back.
+   *
+   * Work in flight when the pause lands is lost and re-executed on the resume,
+   * exactly as for a dismissal; everything journalled replays for free.
+   */
+  async pause(jobId: string): Promise<JobStatus> {
+    const record = this.record(jobId);
+    if (record.trashedAt !== undefined) {
+      throw new JobConflictError(`job "${jobId}" is in the trash`);
+    }
+    const current = await this.reconcile(record);
+    if (!JobManager.PAUSABLE_STATUSES.has(current)) {
+      throw new JobConflictError(`a ${current} job cannot be paused`);
+    }
+    await this.stopWorker(record);
+    await this.awaitWorkerExit(record);
+    record.status = "paused";
+    record.pausedAt = this.now();
+    // A resume submission in flight would land after the pause and restart the
+    // very run being stopped.
+    delete record.autoResumePending;
+    record.updatedAt = this.now();
+    this.write(record);
+    return record.status;
+  }
+
+  /**
+   * Continues a paused run from its last checkpoint. The same submission every
+   * other resume uses, so the previous host is reaped and the dismissals, the
+   * content pin and the execution settings all ride the record as always.
+   */
+  async resumePaused(jobId: string): Promise<JobStatus> {
+    const record = this.record(jobId);
+    if (record.trashedAt !== undefined) {
+      throw new JobConflictError(`job "${jobId}" is in the trash`);
+    }
+    if (this.autoResuming.has(jobId)) {
+      throw new JobConflictError(
+        `job "${jobId}" already has a resume submission in progress`,
+      );
+    }
+    const status = await this.reconcile(record);
+    if (status !== "paused") {
+      throw new JobConflictError(`job "${jobId}" is not paused (status "${status}")`);
+    }
+    this.assertPinResumable(jobId);
+    this.autoResuming.add(jobId);
+    try {
+      const settings = record.executionSettings ?? this.settings.get();
+      // A run paused before its first checkpoint has nothing to resume from and
+      // starts over on its pinned content — the same rule the dismissal and
+      // interrupted paths follow.
+      const checkpoint = this.checkpoint(jobId);
+      const command = this.command(
+        record,
+        checkpoint !== undefined ? "resume" : "run",
+        settings,
+      );
+      const number = (record.submissionCount ?? 1) + 1;
+      const script = this.writeScript(
+        record,
+        `submit-resume-${number - 1}.sh`,
+        command,
+        settings.slurmTemplate,
+      );
+      await this.submitScript(record, script, settings);
+      record.status = "queued";
+      delete record.pausedAt;
+      delete record.error;
+      record.submissionCount = number;
+      record.autoResumePending = { submittedAt: this.now() };
+      record.updatedAt = this.now();
+      this.write(record);
+    } finally {
+      this.autoResuming.delete(jobId);
+    }
+    return record.status;
+  }
+
   async cancel(jobId: string): Promise<JobStatus> {
     const record = this.record(jobId);
     const current = await this.reconcile(record);
@@ -1323,6 +1429,10 @@ export class JobManager {
     for (const record of this.jobs.values()) {
       if (
         record.status === "cancelled" ||
+        // A run the submitter paused is waiting for THEM, not for the provider's
+        // window: claiming it here would restart a run that was deliberately
+        // stopped, and the checkpoint it was stopped on still says credit_blocked.
+        record.status === "paused" ||
         this.autoResuming.has(record.jobId)
       ) {
         continue;

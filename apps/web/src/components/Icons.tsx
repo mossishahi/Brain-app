@@ -56,6 +56,25 @@ export function GearIcon({ size = 18 }: IconProps) {
   );
 }
 
+/** Two bars: the run stops where it is and keeps its place. */
+export function PauseIcon({ size = 18 }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      aria-hidden
+    >
+      <line x1="9" y1="5" x2="9" y2="19" />
+      <line x1="15" y1="5" x2="15" y2="19" />
+    </svg>
+  );
+}
+
 export function TrashIcon({ size = 18 }: IconProps) {
   return (
     <svg {...frame(size)}>

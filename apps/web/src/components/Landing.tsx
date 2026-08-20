@@ -29,10 +29,19 @@ import {
   submitJob,
   trashJob,
   useServerEvents,
+  pauseJob,
+  resumePausedJob,
 } from "../api";
 import { jobDot, jobStatusLine } from "../format";
 import { Dot } from "./common";
-import { CopyIcon, ForwardIcon, ResumeIcon, TrashIcon, XIcon } from "./Icons";
+import {
+  CopyIcon,
+  ForwardIcon,
+  PauseIcon,
+  ResumeIcon,
+  TrashIcon,
+  XIcon,
+} from "./Icons";
 import { PipelineGraph } from "./PipelineGraph";
 import {
   ProviderOnboarding,
@@ -45,6 +54,7 @@ function JobCard({ job }: { readonly job: JobSummary }) {
   const [confirming, setConfirming] = useState<"cancel" | "trash" | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [resuming, setResuming] = useState(false);
+  const [pausing, setPausing] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [detail, setDetail] = useState<JobDetail | null>(
     () => cachedJobDetail(job.jobId) ?? null,
@@ -94,6 +104,19 @@ function JobCard({ job }: { readonly job: JobSummary }) {
     job.status === "queued" ||
     job.status === "running" ||
     job.status === "suspended" ||
+    job.status === "credit-blocked" ||
+    job.status === "paused" ||
+    job.status === "orphaned";
+  /**
+   * PAUSE keeps the run; STOP ends it. Both end the worker immediately, and the
+   * difference is only what the run may do afterwards — which is why a paused
+   * job can still be stopped, and a stopped one can never be resumed.
+   */
+  const pausable =
+    job.status === "queued" ||
+    job.status === "running" ||
+    job.status === "suspended" ||
+    job.status === "credit-blocked" ||
     job.status === "orphaned";
   // Running/queued/suspended jobs must be stopped before they can be trashed.
   const trashable =
@@ -102,8 +125,8 @@ function JobCard({ job }: { readonly job: JobSummary }) {
     job.status === "cancelled" ||
     job.status === "orphaned";
   // An interrupted job (SLURM timeout, node failure, power cut) resumes from
-  // its last checkpoint with one click.
-  const resumable = job.status === "orphaned";
+  // its last checkpoint with one click; a paused one continues the same way.
+  const resumable = job.status === "orphaned" || job.status === "paused";
 
   const perform = async (
     action: () => Promise<unknown>,
@@ -119,11 +142,30 @@ function JobCard({ job }: { readonly job: JobSummary }) {
     }
   };
 
+  /**
+   * Pause needs no confirmation: it is the reversible one, and the thing it
+   * costs — tasks in flight, re-executed on the resume — is the same thing an
+   * interruption costs, which the run survives routinely.
+   */
+  const pause = async (): Promise<void> => {
+    setPausing(true);
+    setActionError(null);
+    try {
+      await pauseJob(job.jobId);
+    } catch (error) {
+      setActionError(errorMessage(error));
+    } finally {
+      setPausing(false);
+    }
+  };
+
   const resume = async (): Promise<void> => {
     setResuming(true);
     setActionError(null);
     try {
-      await resumeInterruptedJob(job.jobId);
+      await (job.status === "paused"
+        ? resumePausedJob(job.jobId)
+        : resumeInterruptedJob(job.jobId));
     } catch (error) {
       setActionError(errorMessage(error));
     } finally {
@@ -201,12 +243,26 @@ function JobCard({ job }: { readonly job: JobSummary }) {
               <button
                 type="button"
                 className="ghost-btn resume-btn"
-                aria-label={`resume interrupted job from its last checkpoint: ${job.topic}`}
+                aria-label={`${
+                  job.status === "paused" ? "resume paused job" : "resume interrupted job"
+                } from its last checkpoint: ${job.topic}`}
                 data-tooltip="resume from checkpoint"
                 disabled={resuming}
                 onClick={() => void resume()}
               >
                 <ResumeIcon size={16} />
+              </button>
+            )}
+            {pausable && (
+              <button
+                type="button"
+                className="ghost-btn"
+                aria-label={`pause job — stops the worker and keeps the run: ${job.topic}`}
+                data-tooltip="pause — resume from here later"
+                disabled={pausing}
+                onClick={() => void pause()}
+              >
+                <PauseIcon size={16} />
               </button>
             )}
             {trashable && (
@@ -226,7 +282,8 @@ function JobCard({ job }: { readonly job: JobSummary }) {
               <button
                 type="button"
                 className="ghost-btn"
-                aria-label={`cancel job: ${job.topic}`}
+                aria-label={`stop job — ends the run for good: ${job.topic}`}
+                data-tooltip="stop — the run cannot continue afterwards"
                 onClick={() => {
                   setActionError(null);
                   setConfirming("cancel");

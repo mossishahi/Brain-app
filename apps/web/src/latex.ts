@@ -591,8 +591,11 @@ export function seatNumberOf(label: string, fallbackIndex: number): number {
   return match ? Number(match[1]) : fallbackIndex + 1;
 }
 
-export function seatTexFileName(seatNumber: number): string {
-  return `seat_${seatNumber}.tex`;
+export function seatTexFileName(seatNumber: number, draft = false): string {
+  // A copy taken mid-review says so in its own name: the same seat's file will
+  // be downloaded again when the review finishes, and two files called
+  // seat_3.tex differing by hours of revision is a trap.
+  return draft ? `seat_${seatNumber}_draft.tex` : `seat_${seatNumber}.tex`;
 }
 
 /** Browser download of a generated text file. */

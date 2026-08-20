@@ -4935,3 +4935,147 @@ fs.appendFileSync(${JSON.stringify(marker)}, process.argv.slice(2).join(" ") + "
     await removeWorkspace(workspace);
   }
 });
+
+test("a paused run stops its worker and is left alone until the submitter resumes it", async () => {
+  // The whole risk of a pause: on disk it is indistinguishable from an
+  // interrupted run — worker gone, checkpoint still "running" — and the poller
+  // exists to resubmit exactly those. If it cannot tell the difference, the
+  // pause button starts the run again a moment after stopping it.
+  const workspace = tempRoot();
+  const bin = join(workspace, "bin");
+  mkdirSync(bin, { recursive: true });
+  const trace = join(workspace, "scheduler-trace.txt");
+  writeFileSync(
+    join(bin, "scancel"),
+    "#!/usr/bin/env bash\nprintf 'scancel %s\\n' \"$*\" >> \"$TRACE\"\n",
+  );
+  writeFileSync(
+    join(bin, "sbatch"),
+    "#!/usr/bin/env bash\nprintf 'sbatch\\n' >> \"$TRACE\"\necho 'Submitted batch job 900'\n",
+  );
+  for (const name of ["squeue", "sacct"]) {
+    writeFileSync(join(bin, name), "#!/usr/bin/env bash\nexit 0\n");
+    chmodSync(join(bin, name), 0o755);
+  }
+  chmodSync(join(bin, "scancel"), 0o755);
+  chmodSync(join(bin, "sbatch"), 0o755);
+  const now = Date.now();
+  const manager = new JobManager({
+    workspace,
+    workerPath: join(workspace, "unused.mjs"),
+    now: () => now,
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}`, TRACE: trace },
+  });
+  const settings = await manager.settings.put({
+    ...manager.settings.get(),
+    runner: "slurm",
+    llm: { provider: "offline" },
+  });
+  const jobId = "pausable";
+  const jobDir = join(workspace, "workspace", "jobs", jobId);
+  const sessionDir = join(workspace, "workspace", "sessions", jobId);
+  mkdirSync(jobDir, { recursive: true });
+  mkdirSync(sessionDir, { recursive: true });
+  writeFileSync(
+    join(jobDir, "job.json"),
+    JSON.stringify({
+      jobId,
+      topic: "a run the submitter wants to stop for a while",
+      status: "running",
+      runner: "slurm",
+      slurmJobId: "800",
+      createdAt: now - 60_000,
+      updatedAt: now - 30_000,
+      submissionCount: 1,
+      executionSettings: settings,
+    }),
+  );
+  // A checkpoint that says "running" — the shape an interrupted run also has.
+  writeFileSync(
+    join(sessionDir, "checkpoint.json"),
+    JSON.stringify({
+      runId: jobId,
+      workflowId: "brainstorm",
+      status: "running",
+      input: {},
+      journal: [
+        { key: "brainstorm-root/process-input::result", kind: "agent", value: { status: "ok", output: {} } },
+      ],
+      pendingGates: [],
+      seq: 4,
+      updatedAt: now - 30_000,
+    }),
+  );
+  manager.reload();
+  try {
+    assert.equal(await manager.pause(jobId), "paused");
+    assert.match(
+      readFileSync(trace, "utf8"),
+      /^scancel .*800/m,
+      "the worker is ended, not merely marked",
+    );
+
+    // The two automatic paths must both leave it alone.
+    await manager.resumeInterruptedJobs();
+    await manager.resumeDueCreditBlocks();
+    assert.equal(
+      (readFileSync(trace, "utf8").match(/sbatch/g) ?? []).length,
+      0,
+      "nothing resubmitted the run behind the submitter",
+    );
+    assert.equal((await manager.detail(jobId)).status, "paused", "and it stayed paused");
+
+    // Resuming is the submitter's call, and it goes through the ordinary
+    // submission — so the previous host is reaped first.
+    assert.equal(await manager.resumePaused(jobId), "queued");
+    const lines = readFileSync(trace, "utf8").trim().split("\n");
+    assert.equal(lines[lines.length - 1], "sbatch", "the resume submits");
+    const record = JSON.parse(readFileSync(join(jobDir, "job.json"), "utf8")) as {
+      slurmJobId?: string;
+      pausedAt?: number;
+      submissionCount?: number;
+    };
+    assert.equal(record.slurmJobId, "900", "the record names the new host");
+    assert.equal(record.pausedAt, undefined, "and no longer looks paused");
+    assert.equal(record.submissionCount, 2);
+  } finally {
+    await removeWorkspace(workspace);
+  }
+});
+
+test("a settled run cannot be paused, and a paused one cannot be paused twice", async () => {
+  const workspace = tempRoot();
+  const now = Date.now();
+  const manager = new JobManager({ workspace, workerPath: join(workspace, "x.mjs"), now: () => now });
+  const settings = await manager.settings.put({
+    ...manager.settings.get(),
+    runner: "local",
+    llm: { provider: "offline" },
+  });
+  const make = (jobId: string, status: string) => {
+    const dir = join(workspace, "workspace", "jobs", jobId);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "job.json"),
+      JSON.stringify({
+        jobId, topic: jobId, status, runner: "local",
+        createdAt: now - 1000, updatedAt: now - 500, submissionCount: 1,
+        executionSettings: settings,
+      }),
+    );
+  };
+  make("done-job", "completed");
+  make("stopped-job", "cancelled");
+  make("already-paused", "paused");
+  manager.reload();
+  try {
+    await assert.rejects(manager.pause("done-job"), /cannot be paused/);
+    await assert.rejects(manager.pause("stopped-job"), /cannot be paused/);
+    await assert.rejects(manager.pause("already-paused"), /cannot be paused/);
+    // And resuming something that was never paused is refused rather than
+    // quietly submitting a second worker.
+    await assert.rejects(manager.resumePaused("done-job"), /not paused/);
+  } finally {
+    await removeWorkspace(workspace);
+  }
+});

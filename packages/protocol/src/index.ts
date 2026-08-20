@@ -850,7 +850,15 @@ export type JobStatus =
   | "completed"
   | "failed"
   | "cancelled"
-  | "orphaned";
+  | "orphaned"
+  /**
+   * Stopped by the submitter, and waiting for them. Its worker is gone and its
+   * checkpoint stands: nothing auto-resumes it — not the interrupted-job
+   * poller, not the credit scheduler — until the submitter says so. That is the
+   * whole difference from `orphaned`, which looks identical on disk and is
+   * resumed automatically.
+   */
+  | "paused";
 
 export type RunnerKind = "slurm" | "local";
 

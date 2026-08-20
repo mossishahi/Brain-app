@@ -1249,6 +1249,38 @@ export async function startBrainServer(
         return;
       }
 
+      const pauseMatch = /^\/api\/jobs\/([^/]+)\/pause$/.exec(path);
+      if (req.method === "POST" && pauseMatch) {
+        const jobId = decodeURIComponent(pauseMatch[1]!);
+        try {
+          const status = await manager.pause(jobId);
+          broadcast();
+          sendJson(res, 200, { jobId, status });
+        } catch (error) {
+          if (error instanceof JobConflictError) {
+            throw new HttpError(409, error.message);
+          }
+          throw error;
+        }
+        return;
+      }
+
+      const resumePausedMatch = /^\/api\/jobs\/([^/]+)\/resume-paused$/.exec(path);
+      if (req.method === "POST" && resumePausedMatch) {
+        const jobId = decodeURIComponent(resumePausedMatch[1]!);
+        try {
+          const status = await manager.resumePaused(jobId);
+          broadcast();
+          sendJson(res, 200, { jobId, status });
+        } catch (error) {
+          if (error instanceof JobConflictError) {
+            throw new HttpError(409, error.message);
+          }
+          throw error;
+        }
+        return;
+      }
+
       const resumeMatch = /^\/api\/jobs\/([^/]+)\/resume$/.exec(path);
       if (req.method === "POST" && resumeMatch) {
         const jobId = decodeURIComponent(resumeMatch[1]!);

@@ -27,6 +27,8 @@ import {
   resumeJob,
   retryFailedJob,
   useServerEvents,
+  pauseJob,
+  resumePausedJob,
 } from "../api";
 import {
   formatClock,
@@ -38,7 +40,14 @@ import {
   STAGE_TITLES,
 } from "../format";
 import { ActivityFeed, Dot, SkeletonLines, TokenChip } from "./common";
-import { BackIcon, ChevronIcon, ForwardIcon } from "./Icons";
+import {
+  BackIcon,
+  ChevronIcon,
+  ForwardIcon,
+  PauseIcon,
+  ResumeIcon,
+  XIcon,
+} from "./Icons";
 import { PipelineGraph } from "./PipelineGraph";
 import { SendDiagnostics } from "./SendDiagnostics";
 import {
@@ -221,6 +230,63 @@ function DashboardSkeleton() {
   );
 }
 
+/**
+ * Pausing, resuming and stopping the run you are watching.
+ *
+ * The three answer different questions and are deliberately not one control:
+ * PAUSE keeps the run (its worker ends, its checkpoint stands, and nothing
+ * automatic picks it up until you say so), RESUME continues from that
+ * checkpoint, and STOP ends it for good — which is why only stop asks first.
+ *
+ * What pause costs is what any interruption costs: tasks in flight are
+ * re-executed on the resume, and everything journalled replays for free.
+ */
+function useRunControl(job: JobDetail | null, jobId: string) {
+  const [busy, setBusy] = useState(false);
+  const [confirmingStop, setConfirmingStop] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const status = job?.status;
+  const live =
+    status === "queued" ||
+    status === "running" ||
+    status === "suspended" ||
+    status === "credit-blocked" ||
+    status === "orphaned";
+  const act = async (action: () => Promise<unknown>, failure: string): Promise<void> => {
+    setBusy(true);
+    setError(null);
+    try {
+      await action();
+    } catch (caught) {
+      setError(`${failure}: ${errorMessage(caught)}`);
+    } finally {
+      setBusy(false);
+      setConfirmingStop(false);
+    }
+  };
+  return {
+    busy,
+    error,
+    confirmingStop,
+    pausable: live,
+    resumable: status === "paused" || status === "orphaned",
+    // A paused run can still be stopped: pause keeps it, stop ends it.
+    stoppable: live || status === "paused",
+    pause: () => act(() => pauseJob(jobId), "could not pause the run"),
+    resume: () =>
+      act(
+        () => (status === "paused" ? resumePausedJob(jobId) : resumeInterruptedJob(jobId)),
+        "could not resume the run",
+      ),
+    askToStop: () => {
+      setError(null);
+      setConfirmingStop(true);
+    },
+    cancelStop: () => setConfirmingStop(false),
+    stop: () => act(() => cancelJob(jobId), "could not stop the run"),
+  };
+}
+
 export function Dashboard({
   jobId,
   initialStage,
@@ -309,6 +375,8 @@ export function Dashboard({
     }
     return out;
   }, [live]);
+
+  const runControl = useRunControl(job, jobId);
 
   const activeStage: StageId = job ? pickDefaultStage(job) : "process-input";
   const selected: StageId = pinned ?? activeStage;
@@ -579,7 +647,79 @@ export function Dashboard({
           <Dot state={jobDot(job.status)} />
           {job.status}
         </span>
+        {/* Controlling the run from where it is watched. Pause keeps it and
+            stops the worker; stop ends it for good and asks first, because it
+            cannot be undone. */}
+        {job.trashedAt === undefined && (
+          <span className="dash-actions">
+            {runControl.pausable && (
+              <button
+                type="button"
+                className="ghost-btn"
+                aria-label="pause this run — stops its worker and keeps the run"
+                data-tooltip="pause — resume from here later"
+                disabled={runControl.busy}
+                onClick={() => void runControl.pause()}
+              >
+                <PauseIcon size={16} />
+              </button>
+            )}
+            {runControl.resumable && (
+              <button
+                type="button"
+                className="ghost-btn"
+                aria-label="resume this run from its last checkpoint"
+                data-tooltip="resume from checkpoint"
+                disabled={runControl.busy}
+                onClick={() => void runControl.resume()}
+              >
+                <ResumeIcon size={16} />
+              </button>
+            )}
+            {runControl.stoppable && (
+              <button
+                type="button"
+                className="ghost-btn"
+                aria-label="stop this run — it cannot continue afterwards"
+                data-tooltip="stop — the run cannot continue afterwards"
+                disabled={runControl.busy}
+                onClick={() => runControl.askToStop()}
+              >
+                <XIcon />
+              </button>
+            )}
+          </span>
+        )}
       </header>
+      {runControl.confirmingStop && (
+        <div className="banner confirm-banner">
+          <span>
+            <strong>Stop this run?</strong> Its worker ends now and it cannot be
+            continued — pause instead if you mean to come back to it.
+          </span>
+          <span className="confirm-actions">
+            <button
+              type="button"
+              className="btn btn-small btn-danger"
+              disabled={runControl.busy}
+              onClick={() => void runControl.stop()}
+            >
+              Stop the run
+            </button>
+            <button
+              type="button"
+              className="btn btn-small"
+              disabled={runControl.busy}
+              onClick={() => runControl.cancelStop()}
+            >
+              Keep it
+            </button>
+          </span>
+        </div>
+      )}
+      {runControl.error !== null && (
+        <div className="banner banner-bad">{runControl.error}</div>
+      )}
 
       {!connected && <div className="reconnect-line">reconnecting…</div>}
       {job.trashedAt !== undefined && (

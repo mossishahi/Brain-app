@@ -1354,16 +1354,25 @@ export function ReviewStagePanels({
                               ? `revised ×${revisions} during review`
                               : "unchanged from the first pass"}
                           </span>
-                          {finalized &&
-                            (() => {
-                              const fileName = seatTexFileName(
-                                seatNumberOf(seat.label, seatIndex),
-                              );
-                              return (
+                          {/* Downloadable from the first version onward, not only
+                              once the walk has finished: the output exists as
+                              soon as the seat has thought, and a reader watching
+                              a run that will take hours has every reason to want
+                              the current draft in their hands. The file names
+                              what it is, so a mid-review copy cannot be mistaken
+                              for the final one. */}
+                          {(() => {
+                            const fileName = seatTexFileName(
+                              seatNumberOf(seat.label, seatIndex),
+                              !finalized,
+                            );
+                            return (
                                 <button
                                   type="button"
                                   className="ghost-btn copy-btn review-download-btn"
-                                  aria-label={`download ${fileName} — this seat's final output as LaTeX`}
+                                  aria-label={`download ${fileName} — this seat's ${
+                                    finalized ? "final output" : "current output, still under review"
+                                  } as LaTeX`}
                                   title={`Download ${fileName} (LaTeX, latex_style)`}
                                   onClick={(event) => {
                                     // A click inside <summary> would also toggle the fold.
@@ -1400,8 +1409,8 @@ export function ReviewStagePanels({
                                 >
                                   <DownloadIcon />
                                 </button>
-                              );
-                            })()}
+                            );
+                          })()}
                         </summary>
                         <div className="review-fold-body">
                           <IdeaTabs idea={seat.finalIdea} />

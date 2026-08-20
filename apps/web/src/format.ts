@@ -47,6 +47,10 @@ export function jobDot(status: JobStatus): DotState {
   switch (status) {
     case "running":
       return { tone: "accent", pulse: true };
+    // Paused is deliberately NOT dim: the run is waiting for its submitter, and
+    // a dim dot reads as "over".
+    case "paused":
+      return { tone: "warn", pulse: false };
     case "suspended":
     case "credit-blocked":
       return { tone: "warn", pulse: false };
@@ -95,6 +99,8 @@ export function jobStatusLine(job: JobSummary): string {
   switch (job.status) {
     case "queued":
       return "queued";
+    case "paused":
+      return "paused — resume when you are ready";
     case "suspended":
       return "waiting for your panel confirmation";
     case "credit-blocked": {

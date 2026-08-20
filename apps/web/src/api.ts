@@ -206,6 +206,17 @@ export const getJob = async (jobId: string): Promise<JobDetail> => {
 export const cancelJob = (jobId: string): Promise<CancelJobResponse> =>
   request(`/jobs/${encodeURIComponent(jobId)}/cancel`, { method: "POST" });
 
+/**
+ * Stops the run and keeps it: the worker ends, the checkpoint stands, and
+ * nothing automatic resumes it until resumePausedJob is called.
+ */
+export const pauseJob = (jobId: string): Promise<CancelJobResponse> =>
+  request(`/jobs/${encodeURIComponent(jobId)}/pause`, { method: "POST" });
+
+/** Continues a paused run from its last checkpoint. */
+export const resumePausedJob = (jobId: string): Promise<CancelJobResponse> =>
+  request(`/jobs/${encodeURIComponent(jobId)}/resume-paused`, { method: "POST" });
+
 /** Claims a credit-blocked job for resume (manual blocks, or an early claim). */
 export const resumeJob = (jobId: string): Promise<ResumeJobResponse> =>
   request(`/jobs/${encodeURIComponent(jobId)}/resume`, { method: "POST" });
