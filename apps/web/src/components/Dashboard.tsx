@@ -46,7 +46,8 @@ import {
   ForwardIcon,
   PauseIcon,
   ResumeIcon,
-  XIcon,
+  ButtonSpinner,
+  StopIcon,
 } from "./Icons";
 import { PipelineGraph } from "./PipelineGraph";
 import { SendDiagnostics } from "./SendDiagnostics";
@@ -661,7 +662,7 @@ export function Dashboard({
                 disabled={runControl.busy}
                 onClick={() => void runControl.pause()}
               >
-                <PauseIcon size={16} />
+                {runControl.busy ? <ButtonSpinner /> : <PauseIcon size={16} />}
               </button>
             )}
             {runControl.resumable && (
@@ -673,7 +674,7 @@ export function Dashboard({
                 disabled={runControl.busy}
                 onClick={() => void runControl.resume()}
               >
-                <ResumeIcon size={16} />
+                {runControl.busy ? <ButtonSpinner /> : <ResumeIcon size={16} />}
               </button>
             )}
             {runControl.stoppable && (
@@ -685,7 +686,7 @@ export function Dashboard({
                 disabled={runControl.busy}
                 onClick={() => runControl.askToStop()}
               >
-                <XIcon />
+                <StopIcon size={16} />
               </button>
             )}
           </span>

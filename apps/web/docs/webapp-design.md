@@ -415,6 +415,14 @@ activity feed, fold), and the *walk inspector* sits below in its own panel.
   and STOP ends it for good. Only stop asks first, because only stop cannot be undone; pause costs
   what any interruption costs — tasks in flight are re-executed on the resume, everything journalled
   replays free. A paused run can still be stopped; a stopped one can never be resumed.
+  Three things make that legible rather than merely present: stop wears a filled SQUARE (it wore an
+  ✕, which reads as "close this", so the control was there and nobody saw it); a control waiting on
+  the server puts a spinner in its icon's place, because the round trip plus a scheduler call is
+  seconds and a control that does not move for seconds reads as a control that did not work; and
+  every icon control carrying a tooltip draws one — the rule used to name the resume button alone,
+  so pause and stop were labelled in the markup and silent on screen. The labels are right-anchored
+  above the control (centred, a nowrap label at a card's right edge runs off the window), and the
+  job card no longer clips its own overflow, which had been cutting them in half.
 - Walk inspector: everything belonging to ONE seat lives in one outer card (no rule under its
   header). The header packs the pager arrows tight around the title — "← Seat 1 / 3 →" — then
   the state chip ("under review" pulse / "done with thinking" `--ok`), and balances the seat's

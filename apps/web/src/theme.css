@@ -1992,9 +1992,21 @@ button.server-file-name {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  overflow: hidden;
+  /* NOT hidden: a control's tooltip rises above the card, and clipping it here
+     left every one of them half-drawn behind the card above. The unrolled
+     detail region does its own clipping (.job-expand), which is what the
+     hidden overflow was for. */
+  overflow: visible;
   padding-right: 8px;
   padding-bottom: 0;
+}
+
+/* A card being hovered comes forward, so its tooltip is not painted under the
+   next card in the list. */
+.job-card:hover,
+.job-card:focus-within {
+  position: relative;
+  z-index: 2;
 }
 
 .job-card:hover {
@@ -4771,20 +4783,29 @@ section.drawer-section:not(.drawer-updates) {
 /* Resume icon on job cards. */
 
 .resume-btn {
-  position: relative;
   color: var(--ok);
 }
 
-.resume-btn::after {
+/* Every icon control carrying a tooltip draws one — pause, stop, resume and
+   the open-this-run link alike. This rule used to name .resume-btn alone, so
+   the controls added beside it were labelled in the markup and silent on
+   screen: the attribute was there, nothing rendered it. */
+.ghost-btn[data-tooltip] {
+  position: relative;
+}
+
+.ghost-btn[data-tooltip]::after {
   position: absolute;
-  left: 50%;
+  /* Right-anchored rather than centred: these controls sit at the right edge
+     of a card, and a centred nowrap label runs off the window. */
+  right: 0;
   bottom: calc(100% + 6px);
   z-index: 30;
-  transform: translateX(-50%);
   padding: 4px 8px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--surface);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--text) 12%, transparent);
   color: var(--text);
   content: attr(data-tooltip);
   font-size: 11px;
@@ -4794,8 +4815,8 @@ section.drawer-section:not(.drawer-updates) {
   white-space: nowrap;
 }
 
-.resume-btn:hover::after,
-.resume-btn:focus-visible::after {
+.ghost-btn[data-tooltip]:hover::after,
+.ghost-btn[data-tooltip]:focus-visible::after {
   opacity: 1;
 }
 
@@ -5344,4 +5365,13 @@ section.drawer-section:not(.drawer-updates) {
 .banner-bad {
   border-color: color-mix(in srgb, var(--bad) 45%, var(--border));
   color: var(--bad);
+}
+
+/* A control waiting on the server: the icon's place, spinning. */
+.btn-spinner {
+  display: inline-block;
+  border-radius: 999px;
+  border: 1.5px solid color-mix(in srgb, var(--accent) 25%, transparent);
+  border-top-color: var(--accent);
+  animation: save-spin 0.7s linear infinite;
 }

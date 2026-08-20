@@ -40,7 +40,8 @@ import {
   PauseIcon,
   ResumeIcon,
   TrashIcon,
-  XIcon,
+  ButtonSpinner,
+  StopIcon,
 } from "./Icons";
 import { PipelineGraph } from "./PipelineGraph";
 import {
@@ -250,7 +251,7 @@ function JobCard({ job }: { readonly job: JobSummary }) {
                 disabled={resuming}
                 onClick={() => void resume()}
               >
-                <ResumeIcon size={16} />
+                {resuming ? <ButtonSpinner /> : <ResumeIcon size={16} />}
               </button>
             )}
             {pausable && (
@@ -262,7 +263,7 @@ function JobCard({ job }: { readonly job: JobSummary }) {
                 disabled={pausing}
                 onClick={() => void pause()}
               >
-                <PauseIcon size={16} />
+                {pausing ? <ButtonSpinner /> : <PauseIcon size={16} />}
               </button>
             )}
             {trashable && (
@@ -289,7 +290,7 @@ function JobCard({ job }: { readonly job: JobSummary }) {
                   setConfirming("cancel");
                 }}
               >
-                <XIcon />
+                <StopIcon size={16} />
               </button>
             )}
           </div>

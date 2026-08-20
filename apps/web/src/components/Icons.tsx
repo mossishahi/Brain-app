@@ -56,6 +56,36 @@ export function GearIcon({ size = 18 }: IconProps) {
   );
 }
 
+/**
+ * A filled square: the universal "stop". Deliberately NOT the ✕ this control
+ * used to wear — an ✕ reads as "close this", so a run that could be stopped
+ * looked like it could only be dismissed, and the control went unseen.
+ */
+export function StopIcon({ size = 18 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+      <rect x="6" y="6" width="12" height="12" rx="1.5" />
+    </svg>
+  );
+}
+
+/**
+ * A control waiting on the server. Shown IN PLACE of the icon, so the button
+ * says "I heard you" on the click rather than at the next snapshot — the
+ * round trip plus a scheduler call is seconds, and a control that does not
+ * move for seconds reads as a control that did not work.
+ */
+export function ButtonSpinner({ size = 14 }: IconProps) {
+  return (
+    <span
+      className="btn-spinner"
+      style={{ width: size, height: size }}
+      role="status"
+      aria-label="working"
+    />
+  );
+}
+
 /** Two bars: the run stops where it is and keeps its place. */
 export function PauseIcon({ size = 18 }: IconProps) {
   return (
