@@ -37,6 +37,7 @@ import {
 } from "@brainstorm-agentic/host-tools";
 
 import { defaultSessionRoot, loadDotEnv, workspaceRootFromSessionRoot } from "./env.js";
+import { manifestPathFor } from "./attachment-store.js";
 import { scheduleFinishedExit } from "./exit.js";
 import { createLiveTextLog, noLiveText } from "./live-text.js";
 import { windDownFromEnv } from "./wind-down.js";
@@ -312,6 +313,28 @@ interface AttachmentsManifestFile {
  * pipeline: the code annotator, every panel member, and every commentor, judge
  * and reviser of the review.
  */
+/**
+ * The manifest this launch will read through, recovering it from the job
+ * directory when the command line forgot it — and saying so, because a
+ * launcher that omits it would otherwise cost the run every file it was given
+ * without a single line anywhere to show for it.
+ */
+function attachmentsManifest(args: CliArgs): string | undefined {
+  const choice = manifestPathFor(
+    stringFlag(args, "attachments-manifest"),
+    stringFlag(args, "events-file"),
+  );
+  if (choice?.recovered === true) {
+    console.error(
+      `[attachments] this launch named no --attachments-manifest; using the store ` +
+        `found in the job directory (${choice.path}). The submission that started ` +
+        `this worker should pass it: without one, every agent is told the ` +
+        `submitted files cannot be read.`,
+    );
+  }
+  return choice?.path;
+}
+
 function loadAttachmentsManifest(
   path: string | undefined,
   options: { readonly tolerant?: boolean } = {},
@@ -876,7 +899,7 @@ async function main(): Promise<void> {
       return;
     }
     const manifest = loadAttachmentsManifest(
-      stringFlag(args, "attachments-manifest"),
+      attachmentsManifest(args),
     );
     const runId = stringFlag(args, "run-id") ?? newRunId();
     mkdirSync(join(sessionRoot, runId), { recursive: true });
@@ -994,7 +1017,7 @@ async function main(): Promise<void> {
     // submission: a resume must read through the same roots or every agent after
     // it is told the submitted files are unavailable.
     const manifest = loadAttachmentsManifest(
-      stringFlag(args, "attachments-manifest"),
+      attachmentsManifest(args),
       // A resume carries journalled work: losing attachment access is a
       // degradation to report, never a reason to strand the run.
       { tolerant: true },

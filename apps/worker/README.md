@@ -17,6 +17,29 @@ SHA-256 verified and cached atomically; resume reuses cached resources and never
 versions. The worker also wires the model backend and host tools, executes the checkpoint-aware
 workflow, and writes canonical state.
 
+## The attachment store is a resource of the job, not an input of one launch
+
+`--attachments-manifest` names the ROOT the attachment tools read through. A worker that comes up
+without it has no roots, so it deletes the attachment host tools and the provider's file offers are
+withdrawn — and the capability broker then tells every agent, truthfully, that the submitted files
+are unavailable and to reason from metadata instead. Agents obey: they say they have no file access
+and go to the web instead. Nothing else surfaces it, which is how one run spent seventeen hours and
+442 consecutive review tasks reasoning blind about a codebase that was on disk the whole time.
+
+The server names the manifest on every submission it builds. The worker no longer depends on being
+told: when the flag is absent it looks for the store in its own job directory — a fixed place, one
+`dirname` from the `--events-file` the same command line names — and uses it, **printing an
+`[attachments]` line that says the launcher forgot**. The recovery is deliberately loud: a run
+reading its files because of a fallback is a launcher bug survived, not a thing to pass over. What
+the launcher DOES name always wins, and a run with no store recovers nothing (inventing a path
+would make the broker lie in the other direction).
+
+Related, in the broker: a capability that lost only SOME of its operations is no longer announced
+as gone. The catalog's `whenUnavailable` prose is written for total loss ("state explicitly that
+attachment access was unavailable"), so injecting it when only deterministic search is missing told
+an agent holding a working file read to stop reading files and report itself blind. A partial
+outage now names the operations that are actually missing.
+
 ## Staggered agent launches
 
 Agent tasks START one at a time, spaced 10 seconds apart, so a parallel wave (the first-pass

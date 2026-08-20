@@ -176,6 +176,51 @@ describe("resolveCapabilityPlan", () => {
     assert.ok(!plan.unavailableInstructions.includes("[attachment-access]"));
   });
 
+  it("a capability that lost one operation is not reported as gone", () => {
+    // The sentence this prevents, written by a real reviewer mid-run: "I have
+    // no file access this round, so I checked this by reading real papers
+    // online instead" — from an agent that was holding a working file read and
+    // had lost only deterministic search. The catalog's whenUnavailable prose
+    // is written for TOTAL loss, so it must not be what a partial outage says.
+    const searchable: CapabilityDeclaration = {
+      capabilityId: "attachment-access",
+      operations: ["attachment.list", "attachment.read", "attachment.search"],
+      whenUnavailable: "Do NOT read attachments; reason from metadata only.",
+    };
+    const input: BrokerInput = {
+      requiredCapabilities: [searchable],
+      providerOffers: [
+        { operationId: "attachment.list", nativeKey: "glob" },
+        { operationId: "attachment.read", nativeKey: "read" },
+      ],
+      hostTools: [],
+      enabledHostToolIds: new Set<string>(),
+    };
+    const plan = resolveCapabilityPlan(input);
+    const text = plan.unavailableInstructions ?? "";
+    assert.match(text, /attachment\.search/, "it names the operation that is missing");
+    assert.doesNotMatch(
+      text,
+      /reason from metadata only/,
+      "the total-loss prose must not be injected while reads still work",
+    );
+    assert.match(text, /the rest of this capability works/);
+    // And the working operations are still on the plan, unchanged.
+    const read = plan.operations.find((o) => o.operationId === "attachment.read");
+    assert.equal(read?.source, "provider");
+  });
+
+  it("a capability that lost everything still says the catalog's own sentence", () => {
+    const input: BrokerInput = {
+      requiredCapabilities: [attachmentAccess],
+      providerOffers: [],
+      hostTools: [],
+      enabledHostToolIds: new Set<string>(),
+    };
+    const plan = resolveCapabilityPlan(input);
+    assert.match(plan.unavailableInstructions ?? "", /reason from metadata only/);
+  });
+
   it("does not duplicate host tool definitions for shared operations", () => {
     const multiOpTool: HostToolManifest = {
       toolId: "multi_tool",

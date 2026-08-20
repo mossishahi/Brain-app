@@ -120,10 +120,21 @@ export function resolveCapabilityPlan(input: BrokerInput): ResolvedCapabilityPla
       capUnavailableOps.push(opId);
     }
 
-    // If any operations for this capability are unavailable, include instruction
+    // A capability that lost SOME of its operations has not gone away, and
+    // saying it has is expensive: the catalog's whenUnavailable prose is
+    // written for total loss ("state explicitly that attachment access was
+    // unavailable and reason only from the metadata"), so injecting it when
+    // only, say, deterministic search is missing tells an agent holding a
+    // working file-read tool to stop reading files and to report itself blind.
+    // A partial outage names what is actually missing instead.
     if (capUnavailableOps.length > 0) {
+      const partial = capUnavailableOps.length < capability.operations.length;
       unavailableInstructions.push(
-        `[${capability.capabilityId}] ${capability.whenUnavailable}`,
+        partial
+          ? `[${capability.capabilityId}] ${capUnavailableOps.join(", ")} ${
+              capUnavailableOps.length === 1 ? "is" : "are"
+            } unavailable; the rest of this capability works. Use the operations you do have, and report only the missing ones as missing — do not treat the capability as unavailable.`
+          : `[${capability.capabilityId}] ${capability.whenUnavailable}`,
       );
     }
   }

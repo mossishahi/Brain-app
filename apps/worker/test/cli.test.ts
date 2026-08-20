@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -494,5 +502,59 @@ test("run and resume accept content-dir and append JSONL events", () => {
     assert.ok(resumed.stdout.includes("Final output:"), "the CLI reports the final copies");
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a launcher that forgets the attachment store does not cost the run its files", () => {
+  // The failure this closes, measured on a real run: 442 consecutive tasks —
+  // every commenter, judge and redeveloper for seventeen hours — were told
+  // "attachment access was unavailable" and reasoned from metadata instead,
+  // because one worker generation came up without --attachments-manifest. The
+  // store was on disk the whole time, one dirname from the events file the
+  // same command line named.
+  const root = tempRoot();
+  const jobDir = mkdtempSync(join(tmpdir(), "bsa-job-"));
+  try {
+    const files = join(jobDir, "attachments", "files");
+    mkdirSync(files, { recursive: true });
+    writeFileSync(join(files, "paper.txt"), "the rectangle eigenvalue formula\n");
+    writeFileSync(
+      join(jobDir, "attachments", "manifest.json"),
+      JSON.stringify({
+        baseDir: join(jobDir, "attachments"),
+        attachments: [{ path: "files/paper.txt", bytes: 33 }],
+      }),
+    );
+    const started = spawnSync(
+      process.execPath,
+      [
+        new URL("../src/main.js", import.meta.url).pathname,
+        "run",
+        "--topic",
+        "Files must survive a forgetful launcher",
+        "--offline",
+        "--run-id",
+        "bsa_test_manifest_recovery",
+        "--session-root",
+        root,
+        "--content-dir",
+        registryContentDir,
+        // Deliberately NO --attachments-manifest: this is the forgetful
+        // launcher. The events file is what gives the job directory away.
+        "--events-file",
+        join(jobDir, "events.jsonl"),
+      ],
+      { encoding: "utf8" },
+    );
+    assert.equal(started.status, 0, started.stderr);
+    assert.match(
+      started.stderr,
+      /\[attachments\] this launch named no --attachments-manifest/,
+      "the recovery must be announced, not silent — silence is how it went unseen",
+    );
+    assert.match(started.stderr, /manifest\.json/, "and must name the store it found");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(jobDir, { recursive: true, force: true });
   }
 });
