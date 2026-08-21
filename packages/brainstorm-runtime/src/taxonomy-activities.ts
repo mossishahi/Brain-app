@@ -68,6 +68,8 @@ interface MatchedMember extends PoolMemberInput {
     readonly path: readonly string[];
     readonly score: number;
   }>;
+  /** The original compound pool term this half was split from, if any. */
+  readonly splitFrom?: string;
 }
 
 interface PlacementDecisionInput {
@@ -97,6 +99,39 @@ function positiveInteger(value: JsonValue | undefined, what: string): number {
     throw new Error(`${what} must be a positive integer`);
   }
   return value;
+}
+
+/**
+ * Lead words of organization/institution names ("Center for X", "Institute
+ * for Y") that make an "<A> for <B>" split produce a meaningless first half.
+ * Deliberately small and conservative — false negatives (a real compound
+ * term that isn't split) are harmless; the guard only prevents obviously
+ * useless splits.
+ */
+const COMPOUND_SPLIT_GUARD_WORDS = new Set([
+  "center", "centre", "institute", "program", "programme", "department",
+  "lab", "laboratory", "group", "society", "foundation", "office",
+  "council", "committee", "division", "school", "academy", "consortium",
+  "association", "company", "corporation",
+]);
+
+/**
+ * Splits a pool term shaped "<A> for <B>" into its two halves — a method
+ * or object (A) and the domain or purpose it is applied to (B) — when both
+ * halves look like real, standalone phrases rather than an organization
+ * name that happens to contain "for" ("Center for Computational Biology").
+ * Only ONE split point is ever tried: the first standalone " for " in the
+ * term, case-insensitive, on word boundaries.
+ */
+export function splitCompoundTerm(term: string): readonly [string, string] | undefined {
+  const match = term.match(/^(.+?)\s+for\s+(.+)$/i);
+  if (!match) return undefined;
+  const a = match[1]!.trim();
+  const b = match[2]!.trim();
+  if (!a || !b) return undefined;
+  const leadWord = a.split(/\s+/)[0]?.toLowerCase();
+  if (leadWord && COMPOUND_SPLIT_GUARD_WORDS.has(leadWord)) return undefined;
+  return [a, b];
 }
 
 /** Strip a resolve position to the artifact's schema (no revision echo inside). */
@@ -511,6 +546,19 @@ export function taxonomyActivities(
     }
     const annotated: (JsonValue | null)[] = [];
     const pending: Array<{ readonly slot: number; readonly entry: Pending }> = [];
+    // A split turns 1 pool member into 2 output entries — 1 net entry more
+    // than carrying it whole. `members` is already sliced to `maxMembers`
+    // above, so `maxMembers - members.length` is exactly the number of
+    // splits the WHOLE pass may ever perform without the final output
+    // exceeding the declared bound. This is computed once, outside the
+    // loop, and decremented on every split actually performed — checking
+    // it locally per-iteration against a snapshot of `annotated.length`
+    // (the previous approach) only proves THAT split leaves room; it says
+    // nothing about the ordinary members still ahead in the loop, each of
+    // which pushes unconditionally with no bound check of its own. A global
+    // budget is the only way to keep the cumulative total, in any order and
+    // across any number of splits, from ever crossing maxMembers.
+    let splitBudget = maxMembers - members.length;
     for (const raw of members) {
       const member = asObject(raw, "pool member") as unknown as PoolMemberInput;
       const result = await taxonomy.resolve(member.term);
@@ -530,13 +578,54 @@ export function taxonomyActivities(
           position: positionArtifact(result.position),
           options: [],
         } as unknown as JsonValue);
-      } else {
-        annotated.push(null);
-        pending.push({
-          slot: annotated.length - 1,
-          entry: { base, options: result.options },
-        });
+        continue;
       }
+
+      // The whole term did not resolve. Before carrying it through as one
+      // atomic unit, check whether it is a compound "<A> for <B>" term glued
+      // from two distinct concepts (one person's stated interest, e.g.
+      // "Manifold Learning for Network Analysis") — split it so BOTH halves
+      // get their own independent shot at landing, each carrying the exact
+      // same count/relevance/origins as the original (real evidence for
+      // both), rather than losing one half to a single placement.
+      const halves = splitCompoundTerm(member.term);
+      if (halves && splitBudget > 0) {
+        splitBudget -= 1;
+        for (const half of halves) {
+          const halfBase: JsonObject = {
+            term: half,
+            count: member.count,
+            ...(member.relevance !== undefined ? { relevance: member.relevance } : {}),
+            variants: [half] as unknown as JsonValue,
+            origins: [...member.origins] as unknown as JsonValue,
+            splitFrom: member.term,
+          };
+          const halfResult = await taxonomy.resolve(half);
+          revision = Math.max(revision, halfResult.revision);
+          annotated.push(null);
+          if (halfResult.found) {
+            semantic?.warm(halfResult.position.path, relevanceOf(member));
+            annotated[annotated.length - 1] = {
+              ...halfBase,
+              matched: true,
+              position: positionArtifact(halfResult.position),
+              options: [],
+            } as unknown as JsonValue;
+          } else {
+            pending.push({
+              slot: annotated.length - 1,
+              entry: { base: halfBase, options: halfResult.options },
+            });
+          }
+        }
+        continue;
+      }
+
+      annotated.push(null);
+      pending.push({
+        slot: annotated.length - 1,
+        entry: { base, options: result.options },
+      });
     }
 
     // Pass 2 — EMBEDDINGS propose: unambiguous scores above the served
@@ -613,7 +702,18 @@ export function taxonomyActivities(
     const decisions = asArray(placements.decisions, "placements.decisions").map(
       (raw) => asObject(raw, "placement decision") as unknown as PlacementDecisionInput,
     );
-    const decisionByTerm = new Map(decisions.map((decision) => [decision.term, decision]));
+    // Decisions are positional against the run's unmatched members, never
+    // keyed by term text: the compiler enforces a strict 1:1, in-order
+    // correspondence between `placements.decisions` and `poolMatches.
+    // unmatched` on write (see compiler.ts's PLACEMENT_COVERAGE_MISMATCH
+    // check). A compound-term split can legally place two members with
+    // identical term text side by side — an unrelated standalone member and
+    // a compound's half both named e.g. "Manifold Learning" — and a
+    // term-keyed map would let the second silently overwrite the first's
+    // decision. Advancing a cursor once per unmatched member, in the same
+    // order they are encountered below, keeps each member's own decision
+    // (or absence of one) correctly attached regardless of duplicate text.
+    let nextDecisionIndex = 0;
 
     const entries: TaxonomySuggestionEntry[] = [];
     for (const raw of members) {
@@ -646,7 +746,8 @@ export function taxonomyActivities(
         });
         continue;
       }
-      const decision = decisionByTerm.get(member.term);
+      const decision = decisions[nextDecisionIndex];
+      nextDecisionIndex += 1;
       if (!decision) {
         // No node matched and the placer left no decision: queue a
         // place-anchored INSERT suggestion — the candidates name where in
@@ -728,7 +829,11 @@ export function taxonomyActivities(
     const decisions = asArray(placements.decisions, "placements.decisions").map(
       (raw) => asObject(raw, "placement decision") as unknown as PlacementDecisionInput,
     );
-    const decisionByTerm = new Map(decisions.map((decision) => [decision.term, decision]));
+    // Positional against the unmatched members, not term-keyed — see the
+    // matching comment in `suggest` above. A duplicate term (a split half
+    // colliding with an unrelated standalone member of the same name) must
+    // not let one member's placement decision bleed into another's seating.
+    let nextDecisionIndex = 0;
 
     // Resolve every member to a landing position: matched members carry it;
     // placed members land one level below their (existing) parent; members the
@@ -751,7 +856,8 @@ export function taxonomyActivities(
         });
         continue;
       }
-      const decision = decisionByTerm.get(member.term);
+      const decision = decisions[nextDecisionIndex];
+      nextDecisionIndex += 1;
       if (!decision) continue; // undecided members carry no seatable landing
       if (decision.outcome === "already_present" && decision.node) {
         const resolved = await taxonomy.resolve(decision.node);

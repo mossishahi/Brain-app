@@ -667,6 +667,10 @@ export const matchedPoolMemberSchema = poolMemberSchema
     matchScore: z.number().min(-1).max(1).optional(),
     /** Scored nearest nodes of an unmatched member (semantic lane on). */
     candidates: z.array(matchCandidateSchema).max(8).optional(),
+    /** The original compound pool term this member was split from, when the
+     *  deterministic matcher divided an "<A> for <B>" term into two halves so
+     *  each concept gets its own taxonomy landing. Absent on ordinary members. */
+    splitFrom: nonEmpty.optional(),
   })
   .superRefine((member, ctx) => {
     if (member.matched && member.position === undefined) {
@@ -1018,11 +1022,14 @@ export type PanelMember = z.infer<typeof panelMemberSchema>;
 
 /**
  * The seated panel produced by the deterministic panel-selection activity.
- * The experts tree remains a separate upstream artifact; a member is one
- * UMBRELLA of that tree, chosen by descending re-weighted support
- * (j × the sum of its subfields' counts), and carries every subfield of that
- * umbrella as its stated research focuses. At least two members are required
- * so that every review step has at least one commentor.
+ * The experts tree remains a separate upstream artifact; a member is either
+ * one TOPIC (a single, specific research focus, when that topic's own
+ * support won it a seat on its own merit) or one UMBRELLA/DEPARTMENT (whose
+ * `subfields` is the fixed, generic focus phrase `panel.ts` uses for a
+ * branch that won as a block — see `BROAD_SEAT_FOCUS` there — never a list
+ * of every topic name the branch happened to accumulate). At least two
+ * members are required so that every review step has at least one
+ * commentor.
  */
 export const panelSchema = z
   .object({

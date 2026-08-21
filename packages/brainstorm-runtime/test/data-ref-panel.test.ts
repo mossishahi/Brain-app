@@ -179,7 +179,9 @@ test("panel.select seats from one cxr-sorted queue over levels 2, 3 and 4 of the
   // capacity 3, Physics is skipped (Quantum Optics is within the next 3 live
   // entries), Quantum Optics is skipped (photon counting is imminent), and
   // the TOPIC seats. Machine Learning's topic is NOT within its window, so
-  // the umbrella seats with all of its subfields.
+  // the umbrella seats as a block — with the generic BROAD_SEAT_FOCUS, not
+  // its topic's real name (a block win is not the same claim as a topic
+  // winning on its own specific merit).
   assert.deepEqual(selectPanel(experts, 3).members, [
     {
       id: "member-1",
@@ -191,7 +193,7 @@ test("panel.select seats from one cxr-sorted queue over levels 2, 3 and 4 of the
       id: "member-2",
       department: "Computer Science",
       umbrella: "Machine Learning",
-      subfields: ["representation learning"],
+      subfields: ["super relevant to this project"],
     },
     {
       id: "member-3",
@@ -220,6 +222,66 @@ test("panel.select seats from one cxr-sorted queue over levels 2, 3 and 4 of the
     umbrella: "Condensed Matter",
     subfields: ["Chip Morphology"],
   });
+});
+
+test("an umbrella- or department-level block seat gets a generic focus, never every topic name it accumulated", () => {
+  // D's umbrellas (U1 cxr=2×0.5=1.0, U2 cxr=1×0.9=0.9) sum to D's own
+  // cxr=1.9 — highest in the queue, so D is popped first. Filler
+  // department E (no umbrellas of its own, cxr=1×1.2=1.2) sits between D
+  // and D's own umbrellas in the sorted queue, so at capacity=1 the
+  // look-ahead's single-entry window after D lands on E, not on U1 or U2:
+  // D's own umbrella is never "imminent", so D seats through its best
+  // umbrella (U1, the higher cxr — "most relevant") rather than deferring.
+  const experts = {
+    departments: [
+      {
+        name: "D",
+        domain: "Domain",
+        count: 1,
+        relevance: 0.1,
+        umbrellas: [
+          {
+            name: "U1",
+            count: 2,
+            relevance: 0.5,
+            subfields: [
+              { name: "topic-a", count: 1, relevance: 0.5 },
+              { name: "topic-b", count: 1, relevance: 0.3 },
+            ],
+          },
+          {
+            name: "U2",
+            count: 1,
+            relevance: 0.9,
+            subfields: [{ name: "topic-c", count: 1, relevance: 0.9 }],
+          },
+        ],
+      },
+      {
+        // A filler with no umbrellas of its own: it seats nobody and spends
+        // no capacity (per selectPanel's own contract), but its queue
+        // position between D and D's umbrellas is exactly what keeps D's
+        // look-ahead window from reaching them.
+        name: "E",
+        domain: "Domain",
+        count: 1,
+        relevance: 1.2,
+        umbrellas: [],
+      },
+    ],
+  };
+
+  const panel = selectPanel(experts, 1);
+  assert.deepEqual(panel.members, [
+    {
+      id: "member-1",
+      department: "D",
+      // The chosen umbrella's REAL name still fills {{umbrella}} — only the
+      // topic list collapses to the generic phrase.
+      umbrella: "U1",
+      subfields: ["super relevant to this project"],
+    },
+  ]);
 });
 
 test("panel.select seats sibling topics as separate members under the same umbrella", () => {

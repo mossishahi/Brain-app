@@ -182,7 +182,7 @@ test("the code-annotation pass is gated on code files and folds summaries into t
   assert.ok(skill.meta.capabilities.includes("attachment-access"));
   assert.ok(skill.meta.capabilities.includes("code-execution"));
 
-  // Every role can run light scripts and read single attached files on demand.
+  // Every role in the decompose-through-review chain can run light scripts.
   for (const name of [
     "processor",
     "pool-builder",
@@ -203,9 +203,39 @@ test("the code-annotation pass is gated on code files and folds summaries into t
       role.meta.capabilities.includes("code-execution"),
       `${name} carries the code-execution capability`,
     );
+  }
+
+  // But attachment-access is only for roles that actually read submitted
+  // material: the ones that read a file's content, or a panel member
+  // reasoning about the submission itself. pool-builder and placer never
+  // bind a file's content (pool-builder gets the file MAP with its
+  // codeSummary already folded in; placer's own bind omits files entirely
+  // — see the placer bind assertions below) — granting them the capability
+  // anyway was unused scope, not a needed one.
+  for (const name of [
+    "processor",
+    "code-annotator",
+    "brain",
+    "commentor",
+    ...(bundle.skills["interdisciplinary-commentor"]
+      ? ["interdisciplinary-commentor"]
+      : []),
+    "judge",
+    "redeveloper",
+    "integrator",
+    "chair",
+  ]) {
+    const role = bundle.skills[name]!;
     assert.ok(
       role.meta.capabilities.includes("attachment-access"),
       `${name} carries the attachment-access capability`,
+    );
+  }
+  for (const name of ["pool-builder", "placer"]) {
+    const role = bundle.skills[name]!;
+    assert.ok(
+      !role.meta.capabilities.includes("attachment-access"),
+      `${name} does not read attachments directly — it works from the file map's summaries`,
     );
   }
 });

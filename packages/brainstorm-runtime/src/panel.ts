@@ -85,6 +85,26 @@ export function scoreExpertiseTree(tree: ExpertsTree): ScoredExpertiseTree {
   };
 }
 
+/**
+ * The stated focus of a seat won by an UMBRELLA or a DEPARTMENT (never a
+ * single topic seating on its own merit) — deliberately generic rather than
+ * every topic name the branch happened to accumulate. Those topics are real
+ * pool support (they are why the branch out-scored its competitors and won
+ * a seat at all), but most of them, individually, are far weaker evidence
+ * than the one or two topics that actually earned the seat: an umbrella's
+ * cxr is `count × relevance`, and relevance is the MAX over its children
+ * (`experts.bridge`'s fold) — so a seat can be won by one 0.55-relevant
+ * topic while its label used to print three near-zero siblings right beside
+ * it, unfiltered, as if they mattered equally. Printing this fixed phrase
+ * into `{{subfields}}` instead states plainly what is actually true of an
+ * umbrella/department-level seat's focus — broad, real, and topically
+ * relevant to the run — without claiming a false precision the underlying
+ * numbers do not support. Topic-level seats (a single topic winning on its
+ * own cxr) keep their real, specific topic name; only a branch that won as
+ * a block gets this generic phrase.
+ */
+const BROAD_SEAT_FOCUS = "super relevant to this project";
+
 /** One node of the mixed seating queue (tree levels 2, 3 and 4). */
 export interface SeatingQueueEntry {
   /** 2 = department (taxonomy field), 3 = umbrella (subfield), 4 = topic. */
@@ -162,15 +182,16 @@ export function seatingQueue(tree: ExpertsTree): SeatingQueueEntry[] {
  *    - an UMBRELLA (level 3) first LOOKS AHEAD: if any of its own topics sit
  *      within the next `capacity` live queue entries, the umbrella is
  *      skipped without spending capacity — its topics will seat themselves.
- *      Otherwise it seats a member with itself as the umbrella and ALL of
- *      its subfields as the stated focuses, and removes the branch's
- *      remaining level-4 entries from the queue;
+ *      Otherwise it seats a member with itself as the umbrella and
+ *      `BROAD_SEAT_FOCUS` (a fixed, generic phrase, not its topics' real
+ *      names — see that constant) as the stated focus, and removes the
+ *      branch's remaining level-4 entries from the queue;
  *    - a DEPARTMENT (level 2) looks ahead the same way: if any of its own
  *      umbrellas sit within the next `capacity` live entries, the department
  *      is skipped without spending capacity. Otherwise it picks its
  *      highest-cxr umbrella still in the queue, seats a member with that
- *      umbrella and the union of the umbrella term and its subfields as
- *      focuses, and removes the picked umbrella and its level-4 entries. A
+ *      umbrella and `BROAD_SEAT_FOCUS` as its focus, and removes the picked
+ *      umbrella and its level-4 entries. A
  *      department whose umbrellas are all consumed (or that houses none)
  *      seats nobody and the loop moves on without spending capacity.
  *
@@ -305,7 +326,7 @@ export function selectPanel(experts: ExpertsTree, panelSize: number): Panel {
         continue;
       }
       const umbrella = department.umbrellas[entry.umbrellaIndex]!;
-      const focuses = umbrella.subfields.map((subfield) => subfield.name);
+      const focuses = [BROAD_SEAT_FOCUS];
       if (!seated.has(seatOf(department.name, umbrella.name, focuses))) {
         seat(department.name, umbrella.name, focuses);
         removeSubfieldEntries(entry.departmentIndex, entry.umbrellaIndex);
@@ -335,7 +356,7 @@ export function selectPanel(experts: ExpertsTree, panelSize: number): Panel {
     }
     if (!picked) continue; // nothing left to represent this department with
     const umbrella = department.umbrellas[picked.umbrellaIndex]!;
-    const focuses = [umbrella.name, ...umbrella.subfields.map((subfield) => subfield.name)];
+    const focuses = [BROAD_SEAT_FOCUS];
     if (seated.has(seatOf(department.name, umbrella.name, focuses))) continue;
     seat(department.name, umbrella.name, focuses);
     removed.add(entryKey(picked));

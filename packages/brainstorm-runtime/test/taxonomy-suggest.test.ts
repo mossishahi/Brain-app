@@ -161,3 +161,83 @@ test("every suggest kind — including insert from undecidable and undecided mem
   };
   assert.equal(placeDetail.nearest?.length, 1);
 });
+
+test("duplicate term text across matches.members — a split half colliding with an unrelated standalone member of the same name — keeps each member's own decision, never last-write-wins", async () => {
+  // Regression: a compound "<A> for <B>" pool term splits into two halves,
+  // each carrying the half's plain text as its `term`. Nothing stops that
+  // text from colliding with an unrelated, perfectly legal standalone pool
+  // member of the same name (the two RAW pool strings were different and
+  // both passed the pool's own dedup check). Decisions must stay attached
+  // to the right occurrence by POSITION, not by re-keying on that now-
+  // ambiguous term text.
+  const taxonomy = new RecordingTaxonomy();
+  const suggest = taxonomyActivities(taxonomy)["taxonomy.suggest"]!;
+
+  const matches = {
+    revision: 7,
+    members: [
+      // The standalone occurrence: 3 people's worth of real evidence.
+      member("Manifold Learning", { matched: false, count: 3, candidates: [] }),
+      // An unrelated split half of a different compound term, same text.
+      member("Manifold Learning", { matched: false, count: 1, candidates: [] }),
+      member("Network Analysis", {
+        matched: true,
+        count: 1,
+        position: {
+          id: "T2",
+          name: "Network Analysis",
+          level: "topic",
+          path: [
+            "Physical Sciences",
+            "Physics and Astronomy",
+            "Statistical and Nonlinear Physics",
+            "Network Analysis",
+          ],
+        },
+      }),
+    ],
+    unmatched: [],
+  } as unknown as JsonValue;
+
+  const placements = {
+    revision: 7,
+    // Positional against the two unmatched "Manifold Learning" occurrences,
+    // in the order they appear above — NOT distinguishable by term text.
+    decisions: [
+      {
+        term: "Manifold Learning",
+        outcome: "place",
+        name: "Manifold Learning",
+        parent: "Field X",
+        aliases: [],
+        reason: "standalone interest, 3 people",
+      },
+      {
+        term: "Manifold Learning",
+        outcome: "place",
+        name: "Manifold Learning",
+        parent: "Field Y",
+        aliases: [],
+        reason: "half of a compound statement",
+      },
+    ],
+  } as unknown as JsonValue;
+
+  const receipt = await suggest(
+    { matches, placements, maxMembers: 200 },
+    { runId: "test-run", nodePath: "root/submit-decisions", signal: new AbortController().signal },
+  );
+  artifactSchemas.suggestionReceipt.parse(receipt);
+
+  // Inspect what was actually queued, in encounter order — not by term
+  // (which is exactly the ambiguity a term-keyed map would collapse).
+  type PlaceDetail = { parent?: string; reason?: string };
+  const standalone = taxonomy.submitted[0]!;
+  const splitHalf = taxonomy.submitted[1]!;
+  assert.equal(standalone.term, "Manifold Learning");
+  assert.equal((standalone.detail as PlaceDetail).parent, "Field X");
+  assert.match((standalone.detail as PlaceDetail).reason ?? "", /3 people/);
+  assert.equal(splitHalf.term, "Manifold Learning");
+  assert.equal((splitHalf.detail as PlaceDetail).parent, "Field Y");
+  assert.match((splitHalf.detail as PlaceDetail).reason ?? "", /compound/);
+});
