@@ -1,15 +1,18 @@
 /** Shared UI primitives used across panels: dots, clamps, chips, evidence. */
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { revealStep } from "./live-threads";
-import type { CSSProperties } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import type {
   ActivityDetailView,
+  CotStepPart,
+  CotStepView,
   EvidenceView,
   PanelMemberView,
   StageActivityEntry,
   TokenUsageView,
   Verdict,
 } from "@brainstorm-agentic/protocol";
+import { partLabel, stepTextBlocks } from "../steps";
 import type { DotState } from "../format";
 
 /** 1234 -> "1.2k", 1230000 -> "1.2M": token counts at chip scale. */
@@ -76,6 +79,55 @@ export function Clamp({ text, lines = 4 }: { text: string; lines?: number }) {
           {open ? "less" : "more"}
         </button>
       )}
+    </div>
+  );
+}
+
+/** One block of a rendered step: the body already built by the caller. */
+export interface StepBlock {
+  /** Which part this block is; absent when the step is one string. */
+  readonly part?: CotStepPart;
+  readonly body: ReactNode;
+}
+
+/**
+ * A step's blocks with one treatment applied to every block's text — the
+ * common case, where the caller draws each block the same way.
+ */
+export function textStepBlocks(
+  step: CotStepView,
+  render: (text: string) => ReactNode,
+): readonly StepBlock[] {
+  return stepTextBlocks(step).map((block) => ({
+    ...(block.part !== undefined ? { part: block.part } : {}),
+    body: render(block.text),
+  }));
+}
+
+/**
+ * A chain step's body, in the shape the run recorded it: four labelled blocks
+ * when the step was written in parts, one unlabelled block when it was written
+ * as a single string.
+ *
+ * The label is a LOCATOR, nothing more — the parts carry no assigned meaning —
+ * so it stays at label size and label colour and never competes with the words
+ * it names. The callers differ in what a block CONTAINS (clamped prose in the
+ * first pass, diff spans in the review deck), so the body is theirs and only
+ * the frame is shared: one definition of what four parts look like.
+ */
+export function StepBlocks({ blocks }: { blocks: readonly StepBlock[] }) {
+  const first = blocks[0];
+  if (blocks.length === 1 && first?.part === undefined) return <>{first.body}</>;
+  return (
+    <div className="step-parts">
+      {blocks.map((block, index) => (
+        <div key={block.part ?? index} className="step-part">
+          {block.part !== undefined && (
+            <span className="step-part-label">{partLabel(block.part)}</span>
+          )}
+          {block.body}
+        </div>
+      ))}
     </div>
   );
 }

@@ -12,6 +12,11 @@
  *    extra "round" card (a cross rewrite), labeled with the walk position
  *    that caused it, its changed words colored by direction.
  *
+ * A step written in FOUR PARTS is diffed part against matching part, and each
+ * part keeps the same two treatments. The step is the unit a rewrite replaces,
+ * so aligning the concatenation would dim a sentence the redeveloper moved
+ * from one part into the next, and the reader would never see it move.
+ *
  * The deck's BASE is the step's first-pass text — the "Original thought"
  * card — which is the only card that renders at full weight in its
  * entirety; every later card's full-weight (or colored) words are exactly
@@ -22,16 +27,33 @@
  * steps ascending, rounds ascending — exactly the order the runtime executed
  * them — threading a working chain seeded from the first-pass text.
  */
+import { isCotStepParts } from "@brainstorm-agentic/protocol";
 import type {
+  CotStepPart,
+  CotStepView,
   ReviewMemberView,
   ReviewRoundView,
   ReviewStepView,
 } from "@brainstorm-agentic/protocol";
+// Extension-qualified because this module is also compiled and run by
+// `node --test`, which resolves a specifier literally — the app's bundler
+// resolves it the same way either way.
+import { stepPlainText, stepTextBlocks } from "../../steps.js";
 
 export interface DiffSegment {
   readonly text: string;
   /** True when this run of words is new in the compared version. */
   readonly changed: boolean;
+}
+
+/**
+ * One block of a version as the deck renders it: a labelled part of a
+ * four-part step, or the whole step when the run recorded it as one string.
+ */
+export interface DiffBlock {
+  /** Which part this block is; absent when the step is one string. */
+  readonly part?: CotStepPart;
+  readonly segments: readonly DiffSegment[];
 }
 
 /**
@@ -83,6 +105,48 @@ export function diffWords(before: string | undefined, after: string): readonly D
   const kept = new Uint8Array(a.length);
   if (b.length > 0) markKept(b, a, 0, b.length, 0, a.length, kept);
   return segmentsOf(after, a, kept);
+}
+
+/**
+ * The diff of one version against the one before it, PART BY PART.
+ *
+ * part1 is aligned to part1 and never to part2. A redevelopment rewrites the
+ * whole four-part object, so a sentence the redeveloper moved from one part
+ * into the next is a change in both places — diffing the four parts as one
+ * concatenated string would dim it where it landed and lose the move
+ * entirely. A step recorded as a single string keeps the single block, and
+ * the treatment inside a block is unchanged: carried words dimmed, this
+ * version's own words at full weight.
+ */
+export function diffStep(
+  before: CotStepView | undefined,
+  after: CotStepView,
+): readonly DiffBlock[] {
+  return stepTextBlocks(after).map((block) => ({
+    ...(block.part !== undefined ? { part: block.part } : {}),
+    segments: diffWords(counterpart(before, block.part), block.text),
+  }));
+}
+
+/**
+ * The earlier version's text for one block. A run never changes step shape
+ * mid-walk — its bundle is pinned for life — so the mismatched shapes below
+ * cannot come out of a real walk; falling back to the whole earlier step keeps
+ * a hand-assembled or half-migrated record dimming what it carried, instead of
+ * rendering as one fully-changed card, which reads as no diff at all.
+ */
+function counterpart(before: CotStepView | undefined, part?: CotStepPart): string | undefined {
+  if (before === undefined) return undefined;
+  if (part !== undefined && isCotStepParts(before)) return before[part];
+  return stepPlainText(before);
+}
+
+/** Every word of a version marked carried: this version changed nothing. */
+function keptBlocks(step: CotStepView): readonly DiffBlock[] {
+  return stepTextBlocks(step).map((block) => ({
+    ...(block.part !== undefined ? { part: block.part } : {}),
+    segments: [{ text: block.text, changed: false }],
+  }));
 }
 
 function tokensOf(text: string): readonly Token[] {
@@ -315,19 +379,22 @@ function segmentsOf(
  * every step spends the whole walk's work to render seven cards — and spends
  * it again on the next progress event of a live run.
  */
-function lazyDiff(before: string | undefined, after: string): () => readonly DiffSegment[] {
-  let cached: readonly DiffSegment[] | undefined;
-  return () => (cached ??= diffWords(before, after));
+function lazyDiff(
+  before: CotStepView | undefined,
+  after: CotStepView,
+): () => readonly DiffBlock[] {
+  let cached: readonly DiffBlock[] | undefined;
+  return () => (cached ??= diffStep(before, after));
 }
 
-function withSegments<T extends object>(
+function withBlocks<T extends object>(
   base: T,
-  segments: () => readonly DiffSegment[],
-): T & { readonly segments: readonly DiffSegment[] } {
-  return Object.defineProperty(base, "segments", {
+  blocks: () => readonly DiffBlock[],
+): T & { readonly blocks: readonly DiffBlock[] } {
+  return Object.defineProperty(base, "blocks", {
     enumerable: true,
-    get: segments,
-  }) as T & { readonly segments: readonly DiffSegment[] };
+    get: blocks,
+  }) as T & { readonly blocks: readonly DiffBlock[] };
 }
 
 /** One retroactive rewrite a round applied to a step other than its own. */
@@ -335,27 +402,28 @@ export interface CrossChangeView {
   /** 1-based index of the step the rewrite landed on. */
   readonly index: number;
   /** The step's text before this rewrite; undefined when unreconstructable. */
-  readonly before?: string;
-  readonly after: string;
-  readonly segments: readonly DiffSegment[];
+  readonly before?: CotStepView;
+  readonly after: CotStepView;
+  readonly blocks: readonly DiffBlock[];
 }
 
 /** Everything a round card needs, derived once per seat. */
 export interface RoundComputedView {
   readonly round: ReviewRoundView;
   /** The step's text as it went INTO this round. */
-  readonly inText?: string;
+  readonly inText?: CotStepView;
   /** The step's text as it came OUT of this round (own rewrite applied). */
-  readonly outText?: string;
+  readonly outText?: CotStepView;
   /** True when this round's redevelopment rewrote the step's own text. */
   readonly ownRewrite: boolean;
   /**
-   * The out-text as diff segments. A round without a rewrite is all-kept
-   * (nothing changed this round — the full-weight debut of the text belongs
-   * to the "Original thought" base card); a rewrite diffs against the
-   * in-text.
+   * The out-text as diff blocks — four for a step written in parts, one
+   * otherwise. A round without a rewrite is all-kept (nothing changed this
+   * round — the full-weight debut of the text belongs to the "Original
+   * thought" base card); a rewrite diffs each part against the in-text's
+   * matching part.
    */
-  readonly segments: readonly DiffSegment[];
+  readonly blocks: readonly DiffBlock[];
   /** Rewrites this round applied to OTHER steps, in change-set order. */
   readonly crossChanges: readonly CrossChangeView[];
 }
@@ -370,9 +438,9 @@ export interface CrossRewriteView {
   readonly byStep: number;
   readonly byRound: number;
   /** The step's text before this rewrite; undefined when unreconstructable. */
-  readonly before?: string;
-  readonly after: string;
-  readonly segments: readonly DiffSegment[];
+  readonly before?: CotStepView;
+  readonly after: CotStepView;
+  readonly blocks: readonly DiffBlock[];
 }
 
 export interface SeatTimeline {
@@ -389,9 +457,9 @@ export interface SeatTimeline {
    * first-pass record (older artifacts), in which case the deck simply has
    * no base card.
    */
-  readonly original: ReadonlyMap<number, string>;
+  readonly original: ReadonlyMap<number, CotStepView>;
   /** The chain as the replay leaves it (first pass + every rewrite). */
-  readonly chain: ReadonlyMap<number, string>;
+  readonly chain: ReadonlyMap<number, CotStepView>;
 }
 
 /**
@@ -411,7 +479,7 @@ const TIMELINE_CACHE_LIMIT = 32;
 
 export function seatTimeline(
   member: ReviewMemberView,
-  firstPassCot?: readonly string[],
+  firstPassCot?: readonly CotStepView[],
 ): SeatTimeline {
   const signature = timelineSignature(member, firstPassCot);
   const hit = timelineCache.get(member.memberId);
@@ -429,22 +497,33 @@ export function seatTimeline(
  */
 export function timelineSignature(
   member: ReviewMemberView,
-  firstPassCot?: readonly string[],
+  firstPassCot?: readonly CotStepView[],
 ): string {
   const parts: string[] = [member.memberId, member.dismissed !== undefined ? "dismissed" : ""];
-  for (const text of firstPassCot ?? []) parts.push(fingerprint(text));
+  for (const text of firstPassCot ?? []) parts.push(fingerprintStep(text));
   for (const step of member.steps) {
     parts.push(`s${step.index}:${step.outcome}`);
     for (const round of step.rounds) {
       parts.push(
-        `r${round.round}:${round.decision?.verdict ?? "-"}:${fingerprint(round.cot ?? "")}`,
+        `r${round.round}:${round.decision?.verdict ?? "-"}:${fingerprintStep(round.cot ?? "")}`,
       );
       for (const entry of round.revision?.rewritten ?? []) {
-        parts.push(`w${entry.index}:${fingerprint(entry.text)}`);
+        parts.push(`w${entry.index}:${fingerprintStep(entry.text)}`);
       }
     }
   }
   return parts.join("|");
+}
+
+/**
+ * A step's fingerprint, part by part: a rewrite that moves the SAME words from
+ * one part into the next changes nothing about their concatenation, and the
+ * deck would then keep serving the diffs it already computed.
+ */
+function fingerprintStep(step: CotStepView): string {
+  return stepTextBlocks(step)
+    .map((block) => fingerprint(block.text))
+    .join(".");
 }
 
 /** FNV-1a over the text — a content fingerprint, nothing security-bearing. */
@@ -478,10 +557,10 @@ export function roundViewKey(stepIndex: number, round: number): string {
  */
 export function computeSeatTimeline(
   member: ReviewMemberView,
-  firstPassCot?: readonly string[],
+  firstPassCot?: readonly CotStepView[],
 ): SeatTimeline {
-  const chain = new Map<number, string>();
-  const original = new Map<number, string>();
+  const chain = new Map<number, CotStepView>();
+  const original = new Map<number, CotStepView>();
   (firstPassCot ?? []).forEach((text, index) => {
     chain.set(index + 1, text);
     original.set(index + 1, text);
@@ -509,15 +588,15 @@ export function computeSeatTimeline(
         // One diff, read by whichever of the two cards below is opened first:
         // the origin round's card and the affected step's card show the same
         // change from opposite ends.
-        const segments = lazyDiff(before, entry.text);
+        const blocks = lazyDiff(before, entry.text);
         crossChanges.push(
-          withSegments(
+          withBlocks(
             {
               index: entry.index,
               ...(before !== undefined ? { before } : {}),
               after: entry.text,
             },
-            segments,
+            blocks,
           ),
         );
         chain.set(entry.index, entry.text);
@@ -525,14 +604,14 @@ export function computeSeatTimeline(
         // its round deck, carrying who caused it and the text it left behind.
         const received = crossRewrites.get(entry.index) ?? [];
         received.push(
-          withSegments(
+          withBlocks(
             {
               byStep: step.index,
               byRound: round.round,
               ...(before !== undefined ? { before } : {}),
               after: entry.text,
             },
-            segments,
+            blocks,
           ),
         );
         crossRewrites.set(entry.index, received);
@@ -552,10 +631,10 @@ export function computeSeatTimeline(
       rounds.set(
         roundViewKey(step.index, round.round),
         outText === undefined
-          ? { ...base, segments: [] }
+          ? { ...base, blocks: [] }
           : own !== undefined
-            ? withSegments(base, lazyDiff(inText, outText))
-            : { ...base, segments: [{ text: outText, changed: false }] },
+            ? withBlocks(base, lazyDiff(inText, outText))
+            : { ...base, blocks: keptBlocks(outText) },
       );
     }
   }
@@ -588,7 +667,7 @@ export type DeckEntry = {
    */
   readonly editRound?: number;
 } & (
-  | { readonly kind: "original"; readonly key: string; readonly text: string }
+  | { readonly kind: "original"; readonly key: string; readonly text: CotStepView }
   | { readonly kind: "round"; readonly key: string; readonly round: ReviewRoundView }
   | { readonly kind: "cross"; readonly key: string; readonly cross: CrossRewriteView }
 );

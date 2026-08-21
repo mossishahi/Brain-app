@@ -22,7 +22,15 @@ import type {
   VerifyOutputView,
 } from "@brainstorm-agentic/protocol";
 import type { DotState } from "../../format";
-import { Clamp, Dot, EvidenceBlock, LiveThread, TokenChip } from "../common";
+import {
+  Clamp,
+  Dot,
+  EvidenceBlock,
+  LiveThread,
+  StepBlocks,
+  TokenChip,
+  textStepBlocks,
+} from "../common";
 
 type TabId = "primary" | "requested" | "chain" | "novelty" | "papers";
 
@@ -622,7 +630,11 @@ export function IdeaTabs({ idea }: { idea: BrainIdeaView }) {
           <ol className="chain-list">
             {idea.cot.map((step, i) => (
               <li key={i}>
-                <Clamp text={step} />
+                {/* A step recorded in parts renders as its four labelled
+                    blocks; one written as a single string keeps the single
+                    block it always had. Each block clamps on its own, so a
+                    long part folds without hiding the parts after it. */}
+                <StepBlocks blocks={textStepBlocks(step, (part) => <Clamp text={part} />)} />
               </li>
             ))}
           </ol>

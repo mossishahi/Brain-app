@@ -2,16 +2,23 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  artifactSchemas,
+  brainIdeaPartsSchema,
   brainIdeaSchema,
+  commentPartsSchema,
   commentSchema,
+  cotStepPartsSchema,
   evidenceSchema,
   expertsTreeSchema,
   finalProposalSchema,
   ignoredFilesSchema,
+  judgeDecisionPartsSchema,
   judgeDecisionSchema,
   mergeRedevelopment,
+  mergeRedevelopmentParts,
   panelSchema,
   processorOutputSchema,
+  redevelopmentPatchPartsSchema,
   redevelopmentPatchSchema,
   RedevelopmentMergeError,
   redevelopmentSchema,
@@ -930,5 +937,317 @@ test("final proposal: prioritized action items are required", () => {
   assert.equal(
     finalProposalSchema.safeParse({ ...good, actionItems: [{ priority: 0, action: "x" }] }).success,
     false,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// the four-part chain forms
+// ---------------------------------------------------------------------------
+
+const emptyParts = { part1: "", part2: "", part3: "", part4: "" };
+const stepParts = (text: string) => ({
+  part1: `${text}, first part.`,
+  part2: `${text}, second part.`,
+  part3: `${text}, third part.`,
+  part4: `${text}, fourth part.`,
+});
+const partsAssessment = [{ commentorId: "cs-gnn", basis: "verified" as const }];
+const mathEvidence = {
+  kind: "math" as const,
+  code: "",
+  result: "",
+  derivation: "Expanding the expectation term by term shows the bias.",
+  citation: "",
+  locator: "",
+  shows: "",
+};
+
+test("a chain step is exactly four parts, and an empty part is legal", () => {
+  assert.ok(cotStepPartsSchema.safeParse(stepParts("Step one")).success);
+  assert.ok(
+    cotStepPartsSchema.safeParse(emptyParts).success,
+    "an empty part carries no claim, and no length rule may fail a run over it",
+  );
+  assert.equal(
+    cotStepPartsSchema.safeParse({ ...stepParts("Step one"), part5: "one more" }).success,
+    false,
+    "four is the ceiling: a fifth part would let a step grow without bound",
+  );
+  assert.equal(
+    cotStepPartsSchema.safeParse({ part1: "a", part2: "b", part3: "c" }).success,
+    false,
+    "all four keys are always present, even when empty",
+  );
+});
+
+test("brainIdeaParts: the same first pass with a four-part chain", () => {
+  const good = {
+    output: validDevelopedOutput,
+    cot: [stepParts("One"), stepParts("Two"), stepParts("Three")],
+    novelty: para(1),
+  };
+  assert.ok(brainIdeaPartsSchema.safeParse(good).success);
+  assert.ok(
+    brainIdeaPartsSchema.safeParse({
+      ...good,
+      cot: [emptyParts, emptyParts, emptyParts],
+    }).success,
+    "no length rule lives in the new chain",
+  );
+  assert.equal(
+    brainIdeaPartsSchema.safeParse({ ...good, cot: [stepParts("One")] }).success,
+    false,
+    "the 3..9 step bounds are unchanged",
+  );
+  assert.equal(
+    brainIdeaPartsSchema.safeParse({ ...good, cot: [para(1), para(1), para(1)] }).success,
+    false,
+    "a parts chain never accepts the legacy string steps",
+  );
+  assert.equal(
+    brainIdeaPartsSchema.safeParse({ ...good, novelty: undefined }).success,
+    false,
+    "the shape/novelty rule is carried over, not re-decided",
+  );
+  // And the legacy schema is untouched by the new one existing beside it.
+  assert.ok(
+    brainIdeaSchema.safeParse({ ...good, cot: [para(1), para(1), para(1)] }).success,
+  );
+  assert.equal(brainIdeaSchema.safeParse(good).success, false);
+});
+
+test("commentParts: flaws replace the scalar step, and an empty list is a verdict", () => {
+  const pass = {
+    verdict: "Pass",
+    reason: "Nothing to fault.",
+    flaws: [],
+    suggestion: "",
+    evidence: noEvidence,
+  };
+  assert.ok(
+    commentPartsSchema.safeParse(pass).success,
+    "a reviewer that found nothing is legal, and says so with an empty list",
+  );
+  assert.ok(
+    commentPartsSchema.safeParse({
+      ...pass,
+      verdict: "Build",
+      reason: "ok",
+      flaws: [{ step: 2, ...emptyParts, part3: "The bound is asserted, never derived." }],
+    }).success,
+    "no length floor on the reason, and no required suggestion on a Build",
+  );
+  assert.equal(
+    commentPartsSchema.safeParse({ ...pass, step: 2 }).success,
+    false,
+    "the top-level step is gone; each flaw carries its own",
+  );
+  assert.equal(
+    commentPartsSchema.safeParse({
+      ...pass,
+      flaws: [{ step: 1, ...emptyParts, part5: "elsewhere" }],
+    }).success,
+    false,
+    "a flaw entry locates itself in one of the four parts, never a fifth",
+  );
+  // KEPT: the evidence contract, which says what a verdict means.
+  assert.equal(
+    commentPartsSchema.safeParse({ ...pass, verdict: "Interrupt" }).success,
+    false,
+    "Interrupt still requires script, math, or reference evidence",
+  );
+  assert.ok(
+    commentPartsSchema.safeParse({
+      ...pass,
+      verdict: "Interrupt",
+      evidence: mathEvidence,
+      flaws: [{ step: 3, ...emptyParts, part1: "The expansion contradicts the claim." }],
+    }).success,
+  );
+});
+
+test("judgeDecisionParts: a flaw list beside the repair signal, no length rules", () => {
+  const partsIssue = {
+    step: 2,
+    part: "part3",
+    point: "The bias term is asserted, never bounded.",
+    basis: "verified",
+    evidence: mathEvidence,
+    suggestion: "",
+    mustAddress: true,
+  };
+  const good = {
+    verdict: "Interrupt",
+    reason: "ok",
+    suggestion: "",
+    evidence: mathEvidence,
+    flaws: [{ step: 2, ...emptyParts, part3: "The bias term is asserted." }],
+    issues: [partsIssue],
+    assessment: partsAssessment,
+  };
+  assert.ok(good.reason.length < 30 && judgeDecisionPartsSchema.safeParse(good).success);
+  assert.ok(
+    judgeDecisionPartsSchema.safeParse({
+      ...good,
+      verdict: "Build",
+      evidence: noEvidence,
+      issues: [{ ...partsIssue, basis: "authority", evidence: noEvidence }],
+      flaws: [],
+      suggestion: "",
+    }).success,
+    "a Build no longer owes a suggestion of any particular length",
+  );
+  // KEPT: every verdict/issue rule that is a contract rather than a length.
+  assert.equal(
+    judgeDecisionPartsSchema.safeParse({ ...good, verdict: "Pass", evidence: noEvidence }).success,
+    false,
+    "Pass still carries no issues",
+  );
+  assert.equal(
+    judgeDecisionPartsSchema.safeParse({
+      ...good,
+      issues: [{ ...partsIssue, basis: "authority", evidence: noEvidence }],
+    }).success,
+    false,
+    "an authority-only issue still cannot sustain an Interrupt",
+  );
+  assert.equal(
+    judgeDecisionPartsSchema.safeParse({
+      ...good,
+      issues: [{ ...partsIssue, part: undefined }],
+    }).success,
+    false,
+    "a parts issue names the part it sits in",
+  );
+  assert.equal(
+    judgeDecisionPartsSchema.safeParse({ ...good, assessment: [] }).success,
+    false,
+    "assessment keeps its min(1): naming who was verified is the judge's core act",
+  );
+});
+
+test("merging a four-part patch carries untouched steps byte-identical", () => {
+  const base = {
+    cot: [stepParts("One"), stepParts("Two"), stepParts("Three")],
+    output: {
+      type: "research idea",
+      paper: validPaperBody,
+      requested: [{ title: "A benchmark table", response: section(1) }],
+    },
+    novelty: para(1, "Original novelty"),
+  };
+  const patch = {
+    steps: [{ index: 2, ...stepParts("Rewritten two") }],
+    outputPatch: { paper: { method: section(3, "Revised method") } },
+  };
+  assert.ok(redevelopmentPatchPartsSchema.safeParse(patch).success);
+  const merged = mergeRedevelopmentParts(base, patch);
+
+  // Same object, not an equal one: the host carried the step, so no retyping
+  // could have altered a character of it.
+  assert.equal(merged.steps[0], base.cot[0]);
+  assert.equal(merged.steps[2], base.cot[2]);
+  assert.deepEqual(merged.steps[1], stepParts("Rewritten two"));
+  const paper = (merged.output as { paper: Record<string, unknown> }).paper;
+  assert.deepEqual(paper.method, section(3, "Revised method"));
+  assert.deepEqual(paper.abstract, validPaperBody.abstract, "unpatched sections stand");
+  assert.deepEqual(
+    (merged.output as { requested: unknown }).requested,
+    base.output.requested,
+    "requested sections carry through when the patch omits them",
+  );
+  assert.equal(merged.novelty, base.novelty, "novelty stands until a repair moves it");
+  // The reassembled whole is a valid first-pass artifact, exactly as the
+  // string-chain merge produces a valid redevelopment.
+  assert.ok(
+    brainIdeaPartsSchema.safeParse({
+      output: merged.output,
+      cot: merged.steps,
+      ...(merged.novelty !== undefined ? { novelty: merged.novelty } : {}),
+    }).success,
+  );
+
+  assert.throws(
+    () => mergeRedevelopmentParts(base, { steps: [{ index: 4, ...stepParts("Beyond") }] }),
+    RedevelopmentMergeError,
+    "a step index past the chain is a broken patch, never a silent append",
+  );
+  assert.throws(
+    () =>
+      mergeRedevelopmentParts(base, {
+        steps: [{ index: 1, ...stepParts("Fixed") }],
+        outputPatch: { survey: { openGaps: section(1) } },
+      }),
+    RedevelopmentMergeError,
+    "a patch cannot switch the member's output to another shape",
+  );
+});
+
+test("the legacy names keep their exact meaning beside the new ones", () => {
+  // A run pins its bundle version forever, so the old entries must still be
+  // the old schemas — the new forms are additions, never replacements.
+  assert.equal(artifactSchemas.comment, commentSchema);
+  assert.equal(artifactSchemas.judgeDecision, judgeDecisionSchema);
+  assert.equal(artifactSchemas.brainIdea, brainIdeaSchema);
+  assert.equal(artifactSchemas.redevelopment, redevelopmentSchema);
+  assert.equal(artifactSchemas.redevelopmentPatch, redevelopmentPatchSchema);
+  assert.equal(artifactSchemas.brainIdeaParts, brainIdeaPartsSchema);
+  assert.equal(artifactSchemas.commentParts, commentPartsSchema);
+  assert.equal(artifactSchemas.judgeDecisionParts, judgeDecisionPartsSchema);
+  assert.equal(artifactSchemas.redevelopmentPatchParts, redevelopmentPatchPartsSchema);
+
+  // The legacy length rules the new schemas dropped are still enforced there.
+  const legacyComment = {
+    verdict: "Build",
+    step: 2,
+    reason: "The bound in step two is asserted rather than derived anywhere.",
+    suggestion: "Derive the bound explicitly from the stated assumptions.",
+    evidence: noEvidence,
+  };
+  assert.ok(commentSchema.safeParse(legacyComment).success);
+  assert.equal(
+    commentSchema.safeParse({ ...legacyComment, reason: "ok" }).success,
+    false,
+    "the legacy comment still demands a substantive reason",
+  );
+  assert.equal(
+    commentSchema.safeParse({ ...legacyComment, suggestion: "fix it" }).success,
+    false,
+    "the legacy comment still demands a concrete Build suggestion",
+  );
+  assert.equal(
+    commentSchema.safeParse({ ...legacyComment, flaws: [] }).success,
+    false,
+    "the legacy comment never gained the new fields",
+  );
+  const legacyIssue = {
+    step: 2,
+    point: "The estimator's bias is demonstrated by the expansion below.",
+    basis: "verified",
+    evidence: mathEvidence,
+    suggestion: "",
+    mustAddress: true,
+  };
+  const legacyDecision = {
+    verdict: "Interrupt",
+    reason: "A commentor demonstrated a verified flaw in the derivation.",
+    suggestion: "",
+    evidence: mathEvidence,
+    issues: [legacyIssue],
+    assessment: partsAssessment,
+  };
+  assert.ok(judgeDecisionSchema.safeParse(legacyDecision).success);
+  assert.equal(
+    judgeDecisionSchema.safeParse({ ...legacyDecision, reason: "ok" }).success,
+    false,
+    "the legacy decision still demands a substantive reason",
+  );
+  assert.equal(
+    judgeDecisionSchema.safeParse({
+      ...legacyDecision,
+      issues: [{ ...legacyIssue, part: "part1" }],
+    }).success,
+    false,
+    "the legacy issue never gained the part locator",
   );
 });

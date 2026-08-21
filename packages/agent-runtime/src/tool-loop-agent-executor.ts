@@ -350,17 +350,41 @@ interface StepwiseSpec {
   /**
    * Sparse delivery: the model submits ONLY the positions it is changing,
    * ascending, and the host fills the rest from the version being revised.
-   * The collected calls are injected as `{index, text}` records instead of a
+   * The collected calls are injected as `{index, …}` records instead of a
    * flat list, so the host knows what was actually rewritten. Without this,
    * every position must be submitted and the field is the plain list.
    */
   readonly sparse?: boolean;
   readonly inject?: JsonObject;
+  /**
+   * Four-part steps rather than one paragraph each, DECLARED by the compiler
+   * that chose the schema. It cannot be inferred here: the runtime strips the
+   * stepwise field out of the delivered schema, so the step item that would
+   * witness the shape is gone by the time a task arrives, and the only thing
+   * left to read was the schema's name. Required, so a form that forgets to
+   * say which it is reads as malformed rather than quietly as strings.
+   */
+  readonly parts: boolean;
 }
+
+/**
+ * The parts a four-part chain step is submitted in, in submission order.
+ * Four is a hard maximum: the parts carry no assigned meaning, they are a
+ * size discipline, and the shape itself is the ceiling on how far one step
+ * can grow — a rewrite refills the same four boxes and can never add a fifth.
+ */
+const STEP_PARTS = ["part1", "part2", "part3", "part4"] as const;
+
+type StepParts = { readonly [part in (typeof STEP_PARTS)[number]]: string };
 
 interface StepwiseStep {
   readonly index: number;
-  readonly text: string;
+  /**
+   * The step exactly as submitted — one paragraph, or the four parts. Either
+   * way it is the WHOLE step: a part is a slice of one step's prose, never a
+   * field with a meaning of its own.
+   */
+  readonly body: string | StepParts;
   readonly turn: number;
 }
 
@@ -376,16 +400,22 @@ function stepwiseSpec(task: AgentTask): StepwiseSpec | undefined {
     return undefined;
   }
   const record = raw as { readonly [key: string]: JsonValue };
-  const { tool, field, count, sparse, inject } = record;
+  const { tool, field, count, sparse, inject, parts } = record;
   if (typeof tool !== "string" || tool.length === 0) return undefined;
   if (typeof field !== "string" || field.length === 0) return undefined;
   if (typeof count !== "number" || !Number.isSafeInteger(count) || count < 1) {
     return undefined;
   }
+  // Required, exactly like the transport's other facts. A spec that does not
+  // SAY which chain form it carries is malformed; it is not a string chain by
+  // default. Defaulting would restore the silent mis-transport this field
+  // exists to remove.
+  if (typeof parts !== "boolean") return undefined;
   return {
     tool,
     field,
     count,
+    parts,
     ...(sparse === true ? { sparse: true } : {}),
     ...(typeof inject === "object" && inject !== null && !Array.isArray(inject)
       ? { inject: inject as JsonObject }
@@ -393,17 +423,83 @@ function stepwiseSpec(task: AgentTask): StepwiseSpec | undefined {
   };
 }
 
+/** The named property of a JSON-schema object, when there is one. */
+function schemaProperty(
+  schema: JsonValue | undefined,
+  name: string,
+): JsonObject | undefined {
+  if (typeof schema !== "object" || schema === null || Array.isArray(schema)) {
+    return undefined;
+  }
+  const properties = (schema as JsonObject).properties;
+  if (
+    typeof properties !== "object" ||
+    properties === null ||
+    Array.isArray(properties)
+  ) {
+    return undefined;
+  }
+  const property = (properties as JsonObject)[name];
+  return typeof property === "object" &&
+    property !== null &&
+    !Array.isArray(property)
+    ? (property as JsonObject)
+    : undefined;
+}
+
+
+/**
+ * The recorded steps as the assembled output field carries them. Sparse
+ * delivery keeps each step's position, because the host applies the rewrite
+ * positionally to the version under revision and carries the rest; a dense
+ * chain is the bare list. A four-part step spreads its parts into the element
+ * itself, which is the element shape the artifact schemas declare.
+ */
+function assembledSteps(
+  steps: readonly StepwiseStep[],
+  sparse: boolean,
+): JsonValue[] {
+  return sparse
+    ? steps.map((step): JsonObject =>
+        typeof step.body === "string"
+          ? { index: step.index, text: step.body }
+          : { index: step.index, ...step.body },
+      )
+    : steps.map((step): JsonValue =>
+        typeof step.body === "string" ? step.body : { ...step.body },
+      );
+}
+
+/**
+ * The chain tool as the model sees it. Two input shapes, one per chain form,
+ * because the shape is what the model is constrained by: asking for four
+ * parts is the whole mechanism by which a step stays small. No part carries
+ * a length rule — the per-part target is skill prose, and a rejection here
+ * would spend a turn to enforce a soft limit.
+ */
 function stepwiseToolDefinition(spec: StepwiseSpec): ToolDefinition {
+  const body = spec.parts
+    ? spec.sparse
+      ? `call carrying the whole rewritten step divided into its four parts. A rewritten step ` +
+        `REPLACES the step it names, so send every part, including the ones you left as they were.`
+      : `call carrying that step divided into its four parts.`
+    : `call carrying exactly one paragraph.`;
+  const part = {
+    type: "string",
+    description:
+      "One quarter of the step. The four parts carry no assigned meaning: " +
+      "they divide the step into smaller pieces and are read back in order.",
+  };
   return {
     name: spec.tool,
     description: spec.sparse
       ? `Submit one REWRITTEN step of the ${spec.count}-step chain. Call this tool once per step ` +
-        `you are changing, in ascending order of index (1 through ${spec.count}), each call ` +
-        `carrying exactly one paragraph. Submit only the steps you rewrite: every step you do ` +
+        `you are changing, in ascending order of index (1 through ${spec.count}), each ${body} ` +
+        `Submit only the steps you rewrite: every step you do ` +
         `not submit is carried over unchanged, word for word. At least one step must be ` +
         `submitted before the final structured answer.`
       : `Submit one step of your ${spec.count}-step chain. Call this tool once per step, strictly ` +
-        `in order (index 1 through ${spec.count}), each call carrying exactly one paragraph. All ` +
+        `in order (index 1 through ${spec.count}), each ${body} All ` +
         `${spec.count} steps must be submitted before the final structured answer.`,
     inputSchema: {
       type: "object",
@@ -416,16 +512,49 @@ function stepwiseToolDefinition(spec: StepwiseSpec): ToolDefinition {
             ? "1-based position of the step being rewritten."
             : "1-based step position.",
         },
-        text: {
-          type: "string",
-          minLength: 1,
-          description: "The step: exactly one paragraph.",
-        },
+        ...(spec.parts
+          ? { part1: part, part2: part, part3: part, part4: part }
+          : {
+              text: {
+                type: "string",
+                minLength: 1,
+                description: "The step: exactly one paragraph.",
+              },
+            }),
       },
-      required: ["index", "text"],
+      required: spec.parts ? ["index", ...STEP_PARTS] : ["index", "text"],
       additionalProperties: false,
     },
   };
+}
+
+/**
+ * The submitted step body, or the sentence saying why it cannot be recorded.
+ * A step that says nothing at all is refused in both chain forms; an empty
+ * PART is not, because the parts are a size discipline and the empty string
+ * is a legal part everywhere else in the system.
+ */
+function stepwiseBody(
+  spec: StepwiseSpec,
+  input: { readonly [key: string]: JsonValue } | undefined,
+): { readonly body: string | StepParts } | { readonly refusal: string } {
+  if (!spec.parts) {
+    return typeof input?.text === "string" && input.text.trim().length > 0
+      ? { body: input.text }
+      : { refusal: "text must carry the step as one non-empty paragraph." };
+  }
+  if (STEP_PARTS.some((part) => typeof input?.[part] !== "string")) {
+    return { refusal: "every one of the four parts must be a string." };
+  }
+  const body: StepParts = {
+    part1: input!.part1 as string,
+    part2: input!.part2 as string,
+    part3: input!.part3 as string,
+    part4: input!.part4 as string,
+  };
+  return STEP_PARTS.every((part) => body[part].trim().length === 0)
+    ? { refusal: "the four parts must carry the step; all four are empty." }
+    : { body };
 }
 
 function recordStepwiseCall(
@@ -456,13 +585,11 @@ function recordStepwiseCall(
         `Rewritten steps must be submitted in ascending order; step ${last.index} is already submitted.`,
       );
     }
-    if (typeof input?.text !== "string" || input.text.trim().length === 0) {
-      return failureToolResult(
-        call,
-        "text must carry the step as one non-empty paragraph.",
-      );
+    const submitted = stepwiseBody(session.spec, input);
+    if ("refusal" in submitted) {
+      return failureToolResult(call, submitted.refusal);
     }
-    session.steps.push({ index, text: input.text, turn: session.turn });
+    session.steps.push({ index, body: submitted.body, turn: session.turn });
     return toolResultBlock(call, {
       output: { ok: true, recorded: index, rewritten: session.steps.length },
     });
@@ -480,15 +607,13 @@ function recordStepwiseCall(
       `Steps must be submitted strictly in order; expected index ${expected} next.`,
     );
   }
-  if (typeof input.text !== "string" || input.text.trim().length === 0) {
-    return failureToolResult(
-      call,
-      "text must carry the step as one non-empty paragraph.",
-    );
+  const submitted = stepwiseBody(session.spec, input);
+  if ("refusal" in submitted) {
+    return failureToolResult(call, submitted.refusal);
   }
   session.steps.push({
     index: expected,
-    text: input.text,
+    body: submitted.body,
     turn: session.turn,
   });
   return toolResultBlock(call, {
@@ -837,12 +962,7 @@ export class ToolLoopAgentExecutor<
         ) {
           output = {
             ...(output as JsonObject),
-            // Sparse delivery keeps each step's position: the host applies
-            // them to the version being revised, and carries the rest.
-            [stepwise.field]:
-              stepwise.sparse === true
-                ? steps.map((step) => ({ index: step.index, text: step.text }))
-                : steps.map((step) => step.text),
+            [stepwise.field]: assembledSteps(steps, stepwise.sparse === true),
             ...(stepwise.inject ?? {}),
           };
         }

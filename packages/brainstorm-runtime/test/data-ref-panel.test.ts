@@ -631,3 +631,107 @@ test("a patch that fits its base still passes, and no base means no merge check"
     "an unsound base is left to the fold, not blamed on the revision",
   );
 });
+
+test("a four-part patch gets the same pre-write merge check a string patch gets", () => {
+  // The hole both patch forms share is the cross-field rule the wire schema
+  // cannot judge. Checking it for one form and not the other would leave a
+  // parts run dying at the fold on a fault nothing ever told it about — the
+  // exact dead end the string form's check was added to close.
+  const validator = new ContentArtifactOutputValidator();
+  const schema = { title: "redevelopmentPatchParts" };
+  const paragraph = "One paragraph of finished text that stands alone and says something real.";
+  const step = (n: number): JsonObject => ({
+    part1: `Step ${n}: the claim it makes.`,
+    part2: `Step ${n}: the ground under the claim.`,
+    part3: `Step ${n}: what follows once the ground holds.`,
+    part4: `Step ${n}: what it leaves open.`,
+  });
+  const base = {
+    cot: [step(1), step(2), step(3)],
+    output: {
+      type: "research obstacle",
+      solution: {
+        problemFraming: paragraph,
+        diagnosis: [{ cause: "A concrete cause statement.", rationale: paragraph }],
+        priorAttempts: [],
+        candidateSolutions: [
+          { approach: "An approach.", mechanism: paragraph, expectedEffect: paragraph, risk: paragraph },
+        ],
+        recommendation: paragraph,
+        validationPlan: ["A validation step that is concrete."],
+        residualRisks: ["A residual risk worth naming."],
+      },
+    },
+  };
+  // Legal as a patch on its own; a solution-shaped output may carry no novelty.
+  const patch = { steps: [{ index: 2, ...step(2) }], novelty: paragraph };
+
+  assert.equal(
+    validator.validate(patch, schema).success,
+    true,
+    "on its own the four-part patch is well-formed: the whole is what it contradicts",
+  );
+  const checked = validator.validate(patch, schema, {
+    taskId: "t-5",
+    kind: "brainstorm.redeveloper",
+    input: {},
+    revisionBase: base,
+  });
+  assert.equal(checked.success, false, "merged against its base, the four-part patch is incoherent");
+  assert.ok(
+    checked.success === false && checked.issues.some((issue) => issue.includes("must omit novelty")),
+    "the feedback names the rule the merged whole breaks",
+  );
+
+  // An out-of-range step is reported as feedback the model can act on, not as
+  // a validation pass followed by a dead task at the fold.
+  const overshoot = validator.validate({ steps: [{ index: 9, ...step(9) }] }, schema, {
+    taskId: "t-6",
+    kind: "brainstorm.redeveloper",
+    input: {},
+    revisionBase: base,
+  });
+  assert.equal(overshoot.success, false);
+  assert.ok(
+    overshoot.success === false &&
+      overshoot.issues.some((issue) => /step 9, but the chain has 3 steps/.test(issue)),
+    "the patch is told which step it named and how long the chain is",
+  );
+
+  // The mirror of the string case: a patch that fits is accepted, and a base
+  // recorded in the OTHER chain form is left alone rather than blamed.
+  const paperBase = {
+    cot: [step(1), step(2), step(3)],
+    output: {
+      type: "research idea",
+      paper: {
+        abstract: ["a one", "a two", "a three"],
+        introduction: ["i one", "i two", "i three"],
+        method: ["m one", "m two", "m three"],
+        discussion: ["d one", "d two", "d three"],
+        conclusion: ["c one"],
+      },
+    },
+    novelty: "the claim as it currently stands",
+  };
+  assert.equal(
+    validator.validate({ steps: [{ index: 1, ...step(1) }] }, schema, {
+      taskId: "t-7",
+      kind: "brainstorm.redeveloper",
+      input: {},
+      revisionBase: paperBase,
+    }).success,
+    true,
+    "a four-part patch that leaves the whole consistent is accepted",
+  );
+  assert.equal(
+    validator.validate({ steps: [{ index: 1, ...step(1) }] }, schema, {
+      taskId: "t-8",
+      kind: "brainstorm.redeveloper",
+      input: {},
+      revisionBase: { ...paperBase, cot: ["a string chain", "not a parts chain", "third"] },
+    }).success,
+    true,
+    "a base in the other chain form is left to the fold, never charged to the patch",
+  );
+});

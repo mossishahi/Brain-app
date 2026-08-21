@@ -217,6 +217,129 @@ interface SeenTask {
   readonly task: AgentTask;
 }
 
+/** One step's four parts, derived from the string form the fixture writes. */
+function fourParts(text: string): JsonObject {
+  return {
+    part1: `${text} — the claim.`,
+    part2: `${text} — the ground it stands on.`,
+    part3: `${text} — what follows.`,
+    part4: `${text} — what it leaves open.`,
+  };
+}
+
+/**
+ * The legacy output restated in the shape the delivered schema names. Every
+ * value is the string fixture's, so a difference between a run over the
+ * legacy bundle and a run over the parts bundle is the RUNTIME's and never
+ * the fixture's. An unrecognised or absent schema name is the legacy path.
+ */
+function asPartsForm(
+  schemaName: string | undefined,
+  output: JsonValue,
+  agentId: string,
+  bindings: JsonObject,
+): JsonValue {
+  switch (schemaName) {
+    case "brainIdeaParts": {
+      const idea = object(output, "brain output");
+      return { ...idea, cot: (idea.cot as string[]).map(fourParts) };
+    }
+    case "commentParts": {
+      // The DRAFT a part-aware reviewer is handed back: one entry per step it
+      // has been shown, every part key present and empty. This fixture fills
+      // exactly one box, and only from the second position onward, so the run
+      // carries both a reviewer with something to say and one that read the
+      // chain and found nothing.
+      const { step: through, ...rest } = object(output, "comment output");
+      const flaws = Array.from({ length: through as number }, (_, index) => {
+        const draft = { step: index + 1, part1: "", part2: "", part3: "", part4: "" };
+        return index + 1 === through && (through as number) >= 2
+          ? { ...draft, part2: `${agentId}: the ground here is not carried forward.` }
+          : draft;
+      });
+      return { ...rest, flaws };
+    }
+    case "judgeDecisionParts": {
+      const decision = object(output, "judge output");
+      const issues = (Array.isArray(decision.issues) ? decision.issues : []).map((issue) => ({
+        ...object(issue, "judge issue"),
+        part: "part2",
+      }));
+      return { ...decision, issues, flaws: [] };
+    }
+    case "redevelopmentPatchParts": {
+      // Patch delivery over a four-part chain: the one rewritten step, whole,
+      // and only the body section the repair moved.
+      const step = bindings.currentStep as number;
+      return {
+        steps: [{ index: step, ...fourParts(`REVISED:${agentId}:${step}`) }],
+        outputPatch: {
+          paper: { method: [1, 2, 3].map((i) => `${agentId} revised method paragraph ${i}`) },
+        },
+        novelty: `Revised novelty for ${agentId}`,
+      };
+    }
+    default:
+      return output;
+  }
+}
+
+/** A chain step as a comparable string, whichever shape the bundle records. */
+function stepText(step: JsonValue): string {
+  if (typeof step === "string") return step;
+  const parts = object(step, "chain step");
+  return String(parts.part1 ?? "");
+}
+
+/** A bound chain as comparable text, one string per step. */
+function chainTexts(bindings: JsonObject): string[] {
+  const chain = bindings.chain;
+  return Array.isArray(chain) ? chain.map(stepText) : [];
+}
+
+/**
+ * A step's fixture SIGNATURE — `COT:<seat>:<n>` or `REVISED:<seat>:<n>`. Every
+ * branch of the fixture writes that head into the step it produces, whichever
+ * shape carries it, so an assertion over signatures pins the exact chain
+ * without pinning the form the bundle happens to record it in.
+ */
+function stepSignature(step: JsonValue): string {
+  const text = stepText(step);
+  return /^\S+/.exec(text)?.[0] ?? text;
+}
+
+/** A chain, or any list of steps, as its signatures in order. */
+function signatures(steps: JsonValue): string[] {
+  return Array.isArray(steps) ? steps.map(stepSignature) : [];
+}
+
+/**
+ * The walk-position ceiling the delivered comment schema pins, wherever the
+ * comment's shape names its step: on the top-level `step` a legacy comment
+ * carries, or on the ENTRY a four-part comment files its steps in.
+ */
+function commentStepCeiling(schema: JsonObject): JsonValue {
+  const properties = object(schema.properties, "comment properties");
+  if (properties.step !== undefined) return object(properties.step, "step target").maximum;
+  const flaws = object(properties.flaws, "the flaws property");
+  const entry = object(object(flaws.items, "flaw entry").properties, "flaw entry properties");
+  return object(entry.step, "the flaw entry's step").maximum;
+}
+
+/** A member's first-pass idea under either schema name the bundle can select. */
+function isMemberIdea(schema: JsonValue | undefined): boolean {
+  return schema === "brainIdea" || schema === "brainIdeaParts";
+}
+
+/**
+ * One chain step as the payload renders it INSIDE the list — the bytes the
+ * cache boundary has to close on. A string step has no newline to indent, so
+ * for a string chain this is `JSON.stringify(step)` exactly as it always was.
+ */
+function stepRendering(step: JsonValue): string {
+  return JSON.stringify(step, null, 2).replaceAll("\n", "\n  ");
+}
+
 class FakeBrainstormExecutor implements AgentExecutor {
   readonly seen: SeenTask[] = [];
   readonly judgeOrder: string[] = [];
@@ -432,7 +555,16 @@ class FakeBrainstormExecutor implements AgentExecutor {
       default:
         throw new Error(`unexpected role ${role}`);
     }
-    return { taskId: task.taskId, status: "ok", output };
+    // A real model is handed a schema and answers in its shape. So is this
+    // one: every branch above writes the legacy form, and the delivered
+    // schema NAME is what restates it in four parts. That is the same rule
+    // the executors follow, and it is why one fixture serves both a bundle
+    // naming the legacy schemas and a bundle naming the parts schemas.
+    return {
+      taskId: task.taskId,
+      status: "ok",
+      output: asPartsForm(task.outputSchema?.name, output, agentId, bindings),
+    };
   }
 
   private judge(memberId: string, bindings: JsonObject): JsonValue {
@@ -644,6 +776,18 @@ test("Pass path walks every seat in step order (seats in parallel) and keeps C-O
     result.status === "failed" ? `${result.error.name}: ${result.error.message}` : undefined,
   );
   assert.deepEqual(result.status === "completed" && result.output, finalProposal());
+  // The other half of the transport's declaration. This test runs against
+  // whichever bundle is configured, so it cannot name a form — it asserts the
+  // INVARIANT instead: what the spec declares agrees with the schema the node
+  // actually compiled. That holds for either bundle, and a compiler answering
+  // the same thing for every node fails it under one of them.
+  const firstPass = executor.tasks("brain")[0]!.task;
+  assert.equal(
+    object(object(firstPass.metadata as JsonValue, "brain metadata").stepwise, "brain stepwise spec")
+      .parts,
+    firstPass.outputSchema?.name === "brainIdeaParts",
+    "the declared chain form agrees with the node's own output schema",
+  );
   assert.deepEqual(
     executor.tasks("brain").map((task) => [
       task.agentId,
@@ -1017,7 +1161,7 @@ test("a bundle binding the scoped record gets closed business collapsed and open
     .find(
       (task) =>
         task.bindings.currentStep === 3 &&
-        (task.bindings.chain as readonly string[]).includes("REVISED:member-1:2"),
+        chainTexts(task.bindings).some((text) => text.startsWith("REVISED:member-1:2")),
     );
   assert.ok(atStepThree, "the walk reached step 3 of the revised chain");
   const record = object(atStepThree!.bindings.history, "scoped record");
@@ -1059,7 +1203,7 @@ test("objections left standing by a force-passed position ride on, whole", async
     .find(
       (task) =>
         task.bindings.currentStep === 2 &&
-        (task.bindings.chain as readonly string[])[0]?.startsWith("REVISED:member-1:1"),
+        chainTexts(task.bindings)[0]?.startsWith("REVISED:member-1:1") === true,
     );
   assert.ok(atStepTwo, "the walk moved past the capped position");
   const record = object(atStepTwo!.bindings.history, "scoped record");
@@ -1241,9 +1385,9 @@ test("the task turn declares its stable prefixes without changing a byte the mod
       through(boundaries[0]!).endsWith(JSON.stringify(seen.bindings.files, null, 2)),
       "the first prefix closes after the run-level file map",
     );
-    const chain = seen.bindings.chain as readonly string[];
+    const chain = seen.bindings.chain as readonly JsonValue[];
     assert.ok(
-      through(boundaries[1]!).endsWith(JSON.stringify(chain[chain.length - 1])),
+      through(boundaries[1]!).endsWith(stepRendering(chain[chain.length - 1]!)),
       "the second prefix closes after the last delivered chain step",
     );
   }
@@ -1254,24 +1398,29 @@ test("the task turn declares its stable prefixes without changing a byte the mod
   const walks = new Map<string, SeenTask[]>();
   for (const seen of executor.seen) {
     if (seen.role !== "commentor") continue;
-    const chain = seen.bindings.chain as readonly string[];
-    const key = `${seen.agentId}|${chain[0]}`;
+    const chain = seen.bindings.chain as readonly JsonValue[];
+    const key = `${seen.agentId}|${JSON.stringify(chain[0])}`;
     walks.set(key, [...(walks.get(key) ?? []), seen]);
   }
   let compared = 0;
   for (const tasks of walks.values()) {
     const ordered = [...tasks].sort(
       (a, b) =>
-        (a.bindings.chain as readonly string[]).length -
-        (b.bindings.chain as readonly string[]).length,
+        (a.bindings.chain as readonly JsonValue[]).length -
+        (b.bindings.chain as readonly JsonValue[]).length,
     );
     for (let i = 1; i < ordered.length; i += 1) {
       const shorter = ordered[i - 1]!;
       const longer = ordered[i]!;
-      const before = shorter.bindings.chain as readonly string[];
-      const after = longer.bindings.chain as readonly string[];
+      const before = shorter.bindings.chain as readonly JsonValue[];
+      const after = longer.bindings.chain as readonly JsonValue[];
       if (before.length >= after.length) continue;
-      if (!before.every((step, index) => step === after[index])) continue;
+      // A four-part step is a fresh object every time it is bound, so the
+      // carried-through test is over VALUES. For a string chain this is the
+      // identical comparison it always was.
+      if (!before.every((step, index) => JSON.stringify(step) === JSON.stringify(after[index]))) {
+        continue;
+      }
       const boundaries = contentCacheBoundaries(blocksOf(shorter));
       const cached = textContent(
         blocksOf(shorter).slice(0, boundaries[boundaries.length - 1]! + 1),
@@ -1302,7 +1451,7 @@ test("Build redevelops minimally: change-set computed, ledger carried, no immedi
 
   // The reviser receives the COMPLETE chain plus the judge's issues.
   const redevelopment = executor.tasks("redeveloper")[0]!;
-  assert.deepEqual(redevelopment.bindings.chain, [
+  assert.deepEqual(signatures(redevelopment.bindings.chain), [
     "COT:member-1:1",
     "COT:member-1:2",
     "COT:member-1:3",
@@ -1326,18 +1475,17 @@ test("Build redevelops minimally: change-set computed, ledger carried, no immedi
   assert.ok(options.includes("Pass"));
   assert.ok(options.includes("Interrupt"));
   // The judge is grounded in the chain it rules on, revised text included.
-  assert.deepEqual(secondRoundJudge.bindings.chain, [
+  assert.deepEqual(signatures(secondRoundJudge.bindings.chain), [
     "COT:member-1:1",
     "REVISED:member-1:2",
   ]);
 
   const roundTwoComment = executor.tasks("commentor").find((task) => {
     if (task.bindings.currentStep !== 2) return false;
-    const chain = task.bindings.chain;
-    return Array.isArray(chain) && chain.some((step) => String(step).startsWith("REVISED:member-1:2"));
+    return signatures(task.bindings.chain).includes("REVISED:member-1:2");
   });
   assert.ok(roundTwoComment, "the re-review must receive the revised chain");
-  assert.deepEqual(roundTwoComment!.bindings.chain, [
+  assert.deepEqual(signatures(roundTwoComment!.bindings.chain), [
     "COT:member-1:1",
     "REVISED:member-1:2",
   ]);
@@ -1361,31 +1509,35 @@ test("Build redevelops minimally: change-set computed, ledger carried, no immedi
   const verdictSchema = (roundTwoSchema.properties as JsonObject)
     .verdict as JsonObject;
   assert.deepEqual(verdictSchema.enum, ["Pass", "Interrupt"]);
-  // Step targets are narrowed to the walk position in the delivered schema.
-  const stepSchema = (roundTwoSchema.properties as JsonObject).step as JsonObject;
-  assert.equal(stepSchema.maximum, 2, "comment step targets are capped at the reviewed step");
+  // Step targets are narrowed to the walk position in the delivered schema,
+  // pinned wherever the comment's shape names its step.
+  assert.equal(
+    commentStepCeiling(roundTwoSchema),
+    2,
+    "comment step targets are capped at the reviewed step",
+  );
 
   // Every redevelopment appends a new version of the member's idea under the
   // member's own artifact path, so the LAST entry is the reviewed output the
   // integrator, the chair, the dashboard, and the session's final copies read.
   const artifacts = await app.artifacts.list();
   const versions = artifacts.filter(
-    (ref) => ref.metadata?.schema === "brainIdea" && ref.metadata.path === "ideas.member-1",
+    (ref) => isMemberIdea(ref.metadata?.schema) && ref.metadata?.path === "ideas.member-1",
   );
   assert.equal(versions.length, 2, "first pass plus one revision under ideas.member-1");
   const finalStored = await app.artifacts.get(versions[versions.length - 1]!.id);
   const finalIdea = JSON.parse(finalStored!.data) as {
-    cot: readonly string[];
+    cot: readonly JsonValue[];
     novelty?: string;
   };
-  assert.deepEqual(finalIdea.cot, [
+  assert.deepEqual(signatures(finalIdea.cot as JsonValue), [
     "COT:member-1:1",
     "REVISED:member-1:2",
     "COT:member-1:3",
   ]);
   assert.equal(finalIdea.novelty, "Revised novelty for member-1");
   const untouched = artifacts.filter(
-    (ref) => ref.metadata?.schema === "brainIdea" && ref.metadata.path === "ideas.member-2",
+    (ref) => isMemberIdea(ref.metadata?.schema) && ref.metadata?.path === "ideas.member-2",
   );
   assert.equal(untouched.length, 1, "an unrevised member keeps its single first-pass version");
 });
@@ -1446,7 +1598,20 @@ test("a verdict targeting a step beyond the review position fails the run with a
       const input = object(task.input, "task input");
       if (input.role !== "commentor" || result.status !== "ok") return result;
       const output = object(result.output as JsonValue, "comment output");
-      return { ...result, output: { ...output, step: 5 } };
+      // The same overshoot in whichever shape the comment is filed: a legacy
+      // comment names one step at the top level, a four-part one names a step
+      // per entry. Either way the guard on write is the same guard.
+      if (!Array.isArray(output.flaws)) return { ...result, output: { ...output, step: 5 } };
+      return {
+        ...result,
+        output: {
+          ...output,
+          flaws: [
+            ...output.flaws,
+            { step: 5, part1: "a step nobody has read", part2: "", part3: "", part4: "" },
+          ],
+        },
+      };
     }
   })();
   const result = await runtime(overshoots).run({
@@ -1993,5 +2158,333 @@ test("the same requirement stops a run whose wiring lost the capability", async 
   assert.match(
     result.status === "failed" ? result.error.message : "",
     /nothing declared its absence/,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// the four-part forms, end to end
+// ---------------------------------------------------------------------------
+
+const PARTS_FORM: Readonly<Record<string, string>> = {
+  brainIdea: "brainIdeaParts",
+  comment: "commentParts",
+  judgeDecision: "judgeDecisionParts",
+  redevelopmentPatch: "redevelopmentPatchParts",
+};
+
+/**
+ * The published bundle with each chain-carrying node — and the role that
+ * declares its output — pointed at the four-part schema beside the one it
+ * names today. That single swap is the whole switch a bundle makes, so what
+ * this exercises is the runtime's two paths, never a second workflow written
+ * for the test.
+ */
+function partsBundle(): ContentBundle {
+  const rewrite = (value: JsonValue): JsonValue => {
+    if (Array.isArray(value)) return value.map(rewrite);
+    if (typeof value !== "object" || value === null) return value;
+    const rewritten: Record<string, JsonValue> = {};
+    for (const [key, entry] of Object.entries(value as JsonObject)) {
+      const form = typeof entry === "string" ? PARTS_FORM[entry] : undefined;
+      rewritten[key] = key === "schema" && form !== undefined ? form : rewrite(entry);
+    }
+    return rewritten;
+  };
+  const bundle = loadContent(registryContentDir);
+  const published = bundle.workflows.brainstorm;
+  if (!published) throw new Error("the published bundle has no brainstorm workflow");
+  const skills = Object.fromEntries(
+    Object.entries(bundle.skills).map(([name, skill]) => {
+      const form = PARTS_FORM[skill.meta.output ?? ""];
+      return [
+        name,
+        form === undefined ? skill : { ...skill, meta: { ...skill.meta, output: form } },
+      ];
+    }),
+  );
+  return {
+    ...bundle,
+    skills,
+    workflows: {
+      ...bundle.workflows,
+      brainstorm: rewrite(published as unknown as JsonValue) as unknown as ContentWorkflowDefinition,
+    },
+  };
+}
+
+/** The same wiring `runtime` builds, over the four-part bundle. */
+function partsRuntime(executor: AgentExecutor): BrainstormRuntime {
+  return new BrainstormRuntime({
+    bundle: partsBundle(),
+    agentExecutor: executor,
+    humanGateMode: "autoApproveSkippable",
+    activities: taxonomyActivities(new StubTaxonomy()),
+    routeResolver: new StaticBrainstormRouteResolver({
+      reasoning: { modelId: "configured-reasoner", providerId: "fake" },
+      writing: { modelId: "configured-writer", providerId: "fake" },
+      balanced: { modelId: "configured-balanced", providerId: "fake" },
+    }),
+    hostTools: TEST_HOST_TOOLS,
+    enabledHostToolIds: new Set(TEST_HOST_TOOLS.map((manifest) => manifest.toolId)),
+  });
+}
+
+test("the four-part forms run end to end, and the judge reads claims only", async () => {
+  const executor = new FakeBrainstormExecutor("build-step-2");
+  const result = await partsRuntime(executor).run({
+    runId: "parts-path",
+    submission: { prompt: "Investigate the mechanism", attachments: [] },
+    params: { panelSize: 2 },
+  });
+  assert.equal(
+    result.status,
+    "completed",
+    result.status === "failed" ? `${result.error.name}: ${result.error.message}` : undefined,
+  );
+
+  // The chain is delivered stepwise whichever shape a step has: the transport
+  // names the FIELD, and DECLARES the shape. It has to declare it — the
+  // stepwise field is stripped out of the delivered schema, so an executor
+  // has nothing left to read the shape off but the schema's name, and a name
+  // is a silent contract. This is the seam where the compiler's answer
+  // becomes the executor's fact, so both halves are asserted here.
+  const brainSpec = object(
+    object(executor.tasks("brain")[0]!.task.metadata as JsonValue, "brain metadata").stepwise,
+    "brain stepwise spec",
+  );
+  assert.equal(brainSpec.field, "cot");
+  assert.equal(brainSpec.parts, true, "a brainIdeaParts node declares a four-part chain");
+  const reviserSpec = object(
+    object(executor.tasks("redeveloper")[0]!.task.metadata as JsonValue, "reviser metadata")
+      .stepwise,
+    "reviser stepwise spec",
+  );
+  assert.equal(reviserSpec.field, "steps");
+  assert.equal(reviserSpec.sparse, true);
+  assert.equal(
+    reviserSpec.parts,
+    true,
+    "a redevelopmentPatchParts node declares a four-part patch",
+  );
+
+  // What the judge is handed is what the prune left: every empty box gone,
+  // every entry that says nothing gone with it, and the comment itself never
+  // gone — a reviewer that found nothing arrives with `flaws: []`.
+  let foundNothing = 0;
+  let foundSomething = 0;
+  for (const seen of executor.tasks("judge")) {
+    const comments = object(seen.bindings.comments, "judge comments");
+    for (const [commentorId, value] of Object.entries(comments)) {
+      const comment = object(value, `comment from ${commentorId}`);
+      assert.equal(comment.step, undefined, "a four-part comment carries no top-level step");
+      const flaws = comment.flaws as JsonObject[];
+      assert.ok(Array.isArray(flaws), "every comment carries its flaws list");
+      if (flaws.length === 0) {
+        foundNothing += 1;
+        continue;
+      }
+      foundSomething += 1;
+      for (const entry of flaws) {
+        const parts = Object.entries(entry).filter(([key]) => key.startsWith("part"));
+        assert.ok(parts.length > 0, "an entry that says nothing is not written down");
+        for (const [key, text] of parts) {
+          assert.notEqual(text, "", `an empty ${key} is a void, not a claim`);
+        }
+      }
+      assert.deepEqual(
+        flaws.map((entry) => Object.keys(entry)),
+        flaws.map(() => ["step", "part2"]),
+        "only the box the reviewer filled survives, and its step with it",
+      );
+    }
+  }
+  assert.ok(foundNothing > 0, "the first walk position files no flaw at all");
+  assert.ok(foundSomething > 0, "a later position files one");
+
+  // The revision folded back into a four-part chain: the rewritten step is a
+  // whole new object, its neighbours are the bytes the host carried.
+  const revised = executor
+    .tasks("commentor")
+    .map((seen) => seen.bindings.chain as JsonObject[])
+    .find((chain) => chain.some((step) => String(step.part1).startsWith("REVISED:")));
+  assert.ok(revised, "a redevelopment reached the chain the next round reviews");
+  for (const step of revised!) {
+    assert.deepEqual(
+      Object.keys(step),
+      ["part1", "part2", "part3", "part4"],
+      "every step of the folded chain is four parts, and nothing else",
+    );
+  }
+});
+
+test("a four-part chain still splits into one cache block per step", async () => {
+  const executor = new FakeBrainstormExecutor();
+  const result = await partsRuntime(executor).run({
+    runId: "parts-cache",
+    submission: { prompt: "Investigate the mechanism", attachments: [] },
+    params: { panelSize: 2 },
+  });
+  assert.equal(
+    result.status,
+    "completed",
+    result.status === "failed" ? `${result.error.name}: ${result.error.message}` : undefined,
+  );
+
+  const blocksOf = (seen: SeenTask) => seen.task.modelRequest!.messages[0]!.content;
+
+  // Same two claims the string chain makes, on a chain of objects: the blocks
+  // read as the one string they replaced, and the marked prefix closes on the
+  // last STEP so the next walk position re-reads it byte for byte.
+  for (const seen of executor.tasks("commentor")) {
+    const sections = payloadVars(seen.role).map((name) => {
+      const value = seen.bindings[name];
+      const rendered =
+        typeof value === "string" ? value : JSON.stringify(value, null, 2);
+      return `## ${name}\n\n${rendered}`;
+    });
+    assert.equal(
+      textContent(blocksOf(seen)),
+      [
+        "# Task",
+        `Execute the ${seen.role} role instructions from the system prompt against the data below. ` +
+          `Return only one JSON value satisfying the "${seen.task.outputSchema!.name}" schema.`,
+        ...(sections.length > 0 ? ["# Task data", ...sections] : []),
+      ].join("\n\n"),
+      "a four-part chain reads exactly as its unsplit rendering",
+    );
+    const boundaries = contentCacheBoundaries(blocksOf(seen));
+    assert.equal(boundaries.length, 2, "a commentor turn still declares two stable prefixes");
+    const chain = seen.bindings.chain as JsonObject[];
+    assert.ok(
+      textContent(blocksOf(seen).slice(0, boundaries[1]! + 1)).endsWith(
+        JSON.stringify(chain[chain.length - 1], null, 2).replaceAll("\n", "\n  "),
+      ),
+      "the second prefix closes after the last delivered step, never on the bracket",
+    );
+  }
+
+  const walks = new Map<string, SeenTask[]>();
+  for (const seen of executor.tasks("commentor")) {
+    const chain = seen.bindings.chain as JsonObject[];
+    walks.set(`${seen.agentId}|${JSON.stringify(chain[0])}`, [
+      ...(walks.get(`${seen.agentId}|${JSON.stringify(chain[0])}`) ?? []),
+      seen,
+    ]);
+  }
+  let compared = 0;
+  for (const tasks of walks.values()) {
+    const ordered = [...tasks].sort(
+      (a, b) =>
+        (a.bindings.chain as JsonObject[]).length - (b.bindings.chain as JsonObject[]).length,
+    );
+    for (let i = 1; i < ordered.length; i += 1) {
+      const shorter = ordered[i - 1]!;
+      const longer = ordered[i]!;
+      const before = shorter.bindings.chain as JsonObject[];
+      const after = longer.bindings.chain as JsonObject[];
+      if (before.length >= after.length) continue;
+      if (!before.every((step, index) => JSON.stringify(step) === JSON.stringify(after[index]))) {
+        continue;
+      }
+      const boundaries = contentCacheBoundaries(blocksOf(shorter));
+      const cached = textContent(
+        blocksOf(shorter).slice(0, boundaries[boundaries.length - 1]! + 1),
+      );
+      assert.ok(
+        textContent(blocksOf(longer)).startsWith(cached),
+        "the next step's turn re-reads the previous one's marked prefix byte for byte",
+      );
+      compared += 1;
+    }
+  }
+  assert.ok(compared > 0, "the walk produced consecutive positions to compare");
+});
+
+test("a four-part reviewer is bounded by the walk position, in the schema and on write", async () => {
+  // The pin the task carries is a HINT — no provider enforces a numeric
+  // maximum — so the same bound is re-checked on write. Both are asserted
+  // here, on the entry list a four-part comment files its steps in.
+  const overshoots = new (class extends FakeBrainstormExecutor {
+    override async execute(task: AgentTask): Promise<AgentResult> {
+      const result = await super.execute(task);
+      if (task.outputSchema?.name !== "commentParts" || result.status !== "ok") return result;
+      const output = object(result.output as JsonValue, "comment output");
+      const flaws = output.flaws as JsonObject[];
+      return {
+        ...result,
+        output: {
+          ...output,
+          flaws: [
+            ...flaws,
+            { step: 5, part1: "a step nobody has read", part2: "", part3: "", part4: "" },
+          ],
+        },
+      };
+    }
+  })();
+  const result = await partsRuntime(overshoots).run({
+    submission: "Overshooting four-part step target",
+    params: { panelSize: 2 },
+  });
+  assert.equal(result.status, "failed");
+  assert.match(
+    result.status === "failed" ? result.error.message : "",
+    /targeted step 5.*only reached step/,
+  );
+
+  const commented = overshoots
+    .tasks("commentor")
+    .find((seen) => seen.task.modelRequest?.responseFormat?.type === "jsonSchema");
+  assert.ok(commented, "a commentor turn was built before the run failed");
+  const format = commented!.task.modelRequest!.responseFormat!;
+  if (format.type !== "jsonSchema") throw new Error("the commentor turn has no jsonSchema format");
+  const flaws = object(
+    object(format.schema.properties, "comment properties").flaws,
+    "the flaws property",
+  );
+  const step = object(
+    object(object(flaws.items, "flaw entry").properties, "flaw entry properties").step,
+    "the flaw entry's step",
+  );
+  assert.equal(
+    step.maximum,
+    commented!.bindings.currentStep,
+    "the step ceiling is pinned on the ENTRY, which is where a four-part comment names its steps",
+  );
+});
+
+test("a four-part judge is bounded on the flaws it files, not only on the issues it distils", async () => {
+  // A part-aware judge writes TWO step-bearing lists: the flaws it marks as a
+  // reviewer, and the issues it hands the reviser. Checking only `issues` left
+  // the judge the one seat at the table that could name a step the walk has
+  // not reached and have nothing say so.
+  const overshoots = new (class extends FakeBrainstormExecutor {
+    override async execute(task: AgentTask): Promise<AgentResult> {
+      const result = await super.execute(task);
+      if (task.outputSchema?.name !== "judgeDecisionParts" || result.status !== "ok") {
+        return result;
+      }
+      const output = object(result.output as JsonValue, "judge output");
+      const flaws = (output.flaws ?? []) as JsonObject[];
+      return {
+        ...result,
+        output: {
+          ...output,
+          flaws: [
+            ...flaws,
+            { step: 5, part1: "a step nobody has read", part2: "", part3: "", part4: "" },
+          ],
+        },
+      };
+    }
+  })();
+  const result = await partsRuntime(overshoots).run({
+    submission: "Overshooting four-part judge target",
+    params: { panelSize: 2 },
+  });
+  assert.equal(result.status, "failed");
+  assert.match(
+    result.status === "failed" ? result.error.message : "",
+    /targeted step 5.*only reached step/,
   );
 });

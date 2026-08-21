@@ -1177,7 +1177,7 @@ test("reasoning-trace routes get summarized thinking and stepwise tasks get the 
       ...structuredTask,
       input: { role: "brain", routeTraits: ["extended-reasoning"] },
       metadata: {
-        stepwise: { tool: "submit_step", field: "cot", count: 3 },
+        stepwise: { tool: "submit_step", field: "cot", parts: false, count: 3 },
       },
     },
     { runId: "run-stepwise", nodePath: "root/first-pass/member[0]" },
@@ -1215,7 +1215,7 @@ test("a sparse revision task fails closed when no step is rewritten", async () =
       ...structuredTask,
       input: { role: "redeveloper", routeTraits: ["extended-reasoning"] },
       metadata: {
-        stepwise: { tool: "submit_step", field: "steps", count: 6, sparse: true },
+        stepwise: { tool: "submit_step", field: "steps", parts: false, count: 6, sparse: true },
       },
     },
     { runId: "run-sparse", nodePath: "root/review/redevelop" },
@@ -1279,5 +1279,267 @@ test("a session that goes silent is restarted fresh, then fails with the stall n
     captured.length,
     3,
     "the initial session plus two fresh-session restarts before failing",
+  );
+});
+
+/**
+ * The in-process chain tool as the SDK registered it. Reaching through the
+ * MCP server's private registry is the only way to drive the tool from a
+ * test: the real caller is Claude Code, in another process, and the handler
+ * is where the ordering contract and the assembled step shape live.
+ */
+function stepwiseHandler(input: ClaudeAgentQueryInput): {
+  readonly inputShape: readonly string[];
+  readonly call: (args: Record<string, unknown>) => Promise<{ isError?: boolean }>;
+} {
+  const servers = input.options.mcpServers as Record<
+    string,
+    {
+      instance: {
+        _registeredTools: Record<
+          string,
+          {
+            inputSchema: { shape: Record<string, unknown> };
+            handler: (
+              args: Record<string, unknown>,
+              extra: unknown,
+            ) => Promise<{ isError?: boolean }>;
+          }
+        >;
+      };
+    }
+  >;
+  const registered = servers.steps!.instance._registeredTools.submit_step!;
+  return {
+    inputShape: Object.keys(registered.inputSchema.shape),
+    call: (args) => registered.handler(args, {}),
+  };
+}
+
+/** A stubbed session that submits the given steps, then answers. */
+function chainQuery(
+  capture: ClaudeAgentQueryInput[],
+  calls: readonly Record<string, unknown>[],
+  structuredOutput: unknown,
+  refusals: boolean[] = [],
+): ClaudeAgentQueryFn {
+  return (input) => ({
+    async *[Symbol.asyncIterator]() {
+      capture.push(input);
+      const tool = stepwiseHandler(input);
+      for (const args of calls) {
+        refusals.push((await tool.call(args)).isError === true);
+      }
+      yield {
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: JSON.stringify(structuredOutput),
+        structured_output: structuredOutput,
+        session_id: "session-test",
+        num_turns: 2,
+        total_cost_usd: 0.01,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      };
+    },
+  });
+}
+
+/** The task shape the runtime delivers for a four-part chain: the stepwise
+ *  field is stripped out of the schema (these tool calls fill it), so the
+ *  spec's own `parts` flag is what tells the executor which chain form to
+ *  ask for. */
+const partsTask: AgentTask = {
+  ...structuredTask,
+  input: { role: "brain" },
+  outputSchema: {
+    name: "brainIdeaParts",
+    schema: {
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      type: "object",
+      properties: { output: { type: "object" } },
+      required: ["output"],
+      additionalProperties: false,
+    },
+  },
+  metadata: { stepwise: { tool: "submit_step", field: "cot", parts: true, count: 2 } },
+};
+
+test("a four-part chain task asks for four parts and assembles them as step objects", async () => {
+  const captured: ClaudeAgentQueryInput[] = [];
+  const executor = new ClaudeAgentExecutor({
+    token: "setup-token-secret",
+    queryFn: chainQuery(
+      captured,
+      [
+        { index: 1, part1: "one a", part2: "one b", part3: "one c", part4: "one d" },
+        { index: 2, part1: "two a", part2: "two b", part3: "two c", part4: "" },
+      ],
+      { output: { type: "research idea" } },
+    ),
+  });
+  const result = await executor.execute(partsTask, {
+    runId: "run-parts",
+    nodePath: "root/first-pass/member[0]",
+  });
+
+  assert.deepEqual(stepwiseHandler(captured[0]!).inputShape, [
+    "index",
+    "part1",
+    "part2",
+    "part3",
+    "part4",
+  ]);
+  assert.equal(result.status, "ok");
+  assert.deepEqual(
+    result.status === "ok" ? (result.output as Record<string, unknown>).cot : undefined,
+    [
+      { part1: "one a", part2: "one b", part3: "one c", part4: "one d" },
+      // An empty part is legal: the parts are a size discipline, and a
+      // refusal here would spend a turn enforcing a soft limit.
+      { part1: "two a", part2: "two b", part3: "two c", part4: "" },
+    ],
+  );
+});
+
+test("a step whose four parts are all empty is refused, like an empty paragraph", async () => {
+  const captured: ClaudeAgentQueryInput[] = [];
+  const refusals: boolean[] = [];
+  const executor = new ClaudeAgentExecutor({
+    token: "setup-token-secret",
+    maxValidationAttempts: 1,
+    queryFn: chainQuery(
+      captured,
+      [
+        { index: 1, part1: " ", part2: "", part3: "", part4: "" },
+        { index: 1, part1: "one a", part2: "", part3: "", part4: "" },
+        { index: 2, part1: "two a", part2: "", part3: "", part4: "" },
+      ],
+      { output: { type: "research idea" } },
+      refusals,
+    ),
+  });
+  const result = await executor.execute(partsTask, {
+    runId: "run-parts-empty",
+    nodePath: "root/first-pass/member[0]",
+  });
+
+  assert.deepEqual(refusals, [true, false, false]);
+  assert.equal(result.status, "ok");
+  assert.deepEqual(
+    result.status === "ok" ? (result.output as Record<string, unknown>).cot : undefined,
+    [
+      { part1: "one a", part2: "", part3: "", part4: "" },
+      { part1: "two a", part2: "", part3: "", part4: "" },
+    ],
+    "the refused call left no gap: position 1 was still open",
+  );
+});
+
+test("a sparse four-part revision keeps each rewritten step's position", async () => {
+  const captured: ClaudeAgentQueryInput[] = [];
+  const executor = new ClaudeAgentExecutor({
+    token: "setup-token-secret",
+    queryFn: chainQuery(
+      captured,
+      [
+        { index: 2, part1: "a", part2: "b", part3: "c", part4: "d" },
+        { index: 5, part1: "e", part2: "f", part3: "g", part4: "h" },
+      ],
+      { novelty: "unchanged" },
+    ),
+  });
+  const result = await executor.execute(
+    {
+      ...partsTask,
+      input: { role: "redeveloper" },
+      outputSchema: { name: "redevelopmentPatchParts", schema: partsTask.outputSchema!.schema },
+      metadata: {
+        stepwise: { tool: "submit_step", field: "steps", parts: true, count: 6, sparse: true },
+      },
+    },
+    { runId: "run-parts-sparse", nodePath: "root/review/redevelop" },
+  );
+
+  assert.equal(result.status, "ok");
+  assert.deepEqual(
+    result.status === "ok" ? (result.output as Record<string, unknown>).steps : undefined,
+    [
+      { index: 2, part1: "a", part2: "b", part3: "c", part4: "d" },
+      { index: 5, part1: "e", part2: "f", part3: "g", part4: "h" },
+    ],
+  );
+});
+
+test("a string chain task still asks for one paragraph and assembles a flat list", async () => {
+  const captured: ClaudeAgentQueryInput[] = [];
+  const executor = new ClaudeAgentExecutor({
+    token: "setup-token-secret",
+    queryFn: chainQuery(
+      captured,
+      [
+        { index: 1, text: "step one" },
+        { index: 2, text: "step two" },
+      ],
+      { output: { type: "research idea" } },
+    ),
+  });
+  // The spec is what has to say `parts: false` here. Renaming the schema is
+  // no longer enough, which is the whole point: the form travels as a stated
+  // fact rather than as a convention read off the name.
+  const result = await executor.execute(
+    {
+      ...partsTask,
+      outputSchema: { name: "brainIdea", schema: partsTask.outputSchema!.schema },
+      metadata: { stepwise: { tool: "submit_step", field: "cot", parts: false, count: 2 } },
+    },
+    { runId: "run-legacy-chain", nodePath: "root/first-pass/member[0]" },
+  );
+
+  assert.deepEqual(stepwiseHandler(captured[0]!).inputShape, ["index", "text"]);
+  assert.equal(result.status, "ok");
+  assert.deepEqual(
+    result.status === "ok" ? (result.output as Record<string, unknown>).cot : undefined,
+    ["step one", "step two"],
+  );
+});
+
+test("the spec decides the chain form, whatever the schema is called and whatever it shows", async () => {
+  const captured: ClaudeAgentQueryInput[] = [];
+  const executor = new ClaudeAgentExecutor({
+    token: "setup-token-secret",
+    queryFn: chainQuery(
+      captured,
+      [{ index: 1, part1: "a", part2: "b", part3: "c", part4: "d" }],
+      { output: { type: "research idea" } },
+    ),
+  });
+  // Deliberately starved of every other witness: a name carrying no "Parts"
+  // suffix, and an array with no item schema to read a shape off. The spec
+  // alone says four parts, and that has to be enough — a chain form whose
+  // name broke the convention used to transport silently as strings.
+  const result = await executor.execute(
+    {
+      ...partsTask,
+      outputSchema: {
+        name: "somethingElse",
+        schema: { type: "object", properties: { cot: { type: "array" } } },
+      },
+      metadata: { stepwise: { tool: "submit_step", field: "cot", parts: true, count: 1 } },
+    },
+    { runId: "run-shape-witness", nodePath: "root/first-pass/member[0]" },
+  );
+
+  assert.deepEqual(stepwiseHandler(captured[0]!).inputShape, [
+    "index",
+    "part1",
+    "part2",
+    "part3",
+    "part4",
+  ]);
+  assert.equal(result.status, "ok");
+  assert.deepEqual(
+    result.status === "ok" ? (result.output as Record<string, unknown>).cot : undefined,
+    [{ part1: "a", part2: "b", part3: "c", part4: "d" }],
   );
 });

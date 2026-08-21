@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type {
+  CotStepView,
   ReviewMemberView,
   ReviewRoundView,
   ReviewStepView,
@@ -129,7 +130,9 @@ test("every card's review is the one that read that card's own text", () => {
   const timeline = computeSeatTimeline(member, ["v0 original"]);
   const deck = deckEntries(step, timeline);
 
-  const textOf = (index: number): string | undefined => {
+  // The step shape is the union now: this walk records strings, and the
+  // assertion below is unchanged — only the annotation had to widen with it.
+  const textOf = (index: number): CotStepView | undefined => {
     const entry = deck[index]!;
     if (entry.kind === "original") return entry.text;
     if (entry.kind === "round") {

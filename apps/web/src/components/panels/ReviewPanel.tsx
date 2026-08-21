@@ -19,16 +19,21 @@
  *    it rewrote.
  */
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { COT_STEP_PARTS } from "@brainstorm-agentic/protocol";
 import type {
   CommentView,
+  CotStepView,
   FirstPassStage,
+  FlawEntryView,
   JudgeDecisionView,
+  JudgeIssueView,
   ReviewMemberView,
   ReviewRoundView,
   ReviewStage,
   ReviewStepView,
 } from "@brainstorm-agentic/protocol";
 import { prefersReducedMotion } from "../../format";
+import { partLabel, stepPlainText } from "../../steps";
 import {
   downloadTextFile,
   seatNumberOf,
@@ -36,7 +41,7 @@ import {
   seatTexFileName,
 } from "../../latex";
 import { LATEX_STYLE } from "../../latex-style";
-import { EvidenceBlock, LiveThread, TokenChip } from "../common";
+import { EvidenceBlock, LiveThread, StepBlocks, TokenChip, textStepBlocks } from "../common";
 import { useRunLive } from "../run-liveness";
 import {
   liveDestinations,
@@ -52,6 +57,7 @@ import {
   roundViewKey,
   seatTimeline,
   type CrossRewriteView,
+  type DiffBlock,
   type DiffSegment,
   type RoundComputedView,
   type SeatTimeline,
@@ -343,6 +349,59 @@ function segmentSpans(segments: readonly DiffSegment[], changedClass: string) {
   ));
 }
 
+/**
+ * A version's whole body: one paragraph for a step recorded as a single
+ * string, four labelled paragraphs for one recorded in parts. Each block
+ * carries its own diff, so the highlighting means the same thing inside a
+ * part as it ever did against a whole step.
+ */
+function DiffBody({
+  blocks,
+  changedClass,
+}: {
+  blocks: readonly DiffBlock[];
+  changedClass: string;
+}) {
+  return (
+    <StepBlocks
+      blocks={blocks.map((block) => ({
+        ...(block.part !== undefined ? { part: block.part } : {}),
+        body: <p className="round-text">{segmentSpans(block.segments, changedClass)}</p>,
+      }))}
+    />
+  );
+}
+
+/**
+ * The flaws a reviewer marked, each under the part it names. An absent part
+ * key means the reviewer said nothing there — the empties are stripped before
+ * the record is written — so a step shows only the parts that drew a remark.
+ */
+function FlawList({ flaws }: { flaws: readonly FlawEntryView[] }) {
+  return (
+    <div>
+      <span className="detail-label">flaws</span>
+      {/* An empty list is a claim of its own: this reviewer was shown the
+          parts and marked nothing. A run that records no parts at all has no
+          list here, and says nothing either way. */}
+      {flaws.length === 0 && <p className="dim small">no flaws marked</p>}
+      {flaws.map((entry, index) => (
+        <div key={index} className="comment-detail">
+          <div className="assessment-row">
+            <span className="badge">step {entry.step}</span>
+          </div>
+          {COT_STEP_PARTS.filter((part) => (entry[part] ?? "") !== "").map((part) => (
+            <div key={part}>
+              <span className="detail-label">{partLabel(part)}</span>
+              <div>{entry[part]}</div>
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /** The judge's decision, rendered flat inside the comments panel. */
 function JudgeContent({
   decision,
@@ -368,6 +427,10 @@ function JudgeContent({
             <div key={index} className="comment-detail">
               <div className="assessment-row">
                 <span className="badge">step {issue.step}</span>
+                {/* Where in the step, when the run recorded parts at all. */}
+                {issue.part !== undefined && (
+                  <span className="badge">{partLabel(issue.part)}</span>
+                )}
                 <span className={`badge${issue.basis === "verified" ? " badge-accent" : ""}`}>
                   {issue.basis}
                 </span>
@@ -382,6 +445,10 @@ function JudgeContent({
           ))}
         </div>
       )}
+      {/* The judge's own marks, on the same terms a commentor files them —
+          beside `issues`, which stays the repair signal the redeveloper
+          works from. */}
+      {decision.flaws !== undefined && <FlawList flaws={decision.flaws} />}
       {Object.keys(decision.assessment).length > 0 && (
         <div className="assessment-row">
           {Object.entries(decision.assessment).map(([commentorId, kind]) => (
@@ -415,6 +482,10 @@ function CommentContent({ comment }: { comment: CommentView }) {
         <span className="detail-label">reason</span>
         <div>{comment.reason}</div>
       </div>
+      {/* Read beside the scalar `step` above, never as a fallback for it: a
+          part-aware comment carries flaws and no step, a legacy one the
+          reverse, and the two records answer different questions. */}
+      {comment.flaws !== undefined && <FlawList flaws={comment.flaws} />}
       {comment.suggestion !== undefined && comment.suggestion !== "" && (
         <div>
           <span className="detail-label">suggestion</span>
@@ -426,6 +497,23 @@ function CommentContent({ comment }: { comment: CommentView }) {
   );
 }
 
+/** Where an issue sits, for the clipboard: the step, and the part when known. */
+function issuePlace(issue: JudgeIssueView): string {
+  return `step ${issue.step}${issue.part !== undefined ? ` · ${partLabel(issue.part)}` : ""}`;
+}
+
+/**
+ * A reviewer's flaws as plain lines, one per part it marked. Each line carries
+ * its own locator because a pasted report has no card under it to sit on.
+ */
+function flawLines(flaws: readonly FlawEntryView[]): readonly string[] {
+  return flaws.flatMap((entry) =>
+    COT_STEP_PARTS.filter((part) => (entry[part] ?? "") !== "").map(
+      (part) => `- [step ${entry.step} · ${partLabel(part)}] ${entry[part]}`,
+    ),
+  );
+}
+
 function commentCopyText(selected: "judge" | string, round: ReviewRoundView): string {
   if (selected === "judge") {
     const d = round.decision;
@@ -433,20 +521,24 @@ function commentCopyText(selected: "judge" | string, round: ReviewRoundView): st
     const issues = (d.issues ?? [])
       .map(
         (issue, i) =>
-          `${i + 1}. [step ${issue.step}] (${issue.basis}${issue.mustAddress ? ", must address" : ""}) ${issue.point}`,
+          `${i + 1}. [${issuePlace(issue)}] (${issue.basis}${issue.mustAddress ? ", must address" : ""}) ${issue.point}`,
       )
       .join("\n");
+    const flaws = flawLines(d.flaws ?? []);
     return [
       `Judge — round ${round.round}: ${d.verdict}`,
       d.reason,
       ...(issues ? [`Issues:\n${issues}`] : []),
+      ...(flaws.length > 0 ? [`Flaws:\n${flaws.join("\n")}`] : []),
     ].join("\n");
   }
   const c = round.comments.find((entry) => entry.commentorId === selected);
   if (!c) return "";
+  const flaws = flawLines(c.flaws ?? []);
   return [
     `${c.commentorLabel} — round ${round.round}: ${c.verdict}${c.step !== undefined ? ` (step ${c.step})` : ""}`,
     c.reason,
+    ...(flaws.length > 0 ? [`Flaws:\n${flaws.join("\n")}`] : []),
     ...(c.suggestion ? [`Suggestion: ${c.suggestion}`] : []),
   ].join("\n");
 }
@@ -633,17 +725,17 @@ function bugReportText(
     lines.push("issues:");
     for (const [i, issue] of issues.entries()) {
       lines.push(
-        `${i + 1}. [step ${issue.step}] (${issue.basis}${issue.mustAddress ? ", must address" : ""}) ${issue.point}`,
+        `${i + 1}. [${issuePlace(issue)}] (${issue.basis}${issue.mustAddress ? ", must address" : ""}) ${issue.point}`,
       );
     }
   }
   if (computed.outText !== undefined) {
-    lines.push(`step text out of round ${round.round}:`, computed.outText);
+    lines.push(`step text out of round ${round.round}:`, stepPlainText(computed.outText));
   }
   for (const change of computed.crossChanges) {
     // Same words the card shows, so a pasted report reads like the screen.
     const direction = change.index > step.index ? "prospectively" : "retroactively";
-    lines.push(`${direction} edited step ${change.index}:`, change.after);
+    lines.push(`${direction} edited step ${change.index}:`, stepPlainText(change.after));
   }
   return lines.join("\n");
 }
@@ -687,12 +779,12 @@ function pendingNote(
 function originalReportText(
   member: ReviewMemberView,
   step: ReviewStepView,
-  text: string,
+  text: CotStepView,
 ): string {
   return [
     `${member.label}${member.umbrella ? ` (${member.umbrella})` : ""} — step ${step.index}`,
     "original thought (first pass, before any review)",
-    text,
+    stepPlainText(text),
   ].join("\n");
 }
 
@@ -721,7 +813,7 @@ function crossReportText(
   return [
     `${member.label}${member.umbrella ? ` (${member.umbrella})` : ""} — step ${step.index}`,
     crossOriginText(cross, step.index),
-    cross.after,
+    stepPlainText(cross.after),
   ].join("\n");
 }
 
@@ -769,7 +861,13 @@ function RoundDeck({
         {writingNextVersion !== undefined ? (
           <LiveThread text={writingNextVersion.text} label="being written" />
         ) : (
-          text !== undefined && <p className="round-text diff-keep-block">{text}</p>
+          text !== undefined && (
+            <StepBlocks
+              blocks={textStepBlocks(text, (part) => (
+                <p className="round-text diff-keep-block">{part}</p>
+              ))}
+            />
+          )
         )}
       </div>
     );
@@ -878,7 +976,9 @@ function RoundDeck({
             />
           </span>
         </div>
-        <p className="round-text">{entry.text}</p>
+        <StepBlocks
+          blocks={textStepBlocks(entry.text, (part) => <p className="round-text">{part}</p>)}
+        />
         {reviewFold(`${member.memberId}:${step.index}:${entry.key}`)}
       </div>
     );
@@ -915,9 +1015,10 @@ function RoundDeck({
             />
           </span>
         </div>
-        <p className="round-text">
-          {segmentSpans(entry.cross.segments, prospective ? "diff-blue" : "diff-red")}
-        </p>
+        <DiffBody
+          blocks={entry.cross.blocks}
+          changedClass={prospective ? "diff-blue" : "diff-red"}
+        />
         {reviewFold(`${member.memberId}:${step.index}:${entry.key}`)}
       </div>
     );
@@ -962,7 +1063,7 @@ function RoundDeck({
         </span>
       </div>
       {computed?.outText !== undefined && (
-        <p className="round-text">{segmentSpans(computed.segments, "diff-new")}</p>
+        <DiffBody blocks={computed.blocks} changedClass="diff-new" />
       )}
       {computed !== undefined && computed.crossChanges.length > 0 && (
         <div className="round-cross-note">
@@ -1120,7 +1221,7 @@ export function ReviewStagePanels({
 
   const firstPassMember = (memberId: string) =>
     firstPass?.members.find((member) => member.memberId === memberId);
-  const firstPassCot = (memberId: string): readonly string[] | undefined =>
+  const firstPassCot = (memberId: string): readonly CotStepView[] | undefined =>
     firstPassMember(memberId)?.idea?.cot;
   // The seat's full expertise, biggest granularity first: department, then
   // umbrella, then the subfields (which only the first-pass view carries).

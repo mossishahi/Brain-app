@@ -109,10 +109,17 @@ function memberIdea(stage: FirstPassStage) {
  * inserts the compiler's fan-out segment before the member. Both shapes stay
  * live forever: old runs are pinned to sequential bundles, new bundles review
  * the seats in parallel.
+ *
+ * `delivery: "patch-parts"` swaps the RECORDED shape rather than the topology:
+ * the chain becomes four-part steps, the comment carries a flaw list instead
+ * of a scalar step, and the patch names parts instead of text. Every assertion
+ * below is shared, so the projection cannot be branching on the app version —
+ * one journal is all a run pinned to an old bundle ever writes, and the other
+ * is all a part-aware run ever writes.
  */
 function assertReviewReconstruction(
   memberPathPrefix: string,
-  delivery: "full" | "patch" | "patch-standing-novelty" = "full",
+  delivery: "full" | "patch" | "patch-standing-novelty" | "patch-parts" = "full",
 ): void {
   const workspace = mkdtempSync(join(tmpdir(), "stage-mapper-test-"));
   try {
@@ -128,9 +135,18 @@ function assertReviewReconstruction(
       discussion: [paragraph, paragraph, paragraph],
       conclusion: [paragraph],
     });
+    // How this run writes a chain step. A run recorded before the chain had
+    // parts writes one string; a part-aware run writes four parts. Both are
+    // built from the same sentence so every assertion can be shared.
+    const parts = delivery === "patch-parts";
+    const ideaSchema = parts ? "brainIdeaParts" : "brainIdea";
+    const step = (text: string): unknown =>
+      parts
+        ? { part1: text, part2: "Second part.", part3: "Third part.", part4: "Fourth part." }
+        : text;
     const firstIdea = {
       output: { type: "research idea", paper: paperBody("The original mechanism.") },
-      cot: ["Step one.", "Step two.", "Step three."],
+      cot: ["Step one.", "Step two.", "Step three."].map(step),
       novelty: "Original novelty claim.",
       literature: [{ title: "Closest work", year: 2024 }],
     };
@@ -149,7 +165,7 @@ function assertReviewReconstruction(
       : "Original novelty claim.";
     const revisedIdea = {
       output: revisedEnvelope,
-      cot: ["Step one.", "REVISED step two.", "Step three."],
+      cot: ["Step one.", "REVISED step two.", "Step three."].map(step),
       novelty: finalNovelty,
       literature: firstIdea.literature,
     };
@@ -169,12 +185,62 @@ function assertReviewReconstruction(
       value: {
         taskId: "t-comment",
         status: "ok",
+        // The two review records, whole. A part-aware comment carries a flaw
+        // list and NO top-level step; a string-chain comment carries the step
+        // and no flaws. Neither is a fallback for the other, so the fixtures
+        // never carry both at once. `part2: ""` is a stray empty the prune
+        // would have removed — the reader must drop it rather than render a
+        // blank block for a part the reviewer said nothing about.
+        output: parts
+          ? {
+              verdict: "Interrupt",
+              reason: "The mechanism misattributes its guarantee to the wrong framework.",
+              flaws: [
+                { step: 2, part1: "The guarantee is claimed for the wrong framework.", part2: "" },
+              ],
+              suggestion: "",
+              evidence: noEvidence,
+            }
+          : {
+              verdict: "Interrupt",
+              step: 2,
+              reason: "The mechanism misattributes its guarantee to the wrong framework.",
+              suggestion: "",
+              evidence: noEvidence,
+            },
+      },
+    };
+    const judgeEntry = {
+      key:
+        memberPathPrefix +
+        "/cotStep[1]/review-round-loop/iter[0]/review-round-body/judge-step/" +
+        "judge-step-execute::result",
+      kind: "agent",
+      value: {
+        taskId: "t-judge",
+        status: "ok",
         output: {
-          verdict: "Interrupt",
-          step: 2,
-          reason: "The mechanism misattributes its guarantee to the wrong framework.",
-          suggestion: "",
+          verdict: "Build",
+          reason: "The commentor's objection stands and the step has to name its framework.",
+          suggestion: "Name the framework the guarantee actually comes from.",
           evidence: noEvidence,
+          assessment: [{ commentorId: "member-2", basis: "authority" }],
+          // `issues` is the repair signal in BOTH shapes; a part-aware issue
+          // adds the locator, and `flaws` is the judge's own marks beside it.
+          issues: [
+            {
+              step: 2,
+              ...(parts ? { part: "part1" } : {}),
+              point: "The step attributes its guarantee to a framework that does not give it.",
+              basis: "authority",
+              mustAddress: true,
+              suggestion: "Name the framework the guarantee actually comes from.",
+              evidence: noEvidence,
+            },
+          ],
+          ...(parts
+            ? { flaws: [{ step: 2, part1: "The framework named here is the wrong one." }] }
+            : {}),
         },
       },
     };
@@ -198,7 +264,14 @@ function assertReviewReconstruction(
                 novelty: "Revised novelty claim.",
               }
             : {
-                steps: [{ index: 2, text: "REVISED step two." }],
+                // A patched step is always the WHOLE new step: its text on a
+                // string chain, all four parts on a part-aware one — never a
+                // single part, because the part boundaries can move.
+                steps: [
+                  parts
+                    ? { index: 2, ...(step("REVISED step two.") as object) }
+                    : { index: 2, text: "REVISED step two." },
+                ],
                 outputPatch: {
                   paper: { method: ["The repaired mechanism.", paragraph, paragraph] },
                 },
@@ -213,7 +286,7 @@ function assertReviewReconstruction(
         workflowId: "brainstorm",
         status: "completed",
         input: {},
-        journal: [commentEntry, revisionEntry],
+        journal: [commentEntry, judgeEntry, revisionEntry],
         pendingGates: [],
         seq: 1,
         updatedAt: Date.now(),
@@ -224,10 +297,13 @@ function assertReviewReconstruction(
       JSON.stringify({
         refs: [
           { id: "a-panel", metadata: { schema: "panel", path: "panel" } },
-          { id: "a-idea", metadata: { schema: "brainIdea", path: "ideas.member-1" } },
+          // A part-aware run records the very same path under the part-aware
+          // schema NAME, so the lookup has to know both names to reach the
+          // artifact at all.
+          { id: "a-idea", metadata: { schema: ideaSchema, path: "ideas.member-1" } },
           // The runtime re-persists the idea after the redevelopment; the
           // first-pass view must stay pinned to the FIRST entry regardless.
-          { id: "a-idea-rev", metadata: { schema: "brainIdea", path: "ideas.member-1" } },
+          { id: "a-idea-rev", metadata: { schema: ideaSchema, path: "ideas.member-1" } },
         ],
       }),
     );
@@ -269,7 +345,7 @@ function assertReviewReconstruction(
       firstPassIdea.paper.method.startsWith("The original mechanism."),
       "the first-pass card keeps the original version",
     );
-    assert.equal(firstPassIdea.cot[1], "Step two.");
+    assert.deepEqual(firstPassIdea.cot[1], step("Step two."));
 
     const reviewStage = detail.stages.find((candidate) => candidate.id === "review-members");
     assert.ok(reviewStage && reviewStage.id === "review-members");
@@ -281,7 +357,7 @@ function assertReviewReconstruction(
       reviewed.finalIdea.paper.method.startsWith("The repaired mechanism."),
       "the review view carries the revised envelope as the final version",
     );
-    assert.equal(reviewed.finalIdea.cot[1], "REVISED step two.");
+    assert.deepEqual(reviewed.finalIdea.cot[1], step("REVISED step two."));
     assert.equal(
       reviewed.finalIdea.novelty,
       finalNovelty,
@@ -297,20 +373,47 @@ function assertReviewReconstruction(
       .find((step) => step.index === 2)
       ?.rounds.find((candidate) => candidate.round === 1);
     assert.ok(round, "step 2 replays its review round");
-    assert.equal(
+    assert.deepEqual(
       round.cot,
-      "Step two.",
-      "the round shows the text the reviewers actually saw (pre-revision)",
+      step("Step two."),
+      "the round shows the step the reviewers actually saw (pre-revision)",
     );
     assert.equal(round.comments.length, 1, "the commentor's interrupt is replayed");
     assert.equal(round.comments[0]?.verdict, "Interrupt");
+    assert.equal(round.decision?.verdict, "Build", "the judge's decision is replayed");
+    assert.equal(round.decision?.issues?.[0]?.step, 2, "the repair signal keeps its step");
     assert.ok(round.revision, "the redevelopment is replayed into the round");
     assert.deepEqual([...round.revision.touchedSteps], [2]);
-    assert.equal(
+    assert.deepEqual(
       round.revision.rewritten?.[0]?.text,
-      "REVISED step two.",
-      "the rewritten step's new text rides along for display",
+      step("REVISED step two."),
+      "the rewritten step's new content rides along for display",
     );
+
+    // The two review records stay TELLABLE APART. A part-aware review carries
+    // flaw lists and a part locator; a string-chain review carries a scalar
+    // step and neither. Reading one as a fallback for the other would make a
+    // run from before the parts look like a review that faulted nothing.
+    const comment = round.comments[0]!;
+    if (parts) {
+      assert.equal(comment.step, undefined, "a part-aware comment has no top-level step");
+      assert.deepEqual(
+        comment.flaws,
+        [{ step: 2, part1: "The guarantee is claimed for the wrong framework." }],
+        "the comment's flaws project with the stray empty part dropped",
+      );
+      assert.equal(round.decision?.issues?.[0]?.part, "part1");
+      assert.deepEqual(
+        round.decision?.flaws,
+        [{ step: 2, part1: "The framework named here is the wrong one." }],
+        "the judge's own marks ride beside its repair signal",
+      );
+    } else {
+      assert.equal(comment.step, 2, "a string-chain comment carries the scalar step");
+      assert.equal(comment.flaws, undefined, "and no flaw list at all");
+      assert.equal(round.decision?.issues?.[0]?.part, undefined);
+      assert.equal(round.decision?.flaws, undefined);
+    }
 
     const untouched = reviewStage.members.find((member) => member.memberId === "member-2");
     assert.equal(untouched?.revisionCount, 0);
@@ -337,6 +440,19 @@ test("a revision delivered as a patch replays into exactly the same review view"
   assertReviewReconstruction(
     "brainstorm-root/review-members/review-members-fanout/member[0]",
     "patch",
+  );
+});
+
+test("a four-part run's journal replays through the very same reconstruction", () => {
+  // The whole point of the union: one projection, two recorded shapes. This
+  // fixture is a run whose chain is four-part objects, whose comment carries a
+  // flaw list instead of a scalar step, and whose patch names parts — and it
+  // reaches every assertion the string-chain fixtures reach. The projection
+  // reads the record, so a run pinned to a bundle from before the parts and a
+  // run pinned to one after it both keep rendering, forever.
+  assertReviewReconstruction(
+    "brainstorm-root/review-members/review-members-fanout/member[0]",
+    "patch-parts",
   );
 });
 

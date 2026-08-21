@@ -471,6 +471,43 @@ export interface SolutionOutputView {
   readonly residualRisks: readonly string[];
 }
 
+/**
+ * One chain step written as four parts. The parts carry NO meaning: they are a
+ * size discipline, not a reasoning schema, so the same rule serves all nine
+ * output shapes. Four is a hard maximum forever — a redevelopment rewrites the
+ * existing four and can never add a fifth.
+ */
+export interface CotStepPartsView {
+  readonly part1: string;
+  readonly part2: string;
+  readonly part3: string;
+  readonly part4: string;
+}
+
+/** The part keys of a four-part step, in the order they are read and rendered. */
+export const COT_STEP_PARTS = ["part1", "part2", "part3", "part4"] as const;
+export type CotStepPart = (typeof COT_STEP_PARTS)[number];
+
+/**
+ * One chain step as a reader receives it: one string, or four parts.
+ *
+ * Every run started before the parts schemas existed recorded a step as a
+ * single string, and a job pins its bundle for life — so both shapes keep
+ * arriving at every later version of the reader, forever. The union is what
+ * lets one dashboard render both.
+ */
+export type CotStepView = string | CotStepPartsView;
+
+/**
+ * Is this step the four-part shape? Branch on the RECORDED shape, never on the
+ * app or bundle version: the version that wrote a run says nothing about the
+ * shape of a step inside it, because a resumed run keeps writing in the shape
+ * its pinned bundle chose.
+ */
+export function isCotStepParts(step: CotStepView): step is CotStepPartsView {
+  return typeof step === "object" && step !== null;
+}
+
 /** A member's direct response to one explicitly requested output. */
 export interface RequestedSectionView {
   readonly title: string;
@@ -499,7 +536,8 @@ export interface BrainIdeaView {
   readonly explanation?: ExplainOutputView;
   readonly solution?: SolutionOutputView;
   readonly requested?: readonly RequestedSectionView[];
-  readonly cot: readonly string[];
+  /** The chain, one entry per step, in either recorded step shape. */
+  readonly cot: readonly CotStepView[];
   readonly novelty?: string;
   readonly literature?: readonly PaperView[];
 }
@@ -511,6 +549,28 @@ export type EvidenceView =
   | { readonly kind: "math"; readonly derivation: string }
   | { readonly kind: "reference"; readonly citation: string; readonly locator: string; readonly shows: string };
 
+/**
+ * One step's flaws, keyed by the part of that step each flaw sits in. Shared by
+ * a commentor and by the judge, because both review the same four parts.
+ *
+ * The reviewer fills in a draft with every part key present and empty; the
+ * orchestrator strips the empties before the record is written. So an ABSENT
+ * part key means the reviewer said nothing about that part — never that it said
+ * something empty — and a reviewer that found nothing carries an empty list
+ * rather than no list at all.
+ *
+ * `part<N>` is a LOCATOR, not a citation: the parts carry no meaning and a
+ * rewrite can move their boundaries, so each flaw sentence stands alone.
+ */
+export interface FlawEntryView {
+  /** The 1-based chain step these flaws sit in. */
+  readonly step: number;
+  readonly part1?: string;
+  readonly part2?: string;
+  readonly part3?: string;
+  readonly part4?: string;
+}
+
 export interface CommentView {
   readonly commentorId: string;
   readonly commentorLabel: string;
@@ -520,6 +580,13 @@ export interface CommentView {
   readonly reason: string;
   readonly suggestion?: string;
   readonly evidence?: EvidenceView;
+  /**
+   * The flaws of a part-aware review, one entry per step the commentor had
+   * something to say about. Absent on a run whose review recorded the scalar
+   * `step` instead — read the two together, never one as a fallback for the
+   * other, because a part-aware comment carries no top-level step.
+   */
+  readonly flaws?: readonly FlawEntryView[];
   /** What this commentor's task spent producing the comment. */
   readonly usage?: TokenUsageView;
 }
@@ -527,6 +594,11 @@ export interface CommentView {
 /** One confirmed problem in the judge's repair signal, pinned to a step. */
 export interface JudgeIssueView {
   readonly step: number;
+  /**
+   * Which part of that step the issue sits in. Absent on runs recorded before
+   * the chain had parts. A locator only — see FlawEntryView.
+   */
+  readonly part?: CotStepPart;
   readonly point: string;
   readonly basis: "verified" | "authority";
   readonly mustAddress: boolean;
@@ -541,6 +613,12 @@ export interface JudgeDecisionView {
   readonly evidence?: EvidenceView;
   /** The distinct confirmed problems of the round; empty on Pass. */
   readonly issues?: readonly JudgeIssueView[];
+  /**
+   * The judge's own per-part flaws, on the same terms as a commentor's. Absent
+   * on a run recorded before the chain had parts; empty when the judge upheld
+   * nothing. `issues` stays the repair signal the redeveloper works from.
+   */
+  readonly flaws?: readonly FlawEntryView[];
   /** commentor id -> verified | authority */
   readonly assessment: Readonly<Record<string, "verified" | "authority">>;
 }
@@ -548,15 +626,19 @@ export interface JudgeDecisionView {
 export interface ReviewRoundView {
   /** 1-based round on the current step. Round 1 is the initial review. */
   readonly round: number;
-  /** The chain-of-thought step text exactly as it stood under this round's review. */
-  readonly cot?: string;
+  /** The chain-of-thought step exactly as it stood under this round's review. */
+  readonly cot?: CotStepView;
   readonly comments: readonly CommentView[];
   readonly decision?: JudgeDecisionView;
   /** Present when this round ended in a redevelopment: the runtime-computed change-set. */
   readonly revision?: {
     readonly touchedSteps: readonly number[];
-    /** The NEW text of each rewritten step, in touchedSteps order. */
-    readonly rewritten?: readonly { readonly index: number; readonly text: string }[];
+    /**
+     * The NEW step, in touchedSteps order, in the shape the run records steps:
+     * a rewrite replaces a whole step, so a part-aware run carries all four
+     * parts here even when only one of them changed.
+     */
+    readonly rewritten?: readonly { readonly index: number; readonly text: CotStepView }[];
   };
 }
 
@@ -1898,9 +1980,14 @@ export interface ToolUsageReport {
  *   GET  /api/jobs/trash                      -> JobSummary[]       (view-only trash, newest first)
  *   GET  /api/jobs/:jobId                     -> JobDetail
  *   POST /api/jobs/:jobId/cancel              -> CancelJobResponse
+ *   POST /api/jobs/:jobId/pause               -> CancelJobResponse  (ends the worker and keeps the checkpoint; nothing automatic resumes a paused job; 409 when the job is not pausable)
+ *   POST /api/jobs/:jobId/resume-paused       -> CancelJobResponse  (paused jobs only; 409 otherwise)
  *   POST /api/jobs/:jobId/resume              -> ResumeJobResponse  (credit-blocked jobs only; 409 otherwise)
  *   POST /api/jobs/:jobId/resume-interrupted  -> ResumeInterruptedJobResponse (orphaned jobs only; 409 otherwise)
+ *   POST /api/jobs/:jobId/retry               -> ResumeInterruptedJobResponse (failed jobs only, from the last checkpoint; 409 otherwise, and when the run failed before its first checkpoint)
  *   POST /api/jobs/:jobId/trash               -> TrashJobResponse   (409 while the job is still live)
+ *   GET  /api/jobs/:jobId/diagnostics         -> DiagnosticPreview  (describes what a report WOULD carry; reading it sends nothing)
+ *   POST /api/jobs/:jobId/diagnostics         -> SendDiagnosticsResponse (sends the report; 409 when no diagnostics endpoint is configured)
  *   POST /api/jobs/:jobId/gate                -> JobDetail           (body: GateAnswerRequest; submits a resume job)
  *   POST /api/jobs/:jobId/gate-hold           -> JobDetail           (permanently pauses the gate's auto-approve countdown)
  *   POST /api/jobs/:jobId/dismiss-member      -> JobDetail           (body: DismissMemberRequest; stops one seat mid-run and resumes the rest from the last checkpoint)

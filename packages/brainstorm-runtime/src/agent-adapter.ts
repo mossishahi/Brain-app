@@ -1,7 +1,10 @@
 import {
   artifactSchemas,
   mergeRedevelopment,
+  mergeRedevelopmentParts,
+  type CotStepParts,
   type RedevelopmentPatch,
+  type RedevelopmentPatchParts,
 } from "@brainstorm-agentic/content";
 import {
   systemPromptSegments,
@@ -437,7 +440,13 @@ function mergedRevisionIssues(
   patch: JsonValue,
   task: AgentTask | undefined,
 ): string[] {
-  if (schemaName !== "redevelopmentPatch") return [];
+  // Both patch forms carry the same hole: the schema on the wire cannot judge
+  // a cross-field rule, so the merged whole is where the rules live. A parts
+  // run that skipped this check would lose the retry-before-write a string run
+  // gets, and die at the fold on a fault it was never told about.
+  const parts = schemaName === "redevelopmentPatchParts";
+  if (schemaName !== "redevelopmentPatch" && !parts) return [];
+  const ideaSchema = parts ? artifactSchemas.brainIdeaParts : artifactSchemas.brainIdea;
   const base = task?.revisionBase;
   if (base === undefined || base === null || typeof base !== "object" || Array.isArray(base)) {
     return [];
@@ -445,9 +454,14 @@ function mergedRevisionIssues(
   const record = base as JsonObject;
   const cot = record.cot;
   const output = record.output;
+  const stepShapeFits = parts
+    ? cot !== undefined &&
+      Array.isArray(cot) &&
+      cot.every((step) => typeof step === "object" && step !== null && !Array.isArray(step))
+    : Array.isArray(cot) && cot.every((step) => typeof step === "string");
   if (
     !Array.isArray(cot) ||
-    !cot.every((step): step is string => typeof step === "string") ||
+    !stepShapeFits ||
     typeof output !== "object" ||
     output === null ||
     Array.isArray(output)
@@ -465,26 +479,31 @@ function mergedRevisionIssues(
     ...(typeof record.novelty === "string" ? { novelty: record.novelty } : {}),
     ...(record.literature !== undefined ? { literature: record.literature } : {}),
   };
-  if (!(artifactSchemas.brainIdea.safeParse(baseIdea) as { success: boolean }).success) {
+  if (!(ideaSchema.safeParse(baseIdea) as { success: boolean }).success) {
     return [];
   }
   let merged;
   try {
-    merged = mergeRedevelopment(
-      {
-        cot,
-        output: output as Record<string, unknown>,
-        ...(typeof record.novelty === "string" ? { novelty: record.novelty } : {}),
-      },
-      patch as unknown as RedevelopmentPatch,
-    );
+    const from = {
+      output: output as Record<string, unknown>,
+      ...(typeof record.novelty === "string" ? { novelty: record.novelty } : {}),
+    };
+    merged = parts
+      ? mergeRedevelopmentParts(
+          { ...from, cot: cot as readonly CotStepParts[] },
+          patch as unknown as RedevelopmentPatchParts,
+        )
+      : mergeRedevelopment(
+          { ...from, cot: cot as readonly string[] },
+          patch as unknown as RedevelopmentPatch,
+        );
   } catch (error) {
     // The patch does not fit what it revises (an out-of-range step, a body
     // key this member's output never had). Retryable: the model can only
     // learn this from being told.
     return [error instanceof Error ? error.message : String(error)];
   }
-  const idea = artifactSchemas.brainIdea.safeParse({
+  const idea = ideaSchema.safeParse({
     output: merged.output,
     cot: merged.steps,
     ...(merged.novelty !== undefined ? { novelty: merged.novelty } : {}),

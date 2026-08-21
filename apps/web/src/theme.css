@@ -4085,6 +4085,30 @@ section.drawer-section:not(.drawer-updates) {
   opacity: 0.55;
 }
 
+/* A step written in FOUR PARTS renders as four labelled blocks, wherever a
+   step is shown — the chain tab, the round deck, the walk inspector. The
+   blocks sit apart far enough to read as four pieces of one step and no
+   further: they are a size discipline, not four sections. */
+.step-parts {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.step-part {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* The label is a LOCATOR and nothing more — the parts carry no assigned
+   meaning — so it stays at label size and label colour and never competes
+   with the words under it. */
+.step-part-label {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
 .diff-red {
   color: var(--bad);
 }

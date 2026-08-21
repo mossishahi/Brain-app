@@ -9,11 +9,13 @@
  *
  * The renderer is pure and takes the style text as an argument (the bundled
  * copy lives in latex-style.ts), so it can also run outside the browser for
- * validation. Only type imports are allowed here.
+ * validation. Only types and the pure step helpers are imported here.
  */
+import { stepTextBlocks } from "./steps";
 import type {
   AssessFeasibilityOutputView,
   BrainIdeaView,
+  CotStepView,
   CritiqueOutputView,
   EvidenceView,
   ExplainOutputView,
@@ -498,6 +500,20 @@ export interface SeatTexInput {
   readonly revisionCount?: number;
 }
 
+/**
+ * One chain step as the document prints it. A step written in four parts
+ * prints them in order, one paragraph each: the parts are a size discipline
+ * and carry no assigned meaning, so nothing labels them here — a printed
+ * document already has paragraphs, which is exactly what a part is. An empty
+ * part contributes no paragraph rather than a blank one.
+ */
+function stepBody(step: CotStepView): string {
+  return stepTextBlocks(step)
+    .map((block) => escapeLatex(block.text))
+    .filter((text) => text.trim() !== "")
+    .join("\n\n");
+}
+
 /** Title-length cap; a submission can be pages long, a \title cannot. */
 const MAX_TITLE_CHARS = 180;
 
@@ -543,11 +559,7 @@ export function seatOutputToLatex(input: SeatTexInput, styleText: string): strin
     ...(idea.novelty !== undefined
       ? section("Novelty statement", [escapeLatex(idea.novelty)], true)
       : []),
-    ...section(
-      "Chain of thought",
-      [list(idea.cot.map((step) => escapeLatex(step)), true)],
-      true,
-    ),
+    ...section("Chain of thought", [list(idea.cot.map(stepBody), true)], true),
     ...(literature.length > 0
       ? section("Collected literature", [list(literatureItems(literature))], true)
       : []),

@@ -434,15 +434,31 @@ test("the interdisciplinary seat is woven deterministically and comments through
   const disciplinary = findAgent(root, "comment-step");
   assert.equal(disciplinary.skill, "commentor");
   assert.equal(disciplinary.bind?.["roster"], undefined, "disciplinary seats stay roster-blind");
+  // Both comment artifacts are live history: bundles up to 0.23.0 file one
+  // scalar step target ("comment"), 0.24.0+ file the four-part flaw marks
+  // ("commentParts"). What matters here is that BOTH seats write the same
+  // artifact into the same slot, whichever form the bundle ships.
+  const commentSchemas = new Set(
+    [bridge, disciplinary].map((node) => node.output.schema),
+  );
+  assert.equal(commentSchemas.size, 1, "both seats file the same comment artifact");
+  const commentSchema = [...commentSchemas][0]!;
+  assert.ok(
+    commentSchema === "comment" || commentSchema === "commentParts",
+    `the seats must file a comment artifact, got "${commentSchema}"`,
+  );
   for (const node of [bridge, disciplinary]) {
-    assert.deepEqual(node.output, { key: "reviews[member.id].current.comments[commentor.id]", schema: "comment" });
+    assert.deepEqual(node.output, {
+      key: "reviews[member.id].current.comments[commentor.id]",
+      schema: commentSchema,
+    });
   }
 
   // The interdisciplinary skill mirrors the commentor contract: same verdict
   // artifact, roster delivered as task data, interface literature review.
   const skill = bundle.skills["interdisciplinary-commentor"]!;
   assert.equal(skill.meta.kind, "role");
-  assert.equal(skill.meta.output, "comment");
+  assert.equal(skill.meta.output, commentSchema);
   assert.ok(skill.meta.payload.includes("roster"));
   assert.ok(skill.meta.techniques.includes("literature-review"));
 });
@@ -468,7 +484,13 @@ test("first pass fans out over the panel in parallel", () => {
   assert.equal(fanout.items, "panel.members");
   const brain = findAgent(bundle.workflows["brainstorm"]!.root, "develop-idea");
   assert.equal(brain.skill, "brain");
-  assert.equal(brain.output.schema, "brainIdea");
+  // Both chain forms are shippable: the one-paragraph step published through
+  // 0.23.0, and the four-part step from 0.24.0. The runtime keeps both, so a
+  // run pinned to an older bundle develops exactly as it always did.
+  assert.ok(
+    brain.output.schema === "brainIdea" || brain.output.schema === "brainIdeaParts",
+    `the thinker must produce an idea artifact, got "${brain.output.schema}"`,
+  );
 });
 
 test("review nests member -> step -> bounded round, with commentors excluding the thinker", () => {
@@ -534,7 +556,10 @@ test("review nests member -> step -> bounded round, with commentors excluding th
   );
 
   const judge = findAgent(root, "judge-step");
-  assert.equal(judge.output.schema, "judgeDecision");
+  assert.ok(
+    judge.output.schema === "judgeDecision" || judge.output.schema === "judgeDecisionParts",
+    `the judge must produce a decision artifact, got "${judge.output.schema}"`,
+  );
 
   const gate = findNode(root, "maybe-redevelop");
   assert.equal(gate.kind, "condition");
@@ -546,10 +571,11 @@ test("review nests member -> step -> bounded round, with commentors excluding th
   // both, so a run pinned to an older bundle revises exactly as it always did.
   assert.ok(
     redev.output.schema === "redevelopment" ||
-      redev.output.schema === "redevelopmentPatch",
+      redev.output.schema === "redevelopmentPatch" ||
+      redev.output.schema === "redevelopmentPatchParts",
     `the reviser must produce a revision artifact, got "${redev.output.schema}"`,
   );
-  if (redev.output.schema === "redevelopmentPatch") {
+  if (redev.output.schema.startsWith("redevelopmentPatch")) {
     assert.equal(
       redev.bind?.["previousOutput"],
       "ideas[member.id].output",
@@ -624,7 +650,7 @@ test("verdict catalog preserves the Pass/Build/Interrupt contract", () => {
   assert.deepEqual(catalog.sequencing.noImmediateRepeat, ["Build"]);
 });
 
-test("skills split into the expected roles and 6 techniques, with clean prompt bodies", () => {
+test("skills split into the expected roles and its techniques, with clean prompt bodies", () => {
   const bundle = freshBundle();
   const roles = Object.values(bundle.skills).filter((s) => s.meta.kind === "role");
   const techniques = Object.values(bundle.skills).filter((s) => s.meta.kind === "technique");
@@ -660,6 +686,9 @@ test("skills split into the expected roles and 6 techniques, with clean prompt b
       "field-placement",
       "literature-review",
       "term-unification",
+      // The house style ships as a technique from 0.24.0 (bought once per
+      // seat in the cached segment); earlier published bundles carry six.
+      ...(bundle.skills["writing-style"] ? ["writing-style"] : []),
     ],
   );
   for (const role of roles) {

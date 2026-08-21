@@ -1,7 +1,10 @@
 import {
   artifactSchemas,
   mergeRedevelopment,
+  mergeRedevelopmentParts,
+  type CotStepParts,
   type RedevelopmentPatch,
+  type RedevelopmentPatchParts,
   type ReviewPhaseName,
   type VerdictsCatalog,
   type WorkflowDefinition as ContentWorkflowDefinition,
@@ -125,7 +128,9 @@ export function validateArtifact(
  * steps it rewrote and only the body sections it changed, and the host
  * carries everything else over from the version being revised — which makes
  * an untouched step byte-identical by construction rather than by the
- * model's diligence.
+ * model's diligence. PATCHPARTS is the same patch over a chain whose steps
+ * are written in four parts: a named step is replaced whole, because a
+ * rewrite may move the boundaries between its parts.
  *
  * Either way the runtime — never the model — computes the change-set by exact
  * per-step comparison against the previous chain, chain length is invariant,
@@ -140,7 +145,7 @@ export function applyRedevelopment(
   scope: ScopeReader,
   revisionValue: JsonValue,
   nodeId: string,
-  delivery: "full" | "patch" = "full",
+  delivery: "full" | "patch" | "patchParts" = "full",
 ): JsonObject {
   const revision = object(revisionValue, "redevelopment");
   const totalSteps = resolveDataReference("input.cotSteps", scope, state, { required: true });
@@ -165,17 +170,27 @@ export function applyRedevelopment(
   let steps: JsonValue[];
   let output: JsonValue;
   let novelty: JsonValue | undefined;
-  if (delivery === "patch") {
+  if (delivery === "patch" || delivery === "patchParts") {
     let merged;
     try {
-      merged = mergeRedevelopment(
-        {
-          cot: previousCot as string[],
-          output: object(previous.output, `idea for ${memberId}: output`),
-          ...(typeof previous.novelty === "string" ? { novelty: previous.novelty } : {}),
-        },
-        revision as unknown as RedevelopmentPatch,
-      );
+      // The two merges differ only in what one step IS; the body patch and
+      // the novelty carry-over are the same code in both, so a run cannot
+      // end up with a four-part chain folded by a different set of rules
+      // than the string chain beside it.
+      const base = {
+        output: object(previous.output, `idea for ${memberId}: output`),
+        ...(typeof previous.novelty === "string" ? { novelty: previous.novelty } : {}),
+      };
+      merged =
+        delivery === "patchParts"
+          ? mergeRedevelopmentParts(
+              { ...base, cot: previousCot as unknown as readonly CotStepParts[] },
+              revision as unknown as RedevelopmentPatchParts,
+            )
+          : mergeRedevelopment(
+              { ...base, cot: previousCot as string[] },
+              revision as unknown as RedevelopmentPatch,
+            );
     } catch (error) {
       throw new BrainstormRuntimeError(
         `node "${nodeId}" produced a revision that does not fit the version it revises: ` +
@@ -201,7 +216,15 @@ export function applyRedevelopment(
   const touched: number[] = [];
   const untouched: number[] = [];
   steps.forEach((step, index) => {
-    (step === previousCot[index] ? untouched : touched).push(index + 1);
+    // Compared by VALUE, not identity: a four-part patch hands back a fresh
+    // object for every step it names, and a step whose four parts all match
+    // the previous one changed nothing however new the object holding them
+    // is. Identity remains the fast path jsonEqual takes first, which is
+    // what every step the patch did not name hits. The ledger stays at STEP
+    // granularity — a step is touched when ANY of its parts differ — because
+    // that is the unit the review walk, the history and the dashboard all
+    // already speak in.
+    (jsonEqual(step, previousCot[index]) ? untouched : touched).push(index + 1);
   });
   const revisedIdea: JsonObject = {
     output,

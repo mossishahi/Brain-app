@@ -10,8 +10,10 @@ import {
   type WorkflowCheckpoint,
 } from "@brainstorm-agentic/core";
 import {
+  COT_STEP_PARTS,
   OUTPUT_SHAPES,
   STAGE_IDS,
+  isCotStepParts,
   type ActivityCapability,
   type ActivityDetailView,
   type AnnotatedFileView,
@@ -23,6 +25,8 @@ import {
   type ContradictionView,
   type ConfidenceView,
   type ConfirmPanelStage,
+  type CotStepPart,
+  type CotStepView,
   type CritiqueIssueView,
   type CritiqueOutputView,
   type EvidenceView,
@@ -30,6 +34,7 @@ import {
   type ExplainOutputView,
   type FilePartitionView,
   type FirstPassMemberView,
+  type FlawEntryView,
   type GroundingView,
   type IdeaOutputView,
   type InterpretationCandidateView,
@@ -72,7 +77,9 @@ import { jobIsExecuting } from "@brainstorm-agentic/protocol";
 
 import {
   mergeRedevelopment,
+  mergeRedevelopmentParts,
   type RedevelopmentPatch,
+  type RedevelopmentPatchParts,
 } from "@brainstorm-agentic/content";
 
 import { readJsonCached, readJsonlCached } from "./read-cache.js";
@@ -1553,6 +1560,57 @@ function researchObstacleView(body: Record<string, unknown>): SolutionOutputView
   };
 }
 
+/**
+ * One recorded chain step, in whichever shape the run that wrote it uses.
+ *
+ * The shape is read off the RECORD, never off the app or the bundle version:
+ * a job pins its bundle for life, so a run started before the chain had parts
+ * keeps writing string steps at every later version of this reader, and a
+ * resumed part-aware run keeps writing four-part objects. Both arrive here
+ * forever, in the same journal directory.
+ *
+ * An object counts as a step only when all four parts are strings. A partial
+ * object is a broken record, and this projection renders history rather than
+ * guessing at it.
+ */
+function cotStep(value: unknown): CotStepView | undefined {
+  if (typeof value === "string") return value;
+  const raw = object(value);
+  if (!raw) return undefined;
+  const parts = COT_STEP_PARTS.map((part) => raw[part]);
+  if (!parts.every((text): text is string => typeof text === "string")) return undefined;
+  return { part1: parts[0]!, part2: parts[1]!, part3: parts[2]!, part4: parts[3]! };
+}
+
+/**
+ * A whole recorded chain.
+ *
+ * An unreadable entry becomes an empty step instead of disappearing, because
+ * the chain is INDEXED: every review round, every judge issue and every flaw
+ * names its step by 1-based position, so dropping one entry would silently
+ * renumber every step after it and point all of those records at the wrong
+ * text.
+ */
+function cotChain(value: unknown): CotStepView[] {
+  return Array.isArray(value) ? value.map((step) => cotStep(step) ?? "") : [];
+}
+
+/**
+ * Is this step the same one it replaced?
+ *
+ * A four-part step is compared part by part. `mergeRedevelopmentParts` hands
+ * an untouched step back as the very same object, so the identity check is a
+ * valid fast path — but a revision that re-submits a step unchanged builds a
+ * NEW object carrying equal parts, and that is not a change. Comparing by
+ * reference alone would report the whole chain as touched every time.
+ */
+function sameStep(left: CotStepView | undefined, right: CotStepView | undefined): boolean {
+  if (left === right) return true;
+  if (left === undefined || right === undefined) return false;
+  if (!isCotStepParts(left) || !isCotStepParts(right)) return false;
+  return COT_STEP_PARTS.every((part) => left[part] === right[part]);
+}
+
 function brainIdea(value: unknown): BrainIdeaView | undefined {
   const idea = object(value);
   if (!idea || !Array.isArray(idea.cot)) return undefined;
@@ -1659,7 +1717,7 @@ function brainIdea(value: unknown): BrainIdeaView | undefined {
     shape: shape ?? "paper",
     ...shaped,
     ...(requested.length > 0 ? { requested } : {}),
-    cot: idea.cot as string[],
+    cot: cotChain(idea.cot),
     ...(typeof idea.novelty === "string" ? { novelty: idea.novelty } : {}),
     ...(literature.length > 0 ? { literature } : {}),
   };
@@ -1865,6 +1923,33 @@ function evidence(value: unknown): EvidenceView | undefined {
   return undefined;
 }
 
+/**
+ * A reviewer's per-step, per-part marks, exactly as recorded.
+ *
+ * What lands in the journal is already pruned: a `part<N>` key survives only
+ * where the reviewer wrote something, and an entry that said nothing at all
+ * is gone. So an ABSENT part means silence about that part, never an empty
+ * remark about it.
+ *
+ * The distinction between an empty list and no list is load-bearing, which is
+ * why a missing `flaws` returns undefined instead of `[]`: `flaws: []` says
+ * the reviewer was shown the parts and faulted nothing, while no `flaws` at
+ * all says the run does not record parts. Collapsing the two would make a run
+ * from before the parts existed look like a clean review.
+ */
+function flawViews(value: unknown): FlawEntryView[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.flatMap((candidate) => {
+    const entry = object(candidate);
+    if (typeof entry?.step !== "number") return [];
+    const marks = COT_STEP_PARTS.flatMap((part) => {
+      const text = entry[part];
+      return typeof text === "string" && text.length > 0 ? [[part, text] as const] : [];
+    });
+    return [{ step: entry.step, ...Object.fromEntries(marks) }];
+  });
+}
+
 function comment(
   value: unknown,
   member: PanelMemberView,
@@ -1879,11 +1964,17 @@ function comment(
   ) {
     return undefined;
   }
+  // The scalar `step` and the `flaws` list are read INDEPENDENTLY, never one
+  // as a fallback for the other: a part-aware comment carries flaws and no
+  // top-level step, a string-chain comment carries a step and no flaws, and
+  // the dashboard has to be able to tell which record it is looking at.
+  const flaws = flawViews(raw.flaws);
   return {
     commentorId: member.id,
     commentorLabel: label,
     verdict: raw.verdict,
     ...(typeof raw.step === "number" ? { step: raw.step } : {}),
+    ...(flaws ? { flaws } : {}),
     reason: raw.reason,
     ...(typeof raw.suggestion === "string" && raw.suggestion.length > 0
       ? { suggestion: raw.suggestion }
@@ -1904,9 +1995,17 @@ function issueViews(value: unknown): JudgeIssueView[] {
     ) {
       return [];
     }
+    // `part` exists only on an issue raised against a four-part chain, and it
+    // is matched against the known keys rather than trusted: it is a LOCATOR
+    // the web side uses to place the issue under a rendered block, so an
+    // unknown value would place it nowhere at all.
+    const part: CotStepPart | undefined = COT_STEP_PARTS.find(
+      (candidate) => candidate === item.part,
+    );
     return [
       {
         step: item.step,
+        ...(part ? { part } : {}),
         point: item.point,
         basis: item.basis,
         mustAddress: item.mustAddress === true,
@@ -1949,6 +2048,12 @@ function decision(value: unknown): JudgeDecisionView | undefined {
     return undefined;
   }
   const issues = issueViews(raw.issues);
+  // The judge's own marks, on the same terms as a commentor's. They are NOT
+  // the repair signal — only `issues` drives a revision — so they are carried
+  // beside it, not folded into it. Unlike `issues` an empty list is kept: the
+  // judge that faulted nothing itself is a different record from a run whose
+  // decisions predate parts, and only the presence of the key says which.
+  const flaws = flawViews(raw.flaws);
   return {
     verdict: raw.verdict,
     reason: raw.reason,
@@ -1957,6 +2062,7 @@ function decision(value: unknown): JudgeDecisionView | undefined {
       : {}),
     ...(evidence(raw.evidence) ? { evidence: evidence(raw.evidence)! } : {}),
     ...(issues.length > 0 ? { issues } : {}),
+    ...(flaws ? { flaws } : {}),
     assessment,
   };
 }
@@ -1993,12 +2099,12 @@ function activePaths(events: readonly RunEvent[]): Set<string> {
  */
 function applyRevision(
   revision: Record<string, unknown>,
-  chain: readonly string[],
+  chain: readonly CotStepView[],
   previousOutput: Record<string, unknown>,
   previousNovelty: string | undefined,
 ):
   | {
-      replacement: string[];
+      replacement: CotStepView[];
       envelope: Record<string, unknown>;
       novelty: string | undefined;
     }
@@ -2013,10 +2119,46 @@ function applyRevision(
       novelty,
     };
   }
+  // A patch names its steps in the shape the run records them: `{index, text}`
+  // against a string chain, `{index, part1..part4}` against a four-part one.
+  // The two merges are not interchangeable — one replaces a step's text, the
+  // other replaces the whole four-part object — so the form is read off the
+  // RECORD, exactly as the step shape itself is. A patch that matches neither
+  // form falls through to the string merge and is rejected there, which is
+  // what a malformed entry has always done.
+  const patchesParts = steps.every((step) => {
+    const entry = object(step);
+    return typeof entry?.index === "number" && typeof entry.part1 === "string";
+  });
   try {
+    if (patchesParts) {
+      // Every step of the base has to BE four parts for a four-part patch to
+      // land on it. A mixed chain is not a shape this projection can merge,
+      // and skipping the round shows the pre-revision chain rather than a
+      // chain nobody wrote.
+      const base = chain.filter(isCotStepParts);
+      if (base.length !== chain.length) return undefined;
+      const merged = mergeRedevelopmentParts(
+        {
+          cot: base,
+          output: previousOutput,
+          ...(previousNovelty !== undefined ? { novelty: previousNovelty } : {}),
+        },
+        revision as unknown as RedevelopmentPatchParts,
+      );
+      return {
+        replacement: [...merged.steps],
+        envelope: merged.output,
+        novelty: merged.novelty,
+      };
+    }
+    // The mirror of the check above: a `{index, text}` patch replaces one
+    // step's text, so the chain it lands on has to be text throughout.
+    const base = chain.filter((step): step is string => typeof step === "string");
+    if (base.length !== chain.length) return undefined;
     const merged = mergeRedevelopment(
       {
-        cot: chain,
+        cot: base,
         output: previousOutput,
         ...(previousNovelty !== undefined ? { novelty: previousNovelty } : {}),
       },
@@ -2049,12 +2191,12 @@ function buildReviews(
   ) => { readonly dismissed: DismissedSeatView } | Record<string, never> = () => ({}),
 ): { members: ReviewMemberView[]; maxRounds: number; complete: boolean } {
   const rounds = new Map<string, {
-    cot?: string;
+    cot?: CotStepView;
     comments: Map<number, CommentView>;
     decision?: JudgeDecisionView;
     revision?: {
       touchedSteps: number[];
-      rewritten?: { index: number; text: string }[];
+      rewritten?: { index: number; text: CotStepView }[];
     };
   }>();
   // Per-member revision replay: how many redevelopments landed, and the last
@@ -2086,8 +2228,8 @@ function buildReviews(
   // first-pass chain, and each redevelopment moves it — by re-emission or by
   // patch — so every round can snapshot the step text exactly as its
   // reviewers saw it.
-  const workingCot = new Map<number, string[]>();
-  const cotFor = (memberIndex: number): string[] => {
+  const workingCot = new Map<number, CotStepView[]>();
+  const cotFor = (memberIndex: number): CotStepView[] => {
     let chain = workingCot.get(memberIndex);
     if (!chain) {
       const member = panel[memberIndex];
@@ -2184,7 +2326,7 @@ function buildReviews(
         // The change-set mirrors the runtime's own diff: exact per-step
         // comparison of the resulting chain against the working chain.
         const touchedSteps = replacement
-          .map((step, index) => (step === chain[index] ? 0 : index + 1))
+          .map((step, index) => (sameStep(step, chain[index]) ? 0 : index + 1))
           .filter((index) => index > 0);
         round.revision = {
           touchedSteps,
@@ -2639,6 +2781,14 @@ export function buildJobDetail(input: MapperInput): JobDetail {
   for (const member of finalPanel) {
     const raw =
       artifact(artifacts, "brainIdea", `ideas.${member.id}`) ??
+      // The SAME path under the part-aware schema name: a run whose
+      // develop-idea node emits four-part steps records its idea as
+      // "brainIdeaParts", and one run only ever writes one of the two names,
+      // so the first-version-wins rule above is untouched by looking for
+      // both. Without this the artifact lookup misses entirely and the whole
+      // first pass falls back to the journal — which works, but silently
+      // stops being the record the dashboard claims to show.
+      artifact(artifacts, "brainIdeaParts", `ideas.${member.id}`) ??
       journalAgent(entries, (key) =>
         key.includes("/first-pass/") &&
         key.includes(`/member[${finalPanel.indexOf(member)}]/`) &&

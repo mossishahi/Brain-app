@@ -1,4 +1,5 @@
 import {
+  CHAIN_PARTS,
   OUTPUT_SHAPES,
   artifactSchemas,
   populatedShape,
@@ -430,7 +431,11 @@ async function writeValidatedOutput(
       }
     }
   }
-  if (schemaName === "brainIdea" || schemaName === "redevelopment") {
+  if (
+    schemaName === "brainIdea" ||
+    schemaName === "brainIdeaParts" ||
+    schemaName === "redevelopment"
+  ) {
     assertDevelopedOutputFitsRun(
       asObject(asObject(parsed, schemaName).output, `${schemaName}.output`),
       nodeId,
@@ -439,7 +444,7 @@ async function writeValidatedOutput(
       roots,
     );
   }
-  if (schemaName === "brainIdea") {
+  if (schemaName === "brainIdea" || schemaName === "brainIdeaParts") {
     const idea = asObject(parsed, "brain idea");
     const expected = resolveDataReference("input.cotSteps", scope, state, { required: true });
     if (!Array.isArray(idea.cot) || idea.cot.length !== expected) {
@@ -502,7 +507,12 @@ async function writeValidatedOutput(
       );
     }
   }
-  if (schemaName === "comment" || schemaName === "judgeDecision") {
+  if (
+    schemaName === "comment" ||
+    schemaName === "commentParts" ||
+    schemaName === "judgeDecision" ||
+    schemaName === "judgeDecisionParts"
+  ) {
     const verdict = asObject(parsed, schemaName).verdict;
     // The seat carries allowed verdicts as NAMES; descriptions live in the
     // bundle and are zipped in at bind time, so no verdict prose is journaled.
@@ -524,15 +534,34 @@ async function writeValidatedOutput(
     // since the static schema cannot know the review position.
     const reviewedThrough = resolveDataReference("stepIndex", scope, state, { required: true });
     if (typeof reviewedThrough === "number") {
-      const targets: JsonValue[] =
+      // Where the targets sit differs by form; the rule does not. The legacy
+      // comment carries ONE scalar step. Every other form carries a list —
+      // the part-keyed flaws a commentor files, the issues a judge raises —
+      // and each entry names its own step. An EMPTY list is a reviewer that
+      // read the chain and found nothing: legal, and the loop below simply
+      // does not run.
+      // A part-aware judge files BOTH lists — the flaws it marks as a reviewer
+      // and the issues it distils as the repair signal — so both are checked.
+      // Guarding only `issues` left the judge the one seat that could name a
+      // step the walk has not reached and have nothing say so.
+      const fields: readonly string[] | undefined =
         schemaName === "comment"
+          ? undefined
+          : schemaName === "commentParts"
+            ? ["flaws"]
+            : schemaName === "judgeDecisionParts"
+              ? ["flaws", "issues"]
+              : ["issues"];
+      const targets: JsonValue[] =
+        fields === undefined
           ? [asObject(parsed, schemaName).step ?? null]
-          : (() => {
-              const issues = asObject(parsed, schemaName).issues;
-              return (Array.isArray(issues) ? issues : []).map(
-                (issue) => asObject(issue, "judge issue").step ?? null,
+          : fields.flatMap((field) => {
+              const entries = asObject(parsed, schemaName)[field];
+              const label = field === "issues" ? "judge issue" : "reviewer flaw";
+              return (Array.isArray(entries) ? entries : []).map(
+                (entry) => asObject(entry, label).step ?? null,
               );
-            })();
+            });
       for (const target of targets) {
         if (typeof target !== "number" || target < 1 || target > reviewedThrough) {
           throw new BrainstormRuntimeError(
@@ -564,16 +593,29 @@ async function writeValidatedOutput(
       }
     }
   }
-  const stored = schemaName === "experts" ? canonicalizeExpertsTree(parsed) : parsed;
+  const stored =
+    schemaName === "experts"
+      ? canonicalizeExpertsTree(parsed)
+      : schemaName === "commentParts" || schemaName === "judgeDecisionParts"
+        ? pruneEmptyFlaws(parsed)
+        : parsed;
   const write = writeDataReference(state, target, stored, scope, roots);
   let next = write.state;
-  if (schemaName === "redevelopment" || schemaName === "redevelopmentPatch") {
+  if (
+    schemaName === "redevelopment" ||
+    schemaName === "redevelopmentPatch" ||
+    schemaName === "redevelopmentPatchParts"
+  ) {
     next = applyRedevelopment(
       next,
       scope,
       parsed,
       nodeId,
-      schemaName === "redevelopmentPatch" ? "patch" : "full",
+      schemaName === "redevelopmentPatchParts"
+        ? "patchParts"
+        : schemaName === "redevelopmentPatch"
+          ? "patch"
+          : "full",
     );
     // Persist the member's UPDATED idea as its own artifact version under the
     // member's idea path (the same path the first pass wrote). The artifact
@@ -583,8 +625,16 @@ async function writeValidatedOutput(
     // for the dashboard and the session's readable final-output copies.
     const memberId = resolveDataReference("member.id", scope, next, { required: true });
     const revised = resolveDataReference("ideas[member.id]", scope, next, { required: true });
-    const revisedIdea = validateArtifact("brainIdea", nodeId, revised!);
-    if (schemaName === "redevelopmentPatch") {
+    // The revised idea is journaled in the chain form the run itself writes:
+    // a four-part patch folds back into a four-part idea, and validating it
+    // as the string form would reject the very shape the run produced.
+    const ideaSchema =
+      schemaName === "redevelopmentPatchParts" ? "brainIdeaParts" : "brainIdea";
+    const revisedIdea = validateArtifact(ideaSchema, nodeId, revised!);
+    if (
+      schemaName === "redevelopmentPatch" ||
+      schemaName === "redevelopmentPatchParts"
+    ) {
       // A patch carries no type and no shape key of its own, so the run-level
       // contract is checked here, on the envelope the host assembled.
       assertDevelopedOutputFitsRun(
@@ -598,7 +648,7 @@ async function writeValidatedOutput(
     next = await persistArtifact(
       next,
       `ideas.${String(memberId)}`,
-      "brainIdea",
+      ideaSchema,
       nodeId,
       revisedIdea,
       context,
@@ -609,6 +659,43 @@ async function writeValidatedOutput(
 
 function isJsonRecord(value: JsonValue | undefined): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Strips the voids out of a part-keyed flaw list, on write.
+ *
+ * A reviewer receives its flaws as a DRAFT: one entry per step it has been
+ * shown, every part key present and empty, so it fills boxes instead of
+ * inventing structure. What comes back therefore carries a box for every
+ * part the reviewer had nothing to say about, and those boxes would ride
+ * into the judge's payload, the ledger and the dashboard as if they were
+ * findings.
+ *
+ * This removes voids, never a claim, and it is therefore normalisation
+ * rather than a decision: an entry keeps every part that says something, an
+ * entry that says nothing at all is dropped, and the comment or decision
+ * object ITSELF is never dropped — a reviewer that read the chain and found
+ * nothing is recorded with `flaws: []`, which is a finding the judge must
+ * see. Running it twice changes nothing, so a replayed journal rebuilds the
+ * same bytes.
+ */
+function pruneEmptyFlaws(parsed: JsonValue): JsonValue {
+  if (!isJsonRecord(parsed) || !Array.isArray(parsed.flaws)) return parsed;
+  const parts: readonly string[] = CHAIN_PARTS;
+  const flaws = parsed.flaws.flatMap((entry) => {
+    if (!isJsonRecord(entry)) return [entry];
+    const kept: Record<string, JsonValue> = {};
+    let claims = 0;
+    for (const [key, value] of Object.entries(entry)) {
+      if (parts.includes(key)) {
+        if (typeof value !== "string" || value.trim().length === 0) continue;
+        claims += 1;
+      }
+      kept[key] = value;
+    }
+    return claims === 0 ? [] : [kept as JsonValue];
+  });
+  return { ...parsed, flaws };
 }
 
 /**
@@ -833,22 +920,48 @@ function removeSchemaProperties(
  * submits each chain step through the submit_step tool and the executor
  * assembles the reviewed chain (plus any literal fields) into the artifact
  * before validation. Derived from the node's output schema and bindings.
+ *
+ * The step PAYLOAD differs between the chain forms — `{ index, text }` for a
+ * string chain, `{ index, part1..part4 }` for a four-part one — so the spec
+ * DECLARES which, in `parts`.
+ *
+ * It has to be declared rather than inferred. The natural witness is the
+ * delivered schema's own step item, but `removed` strips the stepwise field
+ * out of that schema a few lines below — the model must not be asked for a
+ * field these tool calls are what fills — so by the time a task is built the
+ * item is gone. What was left to read was the artifact schema's NAME, and a
+ * naming convention is a silent contract: a later four-part form called
+ * anything but `…Parts` would have compiled, run, and transported its steps
+ * as strings with nothing to say so. The compiler knows the answer here,
+ * because it is the code that chose the schema, so it states it.
+ *
+ * Read off the TASK, never off the app version, so a pinned run transports
+ * exactly the chain form its own bundle compiled.
  */
 function stepwiseContract(
   schemaName: string,
   bindings: JsonObject,
 ): { readonly spec: JsonObject; readonly removed: readonly string[] } | undefined {
-  if (schemaName === "brainIdea") {
+  if (schemaName === "brainIdea" || schemaName === "brainIdeaParts") {
     const count = bindings.cotSteps;
     if (typeof count !== "number" || !Number.isSafeInteger(count) || count < 1) {
       return undefined;
     }
     return {
-      spec: { tool: "submit_step", field: "cot", count },
+      spec: {
+        tool: "submit_step",
+        field: "cot",
+        count,
+        parts: schemaName === "brainIdeaParts",
+      },
       removed: ["cot"],
     };
   }
-  if (schemaName === "redevelopment" || schemaName === "redevelopmentPatch") {
+  if (
+    schemaName === "redevelopment" ||
+    schemaName === "redevelopmentPatch" ||
+    schemaName === "redevelopmentPatchParts"
+  ) {
     // Full emission: the reviser re-emits the COMPLETE chain (touched steps
     // rewritten, untouched copied verbatim). Patch: only the rewritten steps,
     // and the host carries the rest. Either way the runtime — never the
@@ -866,13 +979,36 @@ function stepwiseContract(
         tool: "submit_step",
         field: "steps",
         count: totalSteps,
-        ...(schemaName === "redevelopmentPatch" ? { sparse: true } : {}),
+        parts: schemaName === "redevelopmentPatchParts",
+        ...(schemaName === "redevelopment" ? {} : { sparse: true }),
       },
       removed: ["steps"],
     };
   }
   return undefined;
 }
+
+/**
+ * The review forms, legacy and four-part. Which one a node writes is the
+ * bundle's choice through `output.schema`; the narrowings below are
+ * properties of the REVIEW POSITION — this round's allowed verdicts, the
+ * step the walk has reached — and so apply to every form alike. Listing the
+ * names rather than sniffing the schema keeps a pinned run reading exactly
+ * the path its own bundle was compiled against.
+ */
+const REVIEW_SCHEMAS: ReadonlySet<string> = new Set([
+  "comment",
+  "commentParts",
+  "judgeDecision",
+  "judgeDecisionParts",
+]);
+
+/** The forms that carry a full developed output envelope. */
+const DEVELOPED_SCHEMAS: ReadonlySet<string> = new Set([
+  "brainIdea",
+  "brainIdeaParts",
+  "redevelopment",
+]);
 
 /**
  * Longest collection a payload section is split into per-element blocks for.
@@ -886,25 +1022,49 @@ function renderPayloadValue(value: JsonValue): string {
 }
 
 /**
+ * One list element rendered exactly as `JSON.stringify(list, null, 2)`
+ * renders it in place: pretty-printed, then every line after the first
+ * pushed in by the list's own two spaces. A string never contains a raw
+ * newline once stringified, so this is a no-op on the string case and a
+ * pre-parts chain still splits into the identical bytes it always did.
+ */
+function splitElementText(element: JsonValue): string {
+  return JSON.stringify(element, null, 2).replaceAll("\n", "\n  ");
+}
+
+/**
  * The chunks one payload section renders to. Every chunk carries its own
  * leading separator, so concatenating the whole turn's chunks reproduces the
  * single string this used to be, byte for byte.
  *
- * A section holding a list of strings — the chain of thought under review —
- * is cut at its element boundaries, with each element's comma leading the
- * NEXT chunk rather than trailing its own. That placement is what makes one
- * call's chain a byte-exact prefix of the next call's: at step k the last
- * element chunk reads `,\n  "step k"`, and at step k+1 the very same bytes
- * sit at the very same offset, followed by step k+1 instead of the closing
- * bracket. A redevelopment that rewrites step j only breaks the prefix from
- * j onward.
+ * A section holding a list — the chain of thought under review — is cut at
+ * its element boundaries, with each element's comma leading the NEXT chunk
+ * rather than trailing its own. That placement is what makes one call's
+ * chain a byte-exact prefix of the next call's: at step k the last element
+ * chunk reads `,\n  <step k>`, and at step k+1 the very same bytes sit at
+ * the very same offset, followed by step k+1 instead of the closing bracket.
+ * A redevelopment that rewrites step j only breaks the prefix from j onward.
+ *
+ * A list of OBJECTS splits the same way, because a step written in four
+ * parts is still one element and still grows the list one element at a time.
+ * Without this the whole chain collapsed back into a single block the moment
+ * a run stopped writing steps as strings, and review — where the same chain
+ * is re-read once per walk position, per seat, per round — is exactly where
+ * losing the split costs most. A MIXED list is left whole: elements of two
+ * kinds mean the section is not a chain, and guessing at its boundaries
+ * would risk the prefix property for nothing.
  */
-function payloadSectionChunks(entry: PayloadEntry, splittable: boolean): string[] {
+export function payloadSectionChunks(
+  entry: PayloadEntry,
+  splittable: boolean,
+): string[] {
   const header = `\n\n## ${entry.name}\n\n`;
   const value = entry.value;
   const elements =
-    splittable && Array.isArray(value) && value.every((item) => typeof item === "string")
-      ? (value as readonly string[])
+    splittable &&
+    Array.isArray(value) &&
+    (value.every((item) => typeof item === "string") || value.every(isJsonRecord))
+      ? (value as readonly JsonValue[])
       : undefined;
   if (
     elements === undefined ||
@@ -916,7 +1076,7 @@ function payloadSectionChunks(entry: PayloadEntry, splittable: boolean): string[
   return [
     `${header}[`,
     ...elements.map(
-      (element, index) => `${index === 0 ? "" : ","}\n  ${JSON.stringify(element)}`,
+      (element, index) => `${index === 0 ? "" : ","}\n  ${splitElementText(element)}`,
     ),
     "\n]",
   ];
@@ -1353,7 +1513,11 @@ class ContentCompiler {
       // comment set a judge weighs. Applied to AGENT bindings only —
       // deterministic activity handlers keep their journaled inputs untouched.
       const bindings = resolveBindings(node.bind, scope, this.roots, this.dismissal);
-      if (node.output.schema === "judgeDecision" && isJsonRecord(bindings.comments)) {
+      if (
+        (node.output.schema === "judgeDecision" ||
+          node.output.schema === "judgeDecisionParts") &&
+        isJsonRecord(bindings.comments)
+      ) {
         // The merged comments object arrives in panel seating order every
         // round; re-key it in a deterministic per-round order so the judge's
         // weighing cannot correlate with seat position. The permutation is a
@@ -1373,7 +1537,7 @@ class ContentCompiler {
       // must be one the bundle actually defines — a seat offering an unknown
       // verdict is a content defect, not something to pass to a model.
       if (
-        (node.output.schema === "comment" || node.output.schema === "judgeDecision") &&
+        REVIEW_SCHEMAS.has(node.output.schema) &&
         Array.isArray(bindings.verdictOptions)
       ) {
         const catalog = this.bundle.catalogs.verdicts.verdicts;
@@ -1400,10 +1564,7 @@ class ContentCompiler {
         }
       }
       let taskJsonSchema = jsonSchema;
-      if (
-        node.output.schema === "comment" ||
-        node.output.schema === "judgeDecision"
-      ) {
+      if (REVIEW_SCHEMAS.has(node.output.schema)) {
         // The round's allowed verdicts, however this bundle carries them:
         // names alone, or names zipped with their descriptions.
         const allowed = isJsonRecord(bindings.verdictOptions)
@@ -1424,8 +1585,7 @@ class ContentCompiler {
       // task knows: narrow the schema maxima so a constrained model cannot
       // emit a step the review has not reached.
       if (
-        (node.output.schema === "comment" ||
-          node.output.schema === "judgeDecision") &&
+        REVIEW_SCHEMAS.has(node.output.schema) &&
         typeof bindings.currentStep === "number" &&
         Number.isSafeInteger(bindings.currentStep) &&
         bindings.currentStep >= 1
@@ -1439,7 +1599,10 @@ class ContentCompiler {
               }))
             : patchArrayItemProperty(
                 taskJsonSchema,
-                "issues",
+                // Where the steps a reviewer may name live: the legacy
+                // comment says it once at the top, a four-part comment says
+                // it once per flaw entry, a decision once per issue.
+                node.output.schema === "commentParts" ? "flaws" : "issues",
                 "step",
                 (step) => ({ ...step, maximum: reviewedThrough }),
               ),
@@ -1460,7 +1623,7 @@ class ContentCompiler {
       // absent property cannot be emitted at all). The full envelope still
       // validates the artifact on write, so nothing observable changes.
       if (
-        (node.output.schema === "brainIdea" || node.output.schema === "redevelopment") &&
+        DEVELOPED_SCHEMAS.has(node.output.schema) &&
         typeof bindings.type === "string" &&
         bindings.type.length > 0
       ) {
@@ -1505,7 +1668,7 @@ class ContentCompiler {
       // cannot skip, reorder, or invent a section; when the run recorded
       // none, the property is removed entirely so it cannot be emitted at
       // all. Presence and order are re-checked on write either way.
-      if (node.output.schema === "brainIdea" || node.output.schema === "redevelopment") {
+      if (DEVELOPED_SCHEMAS.has(node.output.schema)) {
         const asks = requestedOutputsOf(bindings.input);
         taskJsonSchema = pinned(patchSchemaProperty(taskJsonSchema, ["output"], (output) => {
             const properties = isJsonRecord(output.properties) ? output.properties : {};
@@ -1553,7 +1716,10 @@ class ContentCompiler {
       // patch's `requested` stays OPTIONAL (omitting it carries the previous
       // sections), but when the run recorded asks and the reviser does supply
       // the list, it must be the run's list in the run's order.
-      if (node.output.schema === "redevelopmentPatch") {
+      if (
+        node.output.schema === "redevelopmentPatch" ||
+        node.output.schema === "redevelopmentPatchParts"
+      ) {
         const shape = typeof bindings.shape === "string" ? bindings.shape : undefined;
         const asks = requestedOutputsOf(bindings.input);
         taskJsonSchema = pinned(
@@ -1874,7 +2040,8 @@ class ContentCompiler {
         // executor's validator gets the version being revised. Host-side
         // context only: it is never rendered into the request — the reviser
         // already receives what it needs through its own bindings.
-        ...(node.output.schema === "redevelopmentPatch"
+        ...(node.output.schema === "redevelopmentPatch" ||
+        node.output.schema === "redevelopmentPatchParts"
           ? revisionBaseFor(scope)
           : {}),
         metadata: {

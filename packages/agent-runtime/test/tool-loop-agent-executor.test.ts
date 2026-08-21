@@ -555,7 +555,7 @@ test("stepwise tasks record ordered submit_step calls, inject the chain, and cap
       taskId: "stepwise-1",
       input: "chain please",
       metadata: {
-        stepwise: { tool: "submit_step", field: "cot", count: 3 },
+        stepwise: { tool: "submit_step", field: "cot", parts: false, count: 3 },
       },
     }),
     context,
@@ -638,7 +638,7 @@ test("a sparse stepwise task submits only rewritten steps, positions and all", a
       taskId: "sparse-1",
       input: "repair please",
       metadata: {
-        stepwise: { tool: "submit_step", field: "steps", count: 6, sparse: true },
+        stepwise: { tool: "submit_step", field: "steps", parts: false, count: 6, sparse: true },
       },
     }),
     context,
@@ -684,7 +684,7 @@ test("a sparse revision that rewrites nothing gets corrective feedback, then fai
       taskId: "sparse-2",
       input: "repair please",
       metadata: {
-        stepwise: { tool: "submit_step", field: "steps", count: 4, sparse: true },
+        stepwise: { tool: "submit_step", field: "steps", parts: false, count: 4, sparse: true },
       },
     }),
     context,
@@ -715,7 +715,7 @@ test("a stepwise task that skips submissions gets corrective feedback, then fail
       taskId: "stepwise-2",
       input: "chain please",
       metadata: {
-        stepwise: { tool: "submit_step", field: "cot", count: 2 },
+        stepwise: { tool: "submit_step", field: "cot", parts: false, count: 2 },
       },
     }),
     context,
@@ -726,6 +726,200 @@ test("a stepwise task that skips submissions gets corrective feedback, then fail
   assert.match(result.error.message, /2 steps must be submitted/);
   // One corrective feedback round-trip happened before failing closed.
   assert.equal(provider.requests.length, 2);
+});
+
+/**
+ * The output contract the runtime delivers for a four-part chain. The
+ * stepwise field is stripped out of the schema — these tool calls are what
+ * fills it — so the artifact schema NAME is what tells the executor which
+ * chain form to ask for.
+ */
+const partsSchema = {
+  name: "brainIdeaParts",
+  schema: {
+    type: "object" as const,
+    properties: { output: { type: "object" } },
+  },
+};
+
+function partsCall(id: string, index: number, prefix: string): {
+  readonly type: "tool_use";
+  readonly id: string;
+  readonly name: string;
+  readonly input: JsonObject;
+} {
+  return {
+    type: "tool_use",
+    id,
+    name: "submit_step",
+    input: {
+      index,
+      part1: `${prefix} a`,
+      part2: `${prefix} b`,
+      part3: `${prefix} c`,
+      part4: `${prefix} d`,
+    },
+  };
+}
+
+test("a four-part chain task asks for four parts and assembles them as step objects", async () => {
+  const provider = new FakeProvider((_request, call) =>
+    call === 1
+      ? response([
+          // Says nothing at all: refused, exactly as an empty paragraph is.
+          {
+            type: "tool_use",
+            id: "s-empty",
+            name: "submit_step",
+            input: { index: 1, part1: " ", part2: "", part3: "", part4: "" },
+          },
+          partsCall("s-1", 1, "one"),
+        ])
+      : call === 2
+        ? response([
+            // An empty PART is legal: the parts are a size discipline, and a
+            // refusal here would spend a turn enforcing a soft limit.
+            {
+              type: "tool_use",
+              id: "s-2",
+              name: "submit_step",
+              input: { index: 2, part1: "two a", part2: "", part3: "", part4: "" },
+            },
+          ])
+        : response([{ type: "text", text: '{"title":"done"}' }]),
+  );
+  const executor = new ToolLoopAgentExecutor({
+    provider,
+    tools: new ToolRegistry(),
+    modelRouteResolver: new FixedModelRouteResolver({
+      modelId: "fake-model",
+      responseFormat: { type: "json" },
+    }),
+  });
+
+  const result = await executor.execute(
+    task({
+      taskId: "parts-1",
+      input: "chain please",
+      outputSchema: partsSchema,
+      metadata: {
+        stepwise: { tool: "submit_step", field: "cot", parts: true, count: 2 },
+      },
+    }),
+    context,
+  );
+
+  const definition = provider.requests[0]?.tools?.find(
+    (tool) => tool.name === "submit_step",
+  );
+  assert.deepEqual(definition?.inputSchema.required, [
+    "index",
+    "part1",
+    "part2",
+    "part3",
+    "part4",
+  ]);
+  assert.equal(result.status, "ok");
+  if (result.status !== "ok") throw new Error("unreachable");
+  assert.ok(isJsonObjectValue(result.output));
+  assert.deepEqual(result.output.cot, [
+    { part1: "one a", part2: "one b", part3: "one c", part4: "one d" },
+    { part1: "two a", part2: "", part3: "", part4: "" },
+  ]);
+  // The empty submission was answered with an error and left no gap: the
+  // step it named was still open on the next call.
+  const secondTurn = provider.requests[1]?.messages.at(-1);
+  const refused = secondTurn?.content.find(
+    (block) => block.type === "tool_result" && block.toolUseId === "s-empty",
+  );
+  assert.ok(
+    refused !== undefined && refused.type === "tool_result" && refused.isError === true,
+  );
+});
+
+test("a sparse four-part revision keeps each rewritten step's position", async () => {
+  const provider = new FakeProvider((_request, call) =>
+    call === 1
+      ? response([partsCall("s-2", 2, "two"), partsCall("s-5", 5, "five")])
+      : response([{ type: "text", text: '{"title":"revised"}' }]),
+  );
+  const executor = new ToolLoopAgentExecutor({
+    provider,
+    tools: new ToolRegistry(),
+    modelRouteResolver: new FixedModelRouteResolver({
+      modelId: "fake-model",
+      responseFormat: { type: "json" },
+    }),
+  });
+
+  const result = await executor.execute(
+    task({
+      taskId: "parts-sparse-1",
+      input: "repair please",
+      outputSchema: { ...partsSchema, name: "redevelopmentPatchParts" },
+      metadata: {
+        stepwise: { tool: "submit_step", field: "steps", parts: true, count: 6, sparse: true },
+      },
+    }),
+    context,
+  );
+
+  assert.equal(result.status, "ok");
+  if (result.status !== "ok") throw new Error("unreachable");
+  assert.ok(isJsonObjectValue(result.output));
+  assert.deepEqual(
+    result.output.steps,
+    [
+      { index: 2, part1: "two a", part2: "two b", part3: "two c", part4: "two d" },
+      { index: 5, part1: "five a", part2: "five b", part3: "five c", part4: "five d" },
+    ],
+    "a rewritten step replaces the whole step, so all four parts ride with its position",
+  );
+});
+
+test("the spec decides the chain form, whatever the schema is called and whatever it shows", async () => {
+  const provider = new FakeProvider((_request, call) =>
+    call === 1
+      ? response([partsCall("s-1", 1, "one")])
+      : response([{ type: "text", text: '{"title":"done"}' }]),
+  );
+  const executor = new ToolLoopAgentExecutor({
+    provider,
+    tools: new ToolRegistry(),
+    modelRouteResolver: new FixedModelRouteResolver({
+      modelId: "fake-model",
+      responseFormat: { type: "json" },
+    }),
+  });
+
+  // Deliberately starved of every other witness: a name that carries no
+  // "Parts" suffix, and an array with no item schema to read a shape off.
+  // The spec alone says four parts, and that has to be enough — a chain form
+  // whose name broke the convention used to transport silently as strings.
+  const result = await executor.execute(
+    task({
+      taskId: "parts-spec-1",
+      input: "chain please",
+      outputSchema: {
+        name: "somethingElse",
+        schema: {
+          type: "object",
+          properties: { cot: { type: "array" } },
+        },
+      },
+      metadata: {
+        stepwise: { tool: "submit_step", field: "cot", parts: true, count: 1 },
+      },
+    }),
+    context,
+  );
+
+  assert.equal(result.status, "ok");
+  if (result.status !== "ok") throw new Error("unreachable");
+  assert.ok(isJsonObjectValue(result.output));
+  assert.deepEqual(result.output.cot, [
+    { part1: "one a", part2: "one b", part3: "one c", part4: "one d" },
+  ]);
 });
 
 test("rate limits get their own retry budget and honor the declared retry-after", async () => {

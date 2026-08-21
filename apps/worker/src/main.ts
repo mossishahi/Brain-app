@@ -525,10 +525,15 @@ async function writeFinalOutputs(
   let proposalId: string | undefined;
   for (const ref of refs) {
     const path = ref.metadata?.path;
-    if (ref.metadata?.schema === "brainIdea" && typeof path === "string" && path.startsWith("ideas.")) {
+    const schema = ref.metadata?.schema;
+    // A bundle selects the chain's form by the schema its develop node names,
+    // so a member idea arrives under either name. Reading only the older one
+    // leaves a four-part run with no member copies at all.
+    const isIdea = schema === "brainIdea" || schema === "brainIdeaParts";
+    if (isIdea && typeof path === "string" && path.startsWith("ideas.")) {
       latestByMember.set(path.slice("ideas.".length), ref.id);
     }
-    if (ref.metadata?.schema === "finalProposal") proposalId = ref.id;
+    if (schema === "finalProposal") proposalId = ref.id;
   }
   if (latestByMember.size === 0 && proposalId === undefined) return [];
 

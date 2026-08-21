@@ -267,7 +267,7 @@ test("stepwise chain: ordered submit_step calls are assembled into the output", 
   const state = newState();
   const stepwiseTask: AgentTask = {
     ...structuredTask,
-    metadata: { stepwise: { tool: "submit_step", field: "cot", count: 2 } },
+    metadata: { stepwise: { tool: "submit_step", field: "cot", parts: false, count: 2 } },
   };
   const executor = new CursorAgentExecutor({
     apiKey: "cursor-key",
@@ -308,7 +308,7 @@ test("missing stepwise delivery spends a validation attempt with feedback", asyn
   const state = newState();
   const stepwiseTask: AgentTask = {
     ...structuredTask,
-    metadata: { stepwise: { tool: "submit_step", field: "cot", count: 1 } },
+    metadata: { stepwise: { tool: "submit_step", field: "cot", parts: false, count: 1 } },
   };
   const executor = new CursorAgentExecutor({
     apiKey: "cursor-key",
@@ -344,6 +344,199 @@ test("missing stepwise delivery spends a validation attempt with feedback", asyn
     cot: ["the step"],
   });
   assert.match(state.prompts[1]!, /Exactly 1 steps must be submitted/);
+});
+
+/** The task shape the runtime delivers for a four-part chain: the stepwise
+ *  field is stripped out of the schema (these tool calls fill it), so the
+ *  spec's own `parts` flag is what tells the executor which chain form to
+ *  ask for. */
+const partsTask: AgentTask = {
+  ...structuredTask,
+  outputSchema: { name: "brainIdeaParts", schema: structuredTask.outputSchema!.schema },
+  metadata: { stepwise: { tool: "submit_step", field: "cot", parts: true, count: 2 } },
+};
+
+test("a four-part chain asks for four parts and assembles them as step objects", async () => {
+  const state = newState();
+  let shape: JsonValue | undefined;
+  const executor = new CursorAgentExecutor({
+    apiKey: "cursor-key",
+    listModels: async () => CATALOG,
+    agentFactory: fakeFactory(
+      [
+        {
+          callTools: async (tools) => {
+            const step = tools.submit_step!;
+            shape = step.inputSchema as JsonValue;
+            await step.execute(
+              { index: 1, part1: "one a", part2: "one b", part3: "one c", part4: "one d" },
+              {},
+            );
+            // An empty part is legal: the parts are a size discipline, and a
+            // refusal here would spend a turn enforcing a soft limit.
+            await step.execute(
+              { index: 2, part1: "two a", part2: "two b", part3: "two c", part4: "" },
+              {},
+            );
+            await tools.submit_result!.execute({ answer: "done" }, {});
+          },
+          result: finished(""),
+        },
+      ],
+      state,
+    ),
+  });
+  const result = await executor.execute(partsTask, {
+    runId: "run-1",
+    nodePath: "root/brain",
+  });
+  assert.deepEqual((shape as JsonObject).required, [
+    "index",
+    "part1",
+    "part2",
+    "part3",
+    "part4",
+  ]);
+  assert.equal(result.status, "ok");
+  assert.deepEqual(result.status === "ok" ? result.output : undefined, {
+    answer: "done",
+    cot: [
+      { part1: "one a", part2: "one b", part3: "one c", part4: "one d" },
+      { part1: "two a", part2: "two b", part3: "two c", part4: "" },
+    ],
+  });
+});
+
+test("a four-part step that says nothing at all is refused, like an empty paragraph", async () => {
+  const state = newState();
+  const executor = new CursorAgentExecutor({
+    apiKey: "cursor-key",
+    listModels: async () => CATALOG,
+    agentFactory: fakeFactory(
+      [
+        {
+          callTools: async (tools) => {
+            const step = tools.submit_step!;
+            const refused = (await step.execute(
+              { index: 1, part1: " ", part2: "", part3: "", part4: "" },
+              {},
+            )) as { isError?: boolean };
+            assert.equal(refused.isError, true);
+            // The refusal left no gap: position 1 is still the one expected.
+            await step.execute(
+              { index: 1, part1: "one a", part2: "", part3: "", part4: "" },
+              {},
+            );
+            await step.execute(
+              { index: 2, part1: "two a", part2: "", part3: "", part4: "" },
+              {},
+            );
+            await tools.submit_result!.execute({ answer: "done" }, {});
+          },
+          result: finished(""),
+        },
+      ],
+      state,
+    ),
+  });
+  const result = await executor.execute(partsTask, {
+    runId: "run-1",
+    nodePath: "root/brain",
+  });
+  assert.equal(result.status, "ok");
+  assert.deepEqual(
+    result.status === "ok" ? (result.output as JsonObject).cot : undefined,
+    [
+      { part1: "one a", part2: "", part3: "", part4: "" },
+      { part1: "two a", part2: "", part3: "", part4: "" },
+    ],
+  );
+});
+
+test("a sparse four-part revision keeps each rewritten step's position", async () => {
+  const state = newState();
+  const executor = new CursorAgentExecutor({
+    apiKey: "cursor-key",
+    listModels: async () => CATALOG,
+    agentFactory: fakeFactory(
+      [
+        {
+          callTools: async (tools) => {
+            const step = tools.submit_step!;
+            await step.execute({ index: 2, part1: "a", part2: "b", part3: "c", part4: "d" }, {});
+            await step.execute({ index: 5, part1: "e", part2: "f", part3: "g", part4: "h" }, {});
+            await tools.submit_result!.execute({ answer: "revised" }, {});
+          },
+          result: finished(""),
+        },
+      ],
+      state,
+    ),
+  });
+  const result = await executor.execute(
+    {
+      ...partsTask,
+      outputSchema: {
+        name: "redevelopmentPatchParts",
+        schema: structuredTask.outputSchema!.schema,
+      },
+      metadata: {
+        stepwise: { tool: "submit_step", field: "steps", parts: true, count: 6, sparse: true },
+      },
+    },
+    { runId: "run-1", nodePath: "root/review/redevelop" },
+  );
+  assert.equal(result.status, "ok");
+  assert.deepEqual(
+    result.status === "ok" ? (result.output as JsonObject).steps : undefined,
+    [
+      { index: 2, part1: "a", part2: "b", part3: "c", part4: "d" },
+      { index: 5, part1: "e", part2: "f", part3: "g", part4: "h" },
+    ],
+  );
+});
+
+test("the spec decides the chain form, whatever the schema is called and whatever it shows", async () => {
+  const state = newState();
+  const executor = new CursorAgentExecutor({
+    apiKey: "cursor-key",
+    listModels: async () => CATALOG,
+    agentFactory: fakeFactory(
+      [
+        {
+          callTools: async (tools) => {
+            await tools.submit_step!.execute(
+              { index: 1, part1: "a", part2: "b", part3: "c", part4: "d" },
+              {},
+            );
+            await tools.submit_result!.execute({ answer: "done" }, {});
+          },
+          result: finished(""),
+        },
+      ],
+      state,
+    ),
+  });
+  // Deliberately starved of every other witness: a name carrying no "Parts"
+  // suffix, and an array with no item schema to read a shape off. The spec
+  // alone says four parts, and that has to be enough — a chain form whose
+  // name broke the convention used to transport silently as strings.
+  const result = await executor.execute(
+    {
+      ...partsTask,
+      outputSchema: {
+        name: "somethingElse",
+        schema: { type: "object", properties: { cot: { type: "array" } } },
+      },
+      metadata: { stepwise: { tool: "submit_step", field: "cot", parts: true, count: 1 } },
+    },
+    { runId: "run-1", nodePath: "root/brain" },
+  );
+  assert.equal(result.status, "ok");
+  assert.deepEqual(
+    result.status === "ok" ? (result.output as JsonObject).cot : undefined,
+    [{ part1: "a", part2: "b", part3: "c", part4: "d" }],
+  );
 });
 
 test("authoritative validation feeds issues into a fresh attempt", async () => {

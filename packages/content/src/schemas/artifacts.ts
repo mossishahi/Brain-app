@@ -1583,6 +1583,61 @@ export const SHAPE_FIELDS: Readonly<Record<OutputShape, readonly string[]>> = ((
 // brain idea (first pass) and redevelopment (revision)
 // ---------------------------------------------------------------------------
 
+/**
+ * The four part keys of a chain step, in order. Exported because the runtime
+ * walks them by name (the empty-prune of a reviewer's flaw list) and the read
+ * side renders them in this order; a second hand-written list somewhere else
+ * would be the thing that drifts.
+ */
+export const CHAIN_PARTS = ["part1", "part2", "part3", "part4"] as const;
+
+export type ChainPart = (typeof CHAIN_PARTS)[number];
+
+/**
+ * One chain step, divided into four parts. The parts carry NO meaning: they
+ * are a size discipline, not a reasoning schema, so the same rule serves all
+ * nine output shapes. Four is a hard maximum forever — a redevelopment
+ * rewrites the existing four and can never add a fifth, which is what makes
+ * the shape itself the ceiling on how far a step can grow.
+ *
+ * No length rule lives here on purpose. The per-part character target is
+ * skill prose; a refinement would turn a soft limit into a failed run.
+ */
+export const cotStepPartsSchema = z
+  .object({
+    part1: z.string(),
+    part2: z.string(),
+    part3: z.string(),
+    part4: z.string(),
+  })
+  .strict();
+
+export type CotStepParts = z.infer<typeof cotStepPartsSchema>;
+
+/**
+ * The novelty rule every chain-carrying artifact shares: a shape positioned
+ * against a literature map states its novelty, and a shape that is not must
+ * omit it. One copy, called by the string-chain schemas and the four-part
+ * one alike — a second would let the two forms disagree about what a paper
+ * owes the moment NOVELTY_SHAPES changes.
+ */
+const requireShapeNovelty = (
+  value: { readonly output: DevelopedOutput; readonly novelty?: string },
+  ctx: z.RefinementCtx,
+): void => {
+  const shape = OUTPUT_SHAPES.find(
+    (candidate) => value.output[candidate] !== undefined && value.output[candidate] !== null,
+  );
+  if (!shape) return; // the envelope's own refinement already reports this
+  const wantsNovelty = NOVELTY_SHAPES.has(shape);
+  if (wantsNovelty && value.novelty === undefined) {
+    ctx.addIssue({ code: "custom", path: ["novelty"], message: `a "${shape}" output requires a novelty statement` });
+  }
+  if (!wantsNovelty && value.novelty !== undefined) {
+    ctx.addIssue({ code: "custom", path: ["novelty"], message: `a "${shape}" output must omit novelty` });
+  }
+};
+
 export const brainIdeaSchema = z
   .object({
     output: developedOutputSchema,
@@ -1598,21 +1653,32 @@ export const brainIdeaSchema = z
     literature: z.array(paperSchema).max(30).optional(),
   })
   .strict()
-  .superRefine((idea, ctx) => {
-    const shape = OUTPUT_SHAPES.find(
-      (candidate) => idea.output[candidate] !== undefined && idea.output[candidate] !== null,
-    );
-    if (!shape) return; // the envelope's own refinement already reports this
-    const wantsNovelty = NOVELTY_SHAPES.has(shape);
-    if (wantsNovelty && idea.novelty === undefined) {
-      ctx.addIssue({ code: "custom", path: ["novelty"], message: `a "${shape}" output requires a novelty statement` });
-    }
-    if (!wantsNovelty && idea.novelty !== undefined) {
-      ctx.addIssue({ code: "custom", path: ["novelty"], message: `a "${shape}" output must omit novelty` });
-    }
-  });
+  .superRefine(requireShapeNovelty);
 
 export type BrainIdea = z.infer<typeof brainIdeaSchema>;
+
+/**
+ * The same first pass, with every chain step divided into four parts.
+ *
+ * A separate NAME rather than a changed `brainIdea`: a run pins its bundle
+ * version forever, so mutating the old shape would break every pinned run on
+ * its next resume. A workflow node picks the form through `output.schema`,
+ * exactly as `redevelopment` and `redevelopmentPatch` already coexist.
+ * Everything but the chain — the envelope, the novelty rule, the literature
+ * list — is the identical contract.
+ */
+export const brainIdeaPartsSchema = z
+  .object({
+    output: developedOutputSchema,
+    /** The chain of thought: one four-part step per position, in order. */
+    cot: z.array(cotStepPartsSchema).min(3).max(9),
+    novelty: paragraphs(1).optional(),
+    literature: z.array(paperSchema).max(30).optional(),
+  })
+  .strict()
+  .superRefine(requireShapeNovelty);
+
+export type BrainIdeaParts = z.infer<typeof brainIdeaPartsSchema>;
 
 /**
  * A member's revision after a Build/Interrupt: the COMPLETE revised chain,
@@ -1632,24 +1698,7 @@ export const redevelopmentSchema = z
     novelty: paragraphs(1).optional(),
   })
   .strict()
-  .superRefine((revision, ctx) => {
-    const shape = OUTPUT_SHAPES.find(
-      (candidate) =>
-        revision.output[candidate] !== undefined && revision.output[candidate] !== null,
-    );
-    if (!shape) return; // the envelope's own refinement already reports this
-    const wantsNovelty = NOVELTY_SHAPES.has(shape);
-    if (wantsNovelty && revision.novelty === undefined) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["novelty"],
-        message: `a "${shape}" output requires a novelty statement`,
-      });
-    }
-    if (!wantsNovelty && revision.novelty !== undefined) {
-      ctx.addIssue({ code: "custom", path: ["novelty"], message: `a "${shape}" output must omit novelty` });
-    }
-  });
+  .superRefine(requireShapeNovelty);
 
 export type Redevelopment = z.infer<typeof redevelopmentSchema>;
 
@@ -1669,6 +1718,58 @@ export type Redevelopment = z.infer<typeof redevelopmentSchema>;
  * chain and the whole envelope, and the merged result is validated against
  * the same schemas the full-emission path uses before anything is recorded.
  */
+/**
+ * The chain-order rule of a patch's step list: ascending, each index at most
+ * once. Shared by the string-step patch and the four-part one below, because
+ * "what a well-formed patch looks like" is one contract — only the payload
+ * of a step differs between the two forms.
+ */
+const requireAscendingSteps = (
+  steps: readonly { readonly index: number }[],
+  ctx: z.RefinementCtx,
+): void => {
+  steps.forEach((step, position) => {
+    const previous = steps[position - 1];
+    if (previous !== undefined && step.index <= previous.index) {
+      ctx.addIssue({
+        code: "custom",
+        path: [position, "index"],
+        message: "steps must be listed in ascending order, each index once",
+      });
+    }
+  });
+};
+
+/**
+ * The developed body's changed sections only, under the same shape key the
+ * previous output populated. Omitted when the repair left the body standing.
+ * `requested` is all-or-nothing: omit it to carry the previous sections, or
+ * give the complete ordered list.
+ *
+ * Defined once and shared by both patch forms: the body a revision patches is
+ * the same body whichever way its chain is written, and `mergeOutputPatch`
+ * below is the single merge that reads it.
+ */
+export const redevelopmentOutputPatchSchema = z
+  .object({
+    // Built from each shape's SECTIONS, without its cross-field rules: a
+    // rule relating two sections cannot be judged on a patch that names
+    // one of them. Every such rule is enforced on the merged whole.
+    paper: paperBodySchema.partial().optional(),
+    resolution: resolutionBodyFields.partial().optional(),
+    verification: verificationBodyFields.partial().optional(),
+    feasibility: feasibilityBodyFields.partial().optional(),
+    critique: critiqueBodyFields.partial().optional(),
+    interpretation: interpretationBodySchema.partial().optional(),
+    survey: surveyBodySchema.partial().optional(),
+    explanation: explanationBodySchema.partial().optional(),
+    solution: solutionBodySchema.partial().optional(),
+    requested: z.array(requestedSectionSchema).min(1).max(4).optional(),
+  })
+  .strict();
+
+export type RedevelopmentOutputPatch = z.infer<typeof redevelopmentOutputPatchSchema>;
+
 export const redevelopmentPatchSchema = z
   .object({
     /**
@@ -1684,48 +1785,44 @@ export const redevelopmentPatchSchema = z
       )
       .min(1)
       .max(9)
-      .superRefine((steps, ctx) => {
-        steps.forEach((step, position) => {
-          const previous = steps[position - 1];
-          if (previous !== undefined && step.index <= previous.index) {
-            ctx.addIssue({
-              code: "custom",
-              path: [position, "index"],
-              message: "steps must be listed in ascending order, each index once",
-            });
-          }
-        });
-      }),
-    /**
-     * The developed body's changed sections only, under the same shape key
-     * the previous output populated. Omitted when the repair left the body
-     * standing. `requested` is all-or-nothing: omit it to carry the previous
-     * sections, or give the complete ordered list.
-     */
-    outputPatch: z
-      .object({
-        // Built from each shape's SECTIONS, without its cross-field rules: a
-        // rule relating two sections cannot be judged on a patch that names
-        // one of them. Every such rule is enforced on the merged whole.
-        paper: paperBodySchema.partial().optional(),
-        resolution: resolutionBodyFields.partial().optional(),
-        verification: verificationBodyFields.partial().optional(),
-        feasibility: feasibilityBodyFields.partial().optional(),
-        critique: critiqueBodyFields.partial().optional(),
-        interpretation: interpretationBodySchema.partial().optional(),
-        survey: surveyBodySchema.partial().optional(),
-        explanation: explanationBodySchema.partial().optional(),
-        solution: solutionBodySchema.partial().optional(),
-        requested: z.array(requestedSectionSchema).min(1).max(4).optional(),
-      })
-      .strict()
-      .optional(),
+      .superRefine(requireAscendingSteps),
+    outputPatch: redevelopmentOutputPatchSchema.optional(),
     /** Only when the repair moved it; otherwise the previous one stands. */
     novelty: paragraphs(1).optional(),
   })
   .strict();
 
 export type RedevelopmentPatch = z.infer<typeof redevelopmentPatchSchema>;
+
+/**
+ * The same patch against a four-part chain: a named step arrives as its
+ * complete replacement four-part object, never as a patch of single parts.
+ * Parts have no meaning and a rewrite may move their boundaries, so patching
+ * one part while the other three stand would leave a step nobody wrote.
+ */
+export const redevelopmentPatchPartsSchema = z
+  .object({
+    steps: z
+      .array(
+        z
+          .object({
+            index: z.number().int().min(1).max(9),
+            part1: z.string(),
+            part2: z.string(),
+            part3: z.string(),
+            part4: z.string(),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(9)
+      .superRefine(requireAscendingSteps),
+    outputPatch: redevelopmentOutputPatchSchema.optional(),
+    novelty: paragraphs(1).optional(),
+  })
+  .strict();
+
+export type RedevelopmentPatchParts = z.infer<typeof redevelopmentPatchPartsSchema>;
 
 /** A patch that cannot be applied to the version it claims to revise. */
 export class RedevelopmentMergeError extends Error {
@@ -1749,8 +1846,68 @@ export interface MergedRedevelopment {
   readonly novelty?: string;
 }
 
+/** The version a four-part patch is applied to (see RedevelopmentBase). */
+export interface RedevelopmentPartsBase {
+  readonly cot: readonly CotStepParts[];
+  readonly output: Readonly<Record<string, unknown>>;
+  readonly novelty?: string;
+}
+
+/** The reassembled four-part revision (see MergedRedevelopment). */
+export interface MergedRedevelopmentParts {
+  readonly steps: readonly CotStepParts[];
+  readonly output: Record<string, unknown>;
+  readonly novelty?: string;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * A patched step must name a position the chain already has. Chain LENGTH is
+ * invariant across a revision, so an index past the end is a broken patch —
+ * never a silent append that would grow the chain behind the run's back.
+ */
+function assertStepInChain(index: number, length: number): void {
+  if (index > length) {
+    throw new RedevelopmentMergeError(
+      `the patch rewrites step ${index}, but the chain has ${length} steps`,
+    );
+  }
+}
+
+/**
+ * Folds a patch's changed body sections into the previous envelope.
+ *
+ * The body a revision patches is identical whichever way the chain is
+ * written, so both merges call this one implementation: a forked copy would
+ * let a four-part run and a string run disagree about which sections
+ * survived, and the dashboard replays these merges out of the checkpoint
+ * journal long after the run itself is gone.
+ */
+function mergeOutputPatch(
+  base: Readonly<Record<string, unknown>>,
+  outputPatch: RedevelopmentOutputPatch | undefined,
+): Record<string, unknown> {
+  const output: Record<string, unknown> = { ...base };
+  const populated = OUTPUT_SHAPES.find((shape) => isRecord(base[shape]));
+  for (const [key, value] of Object.entries(outputPatch ?? {})) {
+    if (value === undefined) continue;
+    if (key === "requested") {
+      output.requested = value;
+      continue;
+    }
+    if (key !== populated) {
+      throw new RedevelopmentMergeError(
+        `the patch changes the "${key}" body, but this member's output is a "${populated ?? "none"}"`,
+      );
+    }
+    // Section-wise: a patched section replaces its previous text entirely,
+    // every other section of the body rides through untouched.
+    output[key] = { ...(base[key] as Record<string, unknown>), ...(value as object) };
+  }
+  return output;
 }
 
 /**
@@ -1768,32 +1925,41 @@ export function mergeRedevelopment(
 ): MergedRedevelopment {
   const steps = [...base.cot];
   for (const step of patch.steps) {
-    if (step.index > steps.length) {
-      throw new RedevelopmentMergeError(
-        `the patch rewrites step ${step.index}, but the chain has ${steps.length} steps`,
-      );
-    }
+    assertStepInChain(step.index, steps.length);
     steps[step.index - 1] = step.text;
   }
 
-  const output: Record<string, unknown> = { ...base.output };
-  const populated = OUTPUT_SHAPES.find((shape) => isRecord(base.output[shape]));
-  for (const [key, value] of Object.entries(patch.outputPatch ?? {})) {
-    if (value === undefined) continue;
-    if (key === "requested") {
-      output.requested = value;
-      continue;
-    }
-    if (key !== populated) {
-      throw new RedevelopmentMergeError(
-        `the patch changes the "${key}" body, but this member's output is a "${populated ?? "none"}"`,
-      );
-    }
-    // Section-wise: a patched section replaces its previous text entirely,
-    // every other section of the body rides through untouched.
-    output[key] = { ...(base.output[key] as Record<string, unknown>), ...(value as object) };
+  const output = mergeOutputPatch(base.output, patch.outputPatch);
+  const novelty = patch.novelty ?? base.novelty;
+  return {
+    steps,
+    output,
+    ...(novelty !== undefined ? { novelty } : {}),
+  };
+}
+
+/**
+ * The same merge for a four-part chain: a patched step REPLACES the whole
+ * four-part object at its position, and every step the patch does not name
+ * rides through byte-identical because the host carried it rather than the
+ * model retyping it. Body and novelty handling are the shared ones above.
+ */
+export function mergeRedevelopmentParts(
+  base: RedevelopmentPartsBase,
+  patch: RedevelopmentPatchParts,
+): MergedRedevelopmentParts {
+  const steps = [...base.cot];
+  for (const step of patch.steps) {
+    assertStepInChain(step.index, steps.length);
+    steps[step.index - 1] = {
+      part1: step.part1,
+      part2: step.part2,
+      part3: step.part3,
+      part4: step.part4,
+    };
   }
 
+  const output = mergeOutputPatch(base.output, patch.outputPatch);
   const novelty = patch.novelty ?? base.novelty;
   return {
     steps,
@@ -1832,6 +1998,55 @@ const requireConcreteSuggestion = (
 };
 
 /**
+ * The verdict/evidence contract shared by every review artifact: an Interrupt
+ * stands on script, math, or reference evidence, and every softer verdict
+ * stands on none. This is a CONTRACT about what a verdict MEANS, not a length
+ * rule, so the part-carrying forms below keep it verbatim. One copy, because
+ * a commentor and a judge disagreeing about what Interrupt requires would be
+ * a review loop arguing with itself.
+ */
+const requireVerdictEvidence = (
+  value: { readonly verdict: Verdict; readonly evidence: Evidence },
+  ctx: z.RefinementCtx,
+): void => {
+  if (value.verdict === "Interrupt" && value.evidence.kind === "none") {
+    ctx.addIssue({
+      code: "custom",
+      path: ["evidence"],
+      message: "Interrupt requires script, math, or reference evidence",
+    });
+  }
+  if (value.verdict !== "Interrupt" && value.evidence.kind !== "none") {
+    ctx.addIssue({
+      code: "custom",
+      path: ["evidence"],
+      message: `${value.verdict} must use {kind:"none"} evidence`,
+    });
+  }
+};
+
+/**
+ * One step's flaws, keyed by the part of that step the flaw sits in. The
+ * reviewer receives this as a DRAFT — one entry per step it has been shown,
+ * every part key present and empty — and fills in only what it has. The
+ * orchestrator strips the empties before the judge reads them.
+ *
+ * `part<N>` is a LOCATOR, not a citation: parts carry no meaning and a
+ * rewrite can move their boundaries, so the flaw sentence must stand alone.
+ */
+export const flawEntrySchema = z
+  .object({
+    step: z.number().int().min(1),
+    part1: z.string(),
+    part2: z.string(),
+    part3: z.string(),
+    part4: z.string(),
+  })
+  .strict();
+
+export type FlawEntry = z.infer<typeof flawEntrySchema>;
+
+/**
  * One commentor's verdict on the reviewed chain so far.
  *
  * `step` names the 1-based chain step the verdict targets. A commentor may
@@ -1860,23 +2075,39 @@ export const commentSchema = z
     if (comment.verdict === "Build") {
       requireConcreteSuggestion(comment.suggestion, ctx);
     }
-    if (comment.verdict === "Interrupt" && comment.evidence.kind === "none") {
-      ctx.addIssue({
-        code: "custom",
-        path: ["evidence"],
-        message: "Interrupt requires script, math, or reference evidence",
-      });
-    }
-    if (comment.verdict !== "Interrupt" && comment.evidence.kind !== "none") {
-      ctx.addIssue({
-        code: "custom",
-        path: ["evidence"],
-        message: `${comment.verdict} must use {kind:"none"} evidence`,
-      });
-    }
+    requireVerdictEvidence(comment, ctx);
   });
 
 export type Comment = z.infer<typeof commentSchema>;
+
+/**
+ * The same commentor verdict against a four-part chain.
+ *
+ * There is no top-level `step` any more: a commentor faults as many steps as
+ * it can see, and each flaw entry carries its own position. `reason` stays as
+ * the short overall note, because a Pass carries no flaws at all and the
+ * dashboard renders a reason for every reviewer.
+ *
+ * Every length rule is gone on purpose. `validateArtifact` throws on a Zod
+ * failure and the adapter turns that into retries and then a dead task, so a
+ * character floor here would convert a soft style target into a lost run. The
+ * limits are prose, in the skill files. The evidence contract stays: it says
+ * what a verdict means.
+ */
+export const commentPartsSchema = z
+  .object({
+    verdict: z.enum(VERDICTS),
+    /** The overall note; the one thing a Pass, which carries no flaws, says. */
+    reason: z.string(),
+    /** One entry per faulted step; empty when the reviewer found nothing. */
+    flaws: z.array(flawEntrySchema).max(9),
+    suggestion: z.string(),
+    evidence: evidenceSchema,
+  })
+  .strict()
+  .superRefine(requireVerdictEvidence);
+
+export type CommentParts = z.infer<typeof commentPartsSchema>;
 
 /**
  * Per-commentor classification in constrained-output-safe form. An ordered
@@ -1907,7 +2138,12 @@ const assessmentSchema = z
  * the repair signal carry content, never commentor identity — so the
  * existing `assessment` field remains the only place commentors are named.
  */
-export const judgeIssueSchema = z
+/**
+ * The issue fields alone. Split out from the schema below so the part-aware
+ * form can extend the same shape instead of restating it; a refined schema
+ * carries no `.safeExtend`, exactly as `resolutionBodyFields` already is.
+ */
+const judgeIssueFields = z
   .object({
     /** The 1-based chain step the issue sits at (never beyond the reviewed step). */
     step: z.number().int().min(1),
@@ -1921,25 +2157,55 @@ export const judgeIssueSchema = z
     /** True when the revision cannot stand without resolving this issue. */
     mustAddress: z.boolean(),
   })
-  .strict()
-  .superRefine((issue, ctx) => {
-    if (issue.basis === "verified" && issue.evidence.kind === "none") {
-      ctx.addIssue({
-        code: "custom",
-        path: ["evidence"],
-        message: 'a "verified" issue requires script, math, or reference evidence',
-      });
-    }
-    if (issue.basis === "authority" && issue.evidence.kind !== "none") {
-      ctx.addIssue({
-        code: "custom",
-        path: ["evidence"],
-        message: 'an "authority" issue must use {kind:"none"} evidence',
-      });
-    }
-  });
+  .strict();
+
+/**
+ * The basis/evidence contract of an issue: "verified" means an evidence
+ * object backs it, "authority" means the judge stands on its own reading.
+ * Shared by both issue forms — the word "verified" cannot mean two things.
+ */
+const requireIssueEvidence = (
+  issue: { readonly basis: "verified" | "authority"; readonly evidence: Evidence },
+  ctx: z.RefinementCtx,
+): void => {
+  if (issue.basis === "verified" && issue.evidence.kind === "none") {
+    ctx.addIssue({
+      code: "custom",
+      path: ["evidence"],
+      message: 'a "verified" issue requires script, math, or reference evidence',
+    });
+  }
+  if (issue.basis === "authority" && issue.evidence.kind !== "none") {
+    ctx.addIssue({
+      code: "custom",
+      path: ["evidence"],
+      message: 'an "authority" issue must use {kind:"none"} evidence',
+    });
+  }
+};
+
+export const judgeIssueSchema = judgeIssueFields.superRefine(requireIssueEvidence);
 
 export type JudgeIssue = z.infer<typeof judgeIssueSchema>;
+
+/**
+ * The same confirmed problem against a four-part chain: it names the part of
+ * the step it sits in, and its `point` carries no length floor (the two-
+ * sentence target is skill prose, never a run-killing refinement).
+ *
+ * `part` is a LOCATOR only. Parts carry no meaning and a redevelopment may
+ * move their boundaries, so the point itself must stand without it.
+ */
+export const judgeIssuePartsSchema = judgeIssueFields
+  .safeExtend({
+    /** The problem, stated in the reviewer's own words. */
+    point: z.string(),
+    /** Which part of the named step the problem sits in. */
+    part: z.enum(CHAIN_PARTS),
+  })
+  .superRefine(requireIssueEvidence);
+
+export type JudgeIssueParts = z.infer<typeof judgeIssuePartsSchema>;
 
 /**
  * The judge's single decision for a review round, aggregating the
@@ -1951,7 +2217,7 @@ export type JudgeIssue = z.infer<typeof judgeIssueSchema>;
  * suggestion tolerance as commentSchema: required-and-concrete for Build,
  * otherwise accepted as extra context for the redeveloper.
  */
-export const judgeDecisionSchema = z
+const judgeDecisionFields = z
   .object({
     verdict: z.enum(VERDICTS),
     reason: substantiveReason,
@@ -1961,62 +2227,91 @@ export const judgeDecisionSchema = z
     issues: z.array(judgeIssueSchema).max(12),
     assessment: assessmentSchema,
   })
-  .strict()
-  .superRefine((decision, ctx) => {
-    if (decision.verdict === "Build") {
-      requireConcreteSuggestion(decision.suggestion, ctx);
-    }
-    if (
-      decision.verdict === "Interrupt" &&
-      decision.evidence.kind === "none"
-    ) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["evidence"],
-        message: "Interrupt requires script, math, or reference evidence",
-      });
-    }
-    if (
-      decision.verdict !== "Interrupt" &&
-      decision.evidence.kind !== "none"
-    ) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["evidence"],
-        message: `${decision.verdict} must use {kind:"none"} evidence`,
-      });
-    }
-    if (decision.verdict === "Pass" && decision.issues.length > 0) {
+  .strict();
+
+/**
+ * How a verdict and its issue list must agree: Pass means nothing is open,
+ * anything else names at least one problem the revision must resolve, and an
+ * Interrupt — which stops the chain — needs one of those backed by evidence
+ * rather than by standing alone. Shared by both decision forms; the rule is
+ * about the verdict, and the verdict is the same object in either.
+ */
+const requireVerdictIssues = (
+  decision: {
+    readonly verdict: Verdict;
+    readonly issues: readonly {
+      readonly mustAddress: boolean;
+      readonly basis: "verified" | "authority";
+    }[];
+  },
+  ctx: z.RefinementCtx,
+): void => {
+  if (decision.verdict === "Pass" && decision.issues.length > 0) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["issues"],
+      message: "Pass carries no issues; an open issue rules out Pass",
+    });
+  }
+  if (decision.verdict !== "Pass") {
+    if (!decision.issues.some((issue) => issue.mustAddress)) {
       ctx.addIssue({
         code: "custom",
         path: ["issues"],
-        message: "Pass carries no issues; an open issue rules out Pass",
+        message: `${decision.verdict} requires at least one must-address issue`,
       });
     }
-    if (decision.verdict !== "Pass") {
-      if (!decision.issues.some((issue) => issue.mustAddress)) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["issues"],
-          message: `${decision.verdict} requires at least one must-address issue`,
-        });
-      }
-      if (
-        decision.verdict === "Interrupt" &&
-        !decision.issues.some(
-          (issue) => issue.mustAddress && issue.basis === "verified",
-        )
-      ) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["issues"],
-          message: "Interrupt requires at least one verified must-address issue",
-        });
-      }
+    if (
+      decision.verdict === "Interrupt" &&
+      !decision.issues.some(
+        (issue) => issue.mustAddress && issue.basis === "verified",
+      )
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["issues"],
+        message: "Interrupt requires at least one verified must-address issue",
+      });
     }
-  });
+  }
+};
+
+export const judgeDecisionSchema = judgeDecisionFields.superRefine((decision, ctx) => {
+  if (decision.verdict === "Build") {
+    requireConcreteSuggestion(decision.suggestion, ctx);
+  }
+  requireVerdictEvidence(decision, ctx);
+  requireVerdictIssues(decision, ctx);
+});
 
 export type JudgeDecision = z.infer<typeof judgeDecisionSchema>;
+
+/**
+ * The same decision against a four-part chain.
+ *
+ * It gains `flaws` — the judge's own reading of the chain, in the identical
+ * per-step, per-part form the commentors submit, so the dashboard renders one
+ * reviewer's marks the same way whoever made them. `issues` stays the
+ * de-duplicated repair signal the redeveloper acts on; the two are not the
+ * same list, and only `issues` drives a revision.
+ *
+ * `assessment` keeps its `.min(1)`: naming who was verified and who stood on
+ * authority is the judge's core act, not a length target. What is gone is the
+ * Build suggestion floor, which was a length rule and would have cost a run.
+ */
+export const judgeDecisionPartsSchema = judgeDecisionFields
+  .safeExtend({
+    reason: z.string(),
+    /** The judge's own per-step marks; empty when it faulted nothing itself. */
+    flaws: z.array(flawEntrySchema).max(9),
+    issues: z.array(judgeIssuePartsSchema).max(12),
+  })
+  .superRefine((decision, ctx) => {
+    requireVerdictEvidence(decision, ctx);
+    requireVerdictIssues(decision, ctx);
+  });
+
+export type JudgeDecisionParts = z.infer<typeof judgeDecisionPartsSchema>;
 
 // ---------------------------------------------------------------------------
 // final proposal
@@ -2163,6 +2458,13 @@ export const artifactSchemas = {
   judgeDecision: judgeDecisionSchema,
   redevelopment: redevelopmentSchema,
   redevelopmentPatch: redevelopmentPatchSchema,
+  // The four-part chain forms. Separate names, never replacements: a run pins
+  // its bundle version forever, so the old names must keep meaning what they
+  // meant on the day that run started.
+  brainIdeaParts: brainIdeaPartsSchema,
+  commentParts: commentPartsSchema,
+  judgeDecisionParts: judgeDecisionPartsSchema,
+  redevelopmentPatchParts: redevelopmentPatchPartsSchema,
   finalProposal: finalProposalSchema,
   bridgeReport: bridgeReportSchema,
 } as const;

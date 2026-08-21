@@ -4,7 +4,7 @@
  * `--offline` runs and by the worker's own tests, so the full nested pipeline
  * (panel selection, review rounds, chair) can be exercised end to end.
  */
-import type { LoadedInputTypes } from "@brainstorm-agentic/content";
+import type { ChainPart, LoadedInputTypes } from "@brainstorm-agentic/content";
 import type { AgentExecutor, AgentResult, AgentTask, JsonObject, JsonValue } from "@brainstorm-agentic/core";
 
 function asObject(value: JsonValue | undefined): JsonObject {
@@ -41,6 +41,50 @@ function paperTypeOf(inputTypes: LoadedInputTypes | undefined): string {
   const names = Object.keys(inputTypes.types);
   if (names.length === 0) throw new Error("offline executor: input-type catalog defines no types");
   return names[names.length - 1]!;
+}
+
+/**
+ * One four-part chain step. The parts carry no assigned meaning — they are a
+ * size discipline, not a reasoning schema — so the stand-in simply divides
+ * one deterministic step across the four keys. All four are written even when
+ * a part would be uninteresting: `cotStepPartsSchema` is strict and none of
+ * the parts is optional, so an omitted key is a failed run, not an empty box.
+ */
+function cotParts(label: string, index: number): JsonObject {
+  return {
+    part1: `${label} chain step ${index} part 1: the claim this step puts forward.`,
+    part2: `${label} chain step ${index} part 2: what the claim rests on.`,
+    part3: `${label} chain step ${index} part 3: the check that would break it.`,
+    part4: `${label} chain step ${index} part 4: what the next step leaves to settle.`,
+  };
+}
+
+/**
+ * The flaw list a part-aware reviewer submits: one entry per step it has been
+ * shown, every part key present, and text only in the boxes it actually has
+ * something for. This is the DRAFT the skills describe, emitted here rather
+ * than a pre-pruned list on purpose — an offline fixture then drives the
+ * runtime's empty-prune exactly as a live reviewer does, so the pruned list
+ * that reaches the journal is produced by the prune and not by the stand-in.
+ *
+ * `mark` writes one note into one box. Every other box and every other entry
+ * stays empty, which exercises BOTH halves of the prune: an empty part inside
+ * a surviving entry, and an entry whose four parts are all empty.
+ */
+function flawDraft(
+  reviewedThrough: number,
+  mark?: { readonly step: number; readonly part: ChainPart; readonly text: string },
+): JsonValue[] {
+  // The schema caps the list at nine entries, the chain's own maximum; a
+  // review position beyond that would make the fixture itself unwritable.
+  const entries = Math.max(0, Math.min(reviewedThrough, 9));
+  return Array.from({ length: entries }, (_, i) => {
+    const step = i + 1;
+    // The note overwrites its box in place — a spread keeps the key at its
+    // first position — so the four parts stay in chain order in every entry.
+    const note = mark !== undefined && mark.step === step ? { [mark.part]: mark.text } : {};
+    return { step, part1: "", part2: "", part3: "", part4: "", ...note };
+  });
 }
 
 const noEvidence: JsonObject = {
@@ -108,6 +152,15 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
     const role = String(input.role ?? task.kind ?? "");
     const agentId = task.agentId ?? role;
     this.executed.push({ role, agentId });
+    // Which SHAPE a role writes is the TASK's choice, never the role's: the
+    // same commentor writes a scalar-step comment under a 0.15..0.22 bundle
+    // and a part-keyed flaw list under a newer one, and the artifact is
+    // validated against the name the node declared. Reading the name off the
+    // task is what keeps one offline executor valid for every bundle the
+    // worker can still load. The names are listed literally, exactly as the
+    // runtime lists them, so a pinned run takes the path its own bundle was
+    // compiled against and an unknown name falls through to the legacy shape.
+    const schemaName = task.outputSchema?.name ?? "";
 
     let output: JsonValue;
     switch (role) {
@@ -468,7 +521,11 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
             ...this.developedOutput(agentId),
             ...(requested ? { requested } : {}),
           },
-          cot: Array.from({ length: this.cotSteps }, (_, i) => `${agentId} chain step ${i + 1} reasoning paragraph.`),
+          cot: Array.from({ length: this.cotSteps }, (_, i) =>
+            schemaName === "brainIdeaParts"
+              ? cotParts(agentId, i + 1)
+              : `${agentId} chain step ${i + 1} reasoning paragraph.`,
+          ),
           novelty: `${agentId} novelty paragraph naming the two closest works and the precise gap.`,
           literature: [
             {
@@ -491,13 +548,28 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
       }
       case "commentor": {
         const currentStep = typeof bindings.currentStep === "number" ? bindings.currentStep : 1;
-        output = {
-          verdict: "Pass",
-          step: currentStep,
-          reason: `${agentId} finds no demonstrable flaw standing in the reviewed steps.`,
-          suggestion: "",
-          evidence: noEvidence,
-        };
+        output =
+          schemaName === "commentParts"
+            ? {
+                // No top-level `step`: the part-aware form is strict and each
+                // flaw entry carries its own position instead.
+                verdict: "Pass",
+                reason: `${agentId} finds no demonstrable flaw standing in the reviewed steps.`,
+                flaws: flawDraft(currentStep, {
+                  step: currentStep,
+                  part: "part2",
+                  text: `${agentId} notes the support here is thin, though not yet faultable.`,
+                }),
+                suggestion: "",
+                evidence: noEvidence,
+              }
+            : {
+                verdict: "Pass",
+                step: currentStep,
+                reason: `${agentId} finds no demonstrable flaw standing in the reviewed steps.`,
+                suggestion: "",
+                evidence: noEvidence,
+              };
         break;
       }
       case "interdisciplinary-commentor": {
@@ -505,17 +577,31 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
         // offline it passes like every other commentor, with a seam-flavored
         // reason so the two comment paths stay distinguishable in fixtures.
         const currentStep = typeof bindings.currentStep === "number" ? bindings.currentStep : 1;
-        output = {
-          verdict: "Pass",
-          step: currentStep,
-          reason: `${agentId} finds every cross-field crossing of the reviewed steps carried by its own support.`,
-          suggestion: "",
-          evidence: noEvidence,
-        };
+        output =
+          schemaName === "commentParts"
+            ? {
+                verdict: "Pass",
+                reason: `${agentId} finds every cross-field crossing of the reviewed steps carried by its own support.`,
+                flaws: flawDraft(currentStep, {
+                  step: currentStep,
+                  part: "part3",
+                  text: `${agentId} notes the crossing here is stated rather than shown.`,
+                }),
+                suggestion: "",
+                evidence: noEvidence,
+              }
+            : {
+                verdict: "Pass",
+                step: currentStep,
+                reason: `${agentId} finds every cross-field crossing of the reviewed steps carried by its own support.`,
+                suggestion: "",
+                evidence: noEvidence,
+              };
         break;
       }
       case "judge": {
         const comments = asObject(bindings.comments as JsonValue);
+        const currentStep = typeof bindings.currentStep === "number" ? bindings.currentStep : 1;
         const assessment = Object.keys(comments).map((commentorId) => ({
           commentorId,
           basis: "authority",
@@ -527,6 +613,13 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
           evidence: noEvidence,
           issues: [],
           assessment,
+          // The judge's own marks, in the same draft form the commentors
+          // submit. A Pass confirmed nothing, so every box stays empty and the
+          // prune reduces the whole draft to `flaws: []` — the recorded value
+          // for a reviewer that was shown the parts and faulted none of them.
+          // Spread conditionally: the legacy decision is strict and has no
+          // such field, so an unconditional key would fail every old bundle.
+          ...(schemaName === "judgeDecisionParts" ? { flaws: flawDraft(currentStep) } : {}),
         };
         break;
       }
@@ -535,6 +628,26 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
         // step and copies the rest of the previous chain verbatim, mirroring
         // the minimal-edit contract the runtime diffs against.
         const currentStep = typeof bindings.currentStep === "number" ? bindings.currentStep : 1;
+        if (schemaName === "redevelopmentPatch" || schemaName === "redevelopmentPatchParts") {
+          // A patch names ONLY what changed and carries no `output` envelope
+          // at all — the host fills every step and every section the patch
+          // leaves unnamed, which is what makes an untouched step
+          // byte-identical by construction rather than by diligence. So the
+          // offline reviser names one step, the one under review, and patches
+          // the single body section a repair at that step would move.
+          output = {
+            steps: [
+              schemaName === "redevelopmentPatchParts"
+                ? { index: currentStep, ...cotParts(`${agentId} revised`, currentStep) }
+                : { index: currentStep, text: `${agentId} revised step ${currentStep} paragraph.` },
+            ],
+            outputPatch: {
+              paper: { conclusion: [`${agentId} revised conclusion paragraph.`] },
+            },
+            novelty: `${agentId} revised novelty paragraph.`,
+          };
+          break;
+        }
         const previous = Array.isArray(bindings.chain) ? bindings.chain : [];
         const requested = requestedSections(bindings.input as JsonValue, `${agentId} revised`);
         output = {

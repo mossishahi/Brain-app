@@ -198,6 +198,62 @@ interface SeenTask {
   readonly task: AgentTask;
 }
 
+/** One step's four parts, derived from the string form the fixture writes. */
+function fourParts(text: string): JsonObject {
+  return {
+    part1: `${text} — the claim.`,
+    part2: `${text} — the ground it stands on.`,
+    part3: `${text} — what follows.`,
+    part4: `${text} — what it leaves open.`,
+  };
+}
+
+/**
+ * The legacy output restated in the shape the delivered schema names, exactly
+ * as e2e.test.ts does it. A dismissal is a seating decision and says nothing
+ * about the chain's form, so these tests must read the same whichever bundle
+ * is loaded. An unrecognised or absent schema name is the legacy path.
+ */
+function asPartsForm(schemaName: string | undefined, output: JsonValue): JsonValue {
+  switch (schemaName) {
+    case "brainIdeaParts": {
+      const idea = object(output, "brain output");
+      return { ...idea, cot: (idea.cot as string[]).map(fourParts) };
+    }
+    case "commentParts": {
+      // The draft a part-aware reviewer fills: one entry per step it has been
+      // shown, every part key present and empty. This panel always Passes, so
+      // every box stays empty and the prune writes `flaws: []` — the record of
+      // a reviewer that read the chain and faulted nothing.
+      const { step: through, ...rest } = object(output, "comment output");
+      const flaws = Array.from({ length: through as number }, (_, index) => ({
+        step: index + 1,
+        part1: "",
+        part2: "",
+        part3: "",
+        part4: "",
+      }));
+      return { ...rest, flaws };
+    }
+    case "judgeDecisionParts": {
+      const decision = object(output, "judge output");
+      const issues = (Array.isArray(decision.issues) ? decision.issues : []).map((issue) => ({
+        ...object(issue, "judge issue"),
+        part: "part2",
+      }));
+      return { ...decision, issues, flaws: [] };
+    }
+    default:
+      return output;
+  }
+}
+
+/** A chain step as a comparable string, whichever shape the bundle records. */
+function stepText(step: JsonValue): string {
+  if (typeof step === "string") return step;
+  return String(object(step, "chain step").part1 ?? "");
+}
+
 class FakeBrainstormExecutor implements AgentExecutor {
   readonly seen: SeenTask[] = [];
   readonly judgeOrder: string[] = [];
@@ -412,7 +468,14 @@ class FakeBrainstormExecutor implements AgentExecutor {
       default:
         throw new Error(`unexpected role ${role}`);
     }
-    return { taskId: task.taskId, status: "ok", output };
+    // Every branch above writes the legacy form; the delivered schema NAME is
+    // what restates it in four parts, exactly as a real model answers the
+    // schema it is handed.
+    return {
+      taskId: task.taskId,
+      status: "ok",
+      output: asPartsForm(task.outputSchema?.name, output),
+    };
   }
 
   tasks(role: string): readonly SeenTask[] {
@@ -505,7 +568,9 @@ function rosterIds(roster: JsonValue | undefined): readonly string[] {
 function chainOwner(bindings: JsonObject): string | undefined {
   const chain = bindings.chain;
   const first = Array.isArray(chain) ? chain[0] : undefined;
-  const match = typeof first === "string" ? /^(?:COT|REVISED):([^:]+):/.exec(first) : null;
+  // The signature sits at the head of the step whichever shape it is recorded
+  // in: a string step IS the text, a four-part step opens with part1.
+  const match = first === undefined ? null : /^(?:COT|REVISED):([^:]+):/.exec(stepText(first));
   return match?.[1];
 }
 
