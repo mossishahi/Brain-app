@@ -179,9 +179,10 @@ test("panel.select seats from one cxr-sorted queue over levels 2, 3 and 4 of the
   // capacity 3, Physics is skipped (Quantum Optics is within the next 3 live
   // entries), Quantum Optics is skipped (photon counting is imminent), and
   // the TOPIC seats. Machine Learning's topic is NOT within its window, so
-  // the umbrella seats as a block — with the generic BROAD_SEAT_FOCUS, not
-  // its topic's real name (a block win is not the same claim as a topic
-  // winning on its own specific merit).
+  // the umbrella wins the seat — and walks down the queue to claim its
+  // strongest live topic's REAL name as the stated focus, never the generic
+  // phrase (that phrase is the fallback for a branch with no live topic
+  // left, not the label of an ordinary block win).
   assert.deepEqual(selectPanel(experts, 3).members, [
     {
       id: "member-1",
@@ -193,7 +194,7 @@ test("panel.select seats from one cxr-sorted queue over levels 2, 3 and 4 of the
       id: "member-2",
       department: "Computer Science",
       umbrella: "Machine Learning",
-      subfields: ["super relevant to this project"],
+      subfields: ["representation learning"],
     },
     {
       id: "member-3",
@@ -224,14 +225,16 @@ test("panel.select seats from one cxr-sorted queue over levels 2, 3 and 4 of the
   });
 });
 
-test("an umbrella- or department-level block seat gets a generic focus, never every topic name it accumulated", () => {
+test("a department that wins seats through its strongest umbrella and that umbrella's strongest topic", () => {
   // D's umbrellas (U1 cxr=2×0.5=1.0, U2 cxr=1×0.9=0.9) sum to D's own
   // cxr=1.9 — highest in the queue, so D is popped first. Filler
   // department E (no umbrellas of its own, cxr=1×1.2=1.2) sits between D
   // and D's own umbrellas in the sorted queue, so at capacity=1 the
   // look-ahead's single-entry window after D lands on E, not on U1 or U2:
-  // D's own umbrella is never "imminent", so D seats through its best
-  // umbrella (U1, the higher cxr — "most relevant") rather than deferring.
+  // D's own umbrella is never "imminent", so D wins the seat — and walks
+  // down the queue: its strongest live umbrella is U1, and U1's strongest
+  // live topic is topic-a, whose REAL name becomes the seat's stated
+  // focus. topic-b stays in the queue, still able to win its own seat.
   const experts = {
     departments: [
       {
@@ -276,12 +279,114 @@ test("an umbrella- or department-level block seat gets a generic focus, never ev
     {
       id: "member-1",
       department: "D",
-      // The chosen umbrella's REAL name still fills {{umbrella}} — only the
-      // topic list collapses to the generic phrase.
+      // The chosen umbrella's REAL name fills {{umbrella}} and its
+      // strongest topic's REAL name fills {{subfields}} — the generic
+      // phrase appears nowhere on an ordinary branch win.
       umbrella: "U1",
+      subfields: ["topic-a"],
+    },
+  ]);
+});
+
+test("the generic focus phrase survives only as the fallback for a branch with no live topic", () => {
+  // One department, one umbrella, and NOT ONE topic anywhere (the bridge
+  // always injects a catch-all leaf, so only a hand-made artifact can look
+  // like this — which is exactly what makes it the honest last resort).
+  // D defers to U (its umbrella is the next live entry), U wins, walks
+  // down, finds nothing to name, and only then falls back to the phrase.
+  const experts = {
+    departments: [
+      {
+        name: "D",
+        domain: "Domain",
+        count: 2,
+        relevance: 0.5,
+        umbrellas: [{ name: "U", count: 2, relevance: 0.5, subfields: [] }],
+      },
+    ],
+  };
+  assert.deepEqual(selectPanel(experts, 1).members, [
+    {
+      id: "member-1",
+      department: "D",
+      umbrella: "U",
       subfields: ["super relevant to this project"],
     },
   ]);
+});
+
+test("a parent-heavy queue yields a real topic focus per seat, and a claimed branch's siblings stay seatable", () => {
+  // The regression shape of run bsa_20260821-175607_5c9992: the bridge's
+  // roll-up (a parent's count is the sum of its children's, its relevance
+  // their max) puts every parent above ALL of its own children, so the
+  // look-ahead window — filled with other branches' parents — almost never
+  // reaches a topic and umbrellas win seat after seat. Those wins must
+  // carry each branch's strongest topic by NAME; on that run all six seats
+  // read "super relevant to this project" instead.
+  const experts = {
+    departments: [
+      {
+        name: "CS",
+        domain: "Physical Sciences",
+        count: 13,
+        relevance: 0.9,
+        umbrellas: [
+          {
+            name: "AI",
+            count: 10,
+            relevance: 0.9,
+            subfields: [
+              // Strongest by cxr (count-heavy), the walk-down's pick.
+              { name: "machine learning", count: 4, relevance: 0.3 },
+              // The relevance star; survives the AI seat and seats itself.
+              { name: "manifold learning", count: 1, relevance: 0.9 },
+            ],
+          },
+          {
+            name: "CTM",
+            count: 3,
+            relevance: 0.8,
+            subfields: [{ name: "topological data analysis", count: 2, relevance: 0.8 }],
+          },
+        ],
+      },
+      {
+        name: "Math",
+        domain: "Physical Sciences",
+        count: 4,
+        relevance: 0.7,
+        umbrellas: [
+          {
+            name: "S&P",
+            count: 4,
+            relevance: 0.7,
+            subfields: [{ name: "geometric statistics", count: 1, relevance: 0.7 }],
+          },
+        ],
+      },
+    ],
+  };
+
+  // Queue: CS 11.4 · AI 9.0 · Math 2.8 · S&P 2.8 · CTM 2.4 · tda 1.6 ·
+  // ml 1.2 · manifold 0.9 · geostat 0.7. Both departments defer to their
+  // umbrellas; AI and S&P win with no topic in the (shrinking) window and
+  // walk down to their strongest topics; CTM's topic IS within its window,
+  // so the skip-promise lets it seat itself.
+  assert.deepEqual(selectPanel(experts, 3).members, [
+    { id: "member-1", department: "CS", umbrella: "AI", subfields: ["machine learning"] },
+    { id: "member-2", department: "Math", umbrella: "S&P", subfields: ["geometric statistics"] },
+    { id: "member-3", department: "CS", umbrella: "CTM", subfields: ["topological data analysis"] },
+  ]);
+
+  // One more seat of capacity: the AI seat consumed only the topic it
+  // claimed, so the branch's remaining topic is still in the queue and now
+  // wins its own precise seat — a second AI member, different focus.
+  assert.deepEqual(selectPanel(experts, 4).members[3], {
+    id: "member-4",
+    department: "CS",
+    umbrella: "AI",
+    subfields: ["manifold learning"],
+  });
 });
 
 test("panel.select seats sibling topics as separate members under the same umbrella", () => {

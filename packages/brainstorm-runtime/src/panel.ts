@@ -86,22 +86,24 @@ export function scoreExpertiseTree(tree: ExpertsTree): ScoredExpertiseTree {
 }
 
 /**
- * The stated focus of a seat won by an UMBRELLA or a DEPARTMENT (never a
- * single topic seating on its own merit) — deliberately generic rather than
- * every topic name the branch happened to accumulate. Those topics are real
- * pool support (they are why the branch out-scored its competitors and won
- * a seat at all), but most of them, individually, are far weaker evidence
- * than the one or two topics that actually earned the seat: an umbrella's
- * cxr is `count × relevance`, and relevance is the MAX over its children
- * (`experts.bridge`'s fold) — so a seat can be won by one 0.55-relevant
- * topic while its label used to print three near-zero siblings right beside
- * it, unfiltered, as if they mattered equally. Printing this fixed phrase
- * into `{{subfields}}` instead states plainly what is actually true of an
- * umbrella/department-level seat's focus — broad, real, and topically
- * relevant to the run — without claiming a false precision the underlying
- * numbers do not support. Topic-level seats (a single topic winning on its
- * own cxr) keep their real, specific topic name; only a branch that won as
- * a block gets this generic phrase.
+ * The stated focus of a branch-won seat that has NO live topic left to name
+ * — the FALLBACK, never the normal label. A branch that wins a seat walks
+ * down the queue and claims its strongest live topic's real name as the
+ * seat's focus (see selectPanel), so `{{subfields}}` normally carries a
+ * genuine, specific term. This phrase appears only when every topic of the
+ * winning branch was already consumed by earlier seats (or the branch never
+ * carried one): the seat is then honestly broad, and the label says so
+ * without inventing precision.
+ *
+ * History: this phrase briefly served as the label of EVERY branch-won seat
+ * (replacing the older join-every-topic-name list). But the scores make
+ * branch wins the COMMON case, not the rare one — a parent's cxr is the sum
+ * of its children's counts times their maximum relevance, so every parent
+ * outranks all of its own children and the look-ahead window nearly never
+ * reaches a topic — which turned the whole panel's focuses into this one
+ * phrase (observed on bsa_20260821-175607_5c9992: six seats, six identical
+ * generic focuses). The walk-down claim restores a real name per seat while
+ * still never printing the branch's weak siblings as if they mattered.
  */
 const BROAD_SEAT_FOCUS = "super relevant to this project";
 
@@ -175,25 +177,33 @@ export function seatingQueue(tree: ExpertsTree): SeatingQueueEntry[] {
  *
  * 1. every level-2/3/4 node carries its cxr seating value (see
  *    scoreExpertiseTree);
- * 2. all of them are mixed into one queue, sorted by cxr descending;
+ * 2. all of them are mixed into one queue, sorted by cxr descending —
+ *    count × relevance is the ONE ordering, for the queue and for every
+ *    walk-down below;
  * 3. with capacity = panelSize, pop the head of the queue while capacity
  *    remains:
  *    - a TOPIC (level 4) seats a member with that single focus;
  *    - an UMBRELLA (level 3) first LOOKS AHEAD: if any of its own topics sit
- *      within the next `capacity` live queue entries, the umbrella is
- *      skipped without spending capacity — its topics will seat themselves.
- *      Otherwise it seats a member with itself as the umbrella and
- *      `BROAD_SEAT_FOCUS` (a fixed, generic phrase, not its topics' real
- *      names — see that constant) as the stated focus, and removes the
- *      branch's remaining level-4 entries from the queue;
- *    - a DEPARTMENT (level 2) looks ahead the same way: if any of its own
- *      umbrellas sit within the next `capacity` live entries, the department
- *      is skipped without spending capacity. Otherwise it picks its
- *      highest-cxr umbrella still in the queue, seats a member with that
- *      umbrella and `BROAD_SEAT_FOCUS` as its focus, and removes the picked
- *      umbrella and its level-4 entries. A
- *      department whose umbrellas are all consumed (or that houses none)
- *      seats nobody and the loop moves on without spending capacity.
+ *      within the next `capacity` live queue entries (the SHRINKING window —
+ *      exactly the seats still open), the umbrella is skipped without
+ *      spending capacity. The skip is a promise the queue always keeps: at
+ *      most capacity−1 live entries stand before that topic, each consuming
+ *      at most one seat, so the topic is guaranteed to seat itself with its
+ *      real name. Otherwise the umbrella WALKS DOWN the queue to its
+ *      strongest live topic (the first in cxr order) and seats a member with
+ *      the umbrella and THAT topic's real name as the stated focus,
+ *      consuming exactly that topic entry — sibling topics stay in the
+ *      queue and may still win their own seats later. Only an umbrella with
+ *      no live topic left falls back to `BROAD_SEAT_FOCUS`;
+ *    - a DEPARTMENT (level 2) looks ahead the same way over its own
+ *      umbrellas and is skipped without spending capacity when one sits in
+ *      the window. Otherwise it walks down to its strongest live umbrella,
+ *      takes that umbrella's strongest live topic as the seat's stated
+ *      focus, and consumes both entries; the umbrella's remaining topics
+ *      stay seatable. A department whose umbrellas are all consumed (or
+ *      that houses none) seats nobody and the loop moves on without
+ *      spending capacity; a found umbrella with no live topic falls back to
+ *      `BROAD_SEAT_FOCUS`.
  *
  * Exhausted branches leave the queue recursively: whenever a node is
  * consumed, its parent is checked — a parent with no remaining children in
@@ -259,17 +269,16 @@ export function selectPanel(experts: ExpertsTree, panelSize: number): Panel {
     }
   };
 
-  const removeSubfieldEntries = (departmentIndex: number, umbrellaIndex: number): void => {
-    for (const entry of queue) {
-      if (
-        entry.level === 4 &&
-        entry.departmentIndex === departmentIndex &&
-        entry.umbrellaIndex === umbrellaIndex
-      ) {
-        removed.add(entryKey(entry));
-      }
-    }
-  };
+  /**
+   * The strongest LIVE entry satisfying `predicate`, in queue (cxr) order.
+   * Everything above the loop's cursor is already popped and marked removed,
+   * so scanning the whole queue front-to-back is exactly "walk down from
+   * here": the first live hit is the highest-cxr candidate still standing.
+   */
+  const firstLive = (
+    predicate: (candidate: SeatingQueueEntry) => boolean,
+  ): SeatingQueueEntry | undefined =>
+    queue.find((candidate) => !removed.has(entryKey(candidate)) && predicate(candidate));
 
   let capacity = panelSize;
   for (let index = 0; index < queue.length; index += 1) {
@@ -325,11 +334,25 @@ export function selectPanel(experts: ExpertsTree, panelSize: number): Panel {
         cascadeFromDepartment(entry.departmentIndex);
         continue;
       }
+      // No topic within reach: the umbrella wins the seat, and walks down
+      // the queue to claim its strongest live topic as the seat's REAL
+      // focus. Only that one entry is consumed — the siblings stay in the
+      // queue, so a strong branch can still win further, more specific
+      // seats later.
       const umbrella = department.umbrellas[entry.umbrellaIndex]!;
-      const focuses = [BROAD_SEAT_FOCUS];
+      const topicEntry = firstLive(
+        (candidate) =>
+          candidate.level === 4 &&
+          candidate.departmentIndex === entry.departmentIndex &&
+          candidate.umbrellaIndex === entry.umbrellaIndex,
+      );
+      const focuses =
+        topicEntry !== undefined
+          ? [umbrella.subfields[topicEntry.subfieldIndex]!.name]
+          : [BROAD_SEAT_FOCUS];
       if (!seated.has(seatOf(department.name, umbrella.name, focuses))) {
+        if (topicEntry !== undefined) removed.add(entryKey(topicEntry));
         seat(department.name, umbrella.name, focuses);
-        removeSubfieldEntries(entry.departmentIndex, entry.umbrellaIndex);
         capacity -= 1;
       }
       cascadeFromDepartment(entry.departmentIndex);
@@ -346,21 +369,30 @@ export function selectPanel(experts: ExpertsTree, panelSize: number): Panel {
     ) {
       continue;
     }
-    // Otherwise seat through the department's best umbrella still available.
-    let picked: SeatingQueueEntry | undefined;
-    for (const candidate of queue) {
-      if (candidate.level !== 3 || candidate.departmentIndex !== entry.departmentIndex) continue;
-      if (removed.has(entryKey(candidate))) continue;
-      picked = candidate; // the queue is sorted, so the first hit is the max
-      break;
-    }
+    // Otherwise seat through the department's strongest umbrella still
+    // available, with that umbrella's strongest live topic as the seat's
+    // stated focus. Both entries are consumed; the umbrella's remaining
+    // topics stay seatable.
+    const picked = firstLive(
+      (candidate) =>
+        candidate.level === 3 && candidate.departmentIndex === entry.departmentIndex,
+    );
     if (!picked) continue; // nothing left to represent this department with
     const umbrella = department.umbrellas[picked.umbrellaIndex]!;
-    const focuses = [BROAD_SEAT_FOCUS];
+    const topicEntry = firstLive(
+      (candidate) =>
+        candidate.level === 4 &&
+        candidate.departmentIndex === entry.departmentIndex &&
+        candidate.umbrellaIndex === picked.umbrellaIndex,
+    );
+    const focuses =
+      topicEntry !== undefined
+        ? [umbrella.subfields[topicEntry.subfieldIndex]!.name]
+        : [BROAD_SEAT_FOCUS];
     if (seated.has(seatOf(department.name, umbrella.name, focuses))) continue;
     seat(department.name, umbrella.name, focuses);
     removed.add(entryKey(picked));
-    removeSubfieldEntries(entry.departmentIndex, picked.umbrellaIndex);
+    if (topicEntry !== undefined) removed.add(entryKey(topicEntry));
     capacity -= 1;
   }
 

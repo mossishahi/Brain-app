@@ -1024,12 +1024,13 @@ export type PanelMember = z.infer<typeof panelMemberSchema>;
  * The seated panel produced by the deterministic panel-selection activity.
  * The experts tree remains a separate upstream artifact; a member is either
  * one TOPIC (a single, specific research focus, when that topic's own
- * support won it a seat on its own merit) or one UMBRELLA/DEPARTMENT (whose
- * `subfields` is the fixed, generic focus phrase `panel.ts` uses for a
- * branch that won as a block — see `BROAD_SEAT_FOCUS` there — never a list
- * of every topic name the branch happened to accumulate). At least two
- * members are required so that every review step has at least one
- * commentor.
+ * support won it a seat on its own merit) or one UMBRELLA/DEPARTMENT whose
+ * `subfields` carries the winning branch's strongest live topic by its real
+ * name (the walk-down claim in `panel.ts`'s selectPanel — never a list of
+ * every topic name the branch happened to accumulate, and the generic
+ * `BROAD_SEAT_FOCUS` phrase only as the fallback for a branch with no live
+ * topic left to name). At least two members are required so that every
+ * review step has at least one commentor.
  */
 export const panelSchema = z
   .object({
