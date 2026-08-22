@@ -61,7 +61,12 @@ import {
   type ClaudeAgentConnectionValidator,
   type CursorAgentConnectionValidator,
 } from "./settings.js";
-import { agentIdentity, buildJobDetail, compactJobDetail } from "./stage-mapper.js";
+import {
+  agentIdentity,
+  buildJobDetail,
+  compactJobDetail,
+  liveIdentityPanel,
+} from "./stage-mapper.js";
 
 export interface JobManagerOptions {
   readonly workspace: string;
@@ -263,7 +268,10 @@ export class JobManager {
   /** One live-text reader per job, created when a reader first asks. */
   private readonly liveStores = new Map<string, LiveTextStore>();
   /** Cached roster per job, for placing live threads. See livePanel(). */
-  private readonly livePanels = new Map<string, { at: number; panel: readonly PanelMemberView[] }>();
+  private readonly livePanels = new Map<
+    string,
+    { at: number; panel: readonly PanelMemberView[]; final: boolean }
+  >();
   private readonly summaryCache = new Map<
     string,
     { key: string; value: JobSummary }
@@ -694,30 +702,40 @@ export class JobManager {
   }
 
   /**
-   * The roster the live annotation needs, cached. Rebuilt only when a path turns
-   * up that the cache cannot place — a handful of times per run — because
-   * building it means building the whole job detail.
+   * The roster the live annotation needs, cached — the CONFIRMED panel, whose
+   * order is what every seated path's `member[i]` indexes (liveIdentityPanel).
+   *
+   * A roster built after the confirmation gate is trusted for the life of the
+   * run: seats are marked dismissed, never removed, so its indexes cannot
+   * shift. Before that the cache holds the proposal riding through — good
+   * enough for the seatless early stages, which are the only threads that
+   * exist then — and the first SEATED path forces a rebuild, because it means
+   * the run is past the gate and the roster it indexes may differ from the
+   * proposal (a shrink shifts every later seat; an added seat is not in the
+   * proposal at all). Rebuilds stay throttled: building the roster means
+   * building the whole job detail.
    */
   private async livePanel(
     jobId: string,
     paths: readonly string[],
   ): Promise<readonly PanelMemberView[]> {
     const cached = this.livePanels.get(jobId);
-    const unplaceable = paths.some(
-      (path) => /member\[(\d+)\]/.test(path) && (cached?.panel.length ?? 0) === 0,
-    );
-    if (cached !== undefined && !unplaceable) return cached.panel;
+    if (cached !== undefined && cached.final) return cached.panel;
+    const seated = paths.some((path) => /member\[\d+\]/.test(path));
+    if (cached !== undefined && !seated) return cached.panel;
     if (cached !== undefined && this.now() - cached.at < 30_000) return cached.panel;
     let panel: readonly PanelMemberView[] = [];
+    let final = false;
     try {
-      const detail = await this.detail(jobId);
-      for (const stage of detail.stages) {
-        if (stage.id === "select-panel" && stage.panel !== undefined) panel = stage.panel;
-      }
+      const identity = liveIdentityPanel(await this.detail(jobId));
+      panel = identity.panel;
+      // An answered gate with no seats would be a contradiction; refusing to
+      // pin it keeps one malformed detail from freezing identity forever.
+      final = identity.final && identity.panel.length > 0;
     } catch {
       // A job whose detail cannot be built yet simply has no names to attach.
     }
-    this.livePanels.set(jobId, { at: this.now(), panel });
+    this.livePanels.set(jobId, { at: this.now(), panel, final });
     return panel;
   }
 

@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -99,6 +105,49 @@ test("a stale thread is dropped even though no end record arrived", () => {
   }
 });
 
+test("a keepalive holds a quiet thread through the staleness bound", () => {
+  // A model writing its structured output is silent for minutes (its deltas
+  // are never shown), and a long verification command is silent for as long
+  // as it runs. The worker vouches for the task with bare records; the thread
+  // must survive them — and still expire once even those stop, because that
+  // is a worker that died.
+  const { file, cleanup } = temp();
+  try {
+    let now = 1_000_000;
+    const store = new LiveTextStore(file, () => now);
+    const seen = new Map<string, number>();
+    appendFileSync(file, record("member[0]", "now writing the final output"));
+    store.poll();
+    store.deltas(seen);
+    now += 100_000;
+    appendFileSync(file, JSON.stringify({ p: "member[0]" }) + "\n"); // keepalive
+    store.poll();
+    now += 100_000; // 200s since the words — but 100s since the keepalive
+    store.poll();
+    assert.deepEqual(store.deltas(seen), [], "the thread survives: its task still runs");
+    now += 130_000; // no further keepalive: the worker is gone
+    store.poll();
+    assert.deepEqual(store.deltas(seen), [{ path: "member[0]", ended: true }]);
+  } finally {
+    cleanup();
+  }
+});
+
+test("a keepalive never conjures a thread", () => {
+  // A keepalive for a thread that ended (or never spoke) must not put an
+  // empty box on the page: it refreshes what exists, nothing more.
+  const { file, cleanup } = temp();
+  try {
+    const store = new LiveTextStore(file);
+    appendFileSync(file, JSON.stringify({ p: "member[0]" }) + "\n");
+    store.poll();
+    assert.equal(store.liveCount, 0);
+    assert.deepEqual(store.deltas(new Map()), []);
+  } finally {
+    cleanup();
+  }
+});
+
 test("a fresh worker's truncation ends every thread of the last one", () => {
   const { file, cleanup } = temp();
   try {
@@ -135,4 +184,30 @@ test("a missing file is simply no live text", () => {
   const store = new LiveTextStore("/nonexistent/live-text.jsonl");
   store.poll();
   assert.deepEqual(store.deltas(new Map()), []);
+});
+
+test("the worker's keepalive cadence fits inside this reader's staleness bound", () => {
+  // The heartbeat and the bound live in different processes that share only a
+  // file, so nothing at runtime checks they agree — and a staleness bound
+  // tightened below two heartbeats would silently bring back the vanishing
+  // threads this pair of constants exists to prevent.
+  const constant = (source: string, name: string): number =>
+    Number(
+      new RegExp(`${name} = ([\\d_]+)`).exec(source)?.[1]?.replaceAll("_", ""),
+    );
+  const keepalive = constant(
+    readFileSync(new URL("../../../worker/src/live-text.ts", import.meta.url), "utf8"),
+    "LIVE_TEXT_KEEPALIVE_MS",
+  );
+  const stale = constant(
+    readFileSync(new URL("../../src/live-text.ts", import.meta.url), "utf8"),
+    "STALE_MS",
+  );
+  assert.ok(Number.isFinite(keepalive) && keepalive > 0, "the worker declares its heartbeat");
+  assert.ok(Number.isFinite(stale) && stale > 0, "the reader declares its bound");
+  assert.ok(
+    keepalive * 2 <= stale,
+    `two heartbeats (${keepalive}ms apart) must fit inside the staleness bound (${stale}ms), ` +
+      "so one lost write cannot kill a live thread",
+  );
 });

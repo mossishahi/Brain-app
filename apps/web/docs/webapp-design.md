@@ -264,6 +264,20 @@ tails it and holds only live threads, and each SSE frame carries the characters 
 connection's** last frame. A reader who opens the page mid-task gets the thread whole — the part of
 the conversation they walked in on — and deltas after that.
 
+**A quiet model is not a dead one.** A model composing its structured output emits nothing a reader
+is shown for minutes, and a long verification command is silent for as long as it runs — while a
+worker killed mid-task also goes silent, and ITS threads must disappear rather than show a dead agent
+talking. The worker settles the ambiguity: while a task runs it re-announces the task's thread on a
+heartbeat (bare keepalive records, several per staleness window), so a quiet thread holds its last
+words until the real output replaces them, and only a worker that stopped writing altogether has its
+threads expire.
+
+**A thread's identity is stamped against the roster the run executes** — the seats kept at the
+confirmation gate plus the custom seats added there, in fan-out order — never against the proposed
+panel, which stops being the roster the moment the gate shrinks or adds. Stamped against the
+proposal, an added seat's words landed under a seat that was never seated and its first-pass card
+never showed its member thinking.
+
 Every Activity row is annotated with three fixed columns between the timestamp and the message,
 because a review's feed is otherwise a wall of messages with no way to tell whose work is whose:
 **what** the agent is (`COMMENTER`, `JUDGE`, `THINKER`, `REDEVELOPER`, `BRIDGE` — small caps, the

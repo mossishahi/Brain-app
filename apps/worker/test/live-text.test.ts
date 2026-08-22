@@ -75,6 +75,51 @@ test("a fresh worker starts a fresh file", async () => {
   }
 });
 
+test("a quiet thread is kept alive until its task ends", async () => {
+  // The regression this pins: a model writing its structured output emits no
+  // forwardable fragments for minutes, and a long verification command is
+  // silent for as long as it runs. The reader drops any thread that is quiet
+  // past its staleness bound (a killed worker writes no end record), so
+  // without a heartbeat the panel went blank exactly while the model did its
+  // final work — as if the output existed when it did not.
+  const { file, cleanup } = temp();
+  try {
+    const log = createLiveTextLog(file, 20); // a test-sized heartbeat
+    log.note("member[0]", "about to go quiet");
+    log.end("member[1]"); // ended without ever speaking: nothing to vouch for
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    log.end("member[0]");
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    await log.close();
+    const written = lines(file);
+    const isTick = (line: { t?: string; done?: true }): boolean =>
+      line.t === undefined && line.done !== true;
+    const ticks = written.filter((line) => line.p === "member[0]" && isTick(line));
+    assert.ok(
+      ticks.length >= 2,
+      `the quiet thread is re-announced on a cadence (saw ${ticks.length})`,
+    );
+    const doneIndex = written.findIndex(
+      (line) => line.p === "member[0]" && line.done === true,
+    );
+    assert.ok(doneIndex >= 0, "the end record still lands");
+    assert.equal(
+      written
+        .slice(doneIndex + 1)
+        .filter((line) => line.p === "member[0]" && isTick(line)).length,
+      0,
+      "an ended thread is vouched for no further",
+    );
+    assert.equal(
+      written.filter((line) => line.p === "member[1]" && isTick(line)).length,
+      0,
+      "a task that never spoke has no thread to keep alive",
+    );
+  } finally {
+    cleanup();
+  }
+});
+
 test("an unwritable file never touches the run", async () => {
   // Live text is the one channel allowed to fail silently: it exists so a reader
   // has something to watch, and the run must not notice a filesystem blip.

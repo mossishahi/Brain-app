@@ -34,9 +34,12 @@ export interface LiveTextDelta {
 }
 
 /**
- * A thread with no fragment for this long is dropped even without an end
- * record: a worker killed mid-task writes none, and a thread left standing shows
- * a dead agent as talking.
+ * A thread with no record for this long is dropped even without an end record:
+ * a worker killed mid-task writes none, and a thread left standing shows a
+ * dead agent as talking. A LIVE worker keeps its quiet threads inside this
+ * bound with keepalive records (bare lines, several per window), so only a
+ * worker that stopped writing altogether ever trips it — a model silently
+ * writing its structured output for ten minutes does not.
  */
 const STALE_MS = 120_000;
 
@@ -108,7 +111,17 @@ export class LiveTextStore {
         this.markEnded(record.p);
         continue;
       }
-      if (typeof record.t !== "string" || record.t.length === 0) continue;
+      if (typeof record.t !== "string" || record.t.length === 0) {
+        // A bare record is the worker's keepalive: the task still runs, its
+        // model is just quiet — writing the structured output (whose deltas
+        // are never shown), or waiting out a long command. It refreshes the
+        // clock of a thread that exists and nothing more: it must not conjure
+        // an empty thread, and a thread already replaced by its output stays
+        // gone.
+        const thread = this.threads.get(record.p);
+        if (thread !== undefined) thread.updatedAt = this.now();
+        continue;
+      }
       const thread = this.threads.get(record.p);
       if (thread === undefined) {
         this.threads.set(record.p, {

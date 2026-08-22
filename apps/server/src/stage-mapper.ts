@@ -888,6 +888,48 @@ export function agentIdentity(
   };
 }
 
+/**
+ * The roster live-thread identity is stamped against: the panel the run
+ * EXECUTES, in fan-out order.
+ *
+ * Every seated execution path indexes `member[i]` over the confirmed roster —
+ * the seats kept at the confirmation gate plus the custom seats the submitter
+ * added there — and the first-pass stage's members are exactly that array,
+ * with dismissed seats marked in place so indexes never shift. The
+ * select-panel stage shows the PROPOSAL, which is a different list the moment
+ * the gate shrinks or adds: identity stamped against it put an added seat's
+ * words under a seat that was never seated (its card then waited forever with
+ * nothing to show) and shifted every seat after a removal onto its
+ * neighbour's card.
+ *
+ * `final` says whether this roster can still change. Until the confirmation
+ * gate is answered the members are the proposal riding through, and a cache
+ * of them must not outlive the answer; once answered, the roster is fixed for
+ * the life of the run.
+ */
+export function liveIdentityPanel(detail: JobDetail): {
+  readonly panel: readonly PanelMemberView[];
+  readonly final: boolean;
+} {
+  let panel: readonly PanelMemberView[] = [];
+  let final = false;
+  for (const stage of detail.stages) {
+    if (stage.id === "first-pass") {
+      panel = stage.members.map((member) => ({
+        id: member.memberId,
+        department: member.department,
+        umbrella: member.umbrella,
+        subfields: member.subfields,
+        ...(member.dismissed !== undefined ? { dismissed: member.dismissed } : {}),
+      }));
+    }
+    if (stage.id === "confirm-panel") {
+      final = stage.gate.state !== "not-reached" && stage.gate.state !== "pending";
+    }
+  }
+  return { panel, final };
+}
+
 /** Friendly names for the calls a failure most commonly lands on. */
 const CALL_NAMES: Readonly<Record<string, string>> = {
   "develop-idea": "first-pass task",

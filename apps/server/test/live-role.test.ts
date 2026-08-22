@@ -4,7 +4,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { LIVE_NODE_SKILLS } from "../src/job-manager.js";
-import { activityAnnotation } from "../src/stage-mapper.js";
+import { activityAnnotation, liveIdentityPanel } from "../src/stage-mapper.js";
 
 /**
  * The role behind a task reaches the page down two separate channels, and they
@@ -113,4 +113,70 @@ test("every agent node the pinned bundle ships is one the live channel can name"
       "LIVE_NODE_SKILLS, or its thread arrives labelled with its node id and " +
       "no stage panel will show it",
   );
+});
+
+/* ------------------------------------- the roster identity is stamped against */
+
+/** A minimal detail carrying only the stages the roster selector reads. */
+function detailWith(stages: readonly unknown[]): Parameters<typeof liveIdentityPanel>[0] {
+  return { stages } as unknown as Parameters<typeof liveIdentityPanel>[0];
+}
+
+const firstPassSeat = (id: string, umbrella: string): unknown => ({
+  memberId: id,
+  label: umbrella,
+  department: "Computer Science",
+  umbrella,
+  subfields: [],
+  status: "thinking",
+});
+
+test("live identity is stamped against the roster the run executes", () => {
+  // Every seated path's member[i] indexes the CONFIRMED panel — the seats
+  // kept at the gate plus the custom seats added there — which is exactly the
+  // first-pass stage's members. The select-panel stage shows the PROPOSAL,
+  // and stamping identity against it put an added seat's words under a seat
+  // that was never seated: its card waited forever while its member spoke,
+  // and every seat past a removal wore its neighbour's thread.
+  const detail = detailWith([
+    {
+      id: "select-panel",
+      // The proposal: three seats, of which the user kept two and added one.
+      panel: [
+        { id: "member-1", department: "CS", umbrella: "AI", subfields: [] },
+        { id: "member-2", department: "CS", umbrella: "Systems", subfields: [] },
+        { id: "member-3", department: "Math", umbrella: "Topology", subfields: [] },
+      ],
+    },
+    { id: "confirm-panel", gate: { state: "approved" } },
+    {
+      id: "first-pass",
+      members: [
+        firstPassSeat("member-1", "Artificial Intelligence"),
+        firstPassSeat("member-3", "Geometry and Topology"),
+        firstPassSeat("member-user-1", "Machine Learning"),
+      ],
+    },
+  ]);
+  const { panel, final } = liveIdentityPanel(detail);
+  assert.deepEqual(
+    panel.map((member) => member.id),
+    ["member-1", "member-3", "member-user-1"],
+    "the confirmed roster in fan-out order, never the proposal",
+  );
+  assert.equal(final, true, "an answered gate pins the roster for the run");
+});
+
+test("a roster is only final once the confirmation gate is answered", () => {
+  // Before the answer the members are the proposal riding through — usable
+  // for the seatless early stages, but never to be cached past the gate.
+  for (const state of ["not-reached", "pending"]) {
+    const { final } = liveIdentityPanel(
+      detailWith([
+        { id: "confirm-panel", gate: { state } },
+        { id: "first-pass", members: [firstPassSeat("member-1", "AI")] },
+      ]),
+    );
+    assert.equal(final, false, `a "${state}" gate leaves the roster provisional`);
+  }
 });

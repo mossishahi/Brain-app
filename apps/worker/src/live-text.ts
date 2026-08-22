@@ -20,11 +20,15 @@
  */
 import { appendFile, writeFile } from "node:fs/promises";
 
-/** One line of the transport: fragments for a task, or that task's end. */
+/**
+ * One line of the transport: fragments for a task, that task's end, or — with
+ * neither field — a KEEPALIVE saying the task still runs while its model is
+ * quiet.
+ */
 export interface LiveTextRecord {
   /** Execution path of the task, which is how every other channel names it. */
   readonly p: string;
-  /** Appended fragment. Absent on an end record. */
+  /** Appended fragment. Absent on an end record and on a keepalive. */
   readonly t?: string;
   /** Present when the task is over and its thread must be dropped. */
   readonly done?: true;
@@ -38,11 +42,27 @@ export interface LiveTextRecord {
 const FLUSH_MS = 1_000;
 
 /**
- * A task's thread is dropped this long after its last fragment even if no end
+ * A task's thread is dropped this long after its last record even if no end
  * record arrives — a worker killed mid-task writes no end record, and a thread
  * that lingers forever would show a dead agent as talking.
  */
 export const LIVE_TEXT_STALE_MS = 120_000;
+
+/**
+ * How often a still-open thread is re-announced while its model is quiet.
+ *
+ * A QUIET thread is not a dead one: a model writing its structured output
+ * emits nothing forwardable for minutes (tool-input deltas are never shown to
+ * readers), and a long verification command is silent for as long as it runs.
+ * Both stretches used to outlive the reader's staleness bound, so the thread
+ * vanished mid-task — the panel went blank exactly when the model was doing
+ * its final work, as if the output existed when it did not. The keepalive is
+ * the worker saying "still running": a bare record (no text, no end) that only
+ * refreshes the reader's clock. Nearly three fit inside the staleness bound,
+ * so one lost write cannot kill a live thread — while a killed worker stops
+ * writing them, and its threads still expire the way they always did.
+ */
+export const LIVE_TEXT_KEEPALIVE_MS = 45_000;
 
 export interface LiveTextLog {
   /** Appends a fragment to a task's thread. */
@@ -58,9 +78,17 @@ export function noLiveText(): LiveTextLog {
   return { note: () => {}, end: () => {}, close: () => Promise.resolve() };
 }
 
-export function createLiveTextLog(file: string): LiveTextLog {
+export function createLiveTextLog(
+  file: string,
+  keepaliveMs: number = LIVE_TEXT_KEEPALIVE_MS,
+): LiveTextLog {
   let pending = new Map<string, string>();
   const ended: string[] = [];
+  // Threads that have said something and whose task has not ended: the ones
+  // the keepalive vouches for. A task the model never spoke in has no thread
+  // to keep alive.
+  const open = new Set<string>();
+  let ticks: string[] = [];
   let timer: NodeJS.Timeout | undefined;
   let chain: Promise<void> = Promise.resolve();
   let failed = false;
@@ -72,12 +100,14 @@ export function createLiveTextLog(file: string): LiveTextLog {
   });
 
   const flush = (): void => {
-    if (failed || (pending.size === 0 && ended.length === 0)) return;
+    if (failed || (pending.size === 0 && ended.length === 0 && ticks.length === 0)) return;
     const lines: string[] = [];
     for (const [p, t] of pending) lines.push(JSON.stringify({ p, t } satisfies LiveTextRecord));
     for (const p of ended) lines.push(JSON.stringify({ p, done: true } satisfies LiveTextRecord));
+    for (const p of ticks) lines.push(JSON.stringify({ p } satisfies LiveTextRecord));
     pending = new Map();
     ended.length = 0;
+    ticks = [];
     chain = chain.then(async () => {
       try {
         await appendFile(file, lines.join("\n") + "\n", "utf8");
@@ -101,19 +131,33 @@ export function createLiveTextLog(file: string): LiveTextLog {
     timer.unref();
   };
 
+  // The keepalive heartbeat: every open thread is re-announced on a fixed
+  // cadence, fragments or not. Pending fragments would refresh the reader's
+  // clock on their own, but a bare extra record costs a few bytes and a
+  // conditional here would be a second copy of the staleness rule.
+  const keepalive = setInterval(() => {
+    if (failed || open.size === 0) return;
+    ticks = [...open];
+    flush();
+  }, keepaliveMs);
+  keepalive.unref();
+
   return {
     note(path, text) {
       if (failed || text.length === 0) return;
       pending.set(path, (pending.get(path) ?? "") + text);
+      open.add(path);
       arm();
     },
     end(path) {
       if (failed) return;
       pending.delete(path);
+      open.delete(path);
       ended.push(path);
       arm();
     },
     async close() {
+      clearInterval(keepalive);
       if (timer !== undefined) {
         clearTimeout(timer);
         timer = undefined;
