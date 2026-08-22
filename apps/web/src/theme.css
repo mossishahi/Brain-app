@@ -880,10 +880,12 @@ select:disabled {
 }
 
 /*
- * The dashboard's job-state strip: a thin always-visible line whose color IS
- * the run's status. Amber with a moving shimmer while waiting for the queue
- * (a retry becomes visible the instant the server accepts it), steady green
- * while running, red on failure.
+ * The dashboard's job-state strip: a thin line drawn only for states that
+ * need the user — amber shimmer while a credit window refills, red on
+ * failure/interruption. Queued and suspended deliberately draw nothing:
+ * both occur on every routine stage transition (a gate suspends, its answer
+ * queues the resume), and an amber bar flashing across the top twice per
+ * run announced ordinary machinery as trouble.
  */
 .job-state-strip {
   height: 3px;
@@ -892,8 +894,6 @@ select:disabled {
   background: var(--border);
 }
 
-.job-state-strip-queued,
-.job-state-strip-suspended,
 .job-state-strip-credit-blocked {
   background: repeating-linear-gradient(
     90deg,
@@ -916,8 +916,6 @@ select:disabled {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .job-state-strip-queued,
-  .job-state-strip-suspended,
   .job-state-strip-credit-blocked {
     animation: none;
   }

@@ -34,6 +34,7 @@ import {
   formatClock,
   formatDuration,
   jobDot,
+  jobStatusChip,
   pickDefaultStage,
   prefersReducedMotion,
   stageDot,
@@ -682,14 +683,14 @@ export function Dashboard({
     // Everything about this run hangs off one scope: the stylesheet stills its
     // animations through data-run-live, components ask useRunLive().
     <RunScope status={job.status} className="dash">
-      {/* The state strip renders ONLY for attention states — amber shimmer
-          while waiting for the queue, red when failed/interrupted — so a
-          retry is VISIBLE the moment the server accepts it. Healthy states
-          (running, completed, cancelled) draw no line: the status dot in the
-          header already says so, and a permanent colored bar is noise. */}
-      {(job.status === "queued" ||
-        job.status === "suspended" ||
-        job.status === "credit-blocked" ||
+      {/* The state strip renders ONLY for states that need the user — amber
+          shimmer while a credit window refills, red when failed/interrupted.
+          "queued" and "suspended" are deliberately NOT here: both occur on
+          every routine stage transition (a gate suspends, its answer queues
+          the resume), and an amber bar flashing across the top twice per run
+          announced ordinary machinery as trouble. The gate card, the header
+          word, and the stages themselves say what is happening. */}
+      {(job.status === "credit-blocked" ||
         job.status === "failed" ||
         job.status === "orphaned") && (
         <div
@@ -715,7 +716,7 @@ export function Dashboard({
         )}
         <span className="dash-status">
           <Dot state={jobDot(job.status)} />
-          {job.status}
+          {jobStatusChip(job)}
         </span>
         {/* Controlling the run from where it is watched. Pause keeps it and
             stops the worker; stop ends it for good and asks first, because it

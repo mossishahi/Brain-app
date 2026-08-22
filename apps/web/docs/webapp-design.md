@@ -619,6 +619,33 @@ A credit-blocked job keeps its interrupted stage selected with a warning badge a
 by inline confirmation. Cancelling marks the job terminal, so the restart-safe scheduler never
 submits it.
 
+### Stage transitions read as one continuous run
+
+Every gate crossing passes through internal states — the run suspends at the gate, the answer
+(the submitter's or the countdown's) submits a resume, and the job sits "queued" until a worker
+picks it up, which a scheduler queue can stretch to minutes. None of that machinery is the
+user's: the dashboard used to flash an amber strip for "suspended" and again for "queued", and
+reset every stage to "pending" for the whole queued window, so a routine Process → Decompose
+transition read as two alarms and a wiped run.
+
+The rules that keep the transition smooth:
+
+- **Recorded progress stands.** A queued job with a checkpoint keeps every stage exactly as
+  derived from the journal and artifacts; only a job with NOTHING recorded (a fresh submission,
+  or one resubmitted before its first checkpoint) is all-pending while queued.
+- **An answered gate never re-offers.** While the resume is queued, the checkpoint on disk still
+  says "suspended with a pending gate"; the server records the ANSWER on the job the moment the
+  resume is submitted, and the mapper shows the decision (approved / shrunk / revised, with the
+  kept-plus-added panel) through the window. The journal's own recorded response supersedes it
+  the moment the resumed run writes one.
+- **The words are the run's, not the scheduler's.** The header chip reads "waiting for you"
+  while a gate waits and "continuing…" while a mid-run resume sits in the queue ("queued" stays
+  for a fresh submission, where the wait is real and worth naming); the landing card says
+  "continuing from checkpoint…".
+- **The amber state strip is for states that need the user** — the credit window, a failure, an
+  interruption. Suspended and queued draw no strip: the gate card, the header word, and the
+  stages themselves already say what is happening.
+
 ## Live updates
 
 The dashboard subscribes to `GET /api/jobs/:id/stream` (SSE, full `JobDetail` snapshots,

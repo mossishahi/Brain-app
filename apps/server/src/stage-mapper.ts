@@ -1871,6 +1871,53 @@ function gateDecision(entries: readonly JournalEntry[]): {
   };
 }
 
+/**
+ * The record's in-flight gate answer, in the journal decision's shape.
+ *
+ * Between answering a gate and the resumed worker's FIRST checkpoint write —
+ * a window a scheduler queue can stretch to minutes — the checkpoint on disk
+ * still says "suspended with a pending gate". The journal therefore has no
+ * response to read yet, and deriving the view from the checkpoint alone
+ * re-offered a card that was already answered and reset the stage to
+ * machinery words. The record's answer is what bridges that window; the
+ * journal's own recorded response is authoritative the moment it exists and
+ * is always preferred by the callers.
+ *
+ * Ids for user-added seats are minted here exactly as the runtime will mint
+ * them on replay (`member-user-<position>`, in submission order — see
+ * brainstorm-runtime/gates.ts), so the hop view and the replayed view name
+ * the same seats.
+ */
+function recordGateAnswer(
+  record: JobRecord,
+  gateKey: string,
+):
+  | {
+      action: string;
+      members?: string[];
+      added: PanelMemberView[];
+      type?: string;
+      requestedOutputs?: { title: string; ask: string }[];
+    }
+  | undefined {
+  const answer = record.gateAnswer;
+  if (!answer || answer.gateKey !== gateKey) return undefined;
+  return {
+    action: answer.action,
+    ...(answer.members !== undefined ? { members: [...answer.members] } : {}),
+    added: (answer.addedMembers ?? []).map((seat, index) => ({
+      id: `member-user-${index + 1}`,
+      department: seat.department,
+      umbrella: seat.umbrella,
+      subfields: [...seat.subfields],
+    })),
+    ...(answer.type !== undefined ? { type: answer.type } : {}),
+    ...(answer.requestedOutputs !== undefined
+      ? { requestedOutputs: answer.requestedOutputs.map((entry) => ({ ...entry })) }
+      : {}),
+  };
+}
+
 /** The classification gate's recorded answer (manual or auto-approved). */
 function classificationGateDecision(entries: readonly JournalEntry[]): {
   action?: string;
@@ -2598,7 +2645,14 @@ function stageStatus(
 ): StageStatus {
   if (checkpoint?.status === "completed") return "completed";
   if (failedStage === id || timing.error) return "failed";
+  // A queued job with a suspended checkpoint is a gate that was ANSWERED: the
+  // resume is in the scheduler queue and the checkpoint simply has not been
+  // rewritten yet. Painting the stage "suspended" through that window showed
+  // the submitter machinery for a decision they had already made (or the
+  // countdown made for them) — the stage falls through to the decided/active
+  // reading instead, so the hop looks like one continuous run.
   if (
+    jobStatus !== "queued" &&
     checkpoint?.status === "suspended" &&
     checkpoint.pendingGates.some((gate) => stageForPath(gate.path) === id)
   ) {
@@ -2687,7 +2741,27 @@ export function buildJobDetail(input: MapperInput): JobDetail {
         /\/classify-input(?:-execute)?::result$/.test(key)
       ),
   );
-  const classificationDecision = classificationGateDecision(entries);
+  // Journal first — the replayed run's own record — then the answer the
+  // record carries while the resume is still in the scheduler queue.
+  const journalClassificationDecision = classificationGateDecision(entries);
+  const recordClassificationAnswer = recordGateAnswer(
+    input.record,
+    "confirm-classification",
+  );
+  const classificationDecision =
+    journalClassificationDecision.action !== undefined ||
+    recordClassificationAnswer === undefined
+      ? journalClassificationDecision
+      : {
+          action: recordClassificationAnswer.action,
+          ...(recordClassificationAnswer.type !== undefined
+            ? { type: recordClassificationAnswer.type }
+            : {}),
+          ...(recordClassificationAnswer.requestedOutputs !== undefined
+            ? { requestedOutputs: recordClassificationAnswer.requestedOutputs }
+            : {}),
+          automatic: false,
+        };
   // The gate's revision is applied to run state only (never re-persisted as
   // an artifact), so the dashboard mirrors it onto the structured-input view.
   if (
@@ -2746,7 +2820,22 @@ export function buildJobDetail(input: MapperInput): JobDetail {
       entries.find((entry) => entry.key.endsWith("/select-panel::result"))?.value,
     );
   }
-  const gate = gateDecision(entries);
+  // Journal first, then the record's in-flight answer — same rule as the
+  // classification decision above, so the confirmed panel (kept seats plus
+  // the user's custom ones) renders while the resume waits in the queue.
+  const journalGate = gateDecision(entries);
+  const recordPanelAnswer = recordGateAnswer(input.record, "confirm-panel");
+  const gate =
+    journalGate.action !== undefined || recordPanelAnswer === undefined
+      ? journalGate
+      : {
+          action: recordPanelAnswer.action,
+          ...(recordPanelAnswer.members !== undefined
+            ? { members: recordPanelAnswer.members }
+            : {}),
+          added: recordPanelAnswer.added,
+          automatic: false,
+        };
   const retained = new Set(gate.members ?? selectedPanel.map((member) => member.id));
   const keptPanel =
     gate.action === "shrink"
@@ -2948,7 +3037,12 @@ export function buildJobDetail(input: MapperInput): JobDetail {
       )?.at;
   const gateResolvedAt = gateResolvedAtFor("confirm-panel");
 
+  // A queued job's suspended checkpoint is a gate that was already answered
+  // (answering is what queues the resume), so it must not read as pending —
+  // that is how an answered card re-offered itself for as long as the resume
+  // sat in the scheduler queue.
   const classificationPending =
+    input.status !== "queued" &&
     checkpoint?.status === "suspended" &&
     checkpoint.pendingGates.some((gate) => gate.gateKey === "confirm-classification");
   const classificationView: NonNullable<
@@ -2980,9 +3074,11 @@ export function buildJobDetail(input: MapperInput): JobDetail {
       }
     : undefined;
 
-  const confirmGate: ConfirmPanelStage["gate"] = checkpoint?.pendingGates.some(
-    (candidate) => stageForPath(candidate.path) === "confirm-panel",
-  )
+  const confirmGate: ConfirmPanelStage["gate"] =
+    input.status !== "queued" &&
+    checkpoint?.pendingGates.some(
+      (candidate) => stageForPath(candidate.path) === "confirm-panel",
+    )
     ? { state: "pending" }
     : gate.automatic || (
         input.settings.panelConfirmation === "auto" &&
@@ -3120,7 +3216,15 @@ export function buildJobDetail(input: MapperInput): JobDetail {
     ]),
   );
 
-  if (input.status === "queued") {
+  // Only a job that has RECORDED nothing is all-pending while queued: a
+  // fresh submission, or one resubmitted before its first checkpoint. A
+  // queued job WITH a checkpoint is a run between two workers — a gate hop,
+  // a retry, a resume — and erasing its stages here is what made every
+  // routine stage transition flash the whole dashboard back to "pending"
+  // while the resume sat in the scheduler queue. Recorded progress stands;
+  // the run-liveness switch (jobIsExecuting) already keeps anything still
+  // marked active from claiming motion.
+  if (input.status === "queued" && checkpoint === undefined) {
     for (const id of STAGE_IDS) statuses.set(id, "pending");
   } else if (input.status === "cancelled" && checkpoint?.status !== "completed") {
     const active = STAGE_IDS.find((id) => statuses.get(id) === "active");
@@ -3391,8 +3495,14 @@ export function buildJobDetail(input: MapperInput): JobDetail {
   )?.id;
   const contentBundle = readContentBundle(input.jobDir);
   // The pending gate view, enriched with the record's auto-approve countdown
-  // so the dashboard can render the progress bar (and its held state).
-  const pendingGateBase = pendingGate(checkpoint, selectedPanel, classificationValue);
+  // so the dashboard can render the progress bar (and its held state). A
+  // queued job carries none: its gate was answered — answering is what
+  // queued the resume — and the stale suspended checkpoint must not offer
+  // the card again while the submission waits for a worker.
+  const pendingGateBase =
+    input.status === "queued"
+      ? undefined
+      : pendingGate(checkpoint, selectedPanel, classificationValue);
   const autoApprove = input.record.gateAutoApprove;
   const pendingGateView: PendingGateView | undefined = pendingGateBase
     ? {

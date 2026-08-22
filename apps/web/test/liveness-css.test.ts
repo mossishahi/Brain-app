@@ -15,8 +15,9 @@ const CSS = readFileSync(new URL("../../src/theme.css", import.meta.url), "utf8"
  */
 const NOT_RUN_LIVENESS: ReadonlyMap<string, string> = new Map([
   ["ambient", "page background décor, unrelated to any run"],
-  ["job-state-strip-queued", "says WAITING — which is what a stopped run does"],
-  ["job-state-strip-suspended", "says WAITING for the submitter's answer"],
+  // queued/suspended strips are gone entirely: both states occur on every
+  // routine stage transition, and their amber bar announced machinery as
+  // trouble. Only the credit strip remains — a real wait for the user.
   ["job-state-strip-credit-blocked", "says WAITING for the credit window"],
   ["btn-spinner", "a control the user just pressed — pausing must not freeze it"],
   ["save-spinner", "settings being saved, not a run"],

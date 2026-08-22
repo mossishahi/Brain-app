@@ -1968,6 +1968,25 @@ export class JobManager {
       record.status = "queued";
       record.submissionCount = number;
       record.autoResumePending = { submittedAt: this.now() };
+      // The decision, recorded where the dashboard can read it while the
+      // resume sits in the scheduler queue: the checkpoint keeps saying
+      // "suspended with a pending gate" until the new worker's first write,
+      // and without this the stage mapper had only machinery to show for
+      // that whole window. The journal's own response supersedes it the
+      // moment the resumed run records one.
+      record.gateAnswer = {
+        gateKey: answer.gateKey,
+        action: answer.action,
+        ...(answer.members !== undefined ? { members: answer.members } : {}),
+        ...(answer.addedMembers !== undefined && answer.addedMembers.length > 0
+          ? { addedMembers: answer.addedMembers }
+          : {}),
+        ...(answer.type !== undefined ? { type: answer.type } : {}),
+        ...(answer.requestedOutputs !== undefined
+          ? { requestedOutputs: answer.requestedOutputs }
+          : {}),
+        at: this.now(),
+      };
       delete record.gateAutoApprove;
       record.updatedAt = this.now();
       this.write(record);

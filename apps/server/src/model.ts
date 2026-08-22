@@ -1,4 +1,5 @@
 import type {
+  CustomSeatRequest,
   JobStatus,
   RunnerKind,
   ServerSettings,
@@ -59,6 +60,27 @@ export interface JobRecord {
     readonly deadlineAt: number;
     readonly totalMs: number;
     readonly heldAt?: number;
+  };
+  /**
+   * The answer the last gate was resumed with, written the moment its resume
+   * submission lands. Between that moment and the resumed worker's first
+   * checkpoint write, the checkpoint on disk still says "suspended with a
+   * pending gate" — a window that can last minutes in a scheduler queue —
+   * and the dashboard must show the DECISION during it, not the machinery:
+   * the stage reads decided, the card never re-offers, and the transition to
+   * the next stage looks like one continuous run. The journal's own recorded
+   * response stays authoritative the moment it exists; this is only the
+   * bridge across the queue. Never cleared — a stale entry is ignored,
+   * because the journal wins and each entry names its gate.
+   */
+  gateAnswer?: {
+    readonly gateKey: string;
+    readonly action: "approve" | "shrink" | "revise";
+    readonly members?: readonly string[];
+    readonly addedMembers?: readonly CustomSeatRequest[];
+    readonly type?: string;
+    readonly requestedOutputs?: readonly { title: string; ask: string }[];
+    readonly at: number;
   };
   /** Immutable remote content snapshot used by this job. */
   contentBundle?: {

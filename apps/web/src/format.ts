@@ -83,6 +83,25 @@ export function stageDot(status: StageStatus): DotState {
   }
 }
 
+/**
+ * The dashboard header's status word. Two internal states are given the
+ * user's words: "suspended" always means a gate is waiting for the
+ * submitter, and a mid-run "queued" (any stage already completed) is a run
+ * continuing from its checkpoint across a gate answer, a retry, or a resume
+ * — the scheduler's own vocabulary described the machinery, not the run.
+ * A fresh submission keeps "queued": nothing has happened yet, and on a
+ * busy cluster that wait is real and worth naming.
+ */
+export function jobStatusChip(
+  job: Pick<JobSummary, "status" | "progress">,
+): string {
+  if (job.status === "suspended") return "waiting for you";
+  if (job.status === "queued" && (job.progress?.completedStages ?? 0) > 0) {
+    return "continuing…";
+  }
+  return job.status;
+}
+
 const RUNNING_STAGE_LINES: Partial<Record<StageId, string>> = {
   "process-input": "processing input…",
   "decompose-experts": "decomposing expertise…",
@@ -98,11 +117,16 @@ const RUNNING_STAGE_LINES: Partial<Record<StageId, string>> = {
 export function jobStatusLine(job: JobSummary): string {
   switch (job.status) {
     case "queued":
-      return "queued";
+      // A mid-run queue wait (gate answered, retry, resume) reads as the
+      // continuation it is; only a run with nothing recorded yet is "queued".
+      return (job.progress?.completedStages ?? 0) > 0
+        ? "continuing from checkpoint…"
+        : "queued";
     case "paused":
       return "paused — resume when you are ready";
     case "suspended":
-      return "waiting for your panel confirmation";
+      // Either gate — the reading of the submission or the seated panel.
+      return "waiting for your confirmation";
     case "credit-blocked": {
       const retryAt = job.creditBlock?.retryAt;
       if (retryAt === undefined) {

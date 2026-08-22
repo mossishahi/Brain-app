@@ -2445,3 +2445,261 @@ test("an llm_call row carries the id of its record, and an older run's rows are 
     rmSync(workspace, { recursive: true, force: true });
   }
 });
+
+/**
+ * The stage-transition hop: a gate is answered, its resume sits in the
+ * scheduler queue, and the checkpoint on disk still says "suspended with a
+ * pending gate". The dashboard must show one continuous run through that
+ * window — recorded stages stand, the answered gate reads decided from the
+ * record, and no card is re-offered. Erasing every stage to "pending" here
+ * is what used to flash the whole dashboard blank on every routine
+ * transition.
+ */
+test("a queued gate resume keeps recorded stages and shows the decision, not the machinery", () => {
+  const workspace = mkdtempSync(join(tmpdir(), "stage-mapper-test-"));
+  try {
+    const sessionDir = join(workspace, "session");
+    const jobDir = join(workspace, "job");
+    mkdirSync(join(sessionDir, "artifacts"), { recursive: true });
+    mkdirSync(jobDir, { recursive: true });
+    writeFileSync(
+      join(sessionDir, "checkpoint.json"),
+      JSON.stringify({
+        runId: "job-1",
+        workflowId: "brainstorm",
+        status: "suspended",
+        input: {},
+        journal: [],
+        pendingGates: [
+          {
+            gateKey: "confirm-panel",
+            journalKey: "brainstorm-root/confirm-panel/confirm-panel-wait::response",
+            path: "brainstorm-root/confirm-panel/confirm-panel-wait",
+          },
+        ],
+        seq: 3,
+        updatedAt: Date.now(),
+      }),
+    );
+    writeFileSync(
+      join(sessionDir, "artifacts", "index.json"),
+      JSON.stringify({
+        refs: [
+          {
+            id: "a-processor",
+            metadata: { schema: "processorOutput", path: "input" },
+          },
+          { id: "a-panel", metadata: { schema: "panel", path: "panel" } },
+        ],
+      }),
+    );
+    writeFileSync(
+      join(sessionDir, "artifacts", "a-processor"),
+      JSON.stringify({
+        type: "research idea",
+        title: "t",
+        question: "q",
+        context: "c",
+        attachments: [],
+        assumptions: [],
+        cotSteps: 4,
+      }),
+    );
+    writeFileSync(
+      join(sessionDir, "artifacts", "a-panel"),
+      JSON.stringify({
+        members: [
+          { id: "member-1", department: "Physics", umbrella: "Quantum Optics", subfields: [] },
+          { id: "member-2", department: "Biology", umbrella: "Systems Biology", subfields: [] },
+        ],
+      }),
+    );
+
+    const record: JobRecord = {
+      jobId: "job-1",
+      topic: "topic",
+      status: "queued",
+      runner: "local",
+      createdAt: 1,
+      updatedAt: 2,
+      gateAnswer: {
+        gateKey: "confirm-panel",
+        action: "approve",
+        addedMembers: [
+          { department: "Math", umbrella: "Topology", subfields: ["knots"] },
+        ],
+        at: 3,
+      },
+    };
+    const detail = buildJobDetail({
+      record,
+      status: "queued",
+      sessionDir,
+      jobDir,
+      // A suspended gate only exists under manual confirmation — auto mode
+      // compiles the gate away in the worker and never suspends.
+      settings: { ...settings, panelConfirmation: "manual" },
+    });
+
+    const byId = new Map(detail.stages.map((stage) => [stage.id, stage]));
+    assert.equal(byId.get("process-input")?.status, "completed");
+    assert.equal(byId.get("select-panel")?.status, "completed");
+    const confirm = byId.get("confirm-panel");
+    assert.ok(confirm && confirm.id === "confirm-panel");
+    assert.equal(confirm.status, "completed");
+    assert.equal(confirm.gate.state, "approved");
+    assert.deepEqual(confirm.gate.addedMemberIds, ["member-user-1"]);
+    assert.equal(detail.pendingGate, undefined, "an answered gate offers no card");
+    const firstPass = byId.get("first-pass");
+    assert.ok(firstPass && firstPass.id === "first-pass");
+    assert.deepEqual(
+      firstPass.members.map((member) => member.memberId),
+      ["member-1", "member-2", "member-user-1"],
+      "the confirmed panel — kept plus added — renders while the resume waits",
+    );
+    assert.ok((detail.progress?.completedStages ?? 0) >= 3);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("a queued classification revise shows the revised reading while the resume waits", () => {
+  const workspace = mkdtempSync(join(tmpdir(), "stage-mapper-test-"));
+  try {
+    const sessionDir = join(workspace, "session");
+    const jobDir = join(workspace, "job");
+    mkdirSync(join(sessionDir, "artifacts"), { recursive: true });
+    mkdirSync(jobDir, { recursive: true });
+    writeFileSync(
+      join(sessionDir, "checkpoint.json"),
+      JSON.stringify({
+        runId: "job-1",
+        workflowId: "brainstorm",
+        status: "suspended",
+        input: {},
+        journal: [],
+        pendingGates: [
+          {
+            gateKey: "confirm-classification",
+            journalKey:
+              "brainstorm-root/confirm-classification/confirm-classification-wait::response",
+            path: "brainstorm-root/confirm-classification/confirm-classification-wait",
+          },
+        ],
+        seq: 2,
+        updatedAt: Date.now(),
+      }),
+    );
+    writeFileSync(
+      join(sessionDir, "artifacts", "index.json"),
+      JSON.stringify({
+        refs: [
+          {
+            id: "a-processor",
+            metadata: { schema: "processorOutput", path: "input" },
+          },
+          {
+            id: "a-classification",
+            metadata: { schema: "taskClassification", path: "classification" },
+          },
+        ],
+      }),
+    );
+    writeFileSync(
+      join(sessionDir, "artifacts", "a-processor"),
+      JSON.stringify({
+        type: "research idea",
+        title: "t",
+        question: "q",
+        context: "c",
+        attachments: [],
+        assumptions: [],
+        cotSteps: 4,
+      }),
+    );
+    writeFileSync(
+      join(sessionDir, "artifacts", "a-classification"),
+      JSON.stringify({
+        primary: { type: "research idea", reason: "reads as a sketch" },
+        alternative: { type: "open problem", reason: "names a formal target" },
+        requestedOutputs: [],
+      }),
+    );
+
+    const record: JobRecord = {
+      jobId: "job-1",
+      topic: "topic",
+      status: "queued",
+      runner: "local",
+      createdAt: 1,
+      updatedAt: 2,
+      gateAnswer: {
+        gateKey: "confirm-classification",
+        action: "revise",
+        type: "open problem",
+        at: 3,
+      },
+    };
+    const detail = buildJobDetail({
+      record,
+      status: "queued",
+      sessionDir,
+      jobDir,
+      settings,
+    });
+
+    const stage = detail.stages.find((candidate) => candidate.id === "process-input");
+    assert.ok(stage && stage.id === "process-input");
+    assert.equal(stage.status, "completed");
+    assert.equal(stage.classification?.gate.state, "revised");
+    assert.equal(stage.classification?.gate.chosenType, "open problem");
+    assert.equal(
+      stage.output?.type,
+      "open problem",
+      "the revised type mirrors onto the structured input during the hop",
+    );
+    assert.equal(detail.pendingGate, undefined);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("a queued job with nothing recorded stays all-pending", () => {
+  const workspace = mkdtempSync(join(tmpdir(), "stage-mapper-test-"));
+  try {
+    const sessionDir = join(workspace, "session");
+    const jobDir = join(workspace, "job");
+    mkdirSync(sessionDir, { recursive: true });
+    mkdirSync(jobDir, { recursive: true });
+    // Stale events from a worker that died before its first checkpoint: the
+    // resubmitted job must not read them as live activity while it waits.
+    writeFileSync(
+      join(jobDir, "events.jsonl"),
+      JSON.stringify({
+        type: "node:started",
+        seq: 1,
+        at: 1,
+        path: "brainstorm-root/process-input",
+        kind: "sequence",
+      }) + "\n",
+    );
+    const record: JobRecord = {
+      jobId: "job-1",
+      topic: "topic",
+      status: "queued",
+      runner: "local",
+      createdAt: 1,
+      updatedAt: 2,
+    };
+    const detail = buildJobDetail({
+      record,
+      status: "queued",
+      sessionDir,
+      jobDir,
+      settings,
+    });
+    assert.ok(detail.stages.every((stage) => stage.status === "pending"));
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
