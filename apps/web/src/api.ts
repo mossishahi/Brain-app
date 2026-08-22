@@ -57,11 +57,20 @@ export function blockedReadiness(error: unknown): ReadinessReport | undefined {
   return readiness as ReadinessReport;
 }
 
+/** True for the error a fetch throws when its AbortSignal fired. */
+export function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError";
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response;
   try {
     res = await fetch(`${API_BASE}${path}`, init);
-  } catch {
+  } catch (error) {
+    // An abort is the CALLER's own decision (a newer search replaced this
+    // one, a dialog closed) — rethrow it untouched so it is never shown as
+    // a network problem.
+    if (isAbortError(error)) throw error;
     throw new ApiError("network error — is the brain server running?", 0);
   }
   if (!res.ok) {
@@ -169,23 +178,36 @@ export const browseServerFiles = (
   kind: AttachmentSelectionKind,
   root?: string,
   path?: string,
+  signal?: AbortSignal,
 ): Promise<BrowseServerFilesResponse> => {
   const query = new URLSearchParams({ kind });
   if (root) query.set("root", root);
   if (path) query.set("path", path);
-  return request(`/attachments/browse?${query.toString()}`);
+  return request(
+    `/attachments/browse?${query.toString()}`,
+    signal ? { signal } : undefined,
+  );
 };
 
+/**
+ * The signal matters here more than anywhere: aborting the fetch also ends
+ * the server-side walk (the server ties its walk to the request), so a
+ * replaced or abandoned search stops costing filesystem work at once.
+ */
 export const searchServerFiles = (
   kind: AttachmentSelectionKind,
   queryText: string,
   root?: string,
   path?: string,
+  signal?: AbortSignal,
 ): Promise<SearchServerFilesResponse> => {
   const query = new URLSearchParams({ kind, q: queryText });
   if (root) query.set("root", root);
   if (path) query.set("path", path);
-  return request(`/attachments/search?${query.toString()}`);
+  return request(
+    `/attachments/search?${query.toString()}`,
+    signal ? { signal } : undefined,
+  );
 };
 
 export const validateAttachments = (

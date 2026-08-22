@@ -187,8 +187,17 @@ function help(): void {
 }
 
 async function main(): Promise<void> {
-  // First thing, before any work: an unsupported Node must fail with one
-  // clear sentence, never as a cryptic dependency crash minutes later.
+  // Before the first async filesystem or DNS call: those run on libuv's
+  // thread pool, which defaults to 4 threads and is created lazily at first
+  // use. The file explorer and attachment ingestion walk shared filesystems
+  // asynchronously and in parallel, and on a slow mount 4 threads are gone
+  // the moment one walk runs — every other async filesystem caller then
+  // queues behind it. 16 keeps concurrent walks and the rest of the server
+  // out of each other's way; an operator-set value always wins. Setting it
+  // after the pool exists is harmless (it is simply ignored).
+  process.env.UV_THREADPOOL_SIZE ??= "16";
+  // An unsupported Node must fail with one clear sentence, never as a
+  // cryptic dependency crash minutes later.
   assertSupportedNodeVersion();
   const args = parseArgs(process.argv.slice(2));
   if (

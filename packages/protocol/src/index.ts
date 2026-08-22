@@ -1515,6 +1515,14 @@ export interface BrowseServerFilesResponse {
   readonly currentPath: string;
   readonly parentPath?: string;
   readonly entries: readonly ServerFileEntry[];
+  /**
+   * Present (true) when the listing stopped early — the directory holds more
+   * entries than the cap, or the storage did not answer within the request's
+   * time budget. Partial listings are served rather than hanging the request:
+   * every explorer call is time-budgeted so a slow shared filesystem can never
+   * freeze the server (see the search response's `truncated` for the same rule).
+   */
+  readonly truncated?: boolean;
 }
 
 export interface SearchServerFilesResponse {

@@ -298,6 +298,21 @@ function sendJson(res: ServerResponse, status: number, value: unknown): void {
   res.end(body);
 }
 
+/**
+ * A signal that fires when the client stops waiting for this response.
+ *
+ * The file-explorer walks take it so a closed picker (or a re-typed search)
+ * stops costing filesystem work the moment its request dies. Listening on the
+ * RESPONSE is deliberate: `res` "close" fires on a dropped connection AND on
+ * normal completion — and by completion the walk has already returned, so the
+ * late abort is a no-op rather than a correctness risk.
+ */
+function requestAbortSignal(res: ServerResponse): AbortSignal {
+  const controller = new AbortController();
+  res.once("close", () => controller.abort());
+  return controller.signal;
+}
+
 function readJson(req: IncomingMessage): Promise<unknown> {
   return new Promise((resolveBody, reject) => {
     const chunks: Buffer[] = [];
@@ -907,17 +922,18 @@ export async function startBrainServer(
         return;
       }
       if (req.method === "GET" && path === "/api/attachments/browse") {
+        const signal = requestAbortSignal(res);
         try {
-          sendJson(
-            res,
-            200,
-            fileBrowser.browse(
-              url.searchParams.get("root") ?? undefined,
-              url.searchParams.get("path") ?? undefined,
-              attachmentKind(url.searchParams.get("kind") ?? "file"),
-            ),
+          const listing = await fileBrowser.browse(
+            url.searchParams.get("root") ?? undefined,
+            url.searchParams.get("path") ?? undefined,
+            attachmentKind(url.searchParams.get("kind") ?? "file"),
+            signal,
           );
+          if (signal.aborted) return;
+          sendJson(res, 200, listing);
         } catch (error) {
+          if (signal.aborted) return;
           throw new HttpError(
             error instanceof ServerFileError ? error.status : 400,
             error instanceof Error ? error.message : String(error),
@@ -926,18 +942,19 @@ export async function startBrainServer(
         return;
       }
       if (req.method === "GET" && path === "/api/attachments/search") {
+        const signal = requestAbortSignal(res);
         try {
-          sendJson(
-            res,
-            200,
-            fileBrowser.search(
-              url.searchParams.get("root") ?? undefined,
-              url.searchParams.get("path") ?? undefined,
-              attachmentKind(url.searchParams.get("kind") ?? "file"),
-              url.searchParams.get("q") ?? "",
-            ),
+          const found = await fileBrowser.search(
+            url.searchParams.get("root") ?? undefined,
+            url.searchParams.get("path") ?? undefined,
+            attachmentKind(url.searchParams.get("kind") ?? "file"),
+            url.searchParams.get("q") ?? "",
+            signal,
           );
+          if (signal.aborted) return;
+          sendJson(res, 200, found);
         } catch (error) {
+          if (signal.aborted) return;
           throw new HttpError(
             error instanceof ServerFileError ? error.status : 400,
             error instanceof Error ? error.message : String(error),
@@ -961,12 +978,14 @@ export async function startBrainServer(
             "paths must be an array of 1–20 non-empty server paths or URLs",
           );
         }
-        sendJson(res, 200, {
-          attachments: await fileBrowser.validate(
-            kind,
-            body.paths as string[],
-          ),
-        });
+        const signal = requestAbortSignal(res);
+        const attachments = await fileBrowser.validate(
+          kind,
+          body.paths as string[],
+          signal,
+        );
+        if (signal.aborted) return;
+        sendJson(res, 200, { attachments });
         return;
       }
       if (req.method === "GET" && path === "/api/settings") {
@@ -1180,7 +1199,7 @@ export async function startBrainServer(
         const request = body as unknown as SubmitJobRequest;
         let jobId: string;
         try {
-          const references = fileBrowser.canonicalizeReferences(
+          const references = await fileBrowser.canonicalizeReferences(
             request.attachments ?? [],
           );
           jobId = await manager.submit(

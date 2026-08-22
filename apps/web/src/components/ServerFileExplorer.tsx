@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Key, ReactNode } from "react";
 import {
   Alert,
@@ -34,6 +34,7 @@ import type {
 import {
   browseServerFiles,
   errorMessage,
+  isAbortError,
   searchServerFiles,
   validateAttachments,
 } from "../api";
@@ -164,15 +165,31 @@ export function ServerFileExplorer({
     readonly ValidatedAttachment[]
   >([]);
 
+  // One controller per in-flight navigation: a new click replaces (and
+  // aborts) the previous request, and closing the dialog aborts whatever is
+  // still out. Aborting matters beyond the browser tab — the server ties its
+  // directory walk to the request, so an abandoned load stops costing
+  // filesystem work the moment it is dropped.
+  const browseAbort = useRef<AbortController | null>(null);
+  useEffect(
+    () => () => {
+      browseAbort.current?.abort();
+    },
+    [],
+  );
+
   const loadDirectory = async (
     root?: string,
     path?: string,
   ): Promise<void> => {
+    browseAbort.current?.abort();
+    const controller = new AbortController();
+    browseAbort.current = controller;
     setLoading(true);
     setError(null);
     setInvalid([]);
     try {
-      const next = await browseServerFiles(kind, root, path);
+      const next = await browseServerFiles(kind, root, path, controller.signal);
       setListing(next);
       setTreeData(toNodes(next));
       // Checked entries from a previous directory are otherwise invisible
@@ -182,9 +199,10 @@ export function ServerFileExplorer({
       setPathDraft(next.currentPath);
       setSearch("");
     } catch (loadError) {
+      if (isAbortError(loadError)) return;
       setError(errorMessage(loadError));
     } finally {
-      setLoading(false);
+      if (browseAbort.current === controller) setLoading(false);
     }
   };
 
@@ -202,7 +220,12 @@ export function ServerFileExplorer({
       setSearching(false);
       return;
     }
+    // The cleanup ABORTS the in-flight request, not just the state updates:
+    // typing on (or closing the dialog) must also stop the walk on the
+    // server. Before this, a superseded search kept running to completion
+    // server-side while the user had already moved on.
     let cancelled = false;
+    const controller = new AbortController();
     const timer = window.setTimeout(() => {
       setSearching(true);
       void searchServerFiles(
@@ -210,6 +233,7 @@ export function ServerFileExplorer({
         query,
         listing.rootId,
         listing.currentPath,
+        controller.signal,
       )
         .then((result) => {
           if (cancelled) return;
@@ -219,7 +243,9 @@ export function ServerFileExplorer({
           setSearchTruncated(result.truncated);
         })
         .catch((searchError) => {
-          if (!cancelled) setError(errorMessage(searchError));
+          if (!cancelled && !isAbortError(searchError)) {
+            setError(errorMessage(searchError));
+          }
         })
         .finally(() => {
           if (!cancelled) setSearching(false);
@@ -228,6 +254,7 @@ export function ServerFileExplorer({
     return () => {
       cancelled = true;
       window.clearTimeout(timer);
+      controller.abort();
     };
   }, [kind, listing, search]);
 
@@ -408,9 +435,16 @@ export function ServerFileExplorer({
         className="server-tree-search"
         onChange={(event) => setSearch(event.target.value)}
       />
-      {searchTruncated && (
+      {serverSearchActive && searchTruncated && (
         <Typography.Text type="secondary">
-          Showing the first 100 matches.
+          Partial results — the match cap or the time budget was reached.
+          Narrow the search, or start it from a deeper folder.
+        </Typography.Text>
+      )}
+      {!serverSearchActive && listing?.truncated && (
+        <Typography.Text type="secondary">
+          Partial listing — this folder is very large or the storage answered
+          slowly. Use the search box to find entries it may not show.
         </Typography.Text>
       )}
 

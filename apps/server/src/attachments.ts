@@ -8,16 +8,17 @@
  * contained file in a bounded inventory. Later pipeline stages never touch
  * the user's original paths — only the snapshot — so resubmission and resume
  * are reproducible even when the sources change.
+ *
+ * Every filesystem operation here is asynchronous, for the same reason the
+ * file explorer's are (see server-files.ts): ingestion runs inside the
+ * server process at submit time, and a synchronous copy of up to 400 files
+ * over a slow shared filesystem used to freeze the whole server — every
+ * other request, the SSE streams, and even signal handling — for its whole
+ * duration. The walk stays SEQUENTIAL on purpose: the inventory order rides
+ * into the job manifest, and the byte budgets must be checked exactly.
  */
-import {
-  copyFileSync,
-  createWriteStream,
-  mkdirSync,
-  readdirSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
+import { createWriteStream } from "node:fs";
+import { copyFile, mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
@@ -143,9 +144,9 @@ function slug(value: string): string {
   return cleaned.length > 0 ? cleaned.slice(0, 60) : "attachment";
 }
 
-function classifyPath(path: string): AttachmentKind {
-  const stat = statSync(path);
-  if (stat.isDirectory()) return "folder";
+async function classifyPath(path: string): Promise<AttachmentKind> {
+  const stats = await stat(path);
+  if (stats.isDirectory()) return "folder";
   const ext = extname(path).toLowerCase();
   if (ext === ".zip") return "zip";
   if (ext === ".pdf") return "pdf";
@@ -199,17 +200,21 @@ interface WalkResult {
 }
 
 /** Copy a tree into the snapshot, applying junk filters and budgets. */
-function copyTree(source: string, destination: string, budget: WalkBudget): WalkResult {
+async function copyTree(
+  source: string,
+  destination: string,
+  budget: WalkBudget,
+): Promise<WalkResult> {
   const files: IngestedFileEntry[] = [];
   const notes: string[] = [];
   let skippedJunk = 0;
   let skippedLarge = 0;
   let truncated = false;
 
-  const walk = (from: string, to: string): void => {
+  const walk = async (from: string, to: string): Promise<void> => {
     if (truncated) return;
-    const entries = readdirSync(from, { withFileTypes: true }).sort((a, b) =>
-      a.name.localeCompare(b.name),
+    const entries = (await readdir(from, { withFileTypes: true })).sort(
+      (a, b) => a.name.localeCompare(b.name),
     );
     for (const entry of entries) {
       if (truncated) return;
@@ -223,7 +228,7 @@ function copyTree(source: string, destination: string, budget: WalkBudget): Walk
           skippedJunk += 1;
           continue;
         }
-        walk(fromPath, join(to, entry.name));
+        await walk(fromPath, join(to, entry.name));
         continue;
       }
       if (!entry.isFile()) continue;
@@ -231,7 +236,7 @@ function copyTree(source: string, destination: string, budget: WalkBudget): Walk
         skippedJunk += 1;
         continue;
       }
-      const bytes = statSync(fromPath).size;
+      const bytes = (await stat(fromPath)).size;
       if (bytes > budget.maxFileBytes) {
         skippedLarge += 1;
         continue;
@@ -241,15 +246,15 @@ function copyTree(source: string, destination: string, budget: WalkBudget): Walk
         return;
       }
       const toPath = join(to, entry.name);
-      mkdirSync(to, { recursive: true });
-      copyFileSync(fromPath, toPath);
+      await mkdir(to, { recursive: true });
+      await copyFile(fromPath, toPath);
       budget.remainingFiles -= 1;
       budget.remainingBytes -= bytes;
       files.push({ path: toPath, bytes });
     }
   };
 
-  walk(source, destination);
+  await walk(source, destination);
   if (skippedJunk > 0) notes.push(`skipped ${skippedJunk} junk or link entr${skippedJunk === 1 ? "y" : "ies"}`);
   if (skippedLarge > 0) notes.push(`skipped ${skippedLarge} file(s) over the per-file size limit`);
   if (truncated) notes.push("inventory truncated at the attachment budget; remaining files were not copied");
@@ -263,12 +268,12 @@ function copyTree(source: string, destination: string, budget: WalkBudget): Walk
  * before bytes hit disk. This is safe for untrusted archives and does not
  * depend on an `unzip` binary being installed on the server host.
  */
-function extractZip(
+async function extractZip(
   zipPath: string,
   destination: string,
   budget: WalkBudget,
 ): Promise<WalkResult> {
-  mkdirSync(destination, { recursive: true });
+  await mkdir(destination, { recursive: true });
   return new Promise((resolvePromise, rejectPromise) => {
     yauzl.open(
       zipPath,
@@ -290,7 +295,12 @@ function extractZip(
           if (settled) return;
           settled = true;
           zipFile.close();
-          rmSync(destination, { recursive: true, force: true });
+          // Cleanup of a half-extracted tree is fire-and-forget: it may be
+          // large and the storage slow, and the caller's error must not wait
+          // on it (nor may the event loop block for it).
+          void rm(destination, { recursive: true, force: true }).catch(
+            () => undefined,
+          );
           rejectPromise(error);
         };
         const finish = (): void => {
@@ -378,7 +388,7 @@ function extractZip(
             }
 
             const target = join(destination, ...relativePath.split("/"));
-            mkdirSync(resolve(target, ".."), { recursive: true });
+            await mkdir(resolve(target, ".."), { recursive: true });
             zipFile.openReadStream(entry, (streamError, stream) => {
               if (streamError || !stream) {
                 fail(streamError ?? new Error(`could not read "${relativePath}"`));
@@ -624,9 +634,9 @@ async function fetchWebAttachment(
   })();
   const base = slug(basename(pathName) || "page");
   const name = extname(base) !== "" ? base : `${base}${extensionForContentType(contentType)}`;
-  mkdirSync(directory, { recursive: true });
+  await mkdir(directory, { recursive: true });
   const target = join(directory, name);
-  writeFileSync(target, body);
+  await writeFile(target, body);
   budget.remainingFiles -= 1;
   budget.remainingBytes -= body.byteLength;
   return {
@@ -637,21 +647,21 @@ async function fetchWebAttachment(
   };
 }
 
-function copySingleFile(
+async function copySingleFile(
   source: string,
   directory: string,
   budget: WalkBudget,
-): WalkResult {
-  const bytes = statSync(source).size;
+): Promise<WalkResult> {
+  const bytes = (await stat(source)).size;
   if (bytes > budget.maxFileBytes) {
     throw new Error(`file is ${bytes} bytes which exceeds the per-file limit`);
   }
   if (budget.remainingFiles <= 0 || budget.remainingBytes < bytes) {
     throw new Error("the attachment budget is exhausted");
   }
-  mkdirSync(directory, { recursive: true });
+  await mkdir(directory, { recursive: true });
   const target = join(directory, slug(basename(source)));
-  copyFileSync(source, target);
+  await copyFile(source, target);
   budget.remainingFiles -= 1;
   budget.remainingBytes -= bytes;
   return { files: [{ path: target, bytes }], notes: [] };
@@ -672,7 +682,7 @@ export async function ingestAttachments(
     remainingBytes: options.maxTotalBytes ?? DEFAULT_MAX_TOTAL_BYTES,
     maxFileBytes: options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES,
   };
-  mkdirSync(baseDir, { recursive: true });
+  await mkdir(baseDir, { recursive: true });
   const attachments: IngestedAttachment[] = [];
 
   for (const [index, rawSpec] of specs.entries()) {
@@ -697,13 +707,13 @@ export async function ingestAttachments(
       }
 
       const sourcePath = resolve(expandHome(spec));
-      const kind = classifyPath(sourcePath);
+      const kind = await classifyPath(sourcePath);
       const name = basename(sourcePath);
       const id = `${index + 1}-${slug(name)}`;
       const directory = join(baseDir, id);
 
       if (kind === "folder") {
-        const result = copyTree(sourcePath, directory, budget);
+        const result = await copyTree(sourcePath, directory, budget);
         if (result.files.length === 0) {
           throw new Error("the folder contains no ingestible files");
         }
@@ -732,7 +742,7 @@ export async function ingestAttachments(
           files: result.files,
         });
       } else {
-        const result = copySingleFile(sourcePath, directory, budget);
+        const result = await copySingleFile(sourcePath, directory, budget);
         attachments.push({
           id,
           name,
