@@ -211,6 +211,35 @@ export function lastWorkerFatalEvent(
   return undefined;
 }
 
+/**
+ * Every agent node of the shipped workflow, mapped to the skill it runs.
+ *
+ * A live record carries only fragments, so the role behind a thread has to be
+ * rebuilt from its execution path — and a path names the NODE while the role
+ * labels are keyed by the SKILL. Those two vocabularies differ for every node
+ * in the pipeline (`process-input` runs `processor`, `build-pool` runs
+ * `pool-builder`), so anything missing from here is not merely unlabelled: it
+ * is labelled WRONG, with a capitalized node id that no reader is looking for.
+ *
+ * A node this table does not know still gets a thread, because a bundle may add
+ * a role before this app learns its name. `live-role.test.ts` fails when the
+ * pinned bundle grows an agent node that is not listed here.
+ */
+export const LIVE_NODE_SKILLS: Readonly<Record<string, string>> = {
+  "process-input": "processor",
+  "classify-input": "classifier",
+  "annotate-code": "code-annotator",
+  "build-pool": "pool-builder",
+  "place-fields": "placer",
+  "develop-idea": "brain",
+  "comment-step": "commentor",
+  "comment-step-bridge": "interdisciplinary-commentor",
+  "judge-step": "judge",
+  "redevelop-idea": "redeveloper",
+  "bridge-audit": "integrator",
+  "synthesize-proposal": "chair",
+};
+
 export class JobManager {
   readonly settings: SettingsStore;
   readonly jobsDir: string;
@@ -652,20 +681,16 @@ export class JobManager {
    */
   private liveTaskKind(path: string): string | undefined {
     const leaf = /([^/]+)-execute$/.exec(path)?.[1];
-    switch (leaf) {
-      case "develop-idea":
-        return "brainstorm.brain";
-      case "comment-step":
-        return "brainstorm.commentor";
-      case "comment-step-bridge":
-        return "brainstorm.interdisciplinary-commentor";
-      case "judge-step":
-        return "brainstorm.judge";
-      case "redevelop-idea":
-        return "brainstorm.redeveloper";
-      default:
-        return leaf === undefined ? undefined : `brainstorm.${leaf}`;
-    }
+    if (leaf === undefined) return undefined;
+    // EVERY agent node, not just the reviewed ones. A path names the NODE, and
+    // the role labels are keyed by the SKILL the node runs, so the two only
+    // meet through this table. It once held the review nodes alone and let the
+    // rest fall through to the node id: the processor's thread arrived labelled
+    // "Process-input", the pool builder's "Build-pool", and the stage panels —
+    // which look for the same words the activity feed shows — matched none of
+    // them and rendered nothing. The activity rows were right the whole time,
+    // because an event carries its task kind rather than rebuilding it.
+    return `brainstorm.${LIVE_NODE_SKILLS[leaf] ?? leaf}`;
   }
 
   /**

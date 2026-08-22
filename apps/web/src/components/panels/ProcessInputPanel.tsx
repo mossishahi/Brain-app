@@ -437,15 +437,19 @@ export function ClassificationDecided({
  * reading of the submission. The label is the role, because these tasks have no
  * seat to be named by and the stage runs them one after another.
  */
-export function ProcessInputLive({ threads }: { threads: readonly RoleThread[] }) {
-  if (threads.length === 0) return null;
-  return (
-    <>
-      {threads.map((thread) => (
-        <LiveThread key={thread.role} text={thread.text} label={thread.role} />
-      ))}
-    </>
-  );
+/**
+ * One role's words, standing in the place that role's own output will fill.
+ *
+ * This stage runs TWO tasks and their outputs land in two different places —
+ * the classifier's reading in the card at the top, the processor's summary in
+ * the body below — so one live slot cannot stand in for both. Rendering both
+ * threads together in the middle would leave at least one of them beside the
+ * thing it becomes rather than in it, which puts the same work on screen twice
+ * and asks the reader to match a preview to its result.
+ */
+export function RoleLive({ thread }: { thread: RoleThread | undefined }) {
+  if (thread === undefined || thread.text.length === 0) return null;
+  return <LiveThread text={thread.text} label={thread.role} />;
 }
 
 export function ProcessInputBody({

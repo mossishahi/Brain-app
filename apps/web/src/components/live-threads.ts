@@ -107,12 +107,16 @@ export function revealStep(current: number, target: number, elapsedMs: number): 
  * or review thread is. What it does have is a ROLE, and each stage's roles are
  * a closed set — the workflow names them — so a panel asks for its own.
  */
-export const PROCESS_INPUT_ROLES: readonly string[] = [
-  "Processor",
-  "Classifier",
+export const PROCESS_INPUT_ROLES: readonly string[] = ["Processor", "Classifier"];
+// The annotator belongs here, not with the processor: `annotate-code` is one of
+// the decompose sub-nodes, so its activity rows already land in this stage. A
+// thread shown in one stage while its rows appear in another reads as two
+// different agents working at once.
+export const DECOMPOSE_ROLES: readonly string[] = [
   "Annotator",
+  "Pool builder",
+  "Placer",
 ];
-export const DECOMPOSE_ROLES: readonly string[] = ["Pool builder", "Placer"];
 
 /**
  * The live threads of tasks that have NO seat, keyed by role.
@@ -211,4 +215,17 @@ export function pendingReviewers(
     (thread) =>
       thread.role !== "Judge" && thread.actor !== undefined && !landed.has(thread.actor),
   );
+}
+
+/**
+ * One role's thread, when that role is talking right now.
+ *
+ * Stages whose tasks write into DIFFERENT places on the page need their threads
+ * one at a time, because each one waits in the place its own output will fill.
+ */
+export function threadFor(
+  threads: readonly RoleThread[],
+  role: string,
+): RoleThread | undefined {
+  return threads.find((thread) => thread.role === role);
 }

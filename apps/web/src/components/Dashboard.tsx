@@ -57,7 +57,7 @@ import {
   ClassificationDecided,
   ClassificationGateCard,
   ProcessInputBody,
-  ProcessInputLive,
+  RoleLive,
 } from "./panels/ProcessInputPanel";
 import { DecomposeBody } from "./panels/DecomposePanel";
 import { SelectPanelBody } from "./panels/SelectPanelPanel";
@@ -67,6 +67,7 @@ import {
   PROCESS_INPUT_ROLES,
   applyLiveEntries,
   liveForRoles,
+  threadFor,
   seatlessLiveByRole,
   type LiveThread,
 } from "./live-threads";
@@ -608,9 +609,17 @@ export function Dashboard({
             {!classificationPending && stage?.classification && (
               <ClassificationDecided classification={stage.classification} />
             )}
-            <ProcessInputLive threads={threads} />
-            {stage?.output && (
+            {/* Each thread waits where its OWN output will appear, and is
+                replaced by it: the classifier's reading in the card above, the
+                processor's summary in the body here. A thread that outlives
+                its output would show the same work twice. */}
+            {!stage?.classification && (
+              <RoleLive thread={threadFor(threads, "Classifier")} />
+            )}
+            {stage?.output ? (
               <ProcessInputBody output={stage.output} files={stage.files} />
+            ) : (
+              <RoleLive thread={threadFor(threads, "Processor")} />
             )}
           </div>
         );

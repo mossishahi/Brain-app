@@ -96,7 +96,11 @@ for (const panel of ["panels/ProcessInputPanel.tsx", "panels/DecomposePanel.tsx"
     );
     assert.match(
       code,
-      /<LiveThread\s+key=\{thread\.role\}\s+text=\{thread\.text\}\s+label=\{thread\.role\}/,
+      // Deliberately shape-agnostic beyond the two things that matter. A panel
+      // whose roles write into DIFFERENT places renders one thread at a time
+      // rather than mapping a list, so it carries no `key`; what must not
+      // change is that the box is LiveThread's and the label is the role.
+      /<LiveThread[^>]*text=\{[^}]*\.text\}[^>]*label=\{[^}]*\.role\}/,
       `${panel}: the thread must be labelled with its role, the way the review ` +
         `deck labels the judge and each reviewer — these stages run several ` +
         `roles one after another`,
@@ -110,4 +114,27 @@ test("decompose does not show an empty tree beside the thread standing in for it
   // the rule exists to prevent.
   const code = source("components/panels/DecomposePanel.tsx");
   assert.match(code, /stage\.experts \|\| \(!steps && live\.length === 0\)/);
+});
+
+test("the processor's words and its summary share one slot, so one replaces the other", () => {
+  // THE RULE, applied to this stage: live text occupies the place of the output
+  // it is producing. The processor's output is the summary body, so its thread
+  // waits THERE and the summary takes the space when it lands. A ternary is the
+  // assertion: written as two independent conditions, the two could both render
+  // for as long as it takes a thread's end and the output's arrival to reach the
+  // page in separate frames, putting the same work on screen twice.
+  const code = source("components/Dashboard.tsx");
+  assert.match(
+    code,
+    /stage\?\.output \? \([\s\S]{0,300}?<ProcessInputBody[\s\S]{0,300}?\) : \([\s\S]{0,300}?threadFor\(threads, "Processor"\)/,
+    "the summary and the processor's thread must be the two arms of one ternary",
+  );
+  // The classifier's output is the card above, not the body, so its thread
+  // waits there instead. One live slot cannot stand in for two outputs that
+  // land in two different places.
+  assert.match(
+    code,
+    /!stage\?\.classification && \(\s*<RoleLive thread=\{threadFor\(threads, "Classifier"\)\}/,
+    "the classifier's thread must wait where its reading will appear",
+  );
 });
