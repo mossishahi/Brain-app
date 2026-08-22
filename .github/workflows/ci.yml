@@ -21,6 +21,11 @@ jobs:
       # validate against it. That is deliberate — it is what catches a content
       # change that the app cannot execute — but it means CI must check out both
       # repositories side by side, exactly as a developer has them.
+      #
+      # WHICH version they load is pinned in app/test-bundle.json, so this lane
+      # tests the same content today that it tested at the last release. The
+      # `content-canary` job below runs the same suite against the registry's
+      # actual latest.
       - name: Check out the app
         uses: actions/checkout@v7
         with:
@@ -93,6 +98,61 @@ jobs:
           echo "=== apps/server (exit $SERVER_RC)"
           cat server-tests.log
           exit $(( FAST_RC + WORKER_RC + SERVER_RC == 0 ? 0 : 1 ))
+
+  # The same suite, run against whatever the Brain Registry publishes as latest
+  # instead of the pin in app/test-bundle.json — and allowed to fail.
+  #
+  # WHY it exists: the cross-repo checkout above is valuable precisely because it
+  # executes real published content, so it catches content the app cannot run.
+  # Losing that property was never the goal; what had to go was letting it decide
+  # whether a release is green. It did decide that, and the result was a content
+  # publish turning an ALREADY RELEASED app tag red — the app had not changed, so
+  # no app commit could have caused it and no app commit could fix it.
+  #
+  # WHY continue-on-error: a red mark here means "the pin is behind the registry
+  # and a bump will cost work", which is information, not a defect in the commit
+  # under test. The job's log names exactly which suites the newer bundle breaks,
+  # so bumping the pin becomes a scoped, reviewable commit that carries its own
+  # test updates instead of a surprise landing on whoever pushes next.
+  content-canary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    steps:
+      - name: Check out the app
+        uses: actions/checkout@v7
+        with:
+          path: app
+
+      - name: Check out the Brain Registry (tags included)
+        uses: actions/checkout@v7
+        with:
+          repository: mossishahi/Brain
+          path: brain
+          # Same reason as the pinned lane: the store is materialized from
+          # annotated release tags, and a shallow clone carries none.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install
+        working-directory: app
+        run: npm ci
+
+      - name: Materialize the registry store once
+        run: node brain/scripts/materialize-store.mjs --quiet
+
+      # Run in one shot rather than the pinned lane's parallel lanes: this job
+      # is a report, not a gate, so a simple readable log beats wall time.
+      - name: Test against the registry's latest published bundle
+        working-directory: app
+        env:
+          BRAIN_TEST_BUNDLE_VERSION: latest
+        run: npm test
 
   # Guards that two modules holding the same knowledge have not drifted apart.
   # These are cheap and they fail loudly, which is the point: the alternative is

@@ -40,6 +40,7 @@ import { defaultSessionRoot, loadDotEnv, workspaceRootFromSessionRoot } from "./
 import { manifestPathFor } from "./attachment-store.js";
 import { scheduleFinishedExit } from "./exit.js";
 import { createLiveTextLog, noLiveText } from "./live-text.js";
+import { createPromptLog, noPromptCapture } from "./prompt-capture.js";
 import { windDownFromEnv } from "./wind-down.js";
 import { configureOutboundHttp } from "./proxy.js";
 import {
@@ -926,6 +927,18 @@ async function main(): Promise<void> {
     eventsFile !== undefined && process.env.BRAINSTORM_AGENTIC_LIVE_TEXT !== "off"
       ? createLiveTextLog(join(dirname(eventsFile), "live-text.jsonl"))
       : noLiveText();
+  // Prompt records ride a second file in the same directory, on the same
+  // condition: a record exists to be downloaded, and without a server watching
+  // there is nobody to download it. A resumed run appends to whatever the
+  // previous worker left, because the rows for its earlier calls are still on
+  // the reader's screen and must still resolve.
+  const prompts =
+    eventsFile !== undefined && process.env.BRAINSTORM_AGENTIC_PROMPT_CAPTURE !== "off"
+      ? createPromptLog(
+          join(dirname(eventsFile), "prompts.jsonl"),
+          fsStoreOptions(process.env),
+        )
+      : noPromptCapture();
   /**
    * The run's event listener, plus the one thing live text needs from the event
    * stream: a task's completion is when its thread stops being what is happening
@@ -1007,6 +1020,7 @@ async function main(): Promise<void> {
       ...(lazy ? { skillResolver: lazy.skillResolver } : {}),
       ...(runEventListener !== undefined ? { onEvent: runEventListener } : {}),
       onLivePreview: ({ path, text }) => liveText.note(path, text),
+      onPrompt: (record) => prompts.note(record),
     });
     const params = workflowParamsFromEnv(process.env);
     try {
@@ -1025,6 +1039,7 @@ async function main(): Promise<void> {
       // Queued event appends must land before the log is read back.
       await eventLog.flush();
       await liveText.close();
+      await prompts.close();
       // Opt-out is honored here: with telemetry off, no record is produced at
       // all rather than one written and then withheld.
       if (process.env.BRAINSTORM_AGENTIC_TELEMETRY !== "off") {
@@ -1117,6 +1132,7 @@ async function main(): Promise<void> {
       ...(lazy ? { skillResolver: lazy.skillResolver } : {}),
       ...(runEventListener !== undefined ? { onEvent: runEventListener } : {}),
       onLivePreview: ({ path, text }) => liveText.note(path, text),
+      onPrompt: (record) => prompts.note(record),
     });
     try {
       const result = await runtime.resume(runId, {
@@ -1127,6 +1143,7 @@ async function main(): Promise<void> {
       // Queued event appends must land before the log is read back.
       await eventLog.flush();
       await liveText.close();
+      await prompts.close();
       // Opt-out is honored here: with telemetry off, no record is produced at
       // all rather than one written and then withheld.
       if (process.env.BRAINSTORM_AGENTIC_TELEMETRY !== "off") {

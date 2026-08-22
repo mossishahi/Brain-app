@@ -8,6 +8,7 @@ import {
   mkdirSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -20,7 +21,9 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import {
+  COT_STEP_PARTS,
   GPU_COMMAND_TAG,
+  isCotStepParts,
   SLURM_COMMAND_TAG,
   type JobDetail,
   type JobSummary,
@@ -92,18 +95,118 @@ function materializedStoreRoot(): string {
 const staticRegistryRoot =
   process.env.BRAIN_TEST_REGISTRY_DIR ?? materializedStoreRoot();
 
-/** The version the registry index publishes as latest — what a new run pins. */
-function latestPublishedVersion(): string {
-  const index = JSON.parse(
-    readFileSync(join(staticRegistryRoot, "index.json"), "utf8"),
-  ) as { bundles: Array<{ id: string; latest: string }> };
-  return index.bundles.find((bundle) => bundle.id === "brainstorm")!.latest;
+/**
+ * The bundle version a new run pins: this repository's declared pin.
+ *
+ * Reading the store's `latest` is what let a registry publish rewrite the
+ * inputs of app tags that had already shipped: content alone could redden a
+ * released commit. `BRAIN_TEST_BUNDLE_VERSION` overrides the pin for one run,
+ * and its literal value "latest" restores the floating resolution for CI's
+ * canary lane, which reports the next bump's cost without failing the workflow.
+ *
+ * The registry double is started advertising this same version (see
+ * `startTestRegistry`), because the server picks a run's version by asking the
+ * registry for its latest — pinning only the assertion side would leave the
+ * server executing different content from the one these tests claim.
+ */
+function pinnedBundleVersion(): string {
+  const override = process.env.BRAIN_TEST_BUNDLE_VERSION;
+  if (override === "latest") {
+    const index = JSON.parse(
+      readFileSync(join(staticRegistryRoot, "index.json"), "utf8"),
+    ) as { bundles: Array<{ id: string; latest: string }> };
+    return index.bundles.find((bundle) => bundle.id === "brainstorm")!.latest;
+  }
+  if (override) return override;
+  return (
+    JSON.parse(
+      readFileSync(new URL("../../../../test-bundle.json", import.meta.url), "utf8"),
+    ) as { version: string }
+  ).version;
+}
+
+/**
+ * Where this run states what it actually executed, for a caller that cannot see
+ * inside it. The path is fixed at the app root so a gate needs no plumbing to
+ * find it, and `.gitignore` carries it: it is a run artifact, not source.
+ */
+const bundleReceiptPath = fileURLToPath(
+  new URL("../../../../.test-bundle-used.json", import.meta.url),
+);
+let bundleReceiptWritten = false;
+
+/**
+ * Records the bundle this suite really ran, once the registry double has agreed
+ * to serve it.
+ *
+ * `brain/scripts/publish-bundle.mjs` gates a publish on this suite and aims it
+ * at a candidate store through three environment variables. An earlier wiring
+ * set only the store directory — and a store directory cannot move a pinned
+ * suite off its pin — so the gate built a candidate store and then watched this
+ * suite execute the PREVIOUS release and called the candidate green. That is
+ * the original floating-`latest` bug rebuilt inside the check meant to catch
+ * it, and re-reading its own environment can never catch it: the environment is
+ * what the caller ASKED for, and the gap being hunted is exactly the gap
+ * between the ask and the result. So the suite states the result, from the
+ * values it resolved rather than from the variables that requested them.
+ *
+ * This runs only after `startTestRegistry` has refused a version the store does
+ * not publish, so the receipt names content that exists on disk rather than a
+ * string that merely parsed.
+ *
+ * Bookkeeping must never redden a run: a read-only checkout, or two suites
+ * racing this path, costs the receipt and not the test result. A gate that
+ * finds no receipt has still learned something true — that the suite never got
+ * as far as serving a bundle — which is a usable answer; a suite that failed
+ * over its own note-taking would not be.
+ */
+function recordBundleUsed(version: string): void {
+  if (bundleReceiptWritten) return;
+  bundleReceiptWritten = true;
+  const staging = `${bundleReceiptPath}.${process.pid}.tmp`;
+  try {
+    const storeRoot = realpathSync(staticRegistryRoot);
+    const receipt = {
+      bundle: "brainstorm",
+      version,
+      storeRoot,
+      bundleDir: join(storeRoot, "bundles", "brainstorm", version),
+      suite: "apps/server",
+      // A reader must be able to tell this run's receipt from one a previous
+      // run left behind after failing before it ever served a bundle.
+      writtenAt: new Date().toISOString(),
+    };
+    // Write beside the target and rename, so a concurrent reader sees either
+    // the old receipt or the new one, never half of either, and the rename
+    // stays within one filesystem.
+    writeFileSync(staging, `${JSON.stringify(receipt, null, 2)}\n`);
+    renameSync(staging, bundleReceiptPath);
+  } catch {
+    try {
+      rmSync(staging, { force: true });
+    } catch {
+      // Nothing left to do: see above, a receipt is never worth a red run.
+    }
+  }
+}
+
+/**
+ * The registry double every test here runs against, serving the pinned version
+ * and leaving the receipt that says so. Tests start their registry through this
+ * rather than calling `startTestRegistry` directly, so no path through the
+ * suite can serve a bundle without recording which one.
+ */
+async function startPinnedTestRegistry(): ReturnType<typeof startTestRegistry> {
+  const version = pinnedBundleVersion();
+  const registry = await startTestRegistry(staticRegistryRoot, version);
+  recordBundleUsed(version);
+  return registry;
 }
 
 async function startTestBrainServer(
   options: Omit<StartBrainServerOptions, "contentRegistryUrl" | "contentRegistryStatus">,
 ): Promise<RunningBrainServer & { readonly registryReads: readonly string[] }> {
-  const registry = await startTestRegistry(staticRegistryRoot);
+  const registry = await startPinnedTestRegistry();
   try {
     const server = await startBrainServer({
       // Production defaults a 3-minute post-start grace before unattended
@@ -301,8 +404,10 @@ test("the registry endpoint is deployment-owned: PUT ignores it and health repor
     assert.equal(omitted.status, 200);
     assert.equal(omitted.value.contentRegistry.url, deploymentUrl);
 
-    // Health names the bundle and the version a new run starts with (no pin
-    // exists, so the effective version IS the latest published one).
+    // Health names the bundle and the version a new run starts with. No
+    // DEPLOYMENT pin exists here, so the effective version is simply the
+    // latest the registry advertises — which the double sets to this
+    // repository's test pin, so both read the same version.
     const health = (
       await requestJson<{
         version: string;
@@ -326,8 +431,8 @@ test("the registry endpoint is deployment-owned: PUT ignores it and health repor
     assert.equal(appRootPackage.name, "brainstorm-agentic-app");
     assert.equal(health.version, appRootPackage.version);
     assert.equal(health.contentRegistry.bundle, "brainstorm");
-    assert.equal(health.contentRegistry.latest, latestPublishedVersion());
-    assert.equal(health.contentRegistry.effectiveVersion, latestPublishedVersion());
+    assert.equal(health.contentRegistry.latest, pinnedBundleVersion());
+    assert.equal(health.contentRegistry.effectiveVersion, pinnedBundleVersion());
     assert.equal(health.contentRegistry.pinnedVersion, undefined);
     // Connected is a live verdict: the registry answered its probe and
     // served the bundle index during this health call, so running is true
@@ -341,7 +446,7 @@ test("the registry endpoint is deployment-owned: PUT ignores it and health repor
 
 test("a registry that disappears flips health to disconnected instead of a stale connection", async () => {
   const workspace = tempRoot();
-  const registry = await startTestRegistry(staticRegistryRoot);
+  const registry = await startPinnedTestRegistry();
   const server = await startBrainServer({
     workspace,
     port: 0,
@@ -358,7 +463,7 @@ test("a registry that disappears flips health to disconnected instead of a stale
       )
     ).value;
     assert.equal(before.contentRegistry.running, true);
-    assert.equal(before.contentRegistry.effectiveVersion, latestPublishedVersion());
+    assert.equal(before.contentRegistry.effectiveVersion, pinnedBundleVersion());
 
     await registry.close();
     const after = (
@@ -2109,12 +2214,12 @@ test("local offline job completes with every dashboard artifact", async () => {
       manifestSha256: string;
     };
     assert.equal(storedPin.bundle, "brainstorm");
-    assert.equal(storedPin.version, latestPublishedVersion());
+    assert.equal(storedPin.version, pinnedBundleVersion());
     assert.match(storedPin.manifestSha256, /^[a-f0-9]{64}$/);
     // The exact skills version this run executed travels on the job itself.
     assert.deepEqual(detail.contentBundle, {
       id: "brainstorm",
-      version: latestPublishedVersion(),
+      version: pinnedBundleVersion(),
     });
     appendFileSync(
       join(workspace, "workspace", "jobs", jobId, "events.jsonl"),
@@ -2166,8 +2271,16 @@ test("local offline job completes with every dashboard artifact", async () => {
     });
     const reviewedRound = reviewStage.members[0]!.steps[0]!.rounds[0];
     assert.ok(reviewedRound, "the first step records at least one round");
+    // Branch on the RECORDED shape, never on a version: a step is one string
+    // or four parts, both shapes reach the reader forever, and the round must
+    // carry real text in whichever shape its own chain used. An absent step
+    // satisfies neither branch, which is the failure this guards.
+    const reviewedCot = reviewedRound.cot;
     assert.ok(
-      typeof reviewedRound.cot === "string" && reviewedRound.cot.length > 0,
+      reviewedCot !== undefined &&
+        (isCotStepParts(reviewedCot)
+          ? COT_STEP_PARTS.every((part) => reviewedCot[part].length > 0)
+          : reviewedCot.length > 0),
       "each round carries the reviewed chain-of-thought text",
     );
     assert.ok(
@@ -3408,6 +3521,74 @@ checkpoint.updatedAt = Date.now(); fs.writeFileSync(checkpointPath, JSON.stringi
     /not credit blocked/,
   );
   rmSync(workspace, { recursive: true, force: true });
+});
+
+test("GET /api/jobs/:id/prompt/:promptId serves the record, and 404s what it cannot find", async () => {
+  const workspace = tempRoot();
+  const server = await startTestBrainServer({ workspace, port: 0 });
+  try {
+    // The point of the assertion: the job-detail matcher must not swallow the
+    // longer path, and an unknown run or record is a 404 rather than a 500 —
+    // a row can legitimately reach the browser a moment before its file line
+    // lands, so this answer is expected and must never be cached.
+    const missing = await fetch(`${server.url}/api/jobs/no-such-job/prompt/no-such-id`);
+    assert.equal(missing.status, 404);
+    assert.match(await missing.text(), /was not found/);
+
+    // The other half of the one-row-one-file invariant: a row that DOES have a
+    // record behind it must resolve to the file, with the headers that make the
+    // browser save it under a legible name. Written as the worker writes it —
+    // one JSON.stringify per line in the run's job directory.
+    await putSettings(server, {
+      runner: "local",
+      panelConfirmation: "auto",
+      llm: { provider: "offline" },
+    });
+    const jobId = await submit(server, "A run whose prompt can be downloaded");
+    const promptId = "0f9e6b1c-7a4d-4e2f-9c3b-1d5a8e7f2b60";
+    const promptDir = join(workspace, "workspace", "jobs", jobId);
+    mkdirSync(promptDir, { recursive: true });
+    appendFileSync(
+      join(promptDir, "prompts.jsonl"),
+      `${JSON.stringify({
+        id: promptId,
+        at: Date.now(),
+        taskId: `${jobId}:brainstorm-root/first-pass/member[0]/develop-idea`,
+        kind: "brainstorm.brain",
+        agentId: "member-1",
+        attempt: 1,
+        turn: 1,
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        complete: true,
+        sections: [
+          { title: "System prompt", body: "You are a scientific panel member." },
+          { title: "Message 1 · user", body: "Develop the idea.\nSecond line." },
+        ],
+      })}\n`,
+    );
+    const served = await fetch(
+      `${server.url}/api/jobs/${encodeURIComponent(jobId)}/prompt/${encodeURIComponent(promptId)}`,
+    );
+    assert.equal(served.status, 200);
+    assert.match(served.headers.get("content-type") ?? "", /^text\/markdown/);
+    // The filename is what turns a bare id in the URL into a legible download.
+    assert.match(
+      served.headers.get("content-disposition") ?? "",
+      new RegExp(`attachment; filename="[a-z0-9-]+-\\d{8}-\\d{6}-${promptId}\\.md"`),
+    );
+    const markdown = await served.text();
+    assert.match(markdown, /^# Prompt · /m);
+    assert.match(markdown, /## System prompt/);
+    assert.match(markdown, /You are a scientific panel member\./);
+    assert.match(markdown, /Develop the idea\./);
+    // A record the file does not hold is still a 404, never another record.
+    const wrong = await fetch(`${server.url}/api/jobs/${jobId}/prompt/not-that-one`);
+    assert.equal(wrong.status, 404);
+  } finally {
+    await server.close();
+    await removeWorkspace(workspace);
+  }
 });
 
 test("POST /api/jobs/:id/resume rejects unknown and non-blocked jobs", async () => {

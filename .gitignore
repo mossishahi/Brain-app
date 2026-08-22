@@ -14,3 +14,7 @@ coverage/
 
 # SLURM wrapper job logs (logs/ itself is git-kept)
 /logs/*.log
+
+# proof of what the test suites actually executed, written by the server suite
+# and read by brain/scripts/publish-bundle.mjs as its publish gate
+.test-bundle-used.json

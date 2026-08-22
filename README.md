@@ -65,7 +65,51 @@ repositories are split, point tests at a checked-out/pinned registry fixture wit
 `BRAIN_TEST_CONTENT_DIR` runs the content, runtime, and worker suites against an editable content
 tree instead of a published version — the pre-release check in `ARCHITECTURE.md` uses it. The
 registry-client suite ignores it: it verifies files against a manifest, and only a published version
-has one.
+has one. The server suite ignores it too, for a different reason: it drives a real registry, so it
+needs a whole store with manifests and cannot be aimed at a bare content directory —
+`BRAIN_TEST_REGISTRY_DIR` points it at a store instead. Know what that costs: a pre-release check
+that only sets `BRAIN_TEST_CONTENT_DIR` leaves the server suite running the already-published
+bundle, so it can pass while saying nothing at all about the candidate.
+
+Which published version the suites run is declared once, in `test-bundle.json` at this directory's
+root. It is pinned, and the pin is the point: the suites execute real published content, so
+resolving whatever the registry index called `latest` meant a content release retroactively changed
+the test inputs of app tags that had already shipped — an untouched, released commit could go red,
+and no app commit could have caused it or fixed it. Bumping that version is a deliberate commit
+that carries whatever test updates the new bundle needs, so the bump and its cost land together.
+
+`BRAIN_TEST_BUNDLE_VERSION` overrides the pin for one run. Give it a version string to try another
+published bundle, or the literal `latest` to restore the old floating behaviour. CI runs the whole
+suite at `latest` in a `content-canary` job that is allowed to fail: it still catches content the
+app cannot execute, which is exactly what the cross-repository checkout is for, but it reports that
+rather than deciding whether a release is green.
+
+Testing an UNPUBLISHED candidate bundle therefore takes all three variables, not two. The pin makes
+`BRAIN_TEST_REGISTRY_DIR` insufficient on its own: a store whose `latest` is the candidate still
+runs at the pinned version, which is the release the candidate is replacing, so the suite passes
+without ever executing the new content. `brain/scripts/publish-bundle.mjs` sets all three, and any
+check written by hand must do the same — store, content directory, and `BRAIN_TEST_BUNDLE_VERSION`
+set to the candidate.
+
+Setting those three is a request, though, and a caller outside the suite cannot see whether the
+request landed: the wiring that set only `BRAIN_TEST_REGISTRY_DIR` looked exactly like working
+wiring, and the gate passed while the suite quietly ran the release the candidate was replacing. So
+the suite reports back. Every server-suite run writes `.test-bundle-used.json` at this directory's
+root — bundle name, the version it RESOLVED, and the store root it read, taken from the values the
+code produced rather than from the variables that asked for them, and written only once the test
+registry has agreed to serve that version out of that store. It is a run artifact, so it is
+gitignored, and writing it can never fail a run: a read-only checkout simply leaves no receipt.
+
+`brain/scripts/publish-bundle.mjs` reads that file as its proof instead of trusting its own
+environment, and treats a missing, stale, or wrong-version receipt the same way it treats a failing
+test. A gate that only re-read the variables it had just exported would be verifying its own
+intent, which is precisely the thing that was already wrong. Because the receipt survives a run,
+check its `writtenAt` or delete it beforehand — a suite that dies before serving a bundle leaves
+the previous run's file in place.
+
+Note that the shipped-content suite is deliberately NOT pinned — it loads every version the index
+publishes, because its subject is that everything still supported stays loadable, not which version
+a simulated run picks.
 
 ## Launch
 

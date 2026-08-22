@@ -57,11 +57,19 @@ import {
   ClassificationDecided,
   ClassificationGateCard,
   ProcessInputBody,
+  ProcessInputLive,
 } from "./panels/ProcessInputPanel";
 import { DecomposeBody } from "./panels/DecomposePanel";
 import { SelectPanelBody } from "./panels/SelectPanelPanel";
 import { GateCard, GateDecided } from "./panels/ConfirmPanelPanel";
-import { applyLiveEntries, type LiveThread } from "./live-threads";
+import {
+  DECOMPOSE_ROLES,
+  PROCESS_INPUT_ROLES,
+  applyLiveEntries,
+  liveForRoles,
+  seatlessLiveByRole,
+  type LiveThread,
+} from "./live-threads";
 import { FirstPassBody } from "./panels/FirstPassPanel";
 import { ReviewStagePanels } from "./panels/ReviewPanel";
 import { BridgeAuditBody } from "./panels/BridgeAuditPanel";
@@ -134,6 +142,7 @@ function StageErrors({
 
 function StageFrame({
   id,
+  jobId,
   title,
   status,
   startedAt,
@@ -152,6 +161,8 @@ function StageFrame({
   children,
 }: {
   id: StageId;
+  /** Half of a captured prompt's address; the feed's llm_call rows need it. */
+  jobId: string;
   title: string;
   status: StageStatus;
   startedAt?: number;
@@ -223,7 +234,12 @@ function StageFrame({
         {expanded && (
           <>
             <StageErrors errors={errors} error={error} />
-            <ActivityFeed entries={activity ?? []} active={status === "active" && live} now={now} />
+            <ActivityFeed
+              entries={activity ?? []}
+              active={status === "active" && live}
+              now={now}
+              jobId={jobId}
+            />
             {children ??
               (status === "active" && live && (activity?.length ?? 0) === 0 ? (
                 <SkeletonLines />
@@ -403,6 +419,13 @@ export function Dashboard({
     }
     return out;
   }, [liveNow]);
+  /**
+   * And the stages that run BEFORE a panel exists: no seat, no step, no round,
+   * so their threads matched neither selector above and were dropped. Their
+   * address is the role, which is also the only thing a reader can be told
+   * about them — the stage runs its roles one after another.
+   */
+  const liveBySeatlessRole = useMemo(() => seatlessLiveByRole(liveNow), [liveNow]);
 
   const runControl = useRunControl(job, jobId);
 
@@ -568,8 +591,9 @@ export function Dashboard({
     switch (id) {
       case "process-input": {
         const stage = stageOf(job, id);
-        if (!stage?.output && !stage?.classification) return null;
-        const classificationPending = stage.classification?.gate.state === "pending";
+        const threads = liveForRoles(liveBySeatlessRole, PROCESS_INPUT_ROLES);
+        if (!stage?.output && !stage?.classification && threads.length === 0) return null;
+        const classificationPending = stage?.classification?.gate.state === "pending";
         return (
           <div>
             {/* The classification confirmation rides on this stage: the gate
@@ -581,10 +605,11 @@ export function Dashboard({
                 onHold={onGateHold}
               />
             )}
-            {!classificationPending && stage.classification && (
+            {!classificationPending && stage?.classification && (
               <ClassificationDecided classification={stage.classification} />
             )}
-            {stage.output && (
+            <ProcessInputLive threads={threads} />
+            {stage?.output && (
               <ProcessInputBody output={stage.output} files={stage.files} />
             )}
           </div>
@@ -592,7 +617,13 @@ export function Dashboard({
       }
       case "decompose-experts": {
         const stage = stageOf(job, id);
-        return stage?.experts ? <DecomposeBody stage={stage} /> : null;
+        const threads = liveForRoles(liveBySeatlessRole, DECOMPOSE_ROLES);
+        // The tree used to be the only reason to render anything here, so a
+        // stage that was still building one showed an empty panel. Its live
+        // text belongs in exactly that empty place.
+        return stage && (stage.experts || threads.length > 0) ? (
+          <DecomposeBody stage={stage} live={threads} />
+        ) : null;
       }
       case "select-panel": {
         const stage = stageOf(job, id);
@@ -889,6 +920,7 @@ export function Dashboard({
         const frame = (children: ReactNode) => (
           <StageFrame
             id={selected}
+            jobId={jobId}
             title={STAGE_TITLES[selected]}
             status={stage?.status ?? "pending"}
             startedAt={stage?.startedAt}

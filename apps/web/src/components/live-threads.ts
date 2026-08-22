@@ -97,6 +97,70 @@ export function revealStep(current: number, target: number, elapsedMs: number): 
   return Math.min(target, from + Math.max(1, Math.round(perMs * Math.max(elapsedMs, 0))));
 }
 
+/* ----------------------------------- the stages that run before a panel exists */
+
+/**
+ * The roles each early stage runs, in the order it runs them.
+ *
+ * These stages are the reason the lists exist at all: they have no seat, no
+ * step and no round, so a thread there cannot be addressed the way a first-pass
+ * or review thread is. What it does have is a ROLE, and each stage's roles are
+ * a closed set — the workflow names them — so a panel asks for its own.
+ */
+export const PROCESS_INPUT_ROLES: readonly string[] = [
+  "Processor",
+  "Classifier",
+  "Annotator",
+];
+export const DECOMPOSE_ROLES: readonly string[] = ["Pool builder", "Placer"];
+
+/**
+ * The live threads of tasks that have NO seat, keyed by role.
+ *
+ * A seat is what every other selector matches on, and the stages before the
+ * panel is seated have none — which is exactly why their threads reached the
+ * browser and were dropped on the floor. `seatId` is the test rather than the
+ * stage, because the server sets it from the execution path and a role is only
+ * ever a label.
+ */
+export function seatlessLiveByRole(
+  live: ReadonlyMap<string, LiveThread>,
+): ReadonlyMap<string, LiveThread> {
+  const out = new Map<string, LiveThread>();
+  for (const thread of live.values()) {
+    if (thread.seatId !== undefined || thread.role === undefined) continue;
+    out.set(thread.role, thread);
+  }
+  return out;
+}
+
+/** One seatless thread with the role that has to be shown beside it. */
+export interface RoleThread {
+  readonly role: string;
+  readonly text: string;
+}
+
+/**
+ * The threads a stage should show, in the stage's own role order.
+ *
+ * The order matters because these roles run in SEQUENCE, so a reader watching
+ * the stage reads down the same way the run works down. A thread with nothing
+ * in it yet is left out: an empty labelled box says a task is silent when it
+ * has simply not started.
+ */
+export function liveForRoles(
+  byRole: ReadonlyMap<string, LiveThread>,
+  roles: readonly string[],
+): readonly RoleThread[] {
+  const out: RoleThread[] = [];
+  for (const role of roles) {
+    const thread = byRole.get(role);
+    if (thread === undefined || thread.text.trim().length === 0) continue;
+    out.push({ role, text: thread.text });
+  }
+  return out;
+}
+
 /** One live thread as a review card needs it. */
 export interface LiveReviewThread {
   readonly text: string;

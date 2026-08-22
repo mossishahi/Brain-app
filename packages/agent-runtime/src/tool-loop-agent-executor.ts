@@ -17,6 +17,8 @@ import type {
   ToolResultBlock,
   ToolUseBlock,
 } from "./core-adapter.js";
+import { randomUUID } from "node:crypto";
+
 import {
   addUsage,
   emptyUsage,
@@ -24,6 +26,7 @@ import {
   satisfiesRequirements,
   serializeError,
   textBlock,
+  textContent,
   toolCallDetail,
   toolUseBlocks,
 } from "./core-adapter.js";
@@ -826,6 +829,9 @@ export class ToolLoopAgentExecutor<
         messages: [...messages],
         tools: toolDefinitions,
       };
+      // One hand-off per turn, recorded before the wire call: on this path a
+      // turn IS the request, so the record is every byte the model receives.
+      this.#reportPromptHandoff(task, context, request, turn, maxTurns);
       const response = await this.#completeWithRetry(
         request,
         context,
@@ -1022,6 +1028,122 @@ export class ToolLoopAgentExecutor<
     }
 
     throw new MaxTurnsExceededError(maxTurns);
+  }
+
+  /**
+   * What this turn hands the model, recorded once and announced as ONE
+   * `llm_call` row.
+   *
+   * This path composes the whole wire request itself, so `complete` is true:
+   * unlike the agent-SDK backends, nothing is added between here and the
+   * model. The sections carry the request field by field — instructions, every
+   * message in order, the tool definitions offered, the output schema, the
+   * capability plan and the settings in force — so a reader can reconstruct
+   * exactly what was sent.
+   *
+   * Nothing but the request is read: the provider holds the credential and
+   * this method never touches it, so no captured prompt can reconstruct one.
+   *
+   * Nothing is built when the host has no prompt sink. That is not an
+   * optimization: a row with no file behind it would offer a reader a request
+   * they cannot open, so the row and the record are emitted together or not at
+   * all.
+   */
+  #reportPromptHandoff(
+    task: AgentTask,
+    context: AgentExecutionContext,
+    request: ModelRequest,
+    turn: number,
+    maxTurns: number,
+  ): void {
+    if (context.reportPrompt === undefined) return;
+    const json = (value: JsonValue): string => JSON.stringify(value, null, 2);
+    const sections: { title: string; body: string }[] = [];
+    // Flattened here rather than through the shared helper: core-adapter is
+    // this package's only import surface for contracts, and it exports the
+    // types, not the prompt utilities.
+    const system =
+      typeof request.system === "string"
+        ? request.system
+        : (request.system ?? []).map((segment) => segment.text).join("\n\n");
+    if (system !== "") {
+      sections.push({ title: "System prompt", body: system });
+    }
+    request.messages.forEach((message, index) => {
+      // Text-only turns read as prose; a turn carrying tool calls or tool
+      // results is shown as the structure it is, because that structure is
+      // what the model reads.
+      const plain = message.content.every((block) => block.type === "text");
+      sections.push({
+        title: `Message ${index + 1} · ${message.role}`,
+        body: plain
+          ? textContent(message.content)
+          : json(message.content as unknown as JsonValue),
+      });
+    });
+    if (request.tools !== undefined && request.tools.length > 0) {
+      sections.push({
+        title: "Tool definitions offered",
+        body: json(request.tools as unknown as JsonValue),
+      });
+    }
+    if (request.responseFormat?.type === "jsonSchema") {
+      sections.push({
+        title: "Delivered output JSON schema",
+        body: json(request.responseFormat.schema),
+      });
+    }
+    if (task.capabilityPlan !== undefined) {
+      sections.push({
+        title: "Resolved capability plan",
+        body: json(task.capabilityPlan as unknown as JsonValue),
+      });
+    }
+    sections.push({
+      title: "Execution settings in force",
+      body: json({
+        modelId: request.modelId,
+        maxTurns,
+        maxToolCallsPerTurn: this.#maxToolCallsPerTurn,
+        parallelToolCalls: this.#parallelToolCalls,
+        maxValidationRetries: this.#maxValidationRetries,
+        maxOutputTokens: request.maxOutputTokens ?? null,
+        temperature: request.temperature ?? null,
+        topP: request.topP ?? null,
+        stopSequences: request.stopSequences ? [...request.stopSequences] : null,
+        toolChoice: (request.toolChoice ?? null) as JsonValue,
+        nativeOperations: request.nativeOperations
+          ? [...request.nativeOperations]
+          : null,
+        providerOptions: (request.providerOptions ?? null) as JsonValue,
+      }),
+    });
+    const record = {
+      id: randomUUID(),
+      at: Date.now(),
+      taskId: task.taskId,
+      kind: task.kind,
+      ...(task.agentId !== undefined ? { agentId: task.agentId } : {}),
+      // One executor call is one attempt here: a validation retry appends a
+      // corrective message and takes the NEXT turn of the same conversation
+      // rather than starting a session over.
+      attempt: 1,
+      turn,
+      provider: this.#provider.providerId,
+      model: request.modelId,
+      ...(task.logicalRoute !== undefined
+        ? { logicalRoute: task.logicalRoute }
+        : {}),
+      complete: true,
+      sections,
+    };
+    context.reportPrompt(record);
+    context.reportProgress?.({
+      kind: "llm_call",
+      turn,
+      promptId: record.id,
+      message: `Prompt sent to ${request.modelId} · turn ${turn}`,
+    });
   }
 
   #validateRoute(route: ModelRoute): void {

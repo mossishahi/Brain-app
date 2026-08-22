@@ -1051,3 +1051,109 @@ test("a paused dispatch queue narrates itself instead of passing as a long model
     `the wait must be narrated, got: ${JSON.stringify(progress)}`,
   );
 });
+
+test("every turn records its own hand-off, complete, with no credential in it", async () => {
+  // Recognisable and unlikely: a provider that carries a key must not be able
+  // to put it into a record, whatever the executor reads off the request.
+  const apiKey = "sk-CREDENTIAL-MUST-NOT-BE-CAPTURED-3f81";
+  class KeyedProvider extends FakeProvider {
+    public readonly apiKey = apiKey;
+  }
+  const provider = new KeyedProvider((_request, call) =>
+    call === 1
+      ? response([
+          { type: "tool_use", id: "call-a", name: "lookup", input: { value: 1 } },
+        ])
+      : response([{ type: "text", text: '{"answer":3}' }]),
+  );
+  const registry = new ToolRegistry().register(
+    defineTool("lookup", async (input) => ({ output: input })),
+  );
+  const executor = new ToolLoopAgentExecutor({
+    provider,
+    tools: registry,
+    maxTurns: 4,
+    modelRouteResolver: new FixedModelRouteResolver({
+      modelId: "fake-model",
+      system: "You are a scientific panel member.",
+    }),
+  });
+
+  const records: Array<{
+    readonly id: string;
+    readonly turn?: number;
+    readonly attempt: number;
+    readonly provider: string;
+    readonly complete: boolean;
+    readonly sections: readonly { readonly title: string; readonly body: string }[];
+  }> = [];
+  const rows: Array<{ kind: string; promptId?: string; turn?: number }> = [];
+  const result = await executor.execute(
+    task({ taskId: "t-prompt", input: "Develop the idea.", tools: ["lookup"] }),
+    {
+      ...context,
+      reportProgress: (entry) => rows.push(entry),
+      reportPrompt: (record) => records.push(record),
+    },
+  );
+
+  assert.equal(result.status, "ok");
+  // Two wire calls, two rows, two records, each row addressing its own record.
+  const calls = rows.filter((entry) => entry.kind === "llm_call");
+  assert.equal(provider.requests.length, 2);
+  assert.equal(calls.length, 2);
+  assert.equal(records.length, 2);
+  assert.deepEqual(records.map((record) => record.turn), [1, 2]);
+  assert.deepEqual(calls.map((entry) => entry.promptId), records.map((r) => r.id));
+  assert.equal(new Set(records.map((record) => record.id)).size, 2);
+
+  const first = records[0]!;
+  assert.equal(first.attempt, 1);
+  assert.equal(first.provider, "fake");
+  assert.equal(first.complete, true, "this path composes the whole wire request");
+  assert.equal(
+    first.sections.find((section) => section.title === "System prompt")?.body,
+    "You are a scientific panel member.",
+  );
+  assert.match(
+    first.sections.find((section) => section.title.startsWith("Message 1"))?.body ?? "",
+    /Develop the idea\./,
+  );
+  assert.match(
+    first.sections.find((section) => section.title === "Tool definitions offered")?.body ?? "",
+    /lookup/,
+  );
+  // The second turn carries the first turn's tool result, so the conversation
+  // is reconstructable from the record alone.
+  assert.equal(
+    records[1]!.sections.filter((section) => section.title.startsWith("Message")).length,
+    3,
+  );
+
+  const serialized = JSON.stringify(records);
+  assert.equal(serialized.includes(apiKey), false);
+  assert.equal(serialized.includes("CREDENTIAL"), false);
+});
+
+test("a host with no prompt sink gets no llm_call row", async () => {
+  const provider = new FakeProvider(() =>
+    response([{ type: "text", text: '{"answer":3}' }]),
+  );
+  const executor = new ToolLoopAgentExecutor({
+    provider,
+    tools: new ToolRegistry(),
+    modelRouteResolver: new FixedModelRouteResolver({ modelId: "fake-model" }),
+  });
+  const rows: Array<{ kind: string }> = [];
+  await executor.execute(task({ taskId: "t-no-sink", input: "hello" }), {
+    ...context,
+    reportProgress: (entry) => rows.push(entry),
+  });
+
+  // No file behind it means no row: a reader must never be offered a request
+  // they cannot open.
+  assert.equal(
+    rows.some((entry) => entry.kind === "llm_call"),
+    false,
+  );
+});

@@ -292,6 +292,17 @@ export const jobsStreamUrl = `${API_BASE}/stream`;
 export const jobStreamUrl = (jobId: string): string =>
   `${API_BASE}/jobs/${encodeURIComponent(jobId)}/stream`;
 
+/**
+ * Where the captured record behind one model call lives, as markdown.
+ *
+ * A URL rather than a fetch helper on purpose: the activity row LINKS at it and
+ * the browser's own download does the rest, so a whole prompt never passes
+ * through this page's state, never lands in a React tree, and never sits in
+ * memory beside a job it does not belong to. The server names the file.
+ */
+export const promptRecordUrl = (jobId: string, promptId: string): string =>
+  `${API_BASE}/jobs/${encodeURIComponent(jobId)}/prompt/${encodeURIComponent(promptId)}`;
+
 export function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }

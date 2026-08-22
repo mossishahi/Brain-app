@@ -11,7 +11,11 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from "@anthropic-ai/claude-agent-sdk";
-import type { AgentTask } from "@brainstorm-agentic/core";
+import type {
+  AgentProgress,
+  AgentTask,
+  PromptRecord,
+} from "@brainstorm-agentic/core";
 
 import {
   ClaudeAgentExecutor,
@@ -704,7 +708,7 @@ test("reports granular tool/status progress without exposing assistant text", as
   );
 });
 
-test("reports tool completions and streamed-turn heartbeats without content", async () => {
+test("reports tool completions and one model row per phase change, never per delta", async () => {
   const reported: Array<{ kind: string; message: string; toolName?: string; elapsedMs?: number }> = [];
   const executor = new ClaudeAgentExecutor({
     token: "setup-token-secret",
@@ -719,13 +723,18 @@ test("reports tool completions and streamed-turn heartbeats without content", as
             content_block: { type: "thinking" },
           },
         };
-        yield {
-          type: "stream_event",
-          event: {
-            type: "content_block_delta",
-            delta: { type: "thinking_delta", thinking: "SECRET THOUGHTS" },
-          },
-        };
+        // A long stretch inside ONE phase. The timer this replaced turned a
+        // stretch like this into a row per heartbeat window, all saying the
+        // same thing; the phase rule must produce exactly one.
+        for (let delta = 0; delta < 40; delta += 1) {
+          yield {
+            type: "stream_event",
+            event: {
+              type: "content_block_delta",
+              delta: { type: "thinking_delta", thinking: "SECRET THOUGHTS" },
+            },
+          };
+        }
         yield {
           type: "assistant",
           message: {
@@ -793,16 +802,11 @@ test("reports tool completions and streamed-turn heartbeats without content", as
   assert.ok(ends[0]!.elapsedMs !== undefined);
   assert.match(ends[1]!.message, /^Source fetch failed · \d+s$/);
 
-  const heartbeats = reported.filter((entry) => entry.kind === "model");
-  assert.ok(
-    heartbeats.some((entry) => /^Model reasoning · \d+s$/.test(entry.message)),
-    "silent thinking stretches surface as reasoning heartbeats",
-  );
-  assert.ok(
-    heartbeats.some((entry) =>
-      /^Writing the structured output · \d+s$/.test(entry.message),
-    ),
-    "long output writing surfaces as a heartbeat",
+  const phases = reported.filter((entry) => entry.kind === "model");
+  assert.deepEqual(
+    phases.map((entry) => entry.message),
+    ["Model reasoning", "Writing the structured output"],
+    "one row per phase, in the order the phases were entered",
   );
   assert.equal(
     reported.some((entry) => entry.message.includes("SECRET THOUGHTS")),
@@ -1542,4 +1546,116 @@ test("the spec decides the chain form, whatever the schema is called and whateve
     result.status === "ok" ? (result.output as Record<string, unknown>).cot : undefined,
     [{ part1: "a", part2: "b", part3: "c", part4: "d" }],
   );
+});
+
+test("one hand-off produces one llm_call row and one record, and no credential rides in it", async () => {
+  // Recognisable and unlikely: if either string ever appears in a record, the
+  // capture reached the executor's credentials and the test says exactly which.
+  const setupToken = "setup-token-CREDENTIAL-MUST-NOT-BE-CAPTURED-9d3f";
+  const apiKey = "sk-ant-CREDENTIAL-MUST-NOT-BE-CAPTURED-4b21";
+  const captured: ClaudeAgentQueryInput[] = [];
+  const records: PromptRecord[] = [];
+  const reported: AgentProgress[] = [];
+  const executor = new ClaudeAgentExecutor({
+    token: setupToken,
+    fallbackModel: "claude-haiku-4-5",
+    maxTurns: 12,
+    env: { ANTHROPIC_API_KEY: apiKey, PATH: "/usr/bin" },
+    queryFn: successQuery(captured),
+  });
+
+  await executor.execute(structuredTask, {
+    runId: "run-prompt-capture",
+    nodePath: "root/brain",
+    reportProgress: (entry) => reported.push(entry),
+    reportPrompt: (record) => records.push(record),
+  });
+
+  const rows = reported.filter((entry) => entry.kind === "llm_call");
+  assert.equal(rows.length, 1, "one hand-off, one row");
+  assert.equal(records.length, 1, "one hand-off, one record");
+  assert.equal(rows[0]!.promptId, records[0]!.id, "the row addresses the record");
+
+  const record = records[0]!;
+  assert.equal(record.provider, "claude-agent-sdk");
+  assert.equal(record.model, "sonnet", "the model the task actually routed to");
+  assert.equal(record.taskId, "task-1");
+  assert.equal(record.kind, "brainstorm.brain");
+  assert.equal(record.attempt, 1);
+  assert.equal(record.turn, undefined, "the SDK path composes no wire turn of its own");
+  assert.equal(record.complete, false, "the SDK adds its own half after we hand over");
+  assert.ok(record.at > 0);
+
+  // Byte for byte: the prompt section is the exact string the SDK received.
+  const promptSection = record.sections.find((section) => section.title === "Prompt");
+  assert.equal(promptSection?.body, captured[0]!.prompt);
+  const settings = record.sections.find((section) =>
+    section.title.startsWith("Execution settings"),
+  );
+  assert.ok(settings !== undefined);
+  assert.equal(JSON.parse(settings.body).maxTurns, 12);
+  assert.equal(JSON.parse(settings.body).fallbackModel, "claude-haiku-4-5");
+
+  const serialized = JSON.stringify(records);
+  assert.equal(
+    serialized.includes(setupToken),
+    false,
+    "the setup token must never reach a captured prompt",
+  );
+  assert.equal(
+    serialized.includes(apiKey),
+    false,
+    "no environment credential may reach a captured prompt",
+  );
+  assert.equal(serialized.includes("CREDENTIAL"), false);
+});
+
+test("a host with no prompt sink gets no llm_call row", async () => {
+  const reported: AgentProgress[] = [];
+  const executor = new ClaudeAgentExecutor({
+    token: "setup-token-secret",
+    queryFn: successQuery([]),
+  });
+
+  await executor.execute(structuredTask, {
+    runId: "run-no-sink",
+    nodePath: "root/brain",
+    reportProgress: (entry) => reported.push(entry),
+  });
+
+  // No file behind it means no row: a reader must never be offered a request
+  // they cannot open.
+  assert.equal(
+    reported.some((entry) => entry.kind === "llm_call"),
+    false,
+  );
+});
+
+test("every attempt of a retried task records its own hand-off", async () => {
+  const records: PromptRecord[] = [];
+  const reported: AgentProgress[] = [];
+  let call = 0;
+  const executor = new ClaudeAgentExecutor({
+    token: "setup-token-secret",
+    maxValidationAttempts: 2,
+    outputValidator: {
+      validate: () => (call > 1 ? true : { success: false, issues: ["not yet"] }),
+    },
+    queryFn: (input) => {
+      call += 1;
+      return successQuery([])(input);
+    },
+  });
+
+  const result = await executor.execute(structuredTask, {
+    runId: "run-attempts",
+    nodePath: "root/brain",
+    reportProgress: (entry) => reported.push(entry),
+    reportPrompt: (record) => records.push(record),
+  });
+
+  assert.equal(result.status, "ok");
+  assert.deepEqual(records.map((record) => record.attempt), [1, 2]);
+  assert.equal(new Set(records.map((record) => record.id)).size, 2, "ids are unique");
+  assert.equal(reported.filter((entry) => entry.kind === "llm_call").length, 2);
 });

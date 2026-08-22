@@ -5,6 +5,8 @@
  */
 import { useState } from "react";
 
+import { LiveThread } from "../common";
+import type { RoleThread } from "../live-threads";
 import { useRunLive } from "../run-liveness";
 import type {
   DecomposeStage,
@@ -357,7 +359,33 @@ function TreeBrowser({
   );
 }
 
-export function DecomposeBody({ stage }: { stage: DecomposeStage }) {
+/**
+ * What each role of this stage is saying while it works, in the place its own
+ * output will take — under the step strip, where the grounding and the tree
+ * appear, and gone the moment either lands.
+ *
+ * Labelled with the ROLE, the way the review deck labels the judge and each
+ * reviewer: this stage runs its roles in sequence (the pool builder, then the
+ * placer), so without the name a reader cannot tell whose words are on screen.
+ */
+function DecomposeLive({ threads }: { threads: readonly RoleThread[] }) {
+  if (threads.length === 0) return null;
+  return (
+    <>
+      {threads.map((thread) => (
+        <LiveThread key={thread.role} text={thread.text} label={thread.role} />
+      ))}
+    </>
+  );
+}
+
+export function DecomposeBody({
+  stage,
+  live = [],
+}: {
+  stage: DecomposeStage;
+  live?: readonly RoleThread[];
+}) {
   const experts = stage.experts ?? { departments: [] };
   const counts = stage.counts ?? computeCounts(experts);
   const steps = stage.steps;
@@ -369,11 +397,16 @@ export function DecomposeBody({ stage }: { stage: DecomposeStage }) {
   ) : null;
   if (!stage.grounding) {
     // While the split stages run there is no grounding or tree yet — the
-    // step strip is the live view; the tree browser appears once bridged.
+    // step strip and the live threads are the view; the tree browser appears
+    // once bridged.
     return (
       <div>
         {stepsSection}
-        {(stage.experts || !steps) && (
+        <DecomposeLive threads={live} />
+        {/* The empty tree stays away while a thread is standing in for it:
+            two views of the same missing output, one of them saying "no
+            departments", is exactly the doubling the rule forbids. */}
+        {(stage.experts || (!steps && live.length === 0)) && (
           <TreeBrowser experts={experts} counts={counts} />
         )}
       </div>
@@ -382,6 +415,7 @@ export function DecomposeBody({ stage }: { stage: DecomposeStage }) {
   return (
     <div>
       {stepsSection}
+      <DecomposeLive threads={live} />
       <section className="subpanel">
         <p className="subpanel-title">Literature grounding</p>
         <GroundingBrowser grounding={stage.grounding} />

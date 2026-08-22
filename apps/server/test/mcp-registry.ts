@@ -277,7 +277,22 @@ function readBody(req: IncomingMessage): Promise<unknown> {
   });
 }
 
-export async function startTestRegistry(root: string): Promise<{
+export async function startTestRegistry(
+  root: string,
+  /**
+   * The version this double advertises as the bundle's latest.
+   *
+   * The store on disk holds every version ever published, but the suite runs
+   * ONE pinned version (app root `test-bundle.json`). Serving the store's index
+   * verbatim would put the server on whatever content shipped most recently,
+   * which is precisely the coupling the pin exists to break: a registry release
+   * would change what an already-released app tag executes. Only the `latest`
+   * field is rewritten, so every published version stays resolvable — a pinned
+   * run must still find an old one — while the version a NEW run selects stays
+   * under this repository's control. Omitted, the store's own index is served.
+   */
+  publishedLatest?: string,
+): Promise<{
   readonly url: string;
   readonly httpServer: HttpServer;
   /**
@@ -290,7 +305,24 @@ export async function startTestRegistry(root: string): Promise<{
   close(): Promise<void>;
 }> {
   const files = filesBelow(root);
+  if (publishedLatest !== undefined) {
+    const indexText = files.get("index.json");
+    if (indexText === undefined) throw new Error("the test registry root has no index.json");
+    const index = JSON.parse(indexText) as {
+      bundles: Array<{ id: string; latest: string; versions: string[] }>;
+    };
+    const brainstorm = index.bundles.find((bundle) => bundle.id === "brainstorm");
+    if (!brainstorm) throw new Error("the test registry root publishes no brainstorm bundle");
+    // A pin naming a version the store never published would otherwise fail
+    // deep inside a run as a missing resource; say so here instead.
+    if (!brainstorm.versions.includes(publishedLatest)) {
+      throw new Error(`the test registry root does not publish brainstorm ${publishedLatest}`);
+    }
+    brainstorm.latest = publishedLatest;
+    files.set("index.json", JSON.stringify(index, null, 2));
+  }
   const reads: string[] = [];
+  // Reads the index above, so it seeds from the advertised version's catalog.
   const taxonomy = loadTestTaxonomy(files);
   const sessions = new Map<
     string,

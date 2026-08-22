@@ -2360,3 +2360,88 @@ test("edit rounds count each seat separately", () => {
   assert.equal(index.get("member-2:1:1"), 1, "one seat's edits never number another's");
   assert.equal(index.get("member-2:1:3"), undefined);
 });
+
+test("an llm_call row carries the id of its record, and an older run's rows are untouched", () => {
+  // The row is the only thing that reaches the browser about a hand-off: the
+  // prompt itself never enters the event log. The id is what turns the row into
+  // a link, so a row that lost it would offer a reader a request they cannot
+  // open. Every other column comes from the paths that were already there.
+  const workspace = mkdtempSync(join(tmpdir(), "stage-mapper-test-"));
+  try {
+    const sessionDir = join(workspace, "session");
+    const jobDir = join(workspace, "job");
+    mkdirSync(join(sessionDir, "artifacts"), { recursive: true });
+    mkdirSync(jobDir, { recursive: true });
+    writeFileSync(
+      join(sessionDir, "checkpoint.json"),
+      JSON.stringify({
+        runId: "job-1",
+        workflowId: "brainstorm",
+        status: "running",
+        input: {},
+        journal: [],
+        pendingGates: [],
+        seq: 1,
+        updatedAt: Date.now(),
+      }),
+    );
+    const path = "brainstorm-root/first-pass/first-pass-fanout/member[0]/develop-idea-execute";
+    const lines = [
+      {
+        type: "agent:progress",
+        seq: 1,
+        at: 1,
+        path,
+        taskKind: "brainstorm.brain",
+        progress: {
+          kind: "llm_call",
+          message: "handed the prompt to the model",
+          promptId: "3f0d-record",
+          turn: 2,
+        },
+      },
+      // A row written before prompt capture existed: no kind, no id, and it
+      // must still render exactly as it did.
+      {
+        type: "agent:progress",
+        seq: 2,
+        at: 2,
+        path,
+        taskKind: "brainstorm.brain",
+        progress: { kind: "model", message: "Model reasoning" },
+      },
+    ];
+    writeFileSync(
+      join(jobDir, "events.jsonl"),
+      lines.map((line) => JSON.stringify(line)).join("\n") + "\n",
+    );
+
+    const record: JobRecord = {
+      jobId: "job-1",
+      topic: "topic",
+      status: "running",
+      runner: "local",
+      createdAt: 1,
+      updatedAt: 2,
+    };
+    const detail = buildJobDetail({
+      record,
+      status: "running",
+      sessionDir,
+      jobDir,
+      settings,
+    });
+    const rows = detail.stages.find((stage) => stage.id === "first-pass")?.activity ?? [];
+
+    const call = rows.find((row) => row.kind === "llm_call");
+    assert.equal(call?.promptId, "3f0d-record");
+    assert.equal(call?.turn, 2);
+    assert.equal(call?.role, "Thinker", "the what column comes from the path it always did");
+
+    const old = rows.find((row) => row.kind === "model");
+    assert.equal(old?.message, "Model reasoning");
+    assert.equal(old?.promptId, undefined, "a row with no record behind it claims none");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});

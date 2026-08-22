@@ -23,7 +23,7 @@
  * configuration. Parameters a model does not declare are skipped — exactly
  * like the Claude Agent SDK ignoring effort on models without it.
  */
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -44,6 +44,7 @@ import {
   type JsonObject,
   type JsonValue,
   type ModelMessage,
+  type PromptRecord,
   type SystemPrompt,
   type TaxonomyAccess,
   type TokenUsage,
@@ -236,9 +237,10 @@ export interface CursorAgentExecutorConfig {
   /** Full attempts for post-generation validation. Default 3. */
   readonly maxValidationAttempts?: number;
   /**
-   * Minimum quiet time before a content-free "model working" heartbeat is
-   * reported during long turns. Default 20000 ms; 0 reports on every event
-   * (tests only).
+   * Accepted and validated, but no longer consulted: model rows follow the
+   * stream's PHASE CHANGES (see reportSdkMessage), never a clock. Kept so
+   * deployments and tests that still pass it keep working, and so the shape of
+   * the settings does not change under a caller who never asked for this.
    */
   readonly progressHeartbeatMs?: number;
   /**
@@ -909,36 +911,29 @@ function formatElapsed(ms: number): string {
 }
 
 interface SdkProgressState {
-  readonly heartbeatMs: number;
   /** call_id -> start bookkeeping for tool_end durations and detail. */
   readonly pendingTools: Map<
     string,
     { name: string; startedAt: number; detail?: ReturnType<typeof toolCallDetail> }
   >;
-  lastEmitAt: number;
+  /** What the model is doing right now (reasoning / composing), or nothing. */
+  phase?: string;
 }
 
-function newProgressState(config: CursorAgentExecutorConfig): SdkProgressState {
-  return {
-    heartbeatMs: config.progressHeartbeatMs ?? 20_000,
-    pendingTools: new Map(),
-    lastEmitAt: Date.now(),
-  };
-}
-
-function emit(
-  state: SdkProgressState,
-  context: AgentExecutionContext,
-  value: AgentProgress,
-): void {
-  state.lastEmitAt = Date.now();
-  progress(context, value);
+function newProgressState(): SdkProgressState {
+  return { pendingTools: new Map() };
 }
 
 /**
- * Translates SDK stream messages into throttled, content-free progress:
- * tool lifecycle with operational detail, thinking/writing heartbeats, and
- * status lines. Message content is never read beyond types and tool inputs.
+ * Translates SDK stream messages into content-free progress: tool lifecycle
+ * with operational detail, phase rows, and status lines. Message content is
+ * never read beyond types and tool inputs.
+ *
+ * A model row is a phase CHANGE, never a timer. One model turn arrives as
+ * dozens of `thinking` and `assistant` delta messages, so a clock over them
+ * produced dozens of identical rows for a single prompt — a heartbeat proving
+ * the process was alive rather than information about the run. The transition
+ * from reasoning to composing is the information; the repeats are not.
  */
 function reportSdkMessage(
   message: UnknownRecord,
@@ -946,9 +941,26 @@ function reportSdkMessage(
   state: SdkProgressState,
 ): void {
   const now = Date.now();
+  const phase =
+    message.type === "thinking"
+      ? "Model reasoning"
+      : message.type === "assistant"
+        ? "Composing the response"
+        : undefined;
+  if (phase !== undefined) {
+    if (state.phase !== phase) {
+      state.phase = phase;
+      progress(context, { kind: "model", message: phase });
+    }
+    return;
+  }
+  // Anything else — a tool round, a completed send, a status line — ends the
+  // phase, so the next stretch of reasoning announces itself instead of being
+  // deduplicated against a phase that belonged to the previous round.
+  state.phase = undefined;
   if (message.type === "system" && message.subtype === "init") {
     const model = record(message.model);
-    emit(state, context, {
+    progress(context, {
       kind: "status",
       message:
         typeof model.id === "string"
@@ -975,7 +987,7 @@ function reportSdkMessage(
         startedAt: now,
         ...(detail ? { detail } : {}),
       });
-      emit(state, context, {
+      progress(context, {
         kind: "tool_start",
         toolName: message.name,
         message: toolMessage(message.name, message.args),
@@ -992,7 +1004,7 @@ function reportSdkMessage(
       const label = TOOL_END_LABELS[name] ?? name;
       const outcome = message.status === "error" ? "failed" : "finished";
       const remaining = state.pendingTools.size;
-      emit(state, context, {
+      progress(context, {
         kind: "tool_end",
         toolName: name,
         elapsedMs,
@@ -1008,19 +1020,9 @@ function reportSdkMessage(
     }
     return;
   }
-  if (message.type === "thinking") {
-    if (now - state.lastEmitAt < state.heartbeatMs) return;
-    emit(state, context, { kind: "model", message: "Model reasoning" });
-    return;
-  }
-  if (message.type === "assistant") {
-    if (now - state.lastEmitAt < state.heartbeatMs) return;
-    emit(state, context, { kind: "model", message: "Composing the response" });
-    return;
-  }
   if (message.type === "status" && typeof message.status === "string") {
     if (message.status === "RUNNING" || message.status === "CREATING") return;
-    emit(state, context, {
+    progress(context, {
       kind: "status",
       message: `Agent ${message.status.toLowerCase()}`,
     });
@@ -1588,6 +1590,117 @@ interface AttemptOutcome {
   readonly costUsd?: number;
 }
 
+/** Pretty JSON for a record section, so the rendered file stays readable. */
+function sectionJson(value: JsonValue): string {
+  return JSON.stringify(value, null, 2);
+}
+
+/**
+ * What this attempt hands the model, recorded once and announced as ONE
+ * `llm_call` row.
+ *
+ * Called immediately before the agent is sent its first message, because that
+ * is where this backend's prompt leaves us: the Cursor runtime composes the
+ * final request — its own system prompt, its built-in tool definitions, its
+ * harness scaffolding — after we hand over. Hence `complete: false`, and the
+ * rendered file must SAY so rather than imply it holds every byte.
+ *
+ * Assembled field by named field from the task, the tools and the settings.
+ * `config.apiKey` is never read here and must never become reachable from a
+ * section: a captured prompt that could reconstruct a credential would turn a
+ * debugging aid into a leak.
+ *
+ * Nothing is built when the host has no prompt sink. That is not an
+ * optimization: a row with no file behind it would offer a reader a request
+ * they cannot open, so the row and the record are emitted together or not at
+ * all.
+ */
+function reportPromptHandoff(
+  config: CursorAgentExecutorConfig,
+  task: AgentTask,
+  context: AgentExecutionContext,
+  attempt: number,
+  modelSelection: CursorSdkAgentOptions["model"],
+  builtinTools: readonly string[],
+  customTools: CustomToolMap,
+  instructions: string,
+  promptText: string,
+): void {
+  if (context.reportPrompt === undefined) return;
+  const sections: { title: string; body: string }[] = [];
+  if (instructions !== "") {
+    // Separate section, not a separate prompt: this text is prepended verbatim
+    // to the body below, so the two concatenated in this order are the exact
+    // bytes the agent was sent.
+    sections.push({ title: "Instructions (prepended to the prompt)", body: instructions });
+  }
+  sections.push({ title: "Prompt", body: promptText });
+  sections.push({
+    title: "Tools offered (Cursor owns its built-in definitions)",
+    body: sectionJson([
+      ...builtinTools.map((name): JsonObject => ({ name })),
+      ...Object.entries(customTools).map(([name, tool]): JsonObject => ({
+        name,
+        inProcess: true,
+        description: tool.description ?? "",
+        ...(tool.inputSchema !== undefined ? { inputSchema: tool.inputSchema } : {}),
+      })),
+    ]),
+  });
+  if (task.outputSchema !== undefined && customTools[RESULT_TOOL] === undefined) {
+    // The transport tool is absent on the raw-JSON fallback attempt, so the
+    // schema above does not carry it; the task's schema still governs what the
+    // answer must satisfy, and a reader needs to see it.
+    sections.push({
+      title: `Output JSON schema (not delivered: this attempt asks for raw JSON)`,
+      body: sectionJson(task.outputSchema.schema),
+    });
+  }
+  if (task.capabilityPlan !== undefined) {
+    sections.push({
+      title: "Resolved capability plan",
+      body: sectionJson(task.capabilityPlan as unknown as JsonValue),
+    });
+  }
+  sections.push({
+    title: "Execution settings in force",
+    body: sectionJson({
+      model: modelSelection.id,
+      modelParams: modelSelection.params
+        ? modelSelection.params.map((param) => ({ id: param.id, value: param.value }))
+        : [],
+      fallbackModel: config.fallbackModel ?? null,
+      maxTurns: config.maxTurns ?? 100,
+      effort: config.effort ?? null,
+      thinking: config.thinking ?? null,
+      maxBudgetUsd: config.maxBudgetUsd ?? null,
+      maxValidationAttempts: config.maxValidationAttempts ?? 3,
+    }),
+  });
+  const promptRecord: PromptRecord = {
+    id: randomUUID(),
+    at: Date.now(),
+    taskId: task.taskId,
+    kind: task.kind,
+    ...(task.agentId !== undefined ? { agentId: task.agentId } : {}),
+    attempt,
+    // No `turn`: this backend runs a whole multi-turn session behind one
+    // hand-off, and the rounds it counts are the SDK's, not wire turns we
+    // composed.
+    provider: "cursor-agent-sdk",
+    model: modelSelection.id,
+    ...(task.logicalRoute !== undefined ? { logicalRoute: task.logicalRoute } : {}),
+    complete: false,
+    sections,
+  };
+  context.reportPrompt(promptRecord);
+  progress(context, {
+    kind: "llm_call",
+    promptId: promptRecord.id,
+    message: `Prompt sent to ${modelSelection.id} · attempt ${attempt}`,
+  });
+}
+
 async function executeAttempt(
   config: CursorAgentExecutorConfig,
   task: AgentTask,
@@ -1595,6 +1708,7 @@ async function executeAttempt(
   capture: AttemptCapture,
   workspace: string,
   modelSelection: CursorSdkAgentOptions["model"],
+  attempt: number,
   validationIssues: readonly string[],
   nativeStructuredOutput: boolean,
   rejectedOutput: JsonValue | undefined,
@@ -1630,8 +1744,12 @@ async function executeAttempt(
   // is the capability group that carries the in-process custom tools.
   const tools = [...builtinTools, ...(hasCustomTools ? ["mcp"] : [])];
 
+  // The compiled role instructions are kept apart from the task body so the
+  // prompt record can name them separately; concatenated in this order they
+  // are the exact bytes the agent is sent.
+  const instructions = instructionBlock(task.modelRequest.system);
   const promptParts: string[] = [
-    instructionBlock(task.modelRequest.system) + messagePrompt(task.modelRequest.messages),
+    messagePrompt(task.modelRequest.messages),
     ...(task.outputSchema && nativeStructuredOutput
       ? [
           "",
@@ -1762,7 +1880,7 @@ async function executeAttempt(
   };
   armStallTimer();
   try {
-    const progressState = newProgressState(config);
+    const progressState = newProgressState();
     // Turn accounting. The stream is FRAGMENTS: one model turn arrives as
     // many `assistant` and `thinking` delta messages (a single probed turn
     // carried 8 and 14 of them), so counting those exploded a one-minute
@@ -1788,8 +1906,36 @@ async function executeAttempt(
     };
 
     /** Sends one turn and drains its stream, returning the terminal result. */
-    const sendAndConsume = async (prompt: string): Promise<CursorSdkRunResult> => {
-      run = await Promise.race([agent.send(prompt), stallSignal]);
+    const sendAndConsume = async (
+      prompt: string,
+      instructionsPrefix = "",
+    ): Promise<CursorSdkRunResult> => {
+      // Every send is recorded, and recorded BEFORE it leaves: an attempt can
+      // send more than once — a session that ends without submitting is asked
+      // to finish, up to MAX_RESULT_NUDGES times — and those follow-ups are
+      // exactly the sends a reader is trying to understand when a run goes
+      // wrong. Reporting only the first left them invisible. Reporting before
+      // the await is what makes a session that dies mid-stream still leave the
+      // reader the request that produced it.
+      //
+      // The prefix travels separately so the record can label it and still
+      // hold the exact bytes: the two sections concatenated in this order are
+      // what `agent.send` receives, which is the promise the record makes.
+      reportPromptHandoff(
+        config,
+        task,
+        context,
+        attempt,
+        modelSelection,
+        builtinTools,
+        customTools,
+        instructionsPrefix,
+        prompt,
+      );
+      run = await Promise.race([
+        agent.send(instructionsPrefix + prompt),
+        stallSignal,
+      ]);
       if (context.signal?.aborted) cancelRun("signal");
       // Manual iteration so the stall signal can interrupt a read blocked on
       // a dead connection: run.cancel() cannot be relied on to end a
@@ -1886,7 +2032,7 @@ async function executeAttempt(
       return result;
     };
 
-    let finalResult = await sendAndConsume(promptParts.join("\n"));
+    let finalResult = await sendAndConsume(promptParts.join("\n"), instructions);
     let turns = toolRounds + usageTurns;
 
     /**
@@ -2137,6 +2283,7 @@ export class CursorAgentExecutor implements AgentExecutor {
           capture,
           workspace,
           selection,
+          attempt,
           validationIssues,
           nativeStructuredOutput,
           rejectedOutput,

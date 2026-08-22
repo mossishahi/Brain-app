@@ -2872,8 +2872,42 @@ section.drawer-section:not(.drawer-updates) {
 
 .activity-tool_start .activity-marker,
 .activity-tool_progress .activity-marker,
-.activity-model .activity-marker {
+.activity-model .activity-marker,
+.activity-llm_call .activity-marker {
   background: var(--accent);
+}
+
+/* The one row in the feed that goes somewhere: an llm_call carries the exact
+   request behind that call, and the row IS the anchor (the column rules above
+   select direct children, so a wrapper would break every one of them). The
+   <li> only holds it, and takes the row's own sizing so the anchor's
+   min-width still resolves against a full-width box. */
+.activity-entry-link {
+  width: max-content;
+  min-width: 100%;
+}
+
+a.activity-entry {
+  color: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+/* Hover and focus say the same thing, because a keyboard reader gets no
+   pointer: the whole row takes the accent, columns that set their own colour
+   included. */
+a.activity-entry:hover,
+a.activity-entry:focus-visible,
+a.activity-entry:hover > *,
+a.activity-entry:focus-visible > * {
+  color: var(--accent);
+}
+
+a.activity-entry:focus-visible {
+  /* Inset, because the list clips at its own edge and an outline drawn outside
+     the row would be scrolled away rather than seen. */
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
 }
 
 .activity-tool_end .activity-marker,

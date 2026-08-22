@@ -70,6 +70,7 @@ import {
   type GpuRunConfig,
 } from "@brainstorm-agentic/host-tools";
 import { OfflineBrainstormExecutor } from "./offline-executor.js";
+import type { PromptSink } from "./prompt-capture.js";
 
 export interface ProviderConfig {
   /** Developer API, Claude Agent SDK, Cursor SDK, or deterministic offline. */
@@ -173,6 +174,12 @@ export interface RuntimeWiringOptions {
    * AgentExecutionContext.reportLive). Omitted on a host that shows none.
    */
   readonly onLivePreview?: LivePreviewSink;
+  /**
+   * Where a hand-off's prompt record goes (see
+   * AgentExecutionContext.reportPrompt). Omitted on a host with nothing to
+   * serve the records from, and then executors build none at all.
+   */
+  readonly onPrompt?: PromptSink;
 }
 
 /** Reads the model id the brainstorm compiler resolved into the task description. */
@@ -525,6 +532,34 @@ class ThinkingArtifactAgentExecutor implements AgentExecutor {
   }
 }
 
+/**
+ * Hands every executor below it the run's prompt sink, by adding
+ * `reportPrompt` to the execution context on its way down.
+ *
+ * WHY here and not in the workflow runner, where `reportLive` is attached: live
+ * text is addressed by execution path, so the runner — which owns the path —
+ * has to be the one that builds that callback. A prompt record names itself and
+ * needs nothing the runner knows, so the sink can reach the executor as a plain
+ * decorator in the host that opened the file, and core stays unaware that this
+ * deployment writes prompts to disk at all.
+ */
+export class PromptCapturingAgentExecutor implements AgentExecutor {
+  constructor(
+    private readonly inner: AgentExecutor,
+    private readonly sink: PromptSink,
+  ) {}
+
+  execute(task: AgentTask, context: AgentExecutionContext): Promise<AgentResult> {
+    // A copy, never a mutation: the runner owns the context object and reuses
+    // it for the events it emits after the task returns. A context that already
+    // carries a sink keeps it, so a test host wiring its own is never clobbered.
+    return this.inner.execute(task, {
+      ...context,
+      reportPrompt: context.reportPrompt ?? this.sink,
+    });
+  }
+}
+
 export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
   const attachmentRoots = options.attachmentRoots ?? [];
   // The Claude Agent SDK path serves attachment access through Claude Code's
@@ -665,12 +700,20 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
   // execution, so a parallel wave (first pass, a review round's
   // commentors) launches one agent per interval instead of all at once.
   const launchIntervalMs = launchIntervalFor(options.providerConfig);
-  const agentExecutor =
+  const staggered =
     launchIntervalMs > 0
       ? new StaggeredLaunchAgentExecutor(executorStack, {
           intervalMs: launchIntervalMs,
         })
       : executorStack;
+  // Above the stagger without taking its place: the sink rides the CONTEXT, so
+  // it has to be attached before any executor that talks to a model sees it,
+  // and this wrapper only decorates — the stagger remains the outermost thing
+  // that DELAYS a task's entry into execution.
+  const agentExecutor =
+    options.onPrompt === undefined
+      ? staggered
+      : new PromptCapturingAgentExecutor(staggered, options.onPrompt);
 
   const runtime = new BrainstormRuntime({
     agentExecutor,

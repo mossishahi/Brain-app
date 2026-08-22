@@ -16,7 +16,8 @@ import type {
 import { CLASSIFICATION_EDIT_LIMITS } from "@brainstorm-agentic/protocol";
 import { errorMessage } from "../../api";
 import { formatClock } from "../../format";
-import { Clamp } from "../common";
+import { Clamp, LiveThread } from "../common";
+import type { RoleThread } from "../live-threads";
 import { AutoApproveBar } from "./ConfirmPanelPanel";
 
 /** Last path segments so long snapshot paths stay scannable; full path on hover. */
@@ -423,6 +424,27 @@ export function ClassificationDecided({
         </span>
       </p>
     </div>
+  );
+}
+
+/**
+ * What the processor, the classifier and the code annotator are saying while
+ * they work, in the place their own output will take.
+ *
+ * The rule this obeys: live text never gets a box of its own beside the thing
+ * it is producing — it stands IN that thing's place and is replaced the moment
+ * it lands. Here that is the panel body: the structured input, and above it the
+ * reading of the submission. The label is the role, because these tasks have no
+ * seat to be named by and the stage runs them one after another.
+ */
+export function ProcessInputLive({ threads }: { threads: readonly RoleThread[] }) {
+  if (threads.length === 0) return null;
+  return (
+    <>
+      {threads.map((thread) => (
+        <LiveThread key={thread.role} text={thread.text} label={thread.role} />
+      ))}
+    </>
   );
 }
 

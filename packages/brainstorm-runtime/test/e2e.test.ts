@@ -127,19 +127,40 @@ function registryStoreRoot(): string {
   return join(brainRepoRoot, ".registry-store");
 }
 
-/** The version the registry index publishes as latest, like a real submission. */
-function latestPublishedBundleDir(): string {
-  const root = registryStoreRoot();
-  const index = JSON.parse(readFileSync(join(root, "index.json"), "utf8")) as {
-    readonly bundles: readonly { readonly id: string; readonly latest: string }[];
-  };
-  const entry = index.bundles.find((bundle) => bundle.id === "brainstorm");
-  if (!entry) throw new Error("the registry index does not publish a brainstorm bundle");
-  return `${join(root, "bundles", "brainstorm", entry.latest)}/`;
+/**
+ * The version this suite executes, from the repo-root pin.
+ *
+ * It used to be the index's `latest`, which made publishing content rewrite the
+ * inputs of app tags that had already shipped — content alone could turn a
+ * released commit red. `BRAIN_TEST_BUNDLE_VERSION` overrides the pin for one
+ * run; its literal value "latest" restores the floating resolution for CI's
+ * canary lane, which reports the next bump's cost without failing the workflow.
+ */
+function pinnedBundleVersion(): string {
+  const override = process.env.BRAIN_TEST_BUNDLE_VERSION;
+  if (override === "latest") {
+    const index = JSON.parse(
+      readFileSync(join(registryStoreRoot(), "index.json"), "utf8"),
+    ) as { readonly bundles: readonly { readonly id: string; readonly latest: string }[] };
+    const entry = index.bundles.find((bundle) => bundle.id === "brainstorm");
+    if (!entry) throw new Error("the registry index does not publish a brainstorm bundle");
+    return entry.latest;
+  }
+  if (override) return override;
+  return (
+    JSON.parse(
+      readFileSync(new URL("../../../../test-bundle.json", import.meta.url), "utf8"),
+    ) as { readonly version: string }
+  ).version;
+}
+
+/** That version's directory in the store, loaded like a real submission's pin. */
+function pinnedBundleDir(): string {
+  return `${join(registryStoreRoot(), "bundles", "brainstorm", pinnedBundleVersion())}/`;
 }
 
 const registryContentDir =
-  process.env.BRAIN_TEST_CONTENT_DIR ?? latestPublishedBundleDir();
+  process.env.BRAIN_TEST_CONTENT_DIR ?? pinnedBundleDir();
 
 function object(value: JsonValue | undefined, label: string): JsonObject {
   assert.ok(typeof value === "object" && value !== null && !Array.isArray(value), `${label} is not an object`);

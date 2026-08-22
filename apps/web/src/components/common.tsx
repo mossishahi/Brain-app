@@ -1,5 +1,6 @@
 /** Shared UI primitives used across panels: dots, clamps, chips, evidence. */
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { promptRecordUrl } from "../api";
 import { revealStep } from "./live-threads";
 import type { CSSProperties, ReactNode } from "react";
 import type {
@@ -333,15 +334,85 @@ function whereTitle(where: StageActivityEntry["where"]): string {
   return `${parts.join(", ")} — the chain being worked on, which is not always the agent's own`;
 }
 
+/**
+ * The cells of one activity row, in column order.
+ *
+ * Split out because an `llm_call` row is the same row inside an anchor: the
+ * layout rules select the row's DIRECT children, so the element carrying
+ * `.activity-entry` has to be the element holding these — the `<li>` normally,
+ * the `<a>` when the row leads somewhere.
+ */
+function ActivityCells({ entry }: { entry: StageActivityEntry }) {
+  return (
+    <>
+      <time dateTime={new Date(entry.at).toISOString()}>
+        {new Date(entry.at).toLocaleTimeString([], {
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+        })}
+      </time>
+      {/* WHAT, WHO, WHERE — three fixed columns, so the messages beside
+          them stay in one line down the feed even when a row has none of
+          the three (a pre-panel stage, a run-level event). An empty column
+          renders a dim dash rather than nothing, because a blank gap reads
+          as a rendering fault. */}
+      <span className="activity-role" title={roleTitle(entry.role)}>
+        {entry.role ?? "—"}
+      </span>
+      <span
+        className="activity-actor"
+        title={
+          entry.actor !== undefined
+            ? `${entry.actor} is doing this`
+            : "not a seat — the role alone says who is working"
+        }
+      >
+        {entry.actor ?? "—"}
+      </span>
+      <span className="activity-where" title={whereTitle(entry.where)}>
+        {entry.where ? <Where where={entry.where} /> : "—"}
+      </span>
+      <span className="activity-marker" aria-hidden />
+      <span className="activity-message">{entry.message}</span>
+      {entry.turn !== undefined && (
+        <span className="activity-meta">turn {entry.turn}</span>
+      )}
+      {entry.elapsedMs !== undefined && (
+        <span className="activity-meta">
+          {(entry.elapsedMs / 1000).toFixed(0)}s
+        </span>
+      )}
+      {entry.usage && (
+        <span className="activity-meta">
+          <TokenChip usage={entry.usage} />
+        </span>
+      )}
+      {entry.capability && (
+        <span className="activity-caps">
+          <CapabilityBadge entry={entry} />
+        </span>
+      )}
+    </>
+  );
+}
+
 export function ActivityFeed({
   entries,
   active,
   now,
+  jobId,
 }: {
   entries: readonly StageActivityEntry[];
   active: boolean;
   /** Current time for the quiet-period ticker; omit to disable it. */
   now?: number;
+  /**
+   * The run these rows belong to, which is half of a captured prompt's address.
+   * Omit and `llm_call` rows render as ordinary rows — correct for any caller
+   * that is not showing one run's feed.
+   */
+  jobId?: string;
 }) {
   // Render the full server-provided window (capped server-side): trimming to
   // a client tail dropped the capability rows once a run's closing heartbeats
@@ -372,58 +443,33 @@ export function ActivityFeed({
             list.scrollHeight - list.scrollTop - list.clientHeight < 40;
         }}
       >
-        {visible.map((entry) => (
-          <li key={entry.id} className={`activity-entry activity-${entry.kind}`}>
-            <time dateTime={new Date(entry.at).toISOString()}>
-              {new Date(entry.at).toLocaleTimeString([], {
-                hour: "2-digit",
-                minute: "2-digit",
-                second: "2-digit",
-              })}
-            </time>
-            {/* WHAT, WHO, WHERE — three fixed columns, so the messages beside
-                them stay in one line down the feed even when a row has none of
-                the three (a pre-panel stage, a run-level event). An empty column
-                renders a dim dash rather than nothing, because a blank gap reads
-                as a rendering fault. */}
-            <span className="activity-role" title={roleTitle(entry.role)}>
-              {entry.role ?? "—"}
-            </span>
-            <span
-              className="activity-actor"
-              title={
-                entry.actor !== undefined
-                  ? `${entry.actor} is doing this`
-                  : "not a seat — the role alone says who is working"
-              }
-            >
-              {entry.actor ?? "—"}
-            </span>
-            <span className="activity-where" title={whereTitle(entry.where)}>
-              {entry.where ? <Where where={entry.where} /> : "—"}
-            </span>
-            <span className="activity-marker" aria-hidden />
-            <span className="activity-message">{entry.message}</span>
-            {entry.turn !== undefined && (
-              <span className="activity-meta">turn {entry.turn}</span>
-            )}
-            {entry.elapsedMs !== undefined && (
-              <span className="activity-meta">
-                {(entry.elapsedMs / 1000).toFixed(0)}s
-              </span>
-            )}
-            {entry.usage && (
-              <span className="activity-meta">
-                <TokenChip usage={entry.usage} />
-              </span>
-            )}
-            {entry.capability && (
-              <span className="activity-caps">
-                <CapabilityBadge entry={entry} />
-              </span>
-            )}
-          </li>
-        ))}
+        {visible.map((entry) => {
+          const promptHref =
+            entry.kind === "llm_call" && entry.promptId !== undefined && jobId !== undefined
+              ? promptRecordUrl(jobId, entry.promptId)
+              : undefined;
+          // An llm_call row is the ONLY row in the feed that goes anywhere: it
+          // carries the exact request behind that call. A real anchor rather
+          // than a handler, so the keyboard reaches it for free and the
+          // download is the browser's, not ours — and the row itself is the
+          // anchor, because the column rules above select direct children.
+          return promptHref !== undefined ? (
+            <li key={entry.id} className="activity-entry-link">
+              <a
+                className={`activity-entry activity-${entry.kind}`}
+                href={promptHref}
+                download
+                title="download exactly what was sent to the model for this call"
+              >
+                <ActivityCells entry={entry} />
+              </a>
+            </li>
+          ) : (
+            <li key={entry.id} className={`activity-entry activity-${entry.kind}`}>
+              <ActivityCells entry={entry} />
+            </li>
+          );
+        })}
       </ol>
       {quietMs > STALE_AFTER_MS && (
         <div className="activity-stale">

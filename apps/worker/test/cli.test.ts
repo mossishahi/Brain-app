@@ -42,32 +42,51 @@ function testTaxonomy(root: string): { taxonomy: TaxonomyAccess } | Record<strin
 
 const brainRepoRoot = fileURLToPath(new URL("../../../../../brain/", import.meta.url));
 /**
- * The newest published bundle, read from the store's own index.
+ * The published bundle these tests run, read from the repo-root pin.
  *
- * Deliberately not a pinned version: these tests want "a real bundle", and a
- * hardcoded one silently becomes a museum piece. This file used to pin 0.1.0,
- * which kept passing until the workflow schema gained a requirement that
- * ancient bundles cannot satisfy — at which point the whole file failed at
- * import, on a rule that has nothing to do with what it tests. Old versions
- * stay in the store on purpose (a pinned run must still resolve), so nothing
- * prunes them and nothing would have flagged the staleness.
+ * This used to follow the store index's `latest` so the file could never
+ * become a museum piece — an earlier version pinned 0.1.0 in this file and kept
+ * passing until the workflow schema gained a requirement ancient bundles cannot
+ * satisfy, failing the whole file at import on a rule unrelated to what it
+ * tests. Following `latest` fixed that and bought a worse problem: publishing
+ * content then rewrote the inputs of app tags that had ALREADY shipped, so a
+ * registry release could turn a released app commit red on its own.
+ *
+ * The pin now lives in `test-bundle.json` at the app root rather than inline
+ * here, which answers the museum-piece worry differently: one declared version
+ * for the whole repository, bumped in a deliberate commit that carries the test
+ * updates the new bundle needs, and CI's canary lane runs this same suite at
+ * `latest` on every build to say out loud how stale the pin has become.
  */
-function latestMaterializedDir(): string {
+function pinnedMaterializedDir(): string {
   execFileSync(
     process.execPath,
     [join(brainRepoRoot, "scripts", "materialize-store.mjs"), "--quiet"],
     { stdio: "inherit" },
   );
   const storeRoot = join(brainRepoRoot, ".registry-store");
-  const index = JSON.parse(readFileSync(join(storeRoot, "index.json"), "utf8")) as {
-    bundles: readonly { id: string; latest: string }[];
-  };
-  const brainstorm = index.bundles.find((bundle) => bundle.id === "brainstorm");
-  if (!brainstorm) throw new Error("the materialized store publishes no brainstorm bundle");
-  return `${join(storeRoot, "bundles", "brainstorm", brainstorm.latest)}/`;
+  const override = process.env.BRAIN_TEST_BUNDLE_VERSION;
+  let version: string;
+  if (override === "latest") {
+    const index = JSON.parse(readFileSync(join(storeRoot, "index.json"), "utf8")) as {
+      bundles: readonly { id: string; latest: string }[];
+    };
+    const brainstorm = index.bundles.find((bundle) => bundle.id === "brainstorm");
+    if (!brainstorm) throw new Error("the materialized store publishes no brainstorm bundle");
+    version = brainstorm.latest;
+  } else if (override) {
+    version = override;
+  } else {
+    version = (
+      JSON.parse(
+        readFileSync(new URL("../../../../test-bundle.json", import.meta.url), "utf8"),
+      ) as { version: string }
+    ).version;
+  }
+  return `${join(storeRoot, "bundles", "brainstorm", version)}/`;
 }
 const registryContentDir =
-  process.env.BRAIN_TEST_CONTENT_DIR ?? latestMaterializedDir();
+  process.env.BRAIN_TEST_CONTENT_DIR ?? pinnedMaterializedDir();
 const registryBundle = loadContent(registryContentDir);
 
 test("Agent SDK environment settings map to executor configuration", () => {

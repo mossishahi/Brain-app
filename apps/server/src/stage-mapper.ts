@@ -579,6 +579,14 @@ function timings(
           ...(event.progress.elapsedMs !== undefined
             ? { elapsedMs: event.progress.elapsedMs }
             : {}),
+          // The handle an "llm_call" row follows to the captured record of what
+          // we sent. Only the ID travels — the prompt itself never enters the
+          // event log — and it is copied through verbatim, so a journal written
+          // before prompt capture existed simply has none and its rows render
+          // exactly as they did.
+          ...(event.progress.promptId !== undefined
+            ? { promptId: event.progress.promptId }
+            : {}),
           ...(capability ? { capability } : {}),
           ...(detail ? { detail } : {}),
         });

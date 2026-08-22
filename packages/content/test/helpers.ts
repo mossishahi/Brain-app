@@ -54,6 +54,27 @@ function versionDir(version: string): string {
   return `${join(registryRoot(), "bundles", "brainstorm", version)}/`;
 }
 
+/**
+ * The single version this suite executes, from the repo-root pin.
+ *
+ * Deliberately NOT the index's `latest`: that made a registry publish rewrite
+ * the inputs of app tags that had already shipped, so content alone could turn
+ * a released commit red. `BRAIN_TEST_BUNDLE_VERSION` overrides the pin for one
+ * run, and its literal value "latest" asks for the old floating resolution —
+ * the CI canary lane, which reports the cost of the next bump but does not get
+ * to fail the workflow.
+ */
+function pinnedBundleVersion(): string {
+  const override = process.env.BRAIN_TEST_BUNDLE_VERSION;
+  if (override === "latest") return brainstormIndexEntry().latest;
+  if (override) return override;
+  return (
+    JSON.parse(
+      readFileSync(new URL("../../../../test-bundle.json", import.meta.url), "utf8"),
+    ) as { readonly version: string }
+  ).version;
+}
+
 /** Every version the registry index publishes; all of them must stay valid. */
 export function publishedContentDirs(): readonly { version: string; dir: string }[] {
   return brainstormIndexEntry().versions.map((version) => ({
@@ -62,11 +83,9 @@ export function publishedContentDirs(): readonly { version: string; dir: string 
   }));
 }
 
-/** Authoritative static bundle owned by Brain Registry: the published latest. */
+/** Authoritative static bundle owned by Brain Registry: the pinned version. */
 export function registryContentDir(): string {
-  return (
-    process.env.BRAIN_TEST_CONTENT_DIR ?? versionDir(brainstormIndexEntry().latest)
-  );
+  return process.env.BRAIN_TEST_CONTENT_DIR ?? versionDir(pinnedBundleVersion());
 }
 
 /** The registry bundle, parsed once; every test mutates its own deep clone. */

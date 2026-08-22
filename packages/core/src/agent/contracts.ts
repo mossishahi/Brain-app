@@ -118,7 +118,11 @@ export type AgentProgressKind =
   | "tool_progress"
   | "tool_end"
   | "retry"
-  | "validation";
+  | "validation"
+  // One real hand-off to a model, carrying only the id of the record that
+  // holds what was sent. The prompt itself never travels this channel; the id
+  // is the handle a reader follows to the file (see PromptRecord).
+  | "llm_call";
 
 export interface AgentProgress {
   readonly kind: AgentProgressKind;
@@ -138,11 +142,57 @@ export interface AgentProgress {
    */
   readonly failed?: boolean;
   /**
+   * Which captured prompt record this row addresses. Meaningful on `llm_call`
+   * only, and always present there: a row without a record behind it would
+   * offer a reader a request they cannot open.
+   *
+   * An id, never the prompt — the event log stays sanitized and small.
+   */
+  readonly promptId?: string;
+  /**
    * Optional structured payload for machine aggregation (e.g. the resolved
    * capability plan at task start). Same sanitation rules as `message`:
    * operational facts only, never content.
    */
   readonly data?: JsonObject;
+}
+
+/**
+ * Exactly what one hand-off to a model contained, kept verbatim so a reader can
+ * reconstruct the request behind a single call byte for byte.
+ *
+ * Deliberately NOT an AgentProgress payload: `sections` carry whole prompts,
+ * and the progress channel is sanitized, streamed to every connected browser,
+ * and small on purpose. This travels the live-text way instead — its own
+ * per-run file, fetched only when a reader asks for one.
+ *
+ * Executors hold API keys and setup tokens. Nothing a record is built from may
+ * come from that material: a credential must never be reconstructable from a
+ * section.
+ */
+export interface PromptRecord {
+  /** Stable id: how a row addresses its file. Unique within the run. */
+  readonly id: string;
+  readonly at: number;
+  readonly taskId: string;
+  readonly kind: string;
+  readonly agentId?: string;
+  /** 1-based executor attempt (a validation retry or a fresh session is a new one). */
+  readonly attempt: number;
+  /** 1-based wire turn where the backend exposes one; absent on the SDK paths. */
+  readonly turn?: number;
+  readonly provider: string;
+  readonly model?: string;
+  readonly logicalRoute?: string;
+  /**
+   * True when this is every byte the model receives. False on the agent-SDK
+   * paths, where the SDK composes the final request and adds its own system
+   * prompt, built-in tools and harness scaffolding after we hand over. The
+   * rendered file must SAY which case it is rather than imply completeness.
+   */
+  readonly complete: boolean;
+  /** Ordered, named sections: everything we sent, verbatim. */
+  readonly sections: readonly { readonly title: string; readonly body: string }[];
 }
 
 export interface AgentExecutionContext {
@@ -173,6 +223,16 @@ export interface AgentExecutionContext {
    * anything producing it.
    */
   readonly reportLive?: (text: string) => void;
+  /**
+   * What we handed the model, once per hand-off, for the reader who needs to
+   * see the exact request behind a call.
+   *
+   * Deliberately NOT a progress event: prompts do not belong in the event log,
+   * which is sanitized, streamed to every connected browser, and small on
+   * purpose. This rides its own per-run file and is fetched only on request,
+   * the same shape as the live-text channel.
+   */
+  readonly reportPrompt?: (record: PromptRecord) => void;
 }
 
 /**

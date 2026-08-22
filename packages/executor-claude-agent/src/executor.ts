@@ -5,7 +5,7 @@ import {
   tool as sdkTool,
 } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { lstatSync, mkdirSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
@@ -27,6 +27,7 @@ import {
   type JsonObject,
   type JsonValue,
   type ModelMessage,
+  type PromptRecord,
   type SystemPrompt,
   type TaxonomyAccess,
   type TokenUsage,
@@ -95,9 +96,10 @@ export interface ClaudeAgentExecutorConfig {
   /** Full Agent SDK attempts for post-generation validation. Default 3. */
   readonly maxValidationAttempts?: number;
   /**
-   * Minimum quiet time before a content-free "model working" heartbeat is
-   * reported during long streamed turns. Default 20000 ms; 0 reports on every
-   * stream delta (tests only).
+   * Accepted and validated, but no longer consulted: model rows follow the
+   * streamed turn's PHASE CHANGES (see reportPhase), never a clock. Kept so
+   * deployments and tests that still pass it keep working, and so the shape of
+   * the settings does not change under a caller who never asked for this.
    */
   readonly progressHeartbeatMs?: number;
   /**
@@ -544,6 +546,25 @@ function stepwiseServer(
 /** In-process MCP server name carrying the shared-taxonomy read tools. */
 const TAXONOMY_SERVER = "taxonomy";
 
+/**
+ * The taxonomy tools' descriptions, named because two callers need the exact
+ * same bytes: the tool the model is offered, and the prompt record that must
+ * be able to reconstruct what the model was offered.
+ */
+const TAXONOMY_TREE_DESCRIPTION =
+  "Fetch the complete CURRENT shared scientific taxonomy as a names-only " +
+  "indented outline (no indent = domain, one = field, two = subfield, " +
+  "three = topic), stamped with the live revision it was read at. " +
+  "Optionally pass `root` (an exact node name) to fetch one branch. " +
+  "Read it in full before deciding any placement.";
+
+const TAXONOMY_RESOLVE_DESCRIPTION =
+  "Resolve one field name against the shared taxonomy at its latest " +
+  "revision. Returns the exact position when the name (or a curated " +
+  "alias) exists, otherwise NA with candidate node names. Use it to " +
+  "check whether a field you are about to place already exists under " +
+  "another spelling.";
+
 /** Full Claude Code tool names for the in-process taxonomy MCP server. */
 function taxonomySdkToolNames(): readonly string[] {
   return [
@@ -607,11 +628,7 @@ function taxonomyServer(
     tools: [
       sdkTool(
         "taxonomy_tree",
-        "Fetch the complete CURRENT shared scientific taxonomy as a names-only " +
-          "indented outline (no indent = domain, one = field, two = subfield, " +
-          "three = topic), stamped with the live revision it was read at. " +
-          "Optionally pass `root` (an exact node name) to fetch one branch. " +
-          "Read it in full before deciding any placement.",
+        TAXONOMY_TREE_DESCRIPTION,
         { root: z.string().optional() },
         watchdog.held(async (args) => {
           try {
@@ -631,11 +648,7 @@ function taxonomyServer(
       ),
       sdkTool(
         "taxonomy_resolve",
-        "Resolve one field name against the shared taxonomy at its latest " +
-          "revision. Returns the exact position when the name (or a curated " +
-          "alias) exists, otherwise NA with candidate node names. Use it to " +
-          "check whether a field you are about to place already exists under " +
-          "another spelling.",
+        TAXONOMY_RESOLVE_DESCRIPTION,
         {
           query: z.string().min(1),
           optionLimit: z.number().int().min(1).max(100).optional(),
@@ -1099,8 +1112,6 @@ function formatElapsed(ms: number): string {
  * already sends; nothing adds model turns, tokens, or API calls.
  */
 interface SdkProgressState {
-  /** Quiet time before a streamed-turn heartbeat is emitted. */
-  readonly heartbeatMs: number;
   /** tool_use_id -> last reported elapsedMs (throttles SDK tool_progress). */
   readonly lastToolProgress: Map<string, number>;
   /** tool_use_id -> start bookkeeping for tool_end durations and detail. */
@@ -1109,34 +1120,42 @@ interface SdkProgressState {
     { name: string; startedAt: number; detail?: ToolCallDetail }
   >;
   /** What the current streamed turn is doing (reasoning / writing output). */
-  phase?: { label: string; startedAt: number };
-  /** Timestamp of the last progress event of any kind we emitted. */
-  lastEmitAt: number;
+  phase?: string;
 }
 
-function newProgressState(config: ClaudeAgentExecutorConfig): SdkProgressState {
+function newProgressState(): SdkProgressState {
   return {
-    heartbeatMs: config.progressHeartbeatMs ?? 20_000,
     lastToolProgress: new Map(),
     pendingTools: new Map(),
-    lastEmitAt: Date.now(),
   };
 }
 
-function emit(
-  state: SdkProgressState,
+/**
+ * Announces the phase a streamed turn has just entered, and only that.
+ *
+ * A model row is a phase CHANGE, never a timer. The timer this replaces fired
+ * every heartbeat window for as long as the phase lasted, which turned one
+ * prompt into thirty nine rows all saying "Model reasoning" — a heartbeat
+ * proving the process was alive, not information about the run. The
+ * TRANSITIONS are the information: reasoning, then composing, then writing the
+ * structured output, then preparing a named tool's input. Each is reported
+ * once, when it begins; how long it lasted is the gap to the next row.
+ */
+function reportPhase(
   context: AgentExecutionContext,
-  value: AgentProgress,
+  state: SdkProgressState,
+  label: string,
 ): void {
-  state.lastEmitAt = Date.now();
-  progress(context, value);
+  if (state.phase === label) return;
+  state.phase = label;
+  progress(context, { kind: "model", message: label });
 }
 
 /**
  * Translates raw API stream events (thinking/text/tool-input deltas) into
- * throttled, content-free heartbeats so a minutes-long model turn never looks
- * like a hang. Deltas are reduced to a phase label + elapsed time; their
- * content is never read beyond the block type.
+ * content-free phase rows, so a minutes-long model turn never looks like a
+ * hang. Deltas are reduced to a phase label; their content is never read
+ * beyond the block type, except to forward the fragment to the live thread.
  */
 function reportStreamEvent(
   message: UnknownRecord,
@@ -1144,12 +1163,13 @@ function reportStreamEvent(
   state: SdkProgressState,
 ): void {
   const event = record(message.event);
-  const now = Date.now();
   if (event.type === "message_start") {
-    state.phase = { label: "Model reasoning", startedAt: now };
+    reportPhase(context, state, "Model reasoning");
     return;
   }
   if (event.type === "message_stop") {
+    // The turn is over: the next one announces its own opening phase rather
+    // than inheriting this one's label and being silently deduplicated.
     state.phase = undefined;
     return;
   }
@@ -1165,13 +1185,14 @@ function reportStreamEvent(
               ? "Writing the structured output"
               : `Preparing ${typeof block.name === "string" ? block.name : "tool"} input`
             : undefined;
-    if (label !== undefined && state.phase?.label !== label) {
-      state.phase = { label, startedAt: now };
-    }
-  } else if (event.type === "content_block_delta") {
+    if (label !== undefined) reportPhase(context, state, label);
+    return;
+  }
+  if (event.type === "content_block_delta") {
     // The fragment itself, for the live thread the host shows while the task
-    // runs. The heartbeat below stays exactly as it was — content-free — because
-    // it goes into the event log, and that channel carries no content.
+    // runs. Deltas emit no progress event at all: they are the very thing that
+    // made the old timer fire, and the phase row above already said what this
+    // stretch of the turn is doing.
     const delta = record(event.delta);
     const fragment =
       typeof delta.thinking === "string"
@@ -1180,17 +1201,7 @@ function reportStreamEvent(
           ? delta.text
           : undefined;
     if (fragment !== undefined && fragment.length > 0) context.reportLive?.(fragment);
-  } else {
-    return;
   }
-  const phase = state.phase;
-  if (!phase) return;
-  if (now - state.lastEmitAt < state.heartbeatMs) return;
-  emit(state, context, {
-    kind: "model",
-    elapsedMs: now - phase.startedAt,
-    message: `${phase.label} · ${formatElapsed(now - phase.startedAt)}`,
-  });
 }
 
 function reportSdkMessage(
@@ -1223,7 +1234,7 @@ function reportSdkMessage(
           ...(detail ? { detail } : {}),
         });
       }
-      emit(state, context, {
+      progress(context, {
         kind: "tool_start",
         toolName: block.name,
         message: toolMessage(block.name, block.input),
@@ -1249,7 +1260,7 @@ function reportSdkMessage(
       const label = TOOL_END_LABELS[pending.name] ?? pending.name;
       const outcome = block.is_error === true ? "failed" : "finished";
       const remaining = state.pendingTools.size;
-      emit(state, context, {
+      progress(context, {
         kind: "tool_end",
         toolName: pending.name,
         elapsedMs,
@@ -1283,7 +1294,7 @@ function reportSdkMessage(
     const last = state.lastToolProgress.get(id) ?? -5000;
     if (elapsedMs - last < 5000) return;
     state.lastToolProgress.set(id, elapsedMs);
-    emit(state, context, {
+    progress(context, {
       kind: "tool_progress",
       toolName: message.tool_name,
       elapsedMs,
@@ -1293,7 +1304,7 @@ function reportSdkMessage(
   }
   if (message.type !== "system") return;
   if (message.subtype === "init") {
-    emit(state, context, {
+    progress(context, {
       kind: "status",
       message:
         typeof message.model === "string"
@@ -1301,9 +1312,9 @@ function reportSdkMessage(
           : "Agent initialized",
     });
   } else if (message.subtype === "status" && message.status === "requesting") {
-    emit(state, context, { kind: "model", message: "Requesting Claude response" });
+    progress(context, { kind: "model", message: "Requesting Claude response" });
   } else if (message.subtype === "status" && message.status === "compacting") {
-    emit(state, context, { kind: "status", message: "Compacting agent context" });
+    progress(context, { kind: "status", message: "Compacting agent context" });
   } else if (message.subtype === "api_retry") {
     const attempt =
       typeof message.attempt === "number" ? message.attempt : undefined;
@@ -1311,7 +1322,7 @@ function reportSdkMessage(
       typeof message.max_retries === "number"
         ? message.max_retries
         : undefined;
-    emit(state, context, {
+    progress(context, {
       kind: "retry",
       ...(attempt !== undefined ? { turn: attempt } : {}),
       message:
@@ -1819,11 +1830,190 @@ function rejectedOutputSnippet(value: JsonValue | undefined): string[] {
   return ["It returned:", text];
 }
 
+/** Pretty JSON for a record section, so the rendered file stays readable. */
+function sectionJson(value: JsonValue): string {
+  return JSON.stringify(value, null, 2);
+}
+
+/**
+ * The tool surface this attempt offers, in the order the SDK receives it.
+ *
+ * Claude Code owns its built-in tools' descriptions and input schemas — they
+ * live in the subprocess and we never see them — so those appear by name. The
+ * in-process MCP tools are ours, and a reader needs their exact text: the
+ * stepwise chain tool's description is composed per task and IS part of what
+ * the model was asked to do.
+ */
+function offeredTools(
+  config: ClaudeAgentExecutorConfig,
+  task: AgentTask,
+  capture: TraceCapture,
+  options: UnknownRecord,
+): JsonValue {
+  const described = new Map<string, { description: string; input: readonly string[] }>();
+  if (capture.stepwise !== undefined) {
+    const spec = capture.stepwise.spec;
+    described.set(stepwiseSdkToolName(spec), {
+      description: stepwiseToolDescription(spec),
+      input: spec.parts ? ["index", ...STEP_PARTS] : ["index", "text"],
+    });
+  }
+  if (config.taxonomy !== undefined && taskUsesTaxonomy(task)) {
+    described.set(`mcp__${TAXONOMY_SERVER}__taxonomy_tree`, {
+      description: TAXONOMY_TREE_DESCRIPTION,
+      input: ["root"],
+    });
+    described.set(`mcp__${TAXONOMY_SERVER}__taxonomy_resolve`, {
+      description: TAXONOMY_RESOLVE_DESCRIPTION,
+      input: ["query", "optionLimit"],
+    });
+  }
+  if (
+    (config.attachmentRoots?.length ?? 0) > 0 &&
+    taskUsesCapability(task, "attachment-access")
+  ) {
+    described.set(`mcp__${ATTACHMENTS_SERVER}__attachment_list`, {
+      description: ATTACHMENT_LIST_MANIFEST.definition.description ?? "",
+      input: ["prefix", "shape"],
+    });
+    described.set(`mcp__${ATTACHMENTS_SERVER}__attachment_search`, {
+      description: ATTACHMENT_SEARCH_MANIFEST.definition.description ?? "",
+      input: [
+        "query",
+        "regex",
+        "caseSensitive",
+        "prefix",
+        "filesOnly",
+        "maxResults",
+      ],
+    });
+  }
+  if (config.gpuRun !== undefined && taskUsesGpu(task)) {
+    described.set(`mcp__${GPU_SERVER}__gpu_run`, {
+      description: GPU_RUN_MANIFEST.definition.description ?? "",
+      input: ["script", "time_limit_minutes", "job_name"],
+    });
+  }
+  const names = Array.isArray(options.tools) ? options.tools.map(String) : [];
+  return names.map((name): JsonObject => {
+    const definition = described.get(name);
+    return definition === undefined
+      ? { name }
+      : { name, description: definition.description, input: [...definition.input] };
+  });
+}
+
+/**
+ * What this attempt hands the model, recorded once and announced as ONE
+ * `llm_call` row.
+ *
+ * Called immediately before the query starts, because that is where this
+ * backend's prompt leaves us: the SDK composes the final wire request inside
+ * the Claude Code subprocess, adding its own system prompt, its built-in tool
+ * definitions and its harness scaffolding after we hand over. Hence
+ * `complete: false` — the file must SAY it holds our half, not imply it holds
+ * every byte the model read.
+ *
+ * The sections are assembled field by named field and NEVER by serializing the
+ * options object: `options.env` carries the setup token (see sdkEnvironment),
+ * and a credential must never be reconstructable from a captured prompt.
+ * Nothing here reads `config.token`.
+ *
+ * Nothing is built when the host has no prompt sink. That is not an
+ * optimization: a row with no file behind it would offer a reader a request
+ * they cannot open, so the row and the record are emitted together or not at
+ * all.
+ */
+function reportPromptHandoff(
+  config: ClaudeAgentExecutorConfig,
+  task: AgentTask,
+  context: AgentExecutionContext,
+  capture: TraceCapture,
+  attempt: number,
+  promptText: string,
+  options: UnknownRecord,
+): void {
+  if (context.reportPrompt === undefined) return;
+  const sections: { title: string; body: string }[] = [];
+  const system = options.systemPrompt;
+  if (typeof system === "string" && system !== "") {
+    sections.push({ title: "System prompt", body: system });
+  } else if (Array.isArray(system)) {
+    // The SDK's dynamic-boundary marker rides along as its own element; the
+    // record shows it where it sits rather than tidying it away, because the
+    // boundary is what makes the prefix cacheable.
+    sections.push({ title: "System prompt", body: system.map(String).join("\n\n") });
+  }
+  sections.push({ title: "Prompt", body: promptText });
+  sections.push({
+    title: "Tools offered (Claude Code owns its built-in definitions)",
+    body: sectionJson(offeredTools(config, task, capture, options)),
+  });
+  const outputFormat = options.outputFormat;
+  if (isJsonValue(outputFormat)) {
+    sections.push({
+      title: "Delivered output JSON schema",
+      body: sectionJson(outputFormat),
+    });
+  } else if (task.outputSchema !== undefined) {
+    sections.push({
+      title: "Output JSON schema (not delivered: this attempt asks for raw JSON)",
+      body: sectionJson(task.outputSchema.schema),
+    });
+  }
+  if (task.capabilityPlan !== undefined) {
+    sections.push({
+      title: "Resolved capability plan",
+      body: sectionJson(task.capabilityPlan as unknown as JsonValue),
+    });
+  }
+  sections.push({
+    title: "Execution settings in force",
+    body: sectionJson({
+      model: typeof options.model === "string" ? options.model : null,
+      fallbackModel:
+        typeof options.fallbackModel === "string" ? options.fallbackModel : null,
+      maxTurns: typeof options.maxTurns === "number" ? options.maxTurns : null,
+      effort: typeof options.effort === "string" ? options.effort : null,
+      thinking: isJsonValue(options.thinking) ? options.thinking : null,
+      maxBudgetUsd:
+        typeof options.maxBudgetUsd === "number" ? options.maxBudgetUsd : null,
+      permissionMode:
+        typeof options.permissionMode === "string" ? options.permissionMode : null,
+      maxValidationAttempts: config.maxValidationAttempts ?? 3,
+    }),
+  });
+  const model = typeof options.model === "string" ? options.model : undefined;
+  const promptRecord: PromptRecord = {
+    id: randomUUID(),
+    at: Date.now(),
+    taskId: task.taskId,
+    kind: task.kind,
+    ...(task.agentId !== undefined ? { agentId: task.agentId } : {}),
+    attempt,
+    // No `turn`: this backend runs a whole multi-turn session behind one
+    // hand-off, and the turn numbers it reports are the SDK's, not a wire
+    // turn we composed.
+    provider: "claude-agent-sdk",
+    ...(model !== undefined ? { model } : {}),
+    ...(task.logicalRoute !== undefined ? { logicalRoute: task.logicalRoute } : {}),
+    complete: false,
+    sections,
+  };
+  context.reportPrompt(promptRecord);
+  progress(context, {
+    kind: "llm_call",
+    promptId: promptRecord.id,
+    message: `Prompt sent to ${model ?? "Claude Code"} · attempt ${attempt}`,
+  });
+}
+
 async function executeQuery(
   config: ClaudeAgentExecutorConfig,
   task: AgentTask,
   context: AgentExecutionContext,
   capture: TraceCapture,
+  attempt: number,
   validationIssues: readonly string[] = [],
   nativeStructuredOutput = true,
   rejectedOutput: JsonValue | undefined = undefined,
@@ -1845,7 +2035,7 @@ async function executeQuery(
           input as Parameters<typeof sdkQuery>[0],
         ) as unknown as ClaudeAgentQuery);
     let finalResult: UnknownRecord | undefined;
-    const progressState = newProgressState(config);
+    const progressState = newProgressState();
     let messageCount = 0;
     const wantsAttachments =
       (config.attachmentRoots?.length ?? 0) > 0 &&
@@ -1859,54 +2049,57 @@ async function executeQuery(
     const watchdog = new SessionWatchdog(
       config.stallTimeoutMs ?? DEFAULT_SESSION_STALL_MS,
     );
-    const stream = queryFn({
-      prompt: [
-        messagePrompt(task.modelRequest.messages),
-        ...(task.outputSchema
-          ? [
-              "",
-              "Your structured output submission is FINAL and recorded verbatim as your answer.",
-              'Never submit placeholder, trial, or test values (such as "test" or "ok") to probe the output tool.',
-            ]
-          : []),
-        ...(wantsAttachments
-          ? [
-              "",
-              "Enumerating and locating attachment content is deterministic host work: use the " +
-                "attachment_list tool for the inventory and the attachment_search tool to find " +
-                "where something is mentioned across every attached file in one call. Do not " +
-                "re-derive these with shell loops (`for f in ...; do cat/sed ...`) or by reading " +
-                "files one by one to look for a term — read a file's content only once you know " +
-                "you need that file, and reserve script execution for actual computation.",
-            ]
-          : []),
-        ...(validationIssues.length > 0
-          ? [
-              "",
-              "A previous session's structured result failed authoritative validation.",
-              ...rejectedOutputSnippet(rejectedOutput),
-              "Issues:",
-              ...validationIssues.map((issue) => `- ${issue}`),
-              "Produce a corrected complete result. Do not discuss the validation errors.",
-            ]
-          : []),
-        ...(!nativeStructuredOutput && task.outputSchema
-          ? [
-              "",
-              "Native structured-output transport is unavailable for this attempt.",
-              "Return ONLY the complete raw JSON object. Do not use Markdown fences or commentary.",
-            ]
-          : []),
-      ].join("\n"),
-      options: queryOptions(
-        config,
-        task,
-        controller,
-        nativeStructuredOutput,
-        capture,
-        watchdog,
-      ),
-    });
+    const promptText = [
+      messagePrompt(task.modelRequest.messages),
+      ...(task.outputSchema
+        ? [
+            "",
+            "Your structured output submission is FINAL and recorded verbatim as your answer.",
+            'Never submit placeholder, trial, or test values (such as "test" or "ok") to probe the output tool.',
+          ]
+        : []),
+      ...(wantsAttachments
+        ? [
+            "",
+            "Enumerating and locating attachment content is deterministic host work: use the " +
+              "attachment_list tool for the inventory and the attachment_search tool to find " +
+              "where something is mentioned across every attached file in one call. Do not " +
+              "re-derive these with shell loops (`for f in ...; do cat/sed ...`) or by reading " +
+              "files one by one to look for a term — read a file's content only once you know " +
+              "you need that file, and reserve script execution for actual computation.",
+          ]
+        : []),
+      ...(validationIssues.length > 0
+        ? [
+            "",
+            "A previous session's structured result failed authoritative validation.",
+            ...rejectedOutputSnippet(rejectedOutput),
+            "Issues:",
+            ...validationIssues.map((issue) => `- ${issue}`),
+            "Produce a corrected complete result. Do not discuss the validation errors.",
+          ]
+        : []),
+      ...(!nativeStructuredOutput && task.outputSchema
+        ? [
+            "",
+            "Native structured-output transport is unavailable for this attempt.",
+            "Return ONLY the complete raw JSON object. Do not use Markdown fences or commentary.",
+          ]
+        : []),
+    ].join("\n");
+    const options = queryOptions(
+      config,
+      task,
+      controller,
+      nativeStructuredOutput,
+      capture,
+      watchdog,
+    );
+    // Before the query, never after: the record describes what we are about to
+    // send, and a session that dies mid-stream must still leave the reader the
+    // request that produced it.
+    reportPromptHandoff(config, task, context, capture, attempt, promptText, options);
+    const stream = queryFn({ prompt: promptText, options });
     const iterator = stream[Symbol.asyncIterator]();
     watchdog.touch();
     try {
@@ -2093,6 +2286,7 @@ export class ClaudeAgentExecutor implements AgentExecutor {
           task,
           context,
           capture,
+          attempt,
           validationIssues,
           nativeStructuredOutput,
           rejectedOutput,

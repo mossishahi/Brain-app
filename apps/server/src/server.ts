@@ -40,6 +40,12 @@ import {
   type ReadinessAdvisor,
   type ReadinessProbes,
 } from "./readiness.js";
+import {
+  promptFilename,
+  promptIdentity,
+  readPromptRecord,
+  renderPromptMarkdown,
+} from "./prompt-record.js";
 import { aggregateToolUsage } from "./tool-usage.js";
 import {
   applyAppUpdate as applyAppUpdateDefault,
@@ -1496,6 +1502,31 @@ export async function startBrainServer(
         const jobId = decodeURIComponent(usageMatch[1]!);
         await manager.detail(jobId); // "was not found" maps to 404 in the outer handler
         sendJson(res, 200, aggregateToolUsage(manager.jobDir(jobId)));
+        return;
+      }
+
+      // Before the job-detail matcher below, which would otherwise swallow it.
+      const promptMatch = /^\/api\/jobs\/([^/]+)\/prompt\/([^/]+)$/.exec(path);
+      if (req.method === "GET" && promptMatch) {
+        const jobId = decodeURIComponent(promptMatch[1]!);
+        const promptId = decodeURIComponent(promptMatch[2]!);
+        const detail = await manager.detail(jobId); // unknown run -> 404 outside
+        const record = readPromptRecord(manager.jobDir(jobId), promptId);
+        if (record === undefined) {
+          // Also the honest answer while a row is younger than the writer's
+          // flush timer, which is why nothing here may be cached: the same
+          // request a second later legitimately succeeds.
+          throw new HttpError(404, "that prompt record was not found");
+        }
+        const identity = promptIdentity(record, detail);
+        const body = renderPromptMarkdown(record, identity);
+        res.writeHead(200, {
+          "content-type": "text/markdown; charset=utf-8",
+          "content-length": Buffer.byteLength(body),
+          "content-disposition": `attachment; filename="${promptFilename(record, identity)}"`,
+          "cache-control": "no-store",
+        });
+        res.end(body);
         return;
       }
 

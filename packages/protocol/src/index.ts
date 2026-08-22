@@ -43,7 +43,14 @@ export type StageActivityKind =
   | "tool_progress"
   | "tool_end"
   | "retry"
-  | "validation";
+  | "validation"
+  /**
+   * One hand-off of a prompt to the model layer. Purely additive: no event
+   * written before this kind existed carries it, so old runs keep rendering
+   * exactly as they did. Every row of this kind names a captured prompt file
+   * through `promptId` — a row without a file behind it is a bug.
+   */
+  | "llm_call";
 
 /**
  * Token spend of one agent task (or a sum of tasks), as the provider
@@ -91,6 +98,13 @@ export interface StageActivityEntry {
   readonly detail?: ActivityDetailView;
   /** Present on task-completion rows: what the finished task spent. */
   readonly usage?: TokenUsageView;
+  /**
+   * Present on "llm_call" rows only: how the row addresses the captured
+   * record of what we sent, at GET /api/jobs/:jobId/prompt/:promptId. The id
+   * travels here rather than the prompt itself — prompts are never carried by
+   * the event stream, which is sanitized and reaches every connected browser.
+   */
+  readonly promptId?: string;
   /**
    * WHAT this agent is, as the panel's own vocabulary names it: "Thinker",
    * "Commenter", "Judge", "Redeveloper". Absent only when the event carries no
@@ -1959,7 +1973,7 @@ export interface ToolUsageReport {
 }
 
 /**
- * REST surface (all JSON):
+ * REST surface (JSON unless a line says otherwise):
  *   GET  /api/health                          -> HealthResponse
  *   POST /api/update-check                    -> UpdateCheckResponse (re-probes release tags now, throttled; called by the dashboard on load and after run submission)
  *   POST /api/update                          -> UpdateAppResponse   (starts the detached self-updater and exits; 409 when no release is known, self-update is disabled, or the checkout is dirty)
@@ -1992,6 +2006,7 @@ export interface ToolUsageReport {
  *   POST /api/jobs/:jobId/gate-hold           -> JobDetail           (permanently pauses the gate's auto-approve countdown)
  *   POST /api/jobs/:jobId/dismiss-member      -> JobDetail           (body: DismissMemberRequest; stops one seat mid-run and resumes the rest from the last checkpoint)
  *   GET  /api/jobs/:jobId/tool-usage          -> ToolUsageReport     (aggregated from the job's event log)
+ *   GET  /api/jobs/:jobId/prompt/:promptId    -> text/markdown       (the prompt behind one "llm_call" row, rendered for download; 404 when the run or the record is unknown)
  *   GET  /api/stream                          -> SSE of ServerEvent{type:"jobs"|"readiness"}
  *   GET  /api/jobs/:jobId/stream              -> SSE of ServerEvent{type:"job"}
  * Static: everything else serves the webapp build (SPA fallback to index.html).

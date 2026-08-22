@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { AgentProgress, AgentTask, JsonObject, JsonValue } from "@brainstorm-agentic/core";
+import type {
+  AgentProgress,
+  AgentTask,
+  JsonObject,
+  JsonValue,
+  PromptRecord,
+} from "@brainstorm-agentic/core";
 import { isCreditBlocked } from "@brainstorm-agentic/core";
 
 import {
@@ -739,9 +745,11 @@ test("a session that ends mid-thought is asked for its result, not thrown away",
       state,
     ),
   });
+  const records: PromptRecord[] = [];
   const result = await executor.execute(structuredTask, {
     runId: "run-1",
     nodePath: "root/review/redevelop",
+    reportPrompt: (record) => records.push(record),
   });
 
   assert.equal(result.status, "ok");
@@ -755,6 +763,22 @@ test("a session that ends mid-thought is asked for its result, not thrown away",
   assert.equal(state.prompts.length, 2);
   assert.match(state.prompts[1]!, /ended your turn without submitting a result/);
   assert.match(state.prompts[1]!, /Do not start new work/);
+  // Both sends are recorded, because the nudge is a prompt we sent and the
+  // record's whole promise is that every prompt we send has one. It is also
+  // the send a reader is most likely to be chasing: it only exists because
+  // the session ended without handing anything over.
+  assert.equal(records.length, 2, "the nudge is a second prompt, so a second record");
+  assert.notEqual(records[0]!.id, records[1]!.id, "each send addresses its own file");
+  // Each record's instruction and prompt sections concatenate, in that order,
+  // to exactly the bytes that send carried. That is the promise the file makes,
+  // and it has to hold for the nudge as much as for the first send.
+  const sentBytes = (record: PromptRecord): string =>
+    record.sections
+      .filter((section) => /^(Instructions|Prompt)/.test(section.title))
+      .map((section) => section.body)
+      .join("");
+  assert.equal(sentBytes(records[0]!), state.prompts[0]);
+  assert.equal(sentBytes(records[1]!), state.prompts[1]);
   // Usage across a multi-send session stays an ESTIMATE, and deliberately so:
   // the streamed messages and the terminal result are two partial views of the
   // same session (either can miss its tail), so they merge component-wise by
@@ -1579,4 +1603,139 @@ test("salvageJsonText finds fenced and embedded objects, never invents one", () 
     a: [1, 2],
   });
   assert.equal(salvageJsonText("no json here"), undefined);
+});
+
+test("a long stretch in one phase emits ONE model row, and the transition emits the next", async () => {
+  const state = newState();
+  const reported: AgentProgress[] = [];
+  // One turn arrives as many delta messages. The timer this replaced turned a
+  // stretch like this into a row per heartbeat window, all saying the same
+  // thing; the phase rule must produce one row per phase.
+  const thinkingDeltas = Array.from({ length: 40 }, () => ({
+    type: "thinking",
+    text: "fragment ",
+  }));
+  const executor = new CursorAgentExecutor({
+    apiKey: "cursor-key",
+    listModels: async () => CATALOG,
+    agentFactory: fakeFactory(
+      [
+        {
+          messages: [
+            ...thinkingDeltas,
+            { type: "assistant", text: "part one" },
+            { type: "assistant", text: "part two" },
+          ],
+          result: finished(JSON.stringify({ answer: "ok" })),
+        },
+      ],
+      state,
+    ),
+  });
+
+  await executor.execute(structuredTask, {
+    runId: "run-phases",
+    nodePath: "root/brain",
+    reportProgress: (entry) => reported.push(entry),
+  });
+
+  assert.deepEqual(
+    reported.filter((entry) => entry.kind === "model").map((entry) => entry.message),
+    ["Model reasoning", "Composing the response"],
+  );
+});
+
+test("one hand-off produces one llm_call row and one record, and no credential rides in it", async () => {
+  // Recognisable and unlikely: if it ever appears in a record, the capture
+  // reached the executor's credential and the test says exactly which one.
+  const apiKey = "cursor-key-CREDENTIAL-MUST-NOT-BE-CAPTURED-7c4a";
+  const state = newState();
+  const reported: AgentProgress[] = [];
+  const records: PromptRecord[] = [];
+  const executor = new CursorAgentExecutor({
+    apiKey,
+    listModels: async () => CATALOG,
+    effort: "xhigh",
+    thinking: "adaptive",
+    maxTurns: 24,
+    fallbackModel: "composer-2.5",
+    agentFactory: fakeFactory(
+      [
+        {
+          callTools: async (tools) => {
+            await tools.submit_result!.execute({ answer: "ok" }, {});
+          },
+          result: finished(),
+        },
+      ],
+      state,
+    ),
+  });
+
+  await executor.execute(structuredTask, {
+    runId: "run-prompt-capture",
+    nodePath: "root/brain",
+    reportProgress: (entry) => reported.push(entry),
+    reportPrompt: (record) => records.push(record),
+  });
+
+  const rows = reported.filter((entry) => entry.kind === "llm_call");
+  assert.equal(rows.length, 1, "one hand-off, one row");
+  assert.equal(records.length, 1, "one hand-off, one record");
+  assert.equal(rows[0]!.promptId, records[0]!.id, "the row addresses the record");
+
+  const record = records[0]!;
+  assert.equal(record.provider, "cursor-agent-sdk");
+  assert.equal(record.model, "claude-sonnet-5");
+  assert.equal(record.taskId, "task-1");
+  assert.equal(record.attempt, 1);
+  assert.equal(record.turn, undefined, "the SDK path composes no wire turn of its own");
+  assert.equal(record.complete, false, "the SDK adds its own half after we hand over");
+
+  // Byte for byte: the instructions section prepended to the prompt section is
+  // exactly the message the agent was sent.
+  const body = (title: string): string =>
+    record.sections.find((section) => section.title.startsWith(title))?.body ?? "";
+  assert.equal(body("Instructions") + body("Prompt"), state.prompts[0]);
+  const settings = JSON.parse(body("Execution settings")) as JsonObject;
+  assert.equal(settings.maxTurns, 24);
+  assert.equal(settings.effort, "xhigh");
+  assert.equal(settings.fallbackModel, "composer-2.5");
+  // The structured-output transport is one of ours, so its whole definition —
+  // the schema the answer must satisfy — is reconstructable from the record.
+  assert.match(body("Tools offered"), /submit_result/);
+
+  const serialized = JSON.stringify(records);
+  assert.equal(
+    serialized.includes(apiKey),
+    false,
+    "the API key must never reach a captured prompt",
+  );
+  assert.equal(serialized.includes("CREDENTIAL"), false);
+});
+
+test("a host with no prompt sink gets no llm_call row", async () => {
+  const state = newState();
+  const reported: AgentProgress[] = [];
+  const executor = new CursorAgentExecutor({
+    apiKey: "cursor-key",
+    listModels: async () => CATALOG,
+    agentFactory: fakeFactory(
+      [{ result: finished(JSON.stringify({ answer: "ok" })) }],
+      state,
+    ),
+  });
+
+  await executor.execute(structuredTask, {
+    runId: "run-no-sink",
+    nodePath: "root/brain",
+    reportProgress: (entry) => reported.push(entry),
+  });
+
+  // No file behind it means no row: a reader must never be offered a request
+  // they cannot open.
+  assert.equal(
+    reported.some((entry) => entry.kind === "llm_call"),
+    false,
+  );
 });
