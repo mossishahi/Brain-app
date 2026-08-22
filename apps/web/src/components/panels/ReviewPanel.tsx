@@ -607,7 +607,17 @@ function CommentsPanel({
     ...comments.map((c) => c.commentorId),
     ...liveReviewers.map(liveTag),
   ]);
-  const active = tags.has(selected) ? selected : "judge";
+  // The first view, when the reader has not picked one: the judge — its
+  // verdict is what a finished round is ABOUT — except while the round is
+  // still being gathered and the judge silent, where the judge tab could only
+  // say "comments land first" and the thing to watch is whoever is writing.
+  const active = tags.has(selected)
+    ? selected
+    : round?.decision === undefined &&
+        liveJudge === undefined &&
+        liveReviewers.length > 0
+      ? liveTag(liveReviewers[0]!)
+      : "judge";
   // Selecting a name shows that reviewer — opening the panel if it was folded.
   const pick = (tag: string): void => {
     onSelect(tag);
@@ -844,8 +854,9 @@ function RoundDeck({
   /** Open another step's deck at one of its cards, and scroll to it. */
   onJump: (stepIndex: number, entryKey: string) => void;
   commentState: {
-    open: (key: string) => boolean;
-    toggle: (key: string) => void;
+    /** `fallback` is the default before the reader has ever toggled this key. */
+    open: (key: string, fallback?: boolean) => boolean;
+    toggle: (key: string, fallback?: boolean) => void;
     tag: (key: string) => string;
     select: (key: string, tag: string) => void;
   };
@@ -855,6 +866,14 @@ function RoundDeck({
   const { writingNextVersion, reviewers } = liveDestinations(live ?? [], step.index);
   if (deck.length === 0) {
     const text = timeline.chain.get(step.index);
+    // Reviewers already writing about this step, before anything has landed.
+    // A round view is born with its FIRST landed comment, and a comment that
+    // verifies its claims takes minutes — so a position's whole opening
+    // commenting phase has an empty deck, and without this panel it read as
+    // "commentors are working" while six reviewers' words were dropped on the
+    // floor. Their words belong in the panel their comments will land in, so
+    // that panel exists here too, holding only what is being written.
+    const gatheringKey = `${member.memberId}:${step.index}:gathering`;
     return (
       <div className="round-card round-card-pending">
         <p className="dim small">{pendingNote(member, step, runLive)}</p>
@@ -868,6 +887,15 @@ function RoundDeck({
               ))}
             />
           )
+        )}
+        {reviewers.length > 0 && (
+          <CommentsPanel
+            live={reviewers}
+            open={commentState.open(gatheringKey, true)}
+            onToggle={() => commentState.toggle(gatheringKey, true)}
+            selected={commentState.tag(gatheringKey)}
+            onSelect={(tag) => commentState.select(gatheringKey, tag)}
+          />
         )}
       </div>
     );
@@ -896,17 +924,25 @@ function RoundDeck({
   // Reviewers writing right now belong to the version they are READING, which
   // is the newest card — the same panel their comments will land in.
   const liveHere = newest ? reviewers : [];
-  const reviewFold = (key: string): ReactNode =>
-    review === undefined && liveHere.length === 0 ? undefined : (
+  const reviewFold = (key: string): ReactNode => {
+    if (review === undefined && liveHere.length === 0) return undefined;
+    // While this version's review is still being WRITTEN — no verdict yet,
+    // reviewers mid-sentence — the fold opens by itself: the live words are
+    // the thing a reader watching the run came to see, and folded they are
+    // just names with dots. A decided round keeps the folded default, and a
+    // reader's own toggle always wins over either default.
+    const beingWritten = review?.decision === undefined && liveHere.length > 0;
+    return (
       <CommentsPanel
         {...(review !== undefined ? { round: review } : {})}
         {...(liveHere.length > 0 ? { live: liveHere } : {})}
-        open={commentState.open(key)}
-        onToggle={() => commentState.toggle(key)}
+        open={commentState.open(key, beingWritten)}
+        onToggle={() => commentState.toggle(key, beingWritten)}
         selected={commentState.tag(key)}
         onSelect={(tag) => commentState.select(key, tag)}
       />
     );
+  };
   const keyAt = (index: number): string =>
     index >= deck.length ? "pending" : deck[index]!.key;
   // The pager arrows hug the card title — exactly the seat pager's pattern —
@@ -1203,14 +1239,19 @@ export function ReviewStagePanels({
   });
 
   const commentState = {
-    open: (key: string) => commentOpen.get(key) ?? false,
-    toggle: (key: string) =>
+    // `fallback` is what an untoggled panel does: folded everywhere, except
+    // the panel whose review is being written right now, which starts open.
+    // The map stores only the reader's own toggles, so their choice wins.
+    open: (key: string, fallback = false) => commentOpen.get(key) ?? fallback,
+    toggle: (key: string, fallback = false) =>
       setCommentOpen((prev) => {
         const next = new Map(prev);
-        next.set(key, !(prev.get(key) ?? false));
+        next.set(key, !(prev.get(key) ?? fallback));
         return next;
       }),
-    tag: (key: string) => commentTags.get(key) ?? "judge",
+    // "" — no pick yet: the panel then decides its own first view (the judge,
+    // or the first still-writing reviewer while nothing has landed).
+    tag: (key: string) => commentTags.get(key) ?? "",
     select: (key: string, tag: string) =>
       setCommentTags((prev) => {
         const next = new Map(prev);

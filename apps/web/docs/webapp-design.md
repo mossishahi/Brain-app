@@ -229,6 +229,14 @@ is replaced by that output the moment it lands.** This is the rule, and it decid
 A box beside the card would put the same work on screen twice and leave the reader to match the
 preview to the thing it becomes.
 
+The comments panel does not wait for the first comment to land. A round's record is born with its
+first landed result, and a comment that verifies its claims takes minutes — so through a position's
+whole opening phase the step card holds the panel with only live threads in it (above it, the step's
+standing text and a one-line note of what the round is doing). And while a version's review is still
+being written — nothing decided, reviewers mid-sentence — the panel sits OPEN by itself and opens on
+whoever is writing; once the round is decided it folds back to the collapsed default. The reader's
+own toggle always wins over either default.
+
 **A task that is working shows what it is saying, not the word "thinking".** While a first-pass seat
 develops its idea, or a commenter/judge/redeveloper works on a step, the card carries a LIVE THREAD:
 the words the model is producing, appended as they arrive, readable as prose and scrollable inside a

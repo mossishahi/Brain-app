@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import type { LiveTextEntry } from "@brainstorm-agentic/protocol";
@@ -173,5 +174,44 @@ test("a landed comment replaces its author's live thread, one reviewer at a time
     pendingReviewers(["Seat 1", "Seat 2"], threads).map((t) => t.actor),
     [],
     "and when every comment has landed, no thread is left",
+  );
+});
+
+/* -------------------- the gathering phase: reviewers writing, nothing landed */
+
+const source = (relative: string): string =>
+  readFileSync(new URL(`../../src/${relative}`, import.meta.url), "utf8");
+
+test("a step's pending card renders the panel of reviewers writing about it", () => {
+  // The regression this pins: a round view is born with its FIRST landed
+  // comment, and a comment that verifies its claims takes minutes — so through
+  // a position's whole opening commenting phase the step's deck is empty. The
+  // pending card used to render the note and the step text and drop the live
+  // reviewer threads on the floor: the reader saw "commentors are working"
+  // for minutes while six reviewers' words existed and went nowhere.
+  const code = source("components/panels/ReviewPanel.tsx");
+  assert.match(
+    code,
+    /round-card-pending[\s\S]{0,1600}?<CommentsPanel/,
+    "the empty-deck pending card must render the comments panel holding the live reviewers",
+  );
+});
+
+test("the panel being written right now opens by itself", () => {
+  const code = source("components/panels/ReviewPanel.tsx");
+  assert.match(
+    code,
+    /commentState\.open\(gatheringKey, true\)/,
+    "the gathering panel starts open — folded it is names and dots, and there is nothing else on the card",
+  );
+  assert.match(
+    code,
+    /review\?\.decision === undefined && liveHere\.length > 0/,
+    "a version's fold keeps the open default for as long as its review is being written",
+  );
+  assert.match(
+    code,
+    /liveTag\(liveReviewers\[0\]!\)/,
+    "and the first view is whoever is writing, while nothing has landed and the judge is silent",
   );
 });
