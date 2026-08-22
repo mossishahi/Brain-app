@@ -258,7 +258,13 @@ test("the processor's file map is partitioned deterministically and NA files nev
   }
 
   // Every downstream agent that receives the input gets it without the raw
-  // file map, plus the useful-file list only.
+  // file map, plus the useful-file list only. Reviewers additionally lose the
+  // planned chain length from workflow 0.25.0: a commentor or judge told the
+  // thinker "has just delivered a step" must not know how many steps the full
+  // delivery will have — the thinker keeps it (it is told the mandate), and
+  // the reviser keeps it (it wrote every step). Earlier published bundles
+  // stay valid with the file map alone omitted.
+  const reviewerIds = new Set(["comment-step", "comment-step-bridge", "judge-step"]);
   for (const id of [
     "build-pool",
     "develop-idea",
@@ -271,11 +277,24 @@ test("the processor's file map is partitioned deterministically and NA files nev
     "synthesize-proposal",
   ]) {
     const agent = findAgent(root, id);
-    assert.deepEqual(
-      agent.bind?.["input"],
-      { ref: "input", omit: ["files"] },
-      `${id} must not see the unpartitioned file map`,
-    );
+    const bind = agent.bind?.["input"] as
+      | { readonly ref?: string; readonly omit?: readonly string[] }
+      | undefined;
+    assert.equal(bind?.ref, "input", `${id} binds the structured input`);
+    const omitted = [...(bind?.omit ?? [])].sort();
+    if (reviewerIds.has(id) && omitted.includes("cotSteps")) {
+      assert.deepEqual(
+        omitted,
+        ["cotSteps", "files"],
+        `${id} hides the raw file map and the planned chain length`,
+      );
+    } else {
+      assert.deepEqual(
+        omitted,
+        ["files"],
+        `${id} must not see the unpartitioned file map`,
+      );
+    }
     assert.equal(
       agent.bind?.["files"],
       "usefulFiles.files",

@@ -429,6 +429,40 @@ function stepsRevisedAfter(entries: readonly JsonValue[]): ReadonlySet<number>[]
 }
 
 /**
+ * A round record with every step reference its reader cannot see removed.
+ *
+ * Review is never prospective — in what a reviewer READS as much as in what
+ * it may say. A redevelopment may rewrite steps past the walk position (the
+ * host applies them, and they are reviewed when the walk arrives), so the
+ * ledger's change-sets legitimately name future steps — but a record handed
+ * to a task must not: a commentor at position 1 was handed
+ * `touched: [1,2], untouched: [3,4,5,6]` beside a chain of one step, and
+ * spent its round reconciling bookkeeping that, in its own world, cannot
+ * exist ("is this history stale?"). The clamp keeps every reference the
+ * reader can check and drops every reference it cannot — including the
+ * accidental announcement of the chain's planned length.
+ *
+ * The LEDGER itself stays complete: the dashboard's prospective-edit cards
+ * and the run summary read the full record; only what a task is handed is
+ * clamped.
+ */
+function clampRoundToPosition(round: JsonObject, currentStep: number): JsonObject {
+  const visible = (value: JsonValue | undefined): number[] | undefined =>
+    Array.isArray(value)
+      ? value.filter(
+          (step): step is number => typeof step === "number" && step <= currentStep,
+        )
+      : undefined;
+  const touched = visible(round.touched);
+  const untouched = visible(round.untouched);
+  return {
+    ...round,
+    ...(touched !== undefined ? { touched } : {}),
+    ...(untouched !== undefined ? { untouched } : {}),
+  };
+}
+
+/**
  * The member's ledger SCOPED to what the current walk position can still act
  * on. The flat ledger carried every round of every earlier position into every
  * later call, so a seat's context grew with its own walk — and most of that
@@ -488,7 +522,11 @@ function scopedRecord(
       rounds: rounds.length,
       outcome: passed ? "passed" : "force-passed",
       objections,
-      revised: revisedSteps(rounds),
+      // A closed position's revisions may have rewritten steps the CURRENT
+      // reader has not been shown yet (a prospective repair); only the
+      // rewrites it can check are named. The full list surfaces naturally as
+      // the walk advances past those steps.
+      revised: revisedSteps(rounds).filter((revised) => revised <= currentStep),
       closingReason: typeof last.reason === "string" ? last.reason : "",
       ...(rewrittenLater.has(step) ? { revisedSince: true } : {}),
     });
@@ -508,7 +546,13 @@ function scopedRecord(
     clean,
     settled,
     standing,
-    rounds: structuredClone(byStep.get(currentStep) ?? []) as JsonValue[],
+    // This position's rounds ride verbatim — except their change-sets, which
+    // are clamped like everything else the reader is handed: a revision here
+    // may have rewritten later steps, and naming them would tell a reviewer
+    // the future already exists as text.
+    rounds: (byStep.get(currentStep) ?? []).map((round) =>
+      clampRoundToPosition(structuredClone(round), currentStep),
+    ) as JsonValue[],
   };
 }
 
@@ -612,15 +656,34 @@ export function initializeReview(
 ): JsonObject {
   const next = mutableState(state);
   const memberId = reviewMemberId(next, scope);
+  const position = reviewStepIndex(next, scope);
   putSeat(next, memberId, {
     round: 0,
     allowedVerdicts: allowedVerdictNames(verdicts, undefined),
-    history: memberHistory(next, memberId),
-    record: scopedRecord(next, memberId, reviewStepIndex(next, scope)),
+    history: boundHistory(next, memberId, position),
+    record: scopedRecord(next, memberId, position),
     phase: "commenting",
     current: { comments: {} },
   });
   return next;
+}
+
+/**
+ * The flat ledger as a task may READ it — bundles published before the
+ * scoped record bind this instead. Same clamp as the record: the ledger
+ * itself keeps every change-set in full, but nothing handed to a task may
+ * name a step past the walk position, whatever bundle the run is pinned to.
+ * The invariant is the runtime's, not the content's, so old pinned runs are
+ * protected too.
+ */
+function boundHistory(
+  state: JsonObject,
+  memberId: string,
+  currentStep: number,
+): JsonValue[] {
+  return memberHistory(state, memberId).map((entry) =>
+    isObject(entry) ? clampRoundToPosition(entry, currentStep) : entry,
+  );
 }
 
 export function prepareReviewRound(
@@ -630,6 +693,7 @@ export function prepareReviewRound(
 ): JsonObject {
   const next = mutableState(state);
   const memberId = reviewMemberId(next, scope);
+  const position = reviewStepIndex(next, scope);
   const seat = reviewSeat(next, memberId);
   const round = (typeof seat.round === "number" ? seat.round : 0) + 1;
   putSeat(next, memberId, {
@@ -638,8 +702,8 @@ export function prepareReviewRound(
     ...seat,
     round,
     allowedVerdicts: allowedVerdictNames(verdicts, seat.lastVerdict),
-    history: memberHistory(next, memberId),
-    record: scopedRecord(next, memberId, reviewStepIndex(next, scope)),
+    history: boundHistory(next, memberId, position),
+    record: scopedRecord(next, memberId, position),
     // The single derived expression of the round budget: the loop's exit
     // condition and the redevelop guard both read this flag, so no literal
     // round count appears in content or in the dashboard.

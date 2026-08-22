@@ -1500,6 +1500,26 @@ test("Build redevelops minimally: change-set computed, ledger carried, no immedi
     "COT:member-1:1",
     "REVISED:member-1:2",
   ]);
+  // A part-aware judge files BOTH lists — its own flaw marks and the issues
+  // repair signal — and each entry's step is capped at the walk position in
+  // the delivered schema, with the flaw draft's length capped the same way.
+  const judgeSchema = secondRoundJudge.task.outputSchema!.schema;
+  const judgeProperties = judgeSchema.properties as JsonObject;
+  const judgeFlaws = judgeProperties.flaws as JsonObject | undefined;
+  if (judgeFlaws !== undefined) {
+    const flawEntry = object(
+      object(judgeFlaws.items, "judge flaw entry").properties,
+      "judge flaw entry properties",
+    );
+    assert.equal(object(flawEntry.step, "judge flaw step").maximum, 2);
+    assert.equal(judgeFlaws.maxItems, 2);
+    const judgeIssues = object(judgeProperties.issues, "judge issues");
+    const issueEntry = object(
+      object(judgeIssues.items, "judge issue entry").properties,
+      "judge issue entry properties",
+    );
+    assert.equal(object(issueEntry.step, "judge issue step").maximum, 2);
+  }
 
   const roundTwoComment = executor.tasks("commentor").find((task) => {
     if (task.bindings.currentStep !== 2) return false;
@@ -1518,7 +1538,11 @@ test("Build redevelops minimally: change-set computed, ledger carried, no immedi
     .find((entry) => entry.verdict === "Build");
   assert.ok(buildRecord, "the ledger carries the Build round");
   assert.deepEqual(buildRecord!.touched, [2], "the change-set names exactly the rewritten step");
-  assert.deepEqual(buildRecord!.untouched, [1, 3]);
+  // Step 3 is the FUTURE at this position: the reviewer has been shown steps
+  // 1..2, so the record it is handed may not name step 3 — not even as
+  // "untouched", which is how the old record quietly announced the chain's
+  // planned length to a reviewer told the thinker had just delivered step 2.
+  assert.deepEqual(buildRecord!.untouched, [1]);
   const ledgerIssues = buildRecord!.issues as readonly JsonValue[];
   assert.equal(object(ledgerIssues[0], "ledger issue").evidenceKind, "none");
   assert.ok(
@@ -1537,6 +1561,20 @@ test("Build redevelops minimally: change-set computed, ledger carried, no immedi
     2,
     "comment step targets are capped at the reviewed step",
   );
+  // A part-aware reviewer's flaw list is a draft with one entry per SHOWN
+  // step, so its delivered length cap is the walk position too — the static
+  // schema's generic ceiling was the one place left where a reviewer's
+  // prompt implied the chain runs further than what it has been shown.
+  const roundTwoFlaws = (roundTwoSchema.properties as JsonObject).flaws as
+    | JsonObject
+    | undefined;
+  if (roundTwoFlaws !== undefined) {
+    assert.equal(
+      roundTwoFlaws.maxItems,
+      2,
+      "the flaw-draft length is capped at the reviewed step",
+    );
+  }
 
   // Every redevelopment appends a new version of the member's idea under the
   // member's own artifact path, so the LAST entry is the reviewed output the

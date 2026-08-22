@@ -1591,24 +1591,53 @@ class ContentCompiler {
         bindings.currentStep >= 1
       ) {
         const reviewedThrough = bindings.currentStep;
-        taskJsonSchema = pinned(
-          node.output.schema === "comment"
-            ? patchSchemaProperty(taskJsonSchema, ["step"], (step) => ({
+        if (node.output.schema === "comment") {
+          taskJsonSchema = pinned(
+            patchSchemaProperty(taskJsonSchema, ["step"], (step) => ({
+              ...step,
+              maximum: reviewedThrough,
+            })),
+            node.id,
+            "the reviewed step bound",
+          );
+        } else {
+          // Where the steps a reviewer may name live: a four-part comment
+          // says it once per flaw entry, a decision once per issue — and a
+          // part-aware judge files BOTH lists, so both are pinned.
+          const stepFields =
+            node.output.schema === "commentParts"
+              ? (["flaws"] as const)
+              : node.output.schema === "judgeDecisionParts"
+                ? (["flaws", "issues"] as const)
+                : (["issues"] as const);
+          for (const field of stepFields) {
+            taskJsonSchema = pinned(
+              patchArrayItemProperty(taskJsonSchema, field, "step", (step) => ({
                 ...step,
                 maximum: reviewedThrough,
-              }))
-            : patchArrayItemProperty(
-                taskJsonSchema,
-                // Where the steps a reviewer may name live: the legacy
-                // comment says it once at the top, a four-part comment says
-                // it once per flaw entry, a decision once per issue.
-                node.output.schema === "commentParts" ? "flaws" : "issues",
-                "step",
-                (step) => ({ ...step, maximum: reviewedThrough }),
-              ),
-          node.id,
-          "the reviewed step bound",
-        );
+              })),
+              node.id,
+              "the reviewed step bound",
+            );
+          }
+          // The flaw list is a DRAFT with exactly one entry per step the
+          // reviewer has been shown, so its length is the walk position.
+          // The static schema's generic ceiling was the one place left where
+          // a reviewer's prompt implied the chain runs further than what it
+          // has been shown — a reviewer must not even learn the planned
+          // length, so the delivered schema says the truth: at most as many
+          // entries as there are visible steps.
+          if ((stepFields as readonly string[]).includes("flaws")) {
+            taskJsonSchema = pinned(
+              patchSchemaProperty(taskJsonSchema, ["flaws"], (flaws) => ({
+                ...flaws,
+                maxItems: reviewedThrough,
+              })),
+              node.id,
+              "the flaw-draft length",
+            );
+          }
+        }
       }
       // The submission types are catalog data, so the static artifact schemas
       // leave `type` as an open string; each task narrows it to what is

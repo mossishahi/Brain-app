@@ -160,8 +160,10 @@ test("the current position's rounds ride verbatim, wherever their issues point",
 
   assert.deepEqual(
     record.rounds,
-    [entries[entries.length - 1]],
-    "this position's round keeps every field, including its change-set",
+    // Verbatim except the change-set clamp: steps 5 and 6 have not been
+    // shown to this position's reviewers, so the record may not name them.
+    [{ ...(entries[entries.length - 1] as JsonObject), untouched: [1, 2, 3] }],
+    "this position's round keeps every field its reader can check",
   );
   // An issue raised HERE about an earlier step belongs to this position's
   // open business, never to the closed record of the step it points at.
@@ -373,7 +375,7 @@ test("a patch that does not fit the version it revises fails the task, never the
   );
 });
 
-test("the first position of a walk sees an empty record, and the legacy ledger is untouched", () => {
+test("the first position of a walk sees an empty record, and the legacy ledger is clamped too", () => {
   const first = initializeReview(stateWith([]), walkScope(1), VERDICTS);
   assert.deepEqual(recordOf(first), {
     clean: [],
@@ -382,11 +384,83 @@ test("the first position of a walk sees an empty record, and the legacy ledger i
     rounds: [],
   });
 
-  // Bundles published before the scoped record bind the flat ledger, so it
-  // keeps being written exactly as it was — an old pinned run resumes
-  // unchanged under this runtime.
+  // Bundles published before the scoped record bind the flat ledger instead.
+  // The prospective clamp is the RUNTIME's invariant, so it protects those
+  // pinned runs too: every entry rides, but no change-set names a step past
+  // the walk position. (The reviewLog itself — what the dashboard and the
+  // run summary read — stays complete; stateWith() holds it unchanged.)
   const entries = ledger();
   const later = initializeReview(stateWith(entries), walkScope(4), VERDICTS);
   const seat = (later.reviews as JsonObject)["member-1"] as JsonObject;
-  assert.deepEqual(seat.history, entries);
+  assert.deepEqual(
+    seat.history,
+    entries.map((entry) => {
+      const round = entry as JsonObject;
+      if (!Array.isArray(round.untouched)) return round;
+      return {
+        ...round,
+        untouched: (round.untouched as number[]).filter((step) => step <= 4),
+      };
+    }),
+  );
+  assert.deepEqual(
+    (later.reviewLog as JsonObject)["member-1"],
+    entries,
+    "the ledger itself keeps the full change-sets",
+  );
+});
+
+test("no record handed to a task names a step past the walk position", () => {
+  // The captured incident, reproduced: a six-step chain whose first-position
+  // revision also rewrote step 2 prospectively. The reviewer at position 1
+  // was handed `touched: [1,2], untouched: [3,4,5,6]` beside a one-step
+  // chain, and burned its round reconciling bookkeeping that cannot exist in
+  // its world — while the untouched list quietly announced the chain's
+  // planned length.
+  const entries: JsonValue[] = [
+    {
+      step: 1,
+      round: 1,
+      verdict: "Interrupt",
+      reason: "Step 1 pins the cause on one function; the pool cut happens earlier.",
+      issues: [issue(1, "The named function never sees the dropped eigenvector.")],
+      touched: [1, 2],
+      untouched: [3, 4, 5, 6],
+    },
+  ];
+  const record = recordOf(
+    prepareReviewRound(stateWith(entries), walkScope(1), VERDICTS),
+  );
+  const rounds = record.rounds as JsonObject[];
+  assert.deepEqual(rounds[0]!.touched, [1], "only the visible rewrite is named");
+  assert.deepEqual(rounds[0]!.untouched, [], "future steps are not announced");
+  assert.ok(
+    !JSON.stringify(record).includes("6"),
+    "nothing in the record hints at the planned chain length",
+  );
+});
+
+test("a closed position's prospective rewrites surface only as the walk reaches them", () => {
+  const entries: JsonValue[] = [
+    {
+      step: 1,
+      round: 1,
+      verdict: "Interrupt",
+      reason: "The opening framing misstates the failing component.",
+      issues: [issue(1, "The framing names the wrong function.")],
+      touched: [1, 5],
+      untouched: [2, 3, 4, 6],
+    },
+    { step: 1, round: 2, verdict: "Pass", reason: "The repaired framing carries the step." },
+  ];
+  // At position 2 the reader has seen steps 1..2: the settled entry may name
+  // the rewrite of step 1, never the prospective rewrite of step 5.
+  const early = recordOf(initializeReview(stateWith(entries), walkScope(2), VERDICTS));
+  const earlySettled = early.settled as JsonObject[];
+  assert.deepEqual(earlySettled[0]!.revised, [1]);
+
+  // At position 5 the rewrite is retrospective and legitimately visible.
+  const late = recordOf(initializeReview(stateWith(entries), walkScope(5), VERDICTS));
+  const lateSettled = late.settled as JsonObject[];
+  assert.deepEqual(lateSettled[0]!.revised, [1, 5]);
 });
