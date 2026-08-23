@@ -794,11 +794,36 @@ test("the developing skills read outline, shape, and shape rules from the refere
     ["redevelop-idea", "redeveloper"],
   ] as const) {
     const node = findAgent(root, nodeId);
-    assert.equal(
-      node.bind?.["outline"],
-      "bundle.inputTypes.outlines[input.type]",
-      `${nodeId} binds the outline for the submission's type`,
-    );
+    const skill = bundle.skills[skillName]!;
+    // Version-aware, like every content-shape check. Bundles before 0.26.0
+    // render the outline as a prose block, so they bind it; from 0.26.0 on
+    // the compiler merges the catalog outline into the result schema's own
+    // field descriptions, so nothing binds or renders it — but the catalog
+    // must still carry it, because the schema merge reads it from there.
+    const rendersOutline = node.bind?.["outline"] !== undefined;
+    if (rendersOutline) {
+      assert.equal(
+        node.bind?.["outline"],
+        "bundle.inputTypes.outlines[input.type]",
+        `${nodeId} binds the outline for the submission's type`,
+      );
+      assert.ok(skill.meta.vars.includes("outline"));
+      assert.ok(
+        !skill.meta.payload.includes("outline"),
+        "the outline is stable framing for the run, so it is rendered rather than sent as payload",
+      );
+      assert.match(skill.body, /\{\{outline\}\}/);
+    } else {
+      assert.ok(
+        !skill.meta.vars.includes("outline"),
+        `${skillName} must not declare an outline it never renders`,
+      );
+      assert.doesNotMatch(skill.body, /\{\{outline\}\}/);
+      assert.ok(
+        Object.keys(bundle.catalogs.inputTypes.outlines).length > 0,
+        "the catalog still carries the outlines the schema merge delivers",
+      );
+    }
     assert.equal(
       node.bind?.["shape"],
       "bundle.inputTypes.shapes[input.type]",
@@ -809,13 +834,6 @@ test("the developing skills read outline, shape, and shape rules from the refere
       "bundle.inputTypes.shapeGuides[input.type]",
       `${nodeId} binds the mechanical rules of the submission's shape`,
     );
-    const skill = bundle.skills[skillName]!;
-    assert.ok(skill.meta.vars.includes("outline"));
-    assert.ok(
-      !skill.meta.payload.includes("outline"),
-      "the outline is stable framing for the run, so it is rendered rather than sent as payload",
-    );
-    assert.match(skill.body, /\{\{outline\}\}/);
     assert.match(skill.body, /\{\{shape\}\}/);
     assert.match(skill.body, /\{\{shapeGuide\}\}/);
     assert.doesNotMatch(
