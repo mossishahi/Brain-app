@@ -171,6 +171,12 @@ export interface RuntimeWiringOptions {
    */
   readonly dismissedMembers?: readonly string[];
   /**
+   * Whether the panel weave seats the interdisciplinary member (`false` =
+   * off). A host option from the job's snapshotted settings; see
+   * CompileContentWorkflowOptions.interdisciplinarySeat.
+   */
+  readonly interdisciplinarySeat?: boolean;
+  /**
    * Where an agent's live text goes while its task runs (see
    * AgentExecutionContext.reportLive). Omitted on a host that shows none.
    */
@@ -758,6 +764,9 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
     checkpoints: options.checkpoints,
     artifacts: options.artifacts,
     onEvent: options.onEvent,
+    ...(options.interdisciplinarySeat !== undefined
+      ? { interdisciplinarySeat: options.interdisciplinarySeat }
+      : {}),
     ...(options.dismissedMembers !== undefined
       ? { dismissedMembers: options.dismissedMembers }
       : {}),

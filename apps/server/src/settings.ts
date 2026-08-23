@@ -217,6 +217,7 @@ function validateCommonSettings(value: unknown): {
   readonly panelConfirmation: "manual" | "auto";
   readonly gateAutoApprove: boolean;
   readonly review?: { readonly maxRounds?: number };
+  readonly panel?: { readonly size?: number; readonly interdisciplinarySeat?: boolean };
   readonly llm: Record<string, unknown>;
   readonly creditRecovery: Record<string, unknown>;
   readonly interruptedRecovery?: Record<string, unknown>;
@@ -233,6 +234,8 @@ function validateCommonSettings(value: unknown): {
   const gpu = input.gpu !== undefined ? validateGpuSettings(input.gpu) : undefined;
   const review =
     input.review !== undefined ? validateReviewSettings(input.review) : undefined;
+  const panel =
+    input.panel !== undefined ? validatePanelSettings(input.panel) : undefined;
   if (input.runner !== "slurm" && input.runner !== "local") {
     throw new Error('runner must be "slurm" or "local"');
   }
@@ -305,6 +308,7 @@ function validateCommonSettings(value: unknown): {
     panelConfirmation: input.panelConfirmation,
     gateAutoApprove,
     ...(review !== undefined ? { review } : {}),
+    ...(panel !== undefined ? { panel } : {}),
     llm,
     creditRecovery,
     ...(interruptedRecovery !== undefined ? { interruptedRecovery } : {}),
@@ -339,6 +343,42 @@ function validateReviewSettings(value: unknown): { maxRounds?: number } {
     );
   }
   return { maxRounds };
+}
+
+/**
+ * Mirrors the shipped workflow's declared panelSize range, exactly like the
+ * review-rounds bounds above: a bad value fails at save time in the drawer,
+ * and the pinned bundle re-validates authoritatively when a run starts.
+ */
+const PANEL_SIZE_BOUNDS = { min: 2, max: 12 } as const;
+
+/** `{}` is valid and means "bundle default size, interdisciplinary seat on". */
+function validatePanelSettings(value: unknown): {
+  size?: number;
+  interdisciplinarySeat?: boolean;
+} {
+  const input = object(value, "panel");
+  const out: { size?: number; interdisciplinarySeat?: boolean } = {};
+  if (input.size !== undefined) {
+    if (
+      typeof input.size !== "number" ||
+      !Number.isInteger(input.size) ||
+      input.size < PANEL_SIZE_BOUNDS.min ||
+      input.size > PANEL_SIZE_BOUNDS.max
+    ) {
+      throw new Error(
+        `panel.size must be an integer between ${PANEL_SIZE_BOUNDS.min} and ${PANEL_SIZE_BOUNDS.max}`,
+      );
+    }
+    out.size = input.size;
+  }
+  if (input.interdisciplinarySeat !== undefined) {
+    if (typeof input.interdisciplinarySeat !== "boolean") {
+      throw new Error("panel.interdisciplinarySeat must be a boolean");
+    }
+    out.interdisciplinarySeat = input.interdisciplinarySeat;
+  }
+  return out;
 }
 
 /** One GPU job's runtime ceiling can be at most a day. */
@@ -592,6 +632,9 @@ function validateStoredSettings(value: unknown): StoredServerSettings {
     ...(common.review?.maxRounds !== undefined
       ? { review: { maxRounds: common.review.maxRounds } }
       : {}),
+    ...(common.panel !== undefined && Object.keys(common.panel).length > 0
+      ? { panel: common.panel }
+      : {}),
     contentRegistry,
     creditRecovery,
     interruptedRecovery,
@@ -634,6 +677,8 @@ interface ValidatedUpdate {
    * the distinction).
    */
   readonly review?: { readonly maxRounds?: number };
+  /** Same three-way meaning as `review`, for the panel policy. */
+  readonly panel?: { readonly size?: number; readonly interdisciplinarySeat?: boolean };
 }
 
 function validateSettingsUpdate(value: unknown): ValidatedUpdate {
@@ -770,6 +815,7 @@ function validateSettingsUpdate(value: unknown): ValidatedUpdate {
     clearOpenRouterApiKey:
       common.creditRecovery.clearOpenRouterApiKey === true,
     ...(common.review !== undefined ? { review: common.review } : {}),
+    ...(common.panel !== undefined ? { panel: common.panel } : {}),
   };
 }
 
@@ -1187,6 +1233,8 @@ export class SettingsStore {
       // `review` keeps its own three-way meaning: absent = keep the stored
       // policy, `{}` = follow the bundle default again, `{maxRounds}` = override.
       review: patch.review !== undefined ? patch.review : stored.review,
+      // `panel` carries the same three-way meaning as `review`.
+      panel: patch.panel !== undefined ? patch.panel : stored.panel,
       telemetry: patch.telemetry ?? stored.telemetry,
     };
     for (const key of Object.keys(merged)) {
@@ -1340,6 +1388,14 @@ export class SettingsStore {
           ? { maxRounds: update.review.maxRounds }
           : undefined
         : currentSettings.review;
+    // Panel policy: the same three-way meaning, over two fields — an update
+    // that submitted `{}` clears both the size override and the seat toggle.
+    const carriedPanel =
+      update.panel !== undefined
+        ? Object.keys(update.panel).length > 0
+          ? update.panel
+          : undefined
+        : currentSettings.panel;
     atomicWriteJson(this.path, {
       ...update.settings,
       contentRegistry: { ...storedRegistry, url: this.deploymentRegistryUrl },
@@ -1349,6 +1405,7 @@ export class SettingsStore {
       // An update that omitted the GPU section keeps the stored setup.
       ...(carriedGpu !== undefined ? { gpu: carriedGpu } : {}),
       ...(carriedReview !== undefined ? { review: carriedReview } : {}),
+      ...(carriedPanel !== undefined ? { panel: carriedPanel } : {}),
     });
     const previousCredentials =
       readJsonFile<StoredCredentials>(this.credentialsPath) ?? {};

@@ -214,16 +214,33 @@ function gpuRunForRun(
 function workflowParamsFromEnv(
   env: NodeJS.ProcessEnv,
 ): Record<string, number> | undefined {
-  const raw = env.BRAINSTORM_AGENTIC_MAX_REVIEW_ROUNDS?.trim();
+  const params: Record<string, number> = {};
+  const read = (name: string, param: string): void => {
+    const raw = env[name]?.trim();
+    if (raw === undefined || raw === "") return;
+    const value = Number(raw);
+    if (!Number.isSafeInteger(value) || value < 1) {
+      console.error(`[config] ignoring invalid ${name}="${raw}"`);
+      return;
+    }
+    params[param] = value;
+  };
+  read("BRAINSTORM_AGENTIC_MAX_REVIEW_ROUNDS", "maxReviewRounds");
+  read("BRAINSTORM_AGENTIC_PANEL_SIZE", "panelSize");
+  return Object.keys(params).length > 0 ? params : undefined;
+}
+
+/**
+ * The interdisciplinary-seat switch, a HOST option rather than a workflow
+ * param: pinned bundles declare no such param, and the weave that honors it
+ * is an app-side activity. Only "off" means off — anything else (unset,
+ * typos) keeps the seat, because losing a seat to a mangled environment
+ * would be silent and permanent for the run.
+ */
+function interdisciplinarySeatFromEnv(env: NodeJS.ProcessEnv): boolean | undefined {
+  const raw = env.BRAINSTORM_AGENTIC_INTERDISCIPLINARY_SEAT?.trim().toLowerCase();
   if (raw === undefined || raw === "") return undefined;
-  const value = Number(raw);
-  if (!Number.isSafeInteger(value) || value < 1) {
-    console.error(
-      `[config] ignoring invalid BRAINSTORM_AGENTIC_MAX_REVIEW_ROUNDS="${raw}"`,
-    );
-    return undefined;
-  }
-  return { maxReviewRounds: value };
+  return raw === "off" || raw === "false" || raw === "0" ? false : undefined;
 }
 
 interface CliArgs {
@@ -1002,6 +1019,7 @@ async function main(): Promise<void> {
       offline,
     );
     const gpuRun = gpuRunForRun(sessionRoot, runId, offline);
+    const interdisciplinarySeat = interdisciplinarySeatFromEnv(process.env);
     const runtime = buildRuntime({
       providerConfig: providerConfigFromEnv(process.env, offline),
       checkpoints: new FsCheckpointStore(sessionRoot, fsStoreOptions(process.env)),
@@ -1016,6 +1034,7 @@ async function main(): Promise<void> {
       ...(taxonomy ? { taxonomy } : {}),
       ...(codeEnvironment ? { codeEnvironment } : {}),
       ...(gpuRun ? { gpuRun } : {}),
+      ...(interdisciplinarySeat !== undefined ? { interdisciplinarySeat } : {}),
       bundle: lazy?.bundle ?? loadContent(contentDir!),
       ...(lazy ? { skillResolver: lazy.skillResolver } : {}),
       ...(runEventListener !== undefined ? { onEvent: runEventListener } : {}),
@@ -1114,6 +1133,7 @@ async function main(): Promise<void> {
       offline,
     );
     const gpuRun = gpuRunForRun(sessionRoot, runId, offline);
+    const resumeInterdisciplinarySeat = interdisciplinarySeatFromEnv(process.env);
     const runtime = buildRuntime({
       providerConfig: providerConfigFromEnv(process.env, offline),
       checkpoints: new FsCheckpointStore(sessionRoot, fsStoreOptions(process.env)),
@@ -1128,6 +1148,9 @@ async function main(): Promise<void> {
       ...(taxonomy ? { taxonomy } : {}),
       ...(codeEnvironment ? { codeEnvironment } : {}),
       ...(gpuRun ? { gpuRun } : {}),
+      ...(resumeInterdisciplinarySeat !== undefined
+        ? { interdisciplinarySeat: resumeInterdisciplinarySeat }
+        : {}),
       bundle: lazy?.bundle ?? loadContent(contentDir!),
       ...(lazy ? { skillResolver: lazy.skillResolver } : {}),
       ...(runEventListener !== undefined ? { onEvent: runEventListener } : {}),

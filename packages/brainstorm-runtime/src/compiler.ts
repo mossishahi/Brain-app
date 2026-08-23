@@ -134,6 +134,15 @@ export interface CompileContentWorkflowOptions {
    * identically on every replay.
    */
   readonly dismissedMembers?: readonly string[];
+  /**
+   * Whether the panel.weave activity seats the interdisciplinary member.
+   * A HOST option, not a workflow param, because pinned bundles declare no
+   * such param and the weave is an app-side activity. `false` returns the
+   * selected panel unwoven; absent or `true` weaves as always. A run whose
+   * panel is already journaled is untouched either way — the weave replays
+   * from the journal without re-running the handler.
+   */
+  readonly interdisciplinarySeat?: boolean;
 }
 
 export interface ResolvedRole {
@@ -1292,7 +1301,9 @@ function annotatedEntries(
   return files.filter(isJsonRecord);
 }
 
-function builtinActivities(): Readonly<Record<string, DeterministicActivityHandler>> {
+function builtinActivities(options: {
+  readonly interdisciplinarySeat?: boolean;
+}): Readonly<Record<string, DeterministicActivityHandler>> {
   return {
     "attachments.useful": (input) =>
       partitionAnnotatedFiles(
@@ -1400,6 +1411,13 @@ function builtinActivities(): Readonly<Record<string, DeterministicActivityHandl
           "INVALID_ACTIVITY_INPUT",
         );
       }
+      // The host switched the interdisciplinary seat off: the selected panel
+      // rides through unwoven. Decided here rather than in the workflow
+      // because no pinned bundle declares such a knob — and the journal makes
+      // it permanent per run: once a panel is recorded, replays never re-ask.
+      if (options.interdisciplinarySeat === false) {
+        return panel as unknown as JsonValue;
+      }
       return weavePanel(
         panel as unknown as Parameters<typeof weavePanel>[0],
         maxSeats,
@@ -1459,7 +1477,14 @@ class ContentCompiler {
   ) {
     this.routeResolver = options.routeResolver ?? new ExecutorOwnedRouteResolver();
     this.capabilityTools = options.capabilityTools ?? new LogicalCapabilityToolResolver();
-    this.activityHandlers = { ...builtinActivities(), ...(options.activities ?? {}) };
+    this.activityHandlers = {
+      ...builtinActivities({
+        ...(options.interdisciplinarySeat !== undefined
+          ? { interdisciplinarySeat: options.interdisciplinarySeat }
+          : {}),
+      }),
+      ...(options.activities ?? {}),
+    };
     this.providerOffers = options.providerOffers ?? [];
     this.hostTools = options.hostTools ?? [];
     this.enabledHostToolIds = options.enabledHostToolIds ?? new Set();

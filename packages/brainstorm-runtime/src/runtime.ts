@@ -74,6 +74,11 @@ export interface BrainstormRuntimeOptions {
    */
   readonly dismissedMembers?: readonly string[];
   /**
+   * Whether the panel weave seats the interdisciplinary member; see
+   * CompileContentWorkflowOptions.interdisciplinarySeat. `false` = off.
+   */
+  readonly interdisciplinarySeat?: boolean;
+  /**
    * When the host wants the run to stop starting work, and why.
    *
    * A scheduler kills its jobs at the allocation boundary, mid-task, and every
@@ -203,6 +208,9 @@ export class BrainstormRuntime {
       journalFormat: options.journalFormat,
       ...(options.dismissedMembers !== undefined
         ? { dismissedMembers: options.dismissedMembers }
+        : {}),
+      ...(options.interdisciplinarySeat !== undefined
+        ? { interdisciplinarySeat: options.interdisciplinarySeat }
         : {}),
     });
     const checkpoints = options.checkpoints ?? new InMemoryCheckpointStore();

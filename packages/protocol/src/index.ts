@@ -1213,6 +1213,19 @@ export interface ServerSettings {
     readonly maxRounds?: number;
   };
   /**
+   * Panel composition for NEW runs, snapshotted at submit time exactly like
+   * `review`. `size` is the seat count the deterministic selection may
+   * produce (absent = the pinned bundle's own default); the bundle's declared
+   * bounds stay authoritative when the run starts. `interdisciplinarySeat`
+   * turns the deterministically woven between-fields seat on or off
+   * (absent = on); a run that already journaled its panel keeps it either
+   * way, because the weave replays from the journal.
+   */
+  readonly panel?: {
+    readonly size?: number;
+    readonly interdisciplinarySeat?: boolean;
+  };
+  /**
    * DEPLOYMENT-OWNED, read-only for users. The registry endpoint is baked
    * into the app (DEFAULT_CONTENT_REGISTRY_URL in the server's settings
    * module; developers override with --content-registry-url or
@@ -1392,6 +1405,14 @@ export interface ServerSettingsUpdate {
    */
   readonly review?: {
     readonly maxRounds?: number;
+  };
+  /**
+   * Absent = keep the stored panel policy. `{}` = bundle default size with
+   * the interdisciplinary seat on.
+   */
+  readonly panel?: {
+    readonly size?: number;
+    readonly interdisciplinarySeat?: boolean;
   };
   /** Anonymous usage reporting; omitted leaves the stored value unchanged. */
   readonly telemetry?: {

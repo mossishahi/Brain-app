@@ -48,6 +48,7 @@ const SECTION_IDS = [
   "credential",
   "confirmation",
   "review",
+  "panel",
   "tools",
   "recovery",
 ] as const;
@@ -195,6 +196,9 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
   const [gateAutoApprove, setGateAutoApprove] = useState(true);
   /** "" = follow the bundle's default; otherwise the override as a string. */
   const [reviewMaxRounds, setReviewMaxRounds] = useState<string>("");
+  /** "" = follow the bundle's default; otherwise the seat count as a string. */
+  const [panelSize, setPanelSize] = useState<string>("");
+  const [interdisciplinarySeat, setInterdisciplinarySeat] = useState(true);
   const [autoResume, setAutoResume] = useState(true);
   const [resumeInterrupted, setResumeInterrupted] = useState(true);
   const [safetyBufferSeconds, setSafetyBufferSeconds] = useState("60");
@@ -345,6 +349,8 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
         setReviewMaxRounds(
           s.review?.maxRounds !== undefined ? String(s.review.maxRounds) : "",
         );
+        setPanelSize(s.panel?.size !== undefined ? String(s.panel.size) : "");
+        setInterdisciplinarySeat(s.panel?.interdisciplinarySeat !== false);
         setAutoResume(s.creditRecovery.autoResume);
         setResumeInterrupted(s.interruptedRecovery?.autoResume ?? true);
         setSafetyBufferSeconds(String(s.creditRecovery.safetyBufferSeconds));
@@ -1215,6 +1221,68 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                   &quot;Bundle default&quot; follows the published workflow.
                 </span>
               </div>
+            </Section>
+
+            <Section
+              title="Panel"
+              state={saveState.panel}
+              error={saveError.panel}
+            >
+              <div className="field">
+                <label className="field-label" htmlFor="settings-panel-size">
+                  Seats on the review panel
+                </label>
+                <select
+                  id="settings-panel-size"
+                  value={panelSize}
+                  onChange={(e) => {
+                    const next = e.target.value;
+                    setPanelSize(next);
+                    void save("panel", {
+                      panel: {
+                        ...(next !== "" ? { size: Number(next) } : {}),
+                        ...(interdisciplinarySeat === false
+                          ? { interdisciplinarySeat: false }
+                          : {}),
+                      },
+                    });
+                  }}
+                >
+                  <option value="">Bundle default</option>
+                  {Array.from({ length: 11 }, (_, i) => i + 2).map((n) => (
+                    <option key={n} value={String(n)}>
+                      {n} seats
+                    </option>
+                  ))}
+                </select>
+                <span className="field-note">
+                  How many expert seats the panel selection may produce. Applies to
+                  every NEW run (running runs keep the panel they started with).
+                  More seats read the submission from more fields and spend more.
+                </span>
+              </div>
+              <label className="radio-row">
+                <input
+                  type="checkbox"
+                  checked={interdisciplinarySeat}
+                  onChange={(e) => {
+                    const next = e.target.checked;
+                    setInterdisciplinarySeat(next);
+                    void save("panel", {
+                      panel: {
+                        ...(panelSize !== "" ? { size: Number(panelSize) } : {}),
+                        ...(next === false ? { interdisciplinarySeat: false } : {}),
+                      },
+                    });
+                  }}
+                />
+                <span>Interdisciplinary seat</span>
+              </label>
+              <span className="field-note">
+                One extra woven seat whose expertise is the space between the
+                selected fields. It develops, is reviewed, and redevelops like
+                every other member. Applies to every NEW run.
+              </span>
             </Section>
 
             <Section

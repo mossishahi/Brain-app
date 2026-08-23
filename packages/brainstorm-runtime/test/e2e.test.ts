@@ -1592,6 +1592,67 @@ test("a unanimous round is a fast pass: recorded, walked past, and no judge conv
   }
 });
 
+test("the interdisciplinary seat switches off as a host option, and the panel rides through unwoven", async () => {
+  // The setting is a HOST option, not a workflow param: pinned bundles
+  // declare no such knob, and the weave that honors it is an app-side
+  // activity. Once a run's panel is journaled the choice is permanent for
+  // that run — replay never re-asks.
+  const executor = new FakeBrainstormExecutor();
+  const app = new BrainstormRuntime({
+    bundle: loadContent(registryContentDir),
+    agentExecutor: executor,
+    humanGateMode: "autoApproveSkippable",
+    interdisciplinarySeat: false,
+    activities: taxonomyActivities(new StubTaxonomy()),
+    routeResolver: new StaticBrainstormRouteResolver({
+      reasoning: { modelId: "configured-reasoner", providerId: "fake" },
+      writing: { modelId: "configured-writer", providerId: "fake" },
+      balanced: { modelId: "configured-balanced", providerId: "fake" },
+    }),
+    hostTools: TEST_HOST_TOOLS,
+    enabledHostToolIds: new Set(TEST_HOST_TOOLS.map((manifest) => manifest.toolId)),
+  });
+  const result = await app.run({
+    runId: "seat-off",
+    submission: "Panel without the woven seat",
+    params: { panelSize: 2 },
+  });
+  assert.equal(
+    result.status,
+    "completed",
+    result.status === "failed" ? `${result.error.name}: ${result.error.message}` : undefined,
+  );
+  assert.equal(
+    executor.tasks("interdisciplinary-commentor").length,
+    0,
+    "no seat, no bridge commentor",
+  );
+  for (const seat of executor.tasks("brain")) {
+    assert.ok(
+      !String(seat.bindings.umbrella).includes("interdisciplinary"),
+      "no first pass runs for a seat that was never woven",
+    );
+  }
+
+  // The same fixture with the option absent still weaves — the switch is the
+  // only difference.
+  const wovenExecutor = new FakeBrainstormExecutor();
+  const woven = await runtime(wovenExecutor).run({
+    runId: "seat-on",
+    submission: "Panel with the woven seat",
+    params: { panelSize: 2 },
+  });
+  assert.equal(
+    woven.status,
+    "completed",
+    woven.status === "failed" ? `${woven.error.name}: ${woven.error.message}` : undefined,
+  );
+  assert.ok(
+    wovenExecutor.tasks("interdisciplinary-commentor").length > 0,
+    "the default path keeps the woven seat commenting through its own skill",
+  );
+});
+
 test("Build redevelops minimally: change-set computed, ledger carried, no immediate repeat", async () => {
   const executor = new FakeBrainstormExecutor("build-step-2");
   const app = runtime(executor, "autoApproveSkippable", undefined, undefined, judgedWorkflow());

@@ -192,10 +192,28 @@ export function buildOrchestrationCommand(
           )}`,
         ]
       : [];
+  // Panel policy for NEW runs, same channel: the size maps onto the pinned
+  // workflow's panelSize param at run start, and the seat switch is a host
+  // option the runtime's weave activity honors. Resumes carry both too — a
+  // run interrupted before its panel was journaled weaves on resume, and it
+  // must weave the way this job was submitted.
+  const panelEnv = [
+    ...(options.settings.panel?.size !== undefined
+      ? [
+          `BRAINSTORM_AGENTIC_PANEL_SIZE=${shellQuote(
+            String(options.settings.panel.size),
+          )}`,
+        ]
+      : []),
+    ...(options.settings.panel?.interdisciplinarySeat === false
+      ? ["BRAINSTORM_AGENTIC_INTERDISCIPLINARY_SEAT=off"]
+      : []),
+  ];
   const command = [
     ...credentialsEnv,
     ...modelEnvironment(options.settings),
     ...reviewEnv,
+    ...panelEnv,
     ...args,
   ].join(" ");
   if (options.credentialsFile !== undefined && options.settings.llm.provider !== "offline") {

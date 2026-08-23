@@ -353,6 +353,36 @@ test("settings roundtrip and template validation", async () => {
     });
     assert.equal(outOfRange.status, 400);
     assert.match(outOfRange.value.message, /review\.maxRounds/);
+
+    // Panel policy: the same three-way meaning over two fields — set, keep
+    // when the update omits it, clear via {} — plus both validation walls.
+    const withPanel = await putSettings(server, {
+      panel: { size: 4, interdisciplinarySeat: false },
+    });
+    assert.equal(withPanel.panel?.size, 4);
+    assert.equal(withPanel.panel?.interdisciplinarySeat, false);
+    const { panel: _omittedPanel, ...withoutPanel } = withPanel;
+    const keptPanel = await requestJson<ServerSettings>(server, "/api/settings", {
+      method: "PUT",
+      body: JSON.stringify(withoutPanel),
+    });
+    assert.equal(keptPanel.status, 200);
+    assert.equal(keptPanel.value.panel?.size, 4);
+    assert.equal(keptPanel.value.panel?.interdisciplinarySeat, false);
+    const clearedPanel = await putSettings(server, { panel: {} });
+    assert.equal(clearedPanel.panel, undefined);
+    const panelOutOfRange = await requestJson<{ message: string }>(server, "/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({ ...changed, panel: { size: 13 } }),
+    });
+    assert.equal(panelOutOfRange.status, 400);
+    assert.match(panelOutOfRange.value.message, /panel\.size/);
+    const panelBadSeat = await requestJson<{ message: string }>(server, "/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({ ...changed, panel: { interdisciplinarySeat: "off" } }),
+    });
+    assert.equal(panelBadSeat.status, 400);
+    assert.match(panelBadSeat.value.message, /interdisciplinarySeat/);
   } finally {
     await server.close();
     await removeWorkspace(workspace);
@@ -1853,6 +1883,37 @@ test("a review-round override rides the command as its own env variable", () => 
   assert.match(overridden, /BRAINSTORM_AGENTIC_MAX_REVIEW_ROUNDS='6'/);
   const unset = buildOrchestrationCommand({ ...fixture, settings: base });
   assert.equal(unset.includes("BRAINSTORM_AGENTIC_MAX_REVIEW_ROUNDS"), false);
+});
+
+test("the panel policy rides the command: size as a param env, the seat as a host switch", () => {
+  const base = { ...defaultServerSettings(), llm: { provider: "offline" as const } };
+  const fixture = {
+    workerPath: "/tmp/worker/main.js",
+    mode: "run" as const,
+    runId: "bsa_panel",
+    topic: "Panel policy",
+    sessionRoot: "/tmp/sessions",
+    eventsFile: "/tmp/events.jsonl",
+    contentDir: "/tmp/content",
+  };
+  const overridden = buildOrchestrationCommand({
+    ...fixture,
+    settings: { ...base, panel: { size: 4, interdisciplinarySeat: false } },
+  });
+  assert.match(overridden, /BRAINSTORM_AGENTIC_PANEL_SIZE='4'/);
+  assert.match(overridden, /BRAINSTORM_AGENTIC_INTERDISCIPLINARY_SEAT=off/);
+  // The seat switch only travels when it turns the seat OFF: absent and true
+  // both mean the default weave, and an env for the default would read as a
+  // knob every run sets.
+  const seatOn = buildOrchestrationCommand({
+    ...fixture,
+    settings: { ...base, panel: { size: 4, interdisciplinarySeat: true } },
+  });
+  assert.match(seatOn, /BRAINSTORM_AGENTIC_PANEL_SIZE='4'/);
+  assert.equal(seatOn.includes("BRAINSTORM_AGENTIC_INTERDISCIPLINARY_SEAT"), false);
+  const unset = buildOrchestrationCommand({ ...fixture, settings: base });
+  assert.equal(unset.includes("BRAINSTORM_AGENTIC_PANEL_SIZE"), false);
+  assert.equal(unset.includes("BRAINSTORM_AGENTIC_INTERDISCIPLINARY_SEAT"), false);
 });
 
 test("the attachment store rides every submission for the job, resumes included", () => {
