@@ -1,5 +1,5 @@
 {
   "bundle": "brainstorm",
-  "version": "0.25.0",
+  "version": "0.26.0",
   "comment": "The published content bundle every suite in this repository executes against. It is PINNED, and that is the whole point: a suite whose inputs move is not a suite. These suites run a real bundle out of the Brain Registry's serving store, and they used to resolve whatever the store's index.json called `latest` — which meant publishing content retroactively changed the test inputs of every app tag that had already shipped, and turned a released, green tag red without a single line of app code changing. Bumping this version is therefore a deliberate commit, and it carries in the same commit whatever test updates the new bundle requires, so the bump and its cost are reviewed together. BRAIN_TEST_BUNDLE_VERSION overrides this for one run; the literal value `latest` restores the old floating behaviour, which is what CI's canary lane uses to report what the next bump will cost without being allowed to decide whether a release is green."
 }
