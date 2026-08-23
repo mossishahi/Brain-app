@@ -784,7 +784,7 @@ function runtime(
 
 test("Pass path walks every seat in step order (seats in parallel) and keeps C-O-T from chair", async () => {
   const executor = new FakeBrainstormExecutor();
-  const app = runtime(executor);
+  const app = runtime(executor, "autoApproveSkippable", undefined, undefined, judgedWorkflow());
   const result = await app.run({
     runId: "pass-path",
     submission: { prompt: "Investigate the mechanism", attachments: [] },
@@ -952,6 +952,28 @@ test("Pass path walks every seat in step order (seats in parallel) and keeps C-O
     Array.isArray(memberEnvelope.required) && (memberEnvelope.required as JsonValue[]).includes("paper"),
     "the run's shape body is required in the delivered schema",
   );
+  // Every field of the kept shape body carries the catalog outline's text as
+  // its schema DESCRIPTION — the outline's delivery channel once skills
+  // stopped rendering it as a prose block (bundle 0.26.0). Read from the
+  // loaded bundle so the expectation is the same single source the compiler
+  // merges from, whichever bundle version the suite is pinned to.
+  publishedBundle ??= loadContent(registryContentDir);
+  const ideaOutline = publishedBundle.catalogs.inputTypes.outlines["research idea"]!;
+  assert.ok(Object.keys(ideaOutline).length > 0, "the catalog carries an outline to merge");
+  const paperFields = object(
+    object(
+      object(memberEnvelope.properties, "envelope properties").paper,
+      "paper body",
+    ).properties,
+    "paper body properties",
+  );
+  for (const [field, text] of Object.entries(ideaOutline)) {
+    assert.equal(
+      object(paperFields[field], `paper ${field}`).description,
+      text,
+      `the ${field} section carries its outline text as the schema description`,
+    );
+  }
   assert.ok((await app.artifacts.list()).length > 0);
   // Capabilities are declared by the content, so the expectation reads the
   // loaded bundle: each task carries exactly its role's declared set.
@@ -1138,18 +1160,77 @@ test("instructions stay in a cacheable system prefix; submitted data rides the t
     brainSystem.includes(String(brainTask.bindings.umbrella)),
     "the literature-review technique renders the seat's umbrella into the instructions",
   );
+
+  // The seat's view of the rest of the board: a `board` bind renders as one
+  // bullet per OTHER seat ("- <umbrella>, <subfields>"), the seat's own row
+  // removed by the compiler. Version-aware like every content-shape check:
+  // bundles that do not bind `board` must render no board bullet at all.
+  publishedBundle ??= loadContent(registryContentDir);
+  const bindsBoard = JSON.stringify(publishedBundle.workflows.brainstorm).includes(
+    '"board"',
+  );
+  const brainTasks = executor.tasks("brain");
+  assert.ok(brainTasks.length >= 2, "the fixture seats at least two members");
+  for (const seat of brainTasks) {
+    const system = systemPromptText(seat.task.modelRequest!.system) ?? "";
+    const own = String(seat.bindings.umbrella);
+    const others = brainTasks
+      .filter((other) => other !== seat)
+      .map((other) => String(other.bindings.umbrella));
+    for (const other of others) {
+      assert.equal(
+        system.includes(`- ${other}`),
+        bindsBoard,
+        bindsBoard
+          ? `the board shows the other seat "${other}" as a bullet`
+          : "a bundle that does not bind the board renders no board bullets",
+      );
+    }
+    if (!others.includes(own)) {
+      assert.ok(
+        !system.includes(`- ${own}`),
+        "the seat's own row is removed from the board it is shown",
+      );
+    }
+  }
 });
+
+/**
+ * The published workflow with the unanimity fast pass stripped, so a test can
+ * assert the JUDGED path — verdict sequencing, round caps, judge schemas,
+ * per-seat call counts — which a unanimous fixture round would otherwise skip.
+ * For bundles that never carry the flag this is the identity, so the same
+ * tests keep proving the same thing against older pins.
+ */
+function judgedWorkflow(): ContentWorkflowDefinition {
+  publishedBundle ??= loadContent(registryContentDir);
+  const cloned = JSON.parse(
+    JSON.stringify(publishedBundle.workflows.brainstorm!),
+  ) as unknown;
+  const strip = (node: unknown): void => {
+    if (typeof node !== "object" || node === null) return;
+    delete (node as Record<string, unknown>).fastPassUnanimous;
+    for (const value of Object.values(node as Record<string, unknown>)) {
+      if (Array.isArray(value)) value.forEach(strip);
+      else strip(value);
+    }
+  };
+  strip(cloned);
+  return cloned as ContentWorkflowDefinition;
+}
 
 /**
  * The published workflow with its four review binds moved from the flat
  * ledger to the scoped record — exactly the edit the next bundle version
- * makes, so the runtime side can be proven before any tag exists.
+ * makes, so the runtime side can be proven before any tag exists. Fast pass
+ * is stripped for the same reason as judgedWorkflow: these fixtures assert
+ * recorded rounds, and a unanimous one must still be judged to be recorded
+ * the way the assertions expect.
  */
 function scopedLedgerWorkflow(): ContentWorkflowDefinition {
-  publishedBundle ??= loadContent(registryContentDir);
   // Content published before the scoped record binds the flat ledger, so the
   // rebind happens here; a tree that already binds the record passes through.
-  const rebound = JSON.stringify(publishedBundle.workflows.brainstorm!).replaceAll(
+  const rebound = JSON.stringify(judgedWorkflow()).replaceAll(
     '"reviews[member.id].history"',
     '"reviews[member.id].record"',
   );
@@ -1456,9 +1537,64 @@ test("the task turn declares its stable prefixes without changing a byte the mod
   assert.ok(compared > 0, "the walk produced consecutive positions to compare");
 });
 
+test("a unanimous round is a fast pass: recorded, walked past, and no judge convened", async () => {
+  // The mechanism under test: when EVERY commentor passes a round, the
+  // runtime records a synthesized Pass ("fast pass") and never calls the
+  // judge — a passing comment may carry no evidence, so the round holds
+  // nothing to weigh. Version-aware: bundles without the flag convene the
+  // judge exactly as before.
+  publishedBundle ??= loadContent(registryContentDir);
+  const flagged = JSON.stringify(publishedBundle.workflows.brainstorm).includes(
+    '"fastPassUnanimous"',
+  );
+  const executor = new FakeBrainstormExecutor();
+  const app = runtime(executor);
+  const result = await app.run({
+    runId: "fast-pass-run",
+    submission: "Fast-pass path test",
+    params: { panelSize: 2 },
+  });
+  assert.equal(
+    result.status,
+    "completed",
+    result.status === "failed" ? `${result.error.name}: ${result.error.message}` : undefined,
+  );
+  if (!flagged) {
+    assert.ok(
+      executor.tasks("judge").length > 0,
+      "a bundle without the flag convenes the judge on every round",
+    );
+    return;
+  }
+  // Every fixture round is unanimous on the default script, so no judge task
+  // may exist at all — the whole review still completes and records.
+  assert.equal(executor.tasks("judge").length, 0, "no judge convened on unanimous rounds");
+  const checkpoint = await app.checkpoints.load("fast-pass-run");
+  const decisions = (checkpoint?.journal ?? []).filter(
+    (entry) =>
+      entry.key.includes("/judge-step") &&
+      entry.key.endsWith("::result") &&
+      typeof entry.value === "object" &&
+      entry.value !== null,
+  );
+  assert.ok(decisions.length > 0, "the fast-passed decisions are journaled like judged ones");
+  for (const entry of decisions) {
+    const output = object(
+      object(entry.value, "judge result").output,
+      "judge decision",
+    );
+    assert.equal(output.verdict, "Pass");
+    assert.match(
+      String(output.reason),
+      /^Fast pass/,
+      "the recorded reason names the fast pass — which is what the dashboard shows",
+    );
+  }
+});
+
 test("Build redevelops minimally: change-set computed, ledger carried, no immediate repeat", async () => {
   const executor = new FakeBrainstormExecutor("build-step-2");
-  const app = runtime(executor);
+  const app = runtime(executor, "autoApproveSkippable", undefined, undefined, judgedWorkflow());
   const result = await app.run({
     submission: "Build-path test",
     params: { panelSize: 2 },
@@ -1481,6 +1617,33 @@ test("Build redevelops minimally: change-set computed, ledger carried, no immedi
   const issues = feedback.issues as readonly JsonValue[];
   assert.ok(Array.isArray(issues) && issues.length === 1, "the issues[] repair signal rides the feedback");
   assert.equal(object(issues[0], "issue").step, 2);
+
+  // The reviser's patch body carries the same catalog outline descriptions
+  // the first pass wrote to: a rewritten section answers the same contract,
+  // and the schema is where that contract now travels.
+  publishedBundle ??= loadContent(registryContentDir);
+  const patchOutline = publishedBundle.catalogs.inputTypes.outlines["research idea"]!;
+  const patchFields = object(
+    object(
+      object(
+        object(
+          object(redevelopment.task.outputSchema!.schema.properties, "reviser properties")
+            .outputPatch,
+          "reviser outputPatch",
+        ).properties,
+        "reviser patch properties",
+      ).paper,
+      "reviser paper body",
+    ).properties,
+    "reviser paper fields",
+  );
+  for (const [field, text] of Object.entries(patchOutline)) {
+    assert.equal(
+      object(patchFields[field], `patch ${field}`).description,
+      text,
+      `a rewritten ${field} answers the same outline contract`,
+    );
+  }
 
   const secondRoundJudge = executor
     .tasks("judge")
@@ -1606,7 +1769,13 @@ test("member task schemas carry only the run's shape body — the other eight ne
   // pass) and redevelopment (revision). The fixture submission classifies as
   // "research idea", which the catalog maps to the paper shape.
   const executor = new FakeBrainstormExecutor("build-step-2");
-  const result = await runtime(executor).run({
+  const result = await runtime(
+    executor,
+    "autoApproveSkippable",
+    undefined,
+    undefined,
+    judgedWorkflow(),
+  ).run({
     submission: "Slim-schema test",
     params: { panelSize: 2 },
   });
@@ -1686,7 +1855,7 @@ test("a verdict targeting a step beyond the review position fails the run with a
 
 test("round cap force-proceeds after four decisions and only three redevelopments", async () => {
   const executor = new FakeBrainstormExecutor("cap-step-1");
-  const app = runtime(executor);
+  const app = runtime(executor, "autoApproveSkippable", undefined, undefined, judgedWorkflow());
   const result = await app.run({
     submission: "Cap-path test",
     params: { panelSize: 2 },
@@ -1706,7 +1875,13 @@ test("round cap force-proceeds after four decisions and only three redevelopment
 
 test("a model cannot issue Build twice consecutively even if it ignores the prompt", async () => {
   const executor = new FakeBrainstormExecutor("repeat-build");
-  const result = await runtime(executor).run({
+  const result = await runtime(
+    executor,
+    "autoApproveSkippable",
+    undefined,
+    undefined,
+    judgedWorkflow(),
+  ).run({
     submission: "Invalid repeated Build",
     params: { panelSize: 2 },
   });
@@ -2244,6 +2419,10 @@ function partsBundle(): ContentBundle {
     if (typeof value !== "object" || value === null) return value;
     const rewritten: Record<string, JsonValue> = {};
     for (const [key, entry] of Object.entries(value as JsonObject)) {
+      // These fixtures assert the JUDGED path (what a four-part judge reads
+      // and files), so the unanimity fast pass is stripped like judgedWorkflow
+      // does — identity for bundles that never carry the flag.
+      if (key === "fastPassUnanimous") continue;
       const form = typeof entry === "string" ? PARTS_FORM[entry] : undefined;
       rewritten[key] = key === "schema" && form !== undefined ? form : rewrite(entry);
     }

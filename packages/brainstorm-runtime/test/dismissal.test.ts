@@ -549,14 +549,36 @@ const TEST_HOST_TOOLS: readonly HostToolManifest[] = [
  * the one thing every test here varies. Passing `undefined` is the pre-feature
  * configuration and must stay distinguishable from passing an empty list.
  */
+/**
+ * The published workflow with the unanimity fast pass stripped: these tests
+ * count model calls per seat under the JUDGED flow (a dismissal must remove
+ * exactly the dismissed seat's calls), and a fast-passed round would remove
+ * judge calls for a different reason. Identity for bundles without the flag.
+ */
+function judgedWorkflow(bundle: ReturnType<typeof loadContent>) {
+  const cloned = JSON.parse(JSON.stringify(bundle.workflows.brainstorm!)) as unknown;
+  const strip = (node: unknown): void => {
+    if (typeof node !== "object" || node === null) return;
+    delete (node as Record<string, unknown>).fastPassUnanimous;
+    for (const value of Object.values(node as Record<string, unknown>)) {
+      if (Array.isArray(value)) value.forEach(strip);
+      else strip(value);
+    }
+  };
+  strip(cloned);
+  return cloned as NonNullable<(typeof bundle.workflows)["brainstorm"]>;
+}
+
 function runtime(
   executor: AgentExecutor,
   dismissedMembers?: readonly string[],
   humanGateMode: "manual" | "autoApproveSkippable" = "autoApproveSkippable",
   stores?: Pick<BrainstormRuntime, "checkpoints" | "artifacts">,
 ) {
+  const bundle = loadContent(registryContentDir);
   return new BrainstormRuntime({
-    bundle: loadContent(registryContentDir),
+    bundle,
+    workflow: judgedWorkflow(bundle),
     agentExecutor: executor,
     humanGateMode,
     activities: taxonomyActivities(new StubTaxonomy()),

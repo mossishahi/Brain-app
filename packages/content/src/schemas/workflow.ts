@@ -176,6 +176,13 @@ export interface AgentNode {
    * can show a live per-seat phase (the model never reports it).
    */
   reviewPhase?: ReviewPhaseName;
+  /**
+   * Judge nodes only: record a synthesized "fast pass" decision instead of
+   * convening the judge when every commentor in the bound comments map passed
+   * the round. Opt-in per node, so bundles without the flag never change
+   * behavior.
+   */
+  fastPassUnanimous?: boolean;
 }
 
 /**
@@ -306,6 +313,15 @@ export const workflowNodeSchema: z.ZodType<WorkflowNode> = z.lazy(() =>
         bind: z.record(z.string().min(1), bindValueSchema).optional(),
         output: z.object({ key: dataRefSchema, schema: z.string().min(1) }).strict(),
         reviewPhase: reviewPhaseSchema.optional(),
+        /**
+         * Judge nodes only: when every commentor in the bound `comments` map
+         * passed the round, the runtime records a synthesized Pass decision
+         * ("fast pass") instead of convening the judge — a passing comment may
+         * carry no evidence, so a unanimous round holds nothing to weigh and
+         * no repair signal to compose. The bundle opts in per node, so a
+         * pinned bundle without the flag never changes behavior.
+         */
+        fastPassUnanimous: z.boolean().optional(),
       })
       .strict(),
     z

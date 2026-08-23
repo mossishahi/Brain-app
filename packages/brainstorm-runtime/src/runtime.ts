@@ -150,6 +150,33 @@ function guardedExecutors(options: {
 }
 
 /**
+ * Answers a task that carries a precompiled FAST-PASS decision without calling
+ * the model.
+ *
+ * The compiler attaches the decision to a judge task's metadata when the node
+ * opted in and every commentor passed the round (see fastPassDecision). The
+ * short-circuit lives in the EXECUTOR seam on purpose: the agent node still
+ * runs, its effect journals a normal ok result, write-time validation and the
+ * state fold see a decision indistinguishable from a judged one, and a replay
+ * never knows the difference. No usage is reported, because nothing was spent.
+ */
+function fastPassAware(inner: AgentExecutor): AgentExecutor {
+  return {
+    async execute(task, context) {
+      const fastPass = task.metadata?.fastPass;
+      if (fastPass !== undefined) {
+        return {
+          taskId: task.taskId,
+          status: "ok",
+          output: structuredClone(fastPass),
+        };
+      }
+      return inner.execute(task, context);
+    },
+  };
+}
+
+/**
  * High-level executable integration of a host-validated registry bundle, core
  * workflow semantics, and an injected provider-neutral AgentExecutor.
  */
@@ -203,7 +230,7 @@ export class BrainstormRuntime {
       functions: this.compiled.functions,
       checkpoints: this.checkpoints,
       artifacts: this.artifacts,
-      agentExecutor: options.agentExecutor,
+      agentExecutor: fastPassAware(options.agentExecutor),
       ...(options.onLivePreview !== undefined
         ? { onLivePreview: options.onLivePreview }
         : {}),

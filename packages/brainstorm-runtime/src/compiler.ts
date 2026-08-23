@@ -71,6 +71,7 @@ import {
 } from "./routes.js";
 import {
   applyRedevelopment,
+  applyThoughts,
   BRAINSTORM_STATE,
   createInitialState,
   finishReviewRound,
@@ -989,6 +990,105 @@ function stepwiseContract(
 }
 
 /**
+ * The catalog outline written onto a shape body's fields as their schema
+ * DESCRIPTIONS.
+ *
+ * The outline is the contract for what each section must contain, and the
+ * schema is the one channel a constrained model reads at the exact point it
+ * emits a field — so that is where the contract belongs. The skills used to
+ * render the same map into their prose as a JSON block the model had to
+ * cross-reference against the schema; the descriptions replace that block,
+ * and the catalog stays the single source (an outline edit reaches every
+ * task with no skill edit). Bundles that still render {{outline}} in prose
+ * simply say the same thing twice, so a pinned older run loses nothing.
+ *
+ * Fields the outline does not name keep whatever description the artifact
+ * schema gave them; outline keys the body does not carry are ignored (the
+ * content loader already validates outline keys against the shape's fields,
+ * but this code must hold for any pinned bundle it is handed).
+ */
+function describeShapeFields(
+  body: JsonValue | undefined,
+  outline: Readonly<Record<string, string>> | undefined,
+): JsonValue | undefined {
+  if (
+    body === undefined ||
+    outline === undefined ||
+    !isJsonRecord(body) ||
+    !isJsonRecord(body.properties)
+  ) {
+    return body;
+  }
+  const properties: Record<string, JsonValue> = {};
+  for (const [field, fieldSchema] of Object.entries(body.properties)) {
+    const text = outline[field];
+    properties[field] =
+      typeof text === "string" && text.length > 0 && isJsonRecord(fieldSchema)
+        ? { ...fieldSchema, description: text }
+        : fieldSchema;
+  }
+  return { ...body, properties };
+}
+
+/** The evidence object every non-Interrupt decision carries: kind none, every detail field empty. */
+const NO_EVIDENCE_OBJECT: JsonObject = {
+  kind: "none",
+  code: "",
+  result: "",
+  derivation: "",
+  citation: "",
+  locator: "",
+  shows: "",
+};
+
+/**
+ * The decision a unanimous round records WITHOUT convening the judge.
+ *
+ * A passing comment is barred from carrying evidence, so a round in which
+ * every commentor passed holds no verified material to weigh and no repair
+ * signal to compose — the judge call would buy a re-investigation the bundle
+ * has declared it does not want (the node opts in through
+ * `fastPassUnanimous`). The synthesized decision travels the NORMAL path:
+ * journaled as the node's result, validated on write like a judged one, and
+ * folded into the review state that the loop's exit condition reads. Its
+ * reason names the fast pass, which is exactly what the dashboard shows
+ * under the judge tab.
+ *
+ * The trade-off is deliberate and the bundle's to make: the judge's
+ * independent read of a clean-looking round (its own flaw marks) is skipped
+ * on unanimous rounds. Every commentor's basis is "authority" BY
+ * CONSTRUCTION — a Pass may not carry evidence — so the assessment stays
+ * honest. An empty comments map never fast-passes: no comments means nothing
+ * was reviewed, and that is the judge's problem to notice.
+ */
+function fastPassDecision(
+  schemaName: string,
+  comments: JsonValue | undefined,
+): JsonObject | undefined {
+  if (schemaName !== "judgeDecision" && schemaName !== "judgeDecisionParts") {
+    return undefined;
+  }
+  if (!isJsonRecord(comments)) return undefined;
+  const entries = Object.entries(comments);
+  if (entries.length === 0) return undefined;
+  for (const [, comment] of entries) {
+    if (!isJsonRecord(comment) || comment.verdict !== "Pass") return undefined;
+  }
+  return {
+    verdict: "Pass",
+    reason:
+      "Fast pass — every commentor passed this round, so the board recorded the pass without convening the judge.",
+    suggestion: "",
+    evidence: structuredClone(NO_EVIDENCE_OBJECT),
+    issues: [],
+    // The judge's own marks exist only on the four-part form, and a judge
+    // that never convened marked nothing.
+    ...(schemaName === "judgeDecisionParts" ? { flaws: [] } : {}),
+    assessment: entries.map(([commentorId]) => ({ commentorId, basis: "authority" })),
+  };
+}
+
+/**
  * The review forms, legacy and four-part. Which one a node writes is the
  * bundle's choice through `output.schema`; the narrowings below are
  * properties of the REVIEW POSITION — this round's allowed verdicts, the
@@ -1008,6 +1108,21 @@ const DEVELOPED_SCHEMAS: ReadonlySet<string> = new Set([
   "brainIdea",
   "brainIdeaParts",
   "redevelopment",
+]);
+
+/**
+ * The chain-writing forms whose captured per-step thoughts are folded into
+ * the run's `thoughts` state — the first pass fills a seat's array, a
+ * redevelopment replaces the touched steps' entries. Listed by schema name,
+ * like every other form dispatch, so a pinned run takes exactly the path its
+ * own bundle compiled.
+ */
+const THOUGHT_SCHEMAS: ReadonlyMap<string, "develop" | "redevelop"> = new Map([
+  ["brainIdea", "develop"],
+  ["brainIdeaParts", "develop"],
+  ["redevelopment", "redevelop"],
+  ["redevelopmentPatch", "redevelop"],
+  ["redevelopmentPatchParts", "redevelop"],
 ]);
 
 /**
@@ -1463,6 +1578,12 @@ class ContentCompiler {
     const builderName = this.functionName(node.id, "task");
     const applyName = this.functionName(node.id, "apply");
     const resultKey = this.temp(node.id, "result");
+    // Chain-writing nodes also expose the journaled result's METADATA to the
+    // store fold, so the executor's per-step thought slices can be folded
+    // into the run's `thoughts` state. Absent for every other node — nothing
+    // else reads metadata.
+    const thoughtDelivery = THOUGHT_SCHEMAS.get(node.output.schema);
+    const metadataKey = this.temp(node.id, "metadata");
     // Captured for the `agent` executor override, which skips the call itself
     // (see dismissal.ts), and for the store fold below, which must then not
     // insist on an output that was deliberately never produced.
@@ -1531,6 +1652,36 @@ class ContentCompiler {
           bindings.comments,
           `${String(member)}|${String(step)}|${String(round)}|${Object.keys(bindings.comments).join("|")}`,
         );
+      }
+      // A seat's view of the REST of the board: a `board` bind delivers the
+      // panel roster as prose — one bullet per OTHER seat, its umbrella and
+      // subfields — with the executing member's own row removed. The skill
+      // renders it into the role body (where the seat's own identity already
+      // lives) to tell a member what the board covers WITHOUT it: exactly the
+      // material a seat needs to stay in its own lane. Computed at task-build
+      // time, like the verdict zipping below, because it is presentation of
+      // run data, not a fact of the run — the roster itself already travels
+      // as panel.members, and nothing journaled changes shape.
+      if (Array.isArray(bindings.board)) {
+        const state = stateFrom(scope);
+        const self = resolveDataReference("member.id", scope, state, {
+          required: false,
+        });
+        const rows: string[] = [];
+        for (const entry of bindings.board) {
+          if (!isJsonRecord(entry)) continue;
+          if (typeof self === "string" && entry.id === self) continue;
+          if (typeof entry.umbrella !== "string" || entry.umbrella.length === 0) continue;
+          const subfields = Array.isArray(entry.subfields)
+            ? entry.subfields.filter(
+                (subfield): subfield is string => typeof subfield === "string",
+              )
+            : [];
+          rows.push(
+            `- ${entry.umbrella}${subfields.length > 0 ? `, ${subfields.join(", ")}` : ""}`,
+          );
+        }
+        (bindings as Record<string, JsonValue>).board = rows.join("\n");
       }
       // The seat carries this round's allowed verdicts as NAMES so verdict
       // prose never enters the journaled state. Whichever name reaches a task
@@ -1687,6 +1838,14 @@ class ContentCompiler {
             for (const [key, value] of Object.entries(properties)) {
               if (!unusedShapes.has(key)) slimmed[key] = value;
             }
+            // The kept body's fields carry the catalog outline as their
+            // descriptions — see describeShapeFields for why this is the
+            // outline's one delivery channel.
+            const described = describeShapeFields(
+              slimmed[shape],
+              this.bundle.catalogs.inputTypes.outlines[label],
+            );
+            if (described !== undefined) slimmed[shape] = described;
             return { ...withShape, properties: slimmed };
           }), node.id, "the output type label");
       }
@@ -1751,6 +1910,7 @@ class ContentCompiler {
       ) {
         const shape = typeof bindings.shape === "string" ? bindings.shape : undefined;
         const asks = requestedOutputsOf(bindings.input);
+        const label = typeof bindings.type === "string" ? bindings.type : undefined;
         taskJsonSchema = pinned(
           patchSchemaProperty(taskJsonSchema, ["outputPatch"], (patch) => {
             const properties = isJsonRecord(patch.properties) ? patch.properties : undefined;
@@ -1763,6 +1923,16 @@ class ContentCompiler {
               if (unusedShapes.has(key)) continue;
               if (key === "requested" && asks.length === 0) continue;
               slimmed[key] = value;
+            }
+            // A reviser rewrites sections against the same contract the first
+            // pass wrote them to, so the patch body's fields carry the same
+            // catalog outline descriptions the full envelope's do.
+            if (shape !== undefined && label !== undefined) {
+              const described = describeShapeFields(
+                slimmed[shape],
+                this.bundle.catalogs.inputTypes.outlines[label],
+              );
+              if (described !== undefined) slimmed[shape] = described;
             }
             if (asks.length > 0 && isJsonRecord(slimmed.requested)) {
               const requestedProperty = slimmed.requested;
@@ -2046,6 +2216,16 @@ class ContentCompiler {
         outputSchema: { name: node.output.schema, schema: taskJsonSchema },
         modelRequest: modelRequestValue,
       };
+      // The unanimity short-circuit, computed AFTER every bind transform so it
+      // reads the comments exactly as the judge would have. Attached to the
+      // task rather than returned here because a task builder builds tasks:
+      // the executor wrapper (see runtime.ts) answers with this decision
+      // instead of calling a model, and everything downstream — journal,
+      // write-time validation, state fold, loop exit — runs the judged path.
+      const fastPass =
+        node.fastPassUnanimous === true
+          ? fastPassDecision(node.output.schema, bindings.comments)
+          : undefined;
       const member = resolveDataReference("member.id", scope, stateFrom(scope), { required: false });
       const commentor = resolveDataReference("commentor.id", scope, stateFrom(scope), { required: false });
       return {
@@ -2080,6 +2260,7 @@ class ContentCompiler {
           logicalRoute: node.route,
           ...(stepwise !== undefined ? { stepwise: stepwise.spec } : {}),
           ...(resolved.providerId !== undefined ? { providerId: resolved.providerId } : {}),
+          ...(fastPass !== undefined ? { fastPass } : {}),
         },
       };
     });
@@ -2091,7 +2272,7 @@ class ContentCompiler {
       // found it.
       if (raw === undefined && this.dismissedHere(scope, enclosing)) return stateFrom(scope);
       if (raw === undefined) throw new BrainstormRuntimeError(`agent "${node.id}" produced no output`, "MISSING_OUTPUT");
-      return writeValidatedOutput(
+      const written = await writeValidatedOutput(
         scope,
         node.output.key,
         node.output.schema,
@@ -2100,6 +2281,12 @@ class ContentCompiler {
         context,
         this.roots,
       );
+      // AFTER the validated write on purpose: a redevelopment's touched
+      // change-set is stashed by applyRedevelopment inside that write, and
+      // it is what decides which steps' thoughts the reviser now owns.
+      return thoughtDelivery === undefined
+        ? written
+        : applyThoughts(written, scope, scope.get(metadataKey), thoughtDelivery);
     });
 
     return sequence(
@@ -2115,7 +2302,11 @@ class ContentCompiler {
               ...this.foldOptions(),
             })]
           : []),
-        agent(builderName, { id: `${node.id}-execute`, resultKey }),
+        agent(builderName, {
+          id: `${node.id}-execute`,
+          resultKey,
+          ...(thoughtDelivery !== undefined ? { resultMetadataKey: metadataKey } : {}),
+        }),
         // The store is a deterministic fold over the journaled agent result:
         // it validates and writes the output into the run state (and persists
         // the artifact, idempotently), so it re-runs on replay instead of
