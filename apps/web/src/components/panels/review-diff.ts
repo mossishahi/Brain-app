@@ -441,6 +441,12 @@ export interface CrossRewriteView {
   readonly before?: CotStepView;
   readonly after: CotStepView;
   readonly blocks: readonly DiffBlock[];
+  /**
+   * Handle to the recorded thinking behind this rewrite (the origin round's
+   * redevelopment), for the card's brain-icon window. Absent when the task
+   * recorded none.
+   */
+  readonly thoughts?: string;
 }
 
 export interface SeatTimeline {
@@ -610,6 +616,7 @@ export function computeSeatTimeline(
               byRound: round.round,
               ...(before !== undefined ? { before } : {}),
               after: entry.text,
+              ...(entry.thoughts !== undefined ? { thoughts: entry.thoughts } : {}),
             },
             blocks,
           ),

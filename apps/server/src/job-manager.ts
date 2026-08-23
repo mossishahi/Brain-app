@@ -66,6 +66,7 @@ import {
   buildJobDetail,
   compactJobDetail,
   liveIdentityPanel,
+  resolveThoughtsRef,
 } from "./stage-mapper.js";
 
 export interface JobManagerOptions {
@@ -905,6 +906,20 @@ export class JobManager {
     } catch {
       return undefined;
     }
+  }
+
+  /**
+   * The recorded thinking behind one version of one chain step, addressed by
+   * the opaque handle a review view carries (the journal key of the result
+   * holding the slice, plus the step). Read straight off the run's checkpoint
+   * journal — the same record the views were built from — so a handle either
+   * resolves or the record genuinely does not exist.
+   */
+  thoughts(jobId: string, ref: string): string | undefined {
+    this.record(jobId); // "was not found" maps to 404 in the route's handler
+    const checkpoint = this.checkpoint(jobId);
+    if (!checkpoint) return undefined;
+    return resolveThoughtsRef(checkpoint.journal, ref);
   }
 
   private checkpointStatus(jobId: string): JobStatus | undefined {

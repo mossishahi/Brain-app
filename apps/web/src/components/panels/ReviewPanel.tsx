@@ -48,7 +48,8 @@ import {
   pendingReviewers,
   type LiveReviewThread,
 } from "../live-threads";
-import { BackIcon, CopyIcon, DownloadIcon, ForwardIcon } from "../Icons";
+import { BackIcon, BrainIcon, CopyIcon, DownloadIcon, ForwardIcon } from "../Icons";
+import { getThoughts } from "../../api";
 import { IdeaTabs } from "./FirstPassPanel";
 import {
   crossEntryKey,
@@ -333,6 +334,98 @@ function CopyButton({ text, label }: { text: () => string; label: string }) {
     >
       {copied ? <span className="small">copied</span> : <CopyIcon />}
     </button>
+  );
+}
+
+/**
+ * Fetched thoughts, cached for the page's life: a recorded slice is
+ * immutable (it lives in the run's journal), so a card hovered twice must
+ * not fetch twice. Failures are NOT cached — a transient error retries on
+ * the next hover.
+ */
+const thoughtsCache = new Map<string, string>();
+
+/**
+ * The grey brain beside a version card's copy icon: hovering (or focusing,
+ * or clicking) it opens a scrollable window with the recorded thinking
+ * behind exactly the version the card shows — the same words the live
+ * thread streamed while that version was being written, kept now as the
+ * task's captured trace. Styled like the live thread on purpose: this is
+ * working material, not an artifact, and it must never read as the chain.
+ */
+function ThoughtsButton({ jobId, refId }: { jobId: string; refId: string }) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState<string | undefined>(() => thoughtsCache.get(refId));
+  const [failed, setFailed] = useState(false);
+  const closeTimer = useRef<number | undefined>(undefined);
+
+  const show = () => {
+    if (closeTimer.current !== undefined) {
+      window.clearTimeout(closeTimer.current);
+      closeTimer.current = undefined;
+    }
+    setOpen(true);
+    if (thoughtsCache.has(refId)) {
+      setText(thoughtsCache.get(refId));
+      return;
+    }
+    setFailed(false);
+    void getThoughts(jobId, refId).then(
+      (response) => {
+        thoughtsCache.set(refId, response.text);
+        setText(response.text);
+      },
+      () => setFailed(true),
+    );
+  };
+  // A short grace on leave, so crossing the gap between the icon and the
+  // window never snaps it shut mid-read.
+  const hide = () => {
+    closeTimer.current = window.setTimeout(() => setOpen(false), 200);
+  };
+
+  return (
+    <span
+      className="thoughts-anchor"
+      onMouseEnter={show}
+      onMouseLeave={hide}
+      onFocus={show}
+      onBlur={hide}
+      onKeyDown={(event) => {
+        if (event.key === "Escape") setOpen(false);
+      }}
+    >
+      <button
+        type="button"
+        className="ghost-btn thoughts-btn"
+        aria-label="read the thoughts behind this version"
+        aria-expanded={open}
+        onClick={() => (open ? setOpen(false) : show())}
+      >
+        <BrainIcon />
+      </button>
+      {open && (
+        <div className="thoughts-pop" role="note">
+          <div className="thoughts-pop-head">
+            thoughts behind this version — recorded while it was written, not
+            part of the chain
+          </div>
+          <div className="thoughts-pop-body">
+            {failed ? (
+              <span className="dim">
+                could not load the thoughts — hover again to retry
+              </span>
+            ) : text === undefined ? (
+              <span className="dim">loading…</span>
+            ) : text.length === 0 ? (
+              <span className="dim">nothing was recorded for this version</span>
+            ) : (
+              text
+            )}
+          </div>
+        </div>
+      )}
+    </span>
   );
 }
 
@@ -835,6 +928,7 @@ function crossReportText(
  * step's own "Round k / K" numbering never shifts around them.
  */
 function RoundDeck({
+  jobId,
   member,
   step,
   timeline,
@@ -844,6 +938,8 @@ function RoundDeck({
   onJump,
   commentState,
 }: {
+  /** The run the deck belongs to; addresses the on-demand thoughts fetch. */
+  jobId: string;
   member: ReviewMemberView;
   step: ReviewStepView;
   timeline: SeatTimeline;
@@ -1006,6 +1102,9 @@ function RoundDeck({
           </span>
           {newerButton}
           <span className="round-card-actions">
+            {step.thoughts !== undefined && (
+              <ThoughtsButton jobId={jobId} refId={step.thoughts} />
+            )}
             <CopyButton
               label="copy the original thought"
               text={() => originalReportText(member, step, entry.text)}
@@ -1045,6 +1144,9 @@ function RoundDeck({
           </span>
           {newerButton}
           <span className="round-card-actions">
+            {entry.cross.thoughts !== undefined && (
+              <ThoughtsButton jobId={jobId} refId={entry.cross.thoughts} />
+            )}
             <CopyButton
               label="copy this rewrite for a bug report"
               text={() => crossReportText(member, step, entry.cross)}
@@ -1092,6 +1194,17 @@ function RoundDeck({
         {review?.revision && <span className="badge badge-warn">redeveloped</span>}
 
         <span className="round-card-actions">
+          {(() => {
+            // The thoughts behind THIS version: the rewrite of this step the
+            // card's own round delivered. A round that wrote no version of
+            // this step has no thoughts of its own to show here.
+            const ref = round.revision?.rewritten?.find(
+              (rewrite) => rewrite.index === step.index,
+            )?.thoughts;
+            return ref !== undefined ? (
+              <ThoughtsButton jobId={jobId} refId={ref} />
+            ) : null;
+          })()}
           <CopyButton
             label="copy this round for a bug report"
             text={() => bugReportText(member, step, computed)}
@@ -1140,6 +1253,7 @@ function RoundDeck({
  * component so a grid-cell click can drive the inspector's seat.
  */
 export function ReviewStagePanels({
+  jobId,
   stage,
   firstPass,
   frame,
@@ -1148,6 +1262,8 @@ export function ReviewStagePanels({
   onDismiss,
   live,
 }: {
+  /** The run under inspection; addresses the on-demand thoughts fetch. */
+  jobId: string;
   stage: ReviewStage;
   firstPass?: FirstPassStage;
   /** Wraps the grid panel in the stage frame (header, fold, activity). */
@@ -1447,6 +1563,7 @@ export function ReviewStagePanels({
                         </span>
                       </div>
                       <RoundDeck
+                        jobId={jobId}
                         member={seat}
                         step={step}
                         timeline={timeline}

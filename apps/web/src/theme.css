@@ -4100,6 +4100,56 @@ a.activity-entry:focus-visible {
 
 .round-card-actions {
   margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* The brain icon beside a version card's copy icon, and the window it opens:
+   the recorded thinking behind exactly the version the card shows — the same
+   thread the live panel streamed while it was written. Grey like every ghost
+   control; the window wears the live thread's own dress (dashed border, dim
+   mono, scrolled inside itself) so working material can never be mistaken
+   for the chain. */
+.thoughts-anchor {
+  position: relative;
+  display: inline-flex;
+}
+
+.thoughts-btn {
+  color: var(--text-dim);
+}
+
+.thoughts-pop {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 30;
+  width: min(420px, 80vw);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--card-shadow, 0 4px 16px rgba(0, 0, 0, 0.12));
+}
+
+.thoughts-pop-head {
+  padding: 6px 10px 4px;
+  font-size: 11px;
+  color: var(--text-dim);
+  border-bottom: 1px dashed var(--border);
+}
+
+.thoughts-pop-body {
+  max-height: 280px;
+  overflow-y: auto;
+  padding: 8px 10px;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  text-align: left;
 }
 
 /* The full step text: never clamped, never scrolled — the card takes the

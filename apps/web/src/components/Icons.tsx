@@ -57,6 +57,20 @@ export function GearIcon({ size = 18 }: IconProps) {
 }
 
 /**
+ * A brain outline: two mirrored hemispheres with a center seam. Opens the
+ * recorded thinking behind a version card — grey like every ghost control,
+ * so it reads as a peek at working material rather than as an artifact.
+ */
+export function BrainIcon({ size = 16 }: IconProps) {
+  return (
+    <svg {...frame(size)}>
+      <path d="M11 4.2a2.6 2.6 0 0 0-4.5 1.1 2.8 2.8 0 0 0-2.2 3.4 2.9 2.9 0 0 0-.6 4.6 2.9 2.9 0 0 0 1.6 4 2.7 2.7 0 0 0 4.2 2A2.4 2.4 0 0 0 11 18V4.2Z" />
+      <path d="M13 4.2a2.6 2.6 0 0 1 4.5 1.1 2.8 2.8 0 0 1 2.2 3.4 2.9 2.9 0 0 1 .6 4.6 2.9 2.9 0 0 1-1.6 4 2.7 2.7 0 0 1-4.2 2A2.4 2.4 0 0 1 13 18V4.2Z" />
+    </svg>
+  );
+}
+
+/**
  * A filled square: the universal "stop". Deliberately NOT the ✕ this control
  * used to wear — an ✕ reads as "close this", so a run that could be stopped
  * looked like it could only be dismissed, and the control went unseen.

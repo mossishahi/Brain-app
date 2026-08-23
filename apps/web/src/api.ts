@@ -28,6 +28,7 @@ import type {
   SendDiagnosticsResponse,
   SubmitJobRequest,
   SubmitJobResponse,
+  ThoughtsResponse,
   ToolUsageReport,
   TrashJobResponse,
   UpdateAppResponse,
@@ -285,6 +286,17 @@ export const diagnoseReadiness = (
 
 export const getToolUsage = (jobId: string): Promise<ToolUsageReport> =>
   request(`/jobs/${encodeURIComponent(jobId)}/tool-usage`);
+
+/**
+ * The recorded thinking behind one version of one chain step, addressed by
+ * the opaque handle a review view carries. Fetched on demand when the brain
+ * icon's window opens — thoughts are large, so they never ride the job
+ * snapshots.
+ */
+export const getThoughts = (jobId: string, ref: string): Promise<ThoughtsResponse> =>
+  request(
+    `/jobs/${encodeURIComponent(jobId)}/thoughts?ref=${encodeURIComponent(ref)}`,
+  );
 
 export const trashJob = (jobId: string): Promise<TrashJobResponse> =>
   request(`/jobs/${encodeURIComponent(jobId)}/trash`, { method: "POST" });

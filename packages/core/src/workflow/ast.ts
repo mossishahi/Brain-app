@@ -50,6 +50,15 @@ export interface AgentNode extends WorkflowNodeBase {
   readonly params?: JsonValue;
   /** Scope key that receives the agent result's output. */
   readonly resultKey?: string;
+  /**
+   * Scope key that receives the agent result's METADATA (null when the result
+   * carries none). The full result — metadata included — has always been the
+   * journaled value; this only exposes what is already recorded to the scope,
+   * so deterministic folds can read executor-attached facts (e.g. per-step
+   * thought slices) without a second journal entry. Replay is unchanged: the
+   * key is set from the same journaled value on every pass.
+   */
+  readonly resultMetadataKey?: string;
 }
 
 export interface ForEachNode extends WorkflowNodeBase {

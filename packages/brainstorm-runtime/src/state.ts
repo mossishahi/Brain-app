@@ -85,6 +85,17 @@ export function createInitialState(
     // runtime — never a model — writes it; the seat's `history` is the
     // per-round projection bound into commentor/judge/redeveloper tasks.
     reviewLog: {},
+    // The thinking behind each seat's chain, one entry per step, keyed by
+    // member id (parallel-merge safe like `ideas`). Written by the runtime
+    // from the executor's captured per-step thought slices: the first pass
+    // fills the whole array, and each applied redevelopment replaces exactly
+    // the TOUCHED steps' entries with the reviser's own slices — so a step's
+    // thoughts always belong to whoever wrote its current text. "" means
+    // nothing was recorded (providers may withhold thinking). Bound into
+    // review tasks only — never the thinker's or the reviser's — and never
+    // written to the ledger, so nothing the author receives can reveal that
+    // its thoughts are read.
+    thoughts: {},
     _runtime: {
       artifacts: {},
       gates: {},
@@ -248,6 +259,71 @@ export function applyRedevelopment(
 
 function isObject(value: JsonValue | undefined): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** The per-step thought slices of one agent result, from its journaled metadata. */
+function thoughtSlices(metadata: JsonValue | undefined): ReadonlyMap<number, string> {
+  const slices = new Map<number, string>();
+  if (!isObject(metadata) || !Array.isArray(metadata.stepThoughts)) return slices;
+  for (const raw of metadata.stepThoughts) {
+    if (!isObject(raw)) continue;
+    const { step, text } = raw;
+    if (typeof step === "number" && Number.isSafeInteger(step) && step >= 1 && typeof text === "string") {
+      slices.set(step, text);
+    }
+  }
+  return slices;
+}
+
+/**
+ * Folds an agent result's captured per-step thoughts into the member's
+ * `thoughts` state.
+ *
+ * A FIRST PASS replaces the whole array: one entry per chain step, "" where
+ * the capture recorded nothing (withheld thinking is a normal answer, never
+ * an error). A REDEVELOPMENT replaces exactly the steps the applied patch
+ * TOUCHED — the reviser's thinking now stands behind the text it rewrote,
+ * and a touched step whose slice is empty becomes "" rather than keeping the
+ * previous author's thoughts about text that no longer exists. Untouched
+ * steps keep their entries, exactly like the chain text they describe.
+ *
+ * Deterministic over journaled values only (the metadata IS part of the
+ * journaled agent result), so every replay rebuilds the same array. Runs
+ * recorded before the capture existed simply keep empty strings.
+ */
+export function applyThoughts(
+  state: JsonObject,
+  scope: ScopeReader,
+  metadata: JsonValue | undefined,
+  delivery: "develop" | "redevelop",
+): JsonObject {
+  const memberId = resolveDataReference("member.id", scope, state, { required: false });
+  const totalSteps = resolveDataReference("input.cotSteps", scope, state, { required: false });
+  if (typeof memberId !== "string" || typeof totalSteps !== "number" || totalSteps < 1) {
+    return state;
+  }
+  const slices = thoughtSlices(metadata);
+  const existing = resolveDataReference("thoughts[member.id]", scope, state, {
+    required: false,
+  });
+  const current: string[] = Array.from({ length: totalSteps }, (_, index) => {
+    const entry = Array.isArray(existing) ? existing[index] : undefined;
+    return typeof entry === "string" ? entry : "";
+  });
+  if (delivery === "develop") {
+    for (let step = 1; step <= totalSteps; step += 1) {
+      current[step - 1] = slices.get(step) ?? "";
+    }
+  } else {
+    const touched = resolveDataReference("reviews[member.id].current.touched", scope, state, {
+      required: false,
+    });
+    for (const step of Array.isArray(touched) ? touched : []) {
+      if (typeof step !== "number" || step < 1 || step > totalSteps) continue;
+      current[step - 1] = slices.get(step) ?? "";
+    }
+  }
+  return writeDataReference(state, "thoughts[member.id]", current, scope).state;
 }
 
 function clone(value: JsonValue | undefined): JsonValue | undefined {

@@ -163,6 +163,24 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
     const schemaName = task.outputSchema?.name ?? "";
 
     let output: JsonValue;
+    // Chain-producing roles also record a deterministic thinking trace, in
+    // the same {thinkingSegments, stepTurns} metadata shape the real
+    // backends capture — so the per-step thought slices (and everything that
+    // binds or displays them) run end to end on the offline path too.
+    let metadata: JsonObject | undefined;
+    const syntheticTrace = (
+      label: string,
+      steps: readonly number[],
+    ): JsonObject => ({
+      thinkingSegments: steps.map((step, order) => ({
+        turn: order + 1,
+        text: `${label} offline deterministic thoughts behind step ${step}: weighing the framing, checking the support, and settling the claim.`,
+      })) as unknown as JsonValue,
+      stepTurns: steps.map((step, order) => ({
+        index: step,
+        turn: order + 1,
+      })) as unknown as JsonValue,
+    });
     switch (role) {
       case "processor": {
         const submission = asObject(bindings.submission as JsonValue);
@@ -516,6 +534,10 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
         break;
       case "brain": {
         const requested = requestedSections(bindings.input as JsonValue, agentId);
+        metadata = syntheticTrace(
+          agentId,
+          Array.from({ length: this.cotSteps }, (_, i) => i + 1),
+        );
         output = {
           output: {
             ...this.developedOutput(agentId),
@@ -628,6 +650,12 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
         // step and copies the rest of the previous chain verbatim, mirroring
         // the minimal-edit contract the runtime diffs against.
         const currentStep = typeof bindings.currentStep === "number" ? bindings.currentStep : 1;
+        metadata = syntheticTrace(
+          `${agentId} revised`,
+          schemaName === "redevelopmentPatch" || schemaName === "redevelopmentPatchParts"
+            ? [currentStep]
+            : Array.from({ length: this.cotSteps }, (_, i) => i + 1),
+        );
         if (schemaName === "redevelopmentPatch" || schemaName === "redevelopmentPatchParts") {
           // A patch names ONLY what changed and carries no `output` envelope
           // at all — the host fills every step and every section the patch
@@ -715,6 +743,11 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
           error: { name: "OfflineExecutorError", message: `unknown role "${role}"` },
         };
     }
-    return { taskId: task.taskId, status: "ok", output };
+    return {
+      taskId: task.taskId,
+      status: "ok",
+      output,
+      ...(metadata !== undefined ? { metadata } : {}),
+    };
   }
 }

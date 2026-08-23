@@ -1525,6 +1525,23 @@ export async function startBrainServer(
       }
 
       // Before the job-detail matcher below, which would otherwise swallow it.
+      const thoughtsMatch = /^\/api\/jobs\/([^/]+)\/thoughts$/.exec(path);
+      if (req.method === "GET" && thoughtsMatch) {
+        const jobId = decodeURIComponent(thoughtsMatch[1]!);
+        const ref = url.searchParams.get("ref") ?? "";
+        if (ref.length === 0) {
+          throw new HttpError(400, "the ref query parameter is required");
+        }
+        // unknown run -> 404 outside; an unknown handle is its own 404
+        const text = manager.thoughts(jobId, ref);
+        if (text === undefined) {
+          throw new HttpError(404, "that thoughts record was not found");
+        }
+        sendJson(res, 200, { ref, text });
+        return;
+      }
+
+      // Before the job-detail matcher below, which would otherwise swallow it.
       const promptMatch = /^\/api\/jobs\/([^/]+)\/prompt\/([^/]+)$/.exec(path);
       if (req.method === "GET" && promptMatch) {
         const jobId = decodeURIComponent(promptMatch[1]!);

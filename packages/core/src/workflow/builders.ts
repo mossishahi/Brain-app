@@ -39,7 +39,11 @@ export function activity(
 
 export function agent(
   taskBuilder: string,
-  options: BaseOptions & { readonly params?: JsonValue; readonly resultKey?: string } = {},
+  options: BaseOptions & {
+    readonly params?: JsonValue;
+    readonly resultKey?: string;
+    readonly resultMetadataKey?: string;
+  } = {},
 ): AgentNode {
   return { kind: "agent", taskBuilder, ...options };
 }

@@ -71,6 +71,7 @@ import {
 } from "@brainstorm-agentic/host-tools";
 import { OfflineBrainstormExecutor } from "./offline-executor.js";
 import type { PromptSink } from "./prompt-capture.js";
+import { sliceThoughtsBySteps } from "./thought-slices.js";
 
 export interface ProviderConfig {
   /** Developer API, Claude Agent SDK, Cursor SDK, or deterministic offline. */
@@ -486,8 +487,16 @@ export class CreditBlockDetectingAgentExecutor implements AgentExecutor {
  * turns) as a per-task artifact, then strips it from the journaled result so
  * checkpoints stay lean. Traces reach the job owner through the artifact
  * store only — never events.jsonl, task feedback, or reviewer context.
+ *
+ * One derived, bounded projection DOES stay in the journaled result:
+ * `stepThoughts`, the trace cut into per-submitted-step slices (see
+ * thought-slices.ts). It is the record the runtime folds into the run's
+ * `thoughts` state so review tasks can bind the thinking behind each chain
+ * step — and it must live in the journal, not the artifact, because run
+ * state is rebuilt from the journal alone on every replay. The raw segments
+ * still never reach the journal; the artifact keeps them whole.
  */
-class ThinkingArtifactAgentExecutor implements AgentExecutor {
+export class ThinkingArtifactAgentExecutor implements AgentExecutor {
   constructor(
     private readonly inner: AgentExecutor,
     private readonly artifacts: ArtifactStore,
@@ -528,7 +537,16 @@ class ThinkingArtifactAgentExecutor implements AgentExecutor {
     } catch {
       // Trace capture must never fail the task itself.
     }
-    return { ...result, metadata: metadata as JsonObject };
+    const stepThoughts = sliceThoughtsBySteps(thinkingSegments, stepTurns);
+    return {
+      ...result,
+      metadata: {
+        ...(metadata as JsonObject),
+        ...(stepThoughts.length > 0
+          ? { stepThoughts: stepThoughts as unknown as JsonValue }
+          : {}),
+      },
+    };
   }
 }
 

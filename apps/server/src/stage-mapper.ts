@@ -292,6 +292,62 @@ function agentOutput(entry: JournalEntry): unknown {
   return value.output;
 }
 
+/**
+ * The per-step thought slices of a journaled agent result — the executor's
+ * captured native-thinking trace, cut at the model's own submit_step
+ * boundaries (the worker's thought-slices module writes them into the
+ * result's metadata, which IS part of the journaled value). Keyed by the
+ * 1-based step; empty slices are dropped, so presence means there is
+ * something to show.
+ */
+function stepThoughtsOf(entry: JournalEntry): Map<number, string> {
+  const slices = new Map<number, string>();
+  if (entry.kind !== "agent") return slices;
+  const metadata = object(object(entry.value)?.metadata);
+  if (!Array.isArray(metadata?.stepThoughts)) return slices;
+  for (const raw of metadata.stepThoughts) {
+    const slice = object(raw);
+    if (
+      typeof slice?.step === "number" &&
+      typeof slice.text === "string" &&
+      slice.text.length > 0
+    ) {
+      slices.set(slice.step, slice.text);
+    }
+  }
+  return slices;
+}
+
+/**
+ * The opaque handle a review view carries for one step's recorded thinking:
+ * the journal key of the result holding the slice, then the step. The
+ * thoughts endpoint parses it back and reads the same journal entry, so no
+ * lookup table exists anywhere — the journal is the record on both sides.
+ */
+function thoughtsRef(journalKey: string, step: number): string {
+  return `${journalKey}#${step}`;
+}
+
+/**
+ * Resolves a thoughts handle against the run's journal: the slice's text, or
+ * undefined when the run never recorded it (an unknown key, a step the task
+ * never submitted, or a handle from a different run). Exported for the
+ * server's GET /api/jobs/:jobId/thoughts route.
+ */
+export function resolveThoughtsRef(
+  entries: readonly JournalEntry[],
+  ref: string,
+): string | undefined {
+  const hash = ref.lastIndexOf("#");
+  if (hash <= 0) return undefined;
+  const key = ref.slice(0, hash);
+  const step = Number(ref.slice(hash + 1));
+  if (!Number.isSafeInteger(step) || step < 1) return undefined;
+  const entry = entries.find((candidate) => candidate.key === key);
+  if (!entry) return undefined;
+  return stepThoughtsOf(entry).get(step);
+}
+
 /** The token-usage record of a journaled or evented value, when well-formed. */
 function usageView(value: unknown): TokenUsageView | undefined {
   const raw = object(value);
@@ -2293,7 +2349,7 @@ function buildReviews(
     decision?: JudgeDecisionView;
     revision?: {
       touchedSteps: number[];
-      rewritten?: { index: number; text: CotStepView }[];
+      rewritten?: { index: number; text: CotStepView; thoughts?: string }[];
     };
   }>();
   // Per-member revision replay: how many redevelopments landed, and the last
@@ -2320,6 +2376,20 @@ function buildReviews(
   // from this reconstruction while the judge kept rendering.
   const agentResultOf = (key: string, nodeId: string): boolean =>
     key.endsWith(`/${nodeId}::result`) || key.endsWith(`/${nodeId}-execute::result`);
+
+  // The thinking behind each seat's ORIGINAL chain, addressed by the develop
+  // task's own journal entry. Found here rather than through the idea
+  // artifact, because artifacts hold validated outputs only — the captured
+  // slices ride the journaled result's metadata.
+  const developEntries = new Map<number, JournalEntry>();
+  for (const entry of entries) {
+    if (entry.kind !== "agent" || !entry.key.includes("/first-pass/")) continue;
+    if (!/\/develop-idea(?:\/develop-idea-execute)?::result$/.test(entry.key)) continue;
+    const memberMatch = /\/member\[(\d+)\]\//.exec(entry.key);
+    if (!memberMatch) continue;
+    const index = Number(memberMatch[1]);
+    if (!developEntries.has(index)) developEntries.set(index, entry);
+  }
 
   // Working chain per member, replayed in journal order: it starts as the
   // first-pass chain, and each redevelopment moves it — by re-emission or by
@@ -2425,6 +2495,10 @@ function buildReviews(
         const touchedSteps = replacement
           .map((step, index) => (sameStep(step, chain[index]) ? 0 : index + 1))
           .filter((index) => index > 0);
+        // The reviser's own recorded thinking, sliced per rewritten step:
+        // the handle rides each rewrite so the deck's version card can show
+        // the thoughts behind exactly the text it displays.
+        const revisionSlices = stepThoughtsOf(entry);
         round.revision = {
           touchedSteps,
           // The rewritten steps' NEW text rides along, so the dashboard can
@@ -2435,6 +2509,9 @@ function buildReviews(
                 rewritten: touchedSteps.map((index) => ({
                   index,
                   text: replacement[index - 1]!,
+                  ...(revisionSlices.has(index)
+                    ? { thoughts: thoughtsRef(entry.key, index) }
+                    : {}),
                 })),
               }
             : {}),
@@ -2457,6 +2534,12 @@ function buildReviews(
   const members: ReviewMemberView[] = panel.map((member, memberIndex) => {
     const stepCount =
       ideas.get(member.id)?.cot.length ?? processorOutput?.cotSteps ?? 0;
+    // The thinking behind the seat's original chain, one handle per step
+    // that recorded any — the deck's "Original thought" card shows these.
+    const developEntry = developEntries.get(memberIndex);
+    const developSlices = developEntry
+      ? stepThoughtsOf(developEntry)
+      : new Map<number, string>();
     const steps: ReviewStepView[] = Array.from({ length: stepCount }, (_, stepIndex) => {
       const views: ReviewRoundView[] = [...rounds.entries()]
         .flatMap(([key, value]) => {
@@ -2488,6 +2571,9 @@ function buildReviews(
               ? "under-review"
               : "pending",
         rounds: views,
+        ...(developEntry !== undefined && developSlices.has(stepIndex + 1)
+          ? { thoughts: thoughtsRef(developEntry.key, stepIndex + 1) }
+          : {}),
       };
     });
     // The member's output as the review left it: with no redevelopments it

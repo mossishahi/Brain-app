@@ -161,6 +161,16 @@ const executeAgent: NodeExecutor = async (node, context) => {
   });
   const output = value === undefined ? undefined : (value as { readonly output?: JsonValue }).output;
   if (spec.resultKey !== undefined) context.scope.set(spec.resultKey, output ?? null);
+  if (spec.resultMetadataKey !== undefined) {
+    // The journaled value IS the full result, so replay sets the same
+    // metadata the original execution saw (a dismissal-skipped node sets
+    // null, matching its absent result).
+    const metadata =
+      value === undefined
+        ? undefined
+        : (value as { readonly metadata?: JsonValue }).metadata;
+    context.scope.set(spec.resultMetadataKey, metadata ?? null);
+  }
   return output;
 };
 

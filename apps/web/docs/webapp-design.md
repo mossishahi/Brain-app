@@ -513,6 +513,17 @@ activity feed, fold), and the *walk inspector* sits below in its own panel.
 - No card says which of a step's versions it is. Every card that was not the newest used to carry
   "an earlier version", which restated what the pager arrows already show and labeled most of the
   deck for no decision it helped anyone make.
+- **Every version card carries a grey brain icon beside its copy icon** when the run recorded the
+  thinking behind that version. Hovering it (or focusing, or clicking) opens a scrollable window —
+  dressed like the live thread (dashed border, dim mono), never like an artifact — holding the
+  recorded per-step slice of the author's native-thinking stream: the SAME words the panel
+  streamed live while that version was being written, kept now as the task's captured trace. The
+  "Original thought" card shows the first-pass slice; a round's own card shows the redeveloper's
+  slice for the step it rewrote; a cross-edit card shows the origin round's slice for the step it
+  landed on. The text is fetched on demand (GET /api/jobs/:id/thoughts?ref=…) and cached — thoughts
+  are large and never ride the job snapshots. No icon renders when nothing was recorded: a
+  withheld thinking channel is a normal answer, and a control that opens on emptiness reads as
+  broken.
 - Round text: the step text as it came OUT of that round (its number is an identity, not a
   verdict — that round's verdict rides with its comments, one card back), full height, never
   clamped or scrolled. Words carried from earlier rounds render dimmed; the round's own changes

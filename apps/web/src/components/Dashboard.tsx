@@ -966,6 +966,7 @@ export function Dashboard({
                 // them; the first-pass stage seeds the inspector's change
                 // tracking so every diff reaches back to the original chain.
                 <ReviewStagePanels
+                  jobId={job.jobId}
                   stage={reviewStage}
                   live={liveByReviewedSeat}
                   firstPass={stageOf(job, "first-pass")}

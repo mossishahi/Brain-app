@@ -652,7 +652,18 @@ export interface ReviewRoundView {
      * a rewrite replaces a whole step, so a part-aware run carries all four
      * parts here even when only one of them changed.
      */
-    readonly rewritten?: readonly { readonly index: number; readonly text: CotStepView }[];
+    readonly rewritten?: readonly {
+      readonly index: number;
+      readonly text: CotStepView;
+      /**
+       * Opaque handle to the recorded thinking behind THIS rewrite of THIS
+       * step, fetched on demand at GET /api/jobs/:jobId/thoughts?ref=… — a
+       * handle rather than the text, because thoughts are large and ride
+       * every SSE snapshot otherwise. Absent when the task recorded none
+       * (providers may withhold the channel; runs predate the capture).
+       */
+      readonly thoughts?: string;
+    }[];
   };
 }
 
@@ -665,6 +676,14 @@ export interface ReviewStepView {
   /** While this step is under review, what the seat is doing on it. */
   readonly phase?: ReviewPhase;
   readonly rounds: readonly ReviewRoundView[];
+  /**
+   * Opaque handle to the recorded thinking behind the step's ORIGINAL
+   * (first-pass) text — the same words the live thread streamed while the
+   * seat worked — fetched on demand at GET /api/jobs/:jobId/thoughts?ref=….
+   * Absent when nothing was recorded. Later versions carry their own handle
+   * on the rewrite that produced them (see revision.rewritten).
+   */
+  readonly thoughts?: string;
 }
 
 export interface ReviewMemberView {
@@ -1755,6 +1774,20 @@ export interface SendDiagnosticsResponse {
   readonly bytes: number;
 }
 
+/**
+ * Response of GET /api/jobs/:jobId/thoughts?ref=…: the recorded thinking
+ * behind one version of one chain step, addressed by the opaque `thoughts`
+ * handle a review view carries. The text is the runtime-captured per-step
+ * slice of the author's native-thinking stream — the same thread the
+ * dashboard streamed live while the task ran — and it is served on demand
+ * because it is far too large to ride every job-detail snapshot. "" is a
+ * legal answer for a step whose author recorded nothing.
+ */
+export interface ThoughtsResponse {
+  readonly ref: string;
+  readonly text: string;
+}
+
 export interface TrashJobResponse {
   readonly jobId: string;
   readonly trashedAt: number;
@@ -2015,6 +2048,7 @@ export interface ToolUsageReport {
  *   POST /api/jobs/:jobId/dismiss-member      -> JobDetail           (body: DismissMemberRequest; stops one seat mid-run and resumes the rest from the last checkpoint)
  *   GET  /api/jobs/:jobId/tool-usage          -> ToolUsageReport     (aggregated from the job's event log)
  *   GET  /api/jobs/:jobId/prompt/:promptId    -> text/markdown       (the prompt behind one "llm_call" row, rendered for download; 404 when the run or the record is unknown)
+ *   GET  /api/jobs/:jobId/thoughts?ref=...    -> ThoughtsResponse    (the recorded thinking behind one version of one chain step; 404 when the run or the handle is unknown)
  *   GET  /api/stream                          -> SSE of ServerEvent{type:"jobs"|"readiness"}
  *   GET  /api/jobs/:jobId/stream              -> SSE of ServerEvent{type:"job"}
  * Static: everything else serves the webapp build (SPA fallback to index.html).
