@@ -657,11 +657,20 @@ test("a patch that only breaks once applied is retryable, not a recorded failure
       },
     },
   };
-  // Legal as a patch — the patch schema drops the cross-field rules on
-  // purpose — but a solution-shaped output may not carry a novelty claim.
+  // Legal as a patch — every partial body is optional patch-side — but the
+  // merged output would then carry TWO shape bodies, and the envelope allows
+  // exactly one.
   const patch = {
     steps: [{ index: 2, text: "a repaired step two paragraph that stands alone" }],
-    novelty: paragraph,
+    outputPatch: {
+      paper: {
+        abstract: [paragraph, paragraph, paragraph],
+        introduction: [paragraph, paragraph, paragraph],
+        method: [paragraph, paragraph, paragraph],
+        discussion: [paragraph, paragraph, paragraph],
+        conclusion: [paragraph],
+      },
+    },
   };
 
   assert.equal(
@@ -679,7 +688,7 @@ test("a patch that only breaks once applied is retryable, not a recorded failure
   assert.equal(checked.success, false, "merged against its base, the patch is incoherent");
   assert.ok(
     checked.success === false &&
-      checked.issues.some((issue) => issue.includes("must omit novelty")),
+      checked.issues.some((issue) => issue.includes('the patch changes the "paper" body')),
     "the feedback names the rule the merged whole breaks",
   );
 });
@@ -768,8 +777,20 @@ test("a four-part patch gets the same pre-write merge check a string patch gets"
       },
     },
   };
-  // Legal as a patch on its own; a solution-shaped output may carry no novelty.
-  const patch = { steps: [{ index: 2, ...step(2) }], novelty: paragraph };
+  // Legal as a patch on its own — every partial body is optional patch-side —
+  // but the base's output is a solution, so a paper section has no home there.
+  const patch = {
+    steps: [{ index: 2, ...step(2) }],
+    outputPatch: {
+      paper: {
+        abstract: [paragraph, paragraph, paragraph],
+        introduction: [paragraph, paragraph, paragraph],
+        method: [paragraph, paragraph, paragraph],
+        discussion: [paragraph, paragraph, paragraph],
+        conclusion: [paragraph],
+      },
+    },
+  };
 
   assert.equal(
     validator.validate(patch, schema).success,
@@ -784,7 +805,8 @@ test("a four-part patch gets the same pre-write merge check a string patch gets"
   });
   assert.equal(checked.success, false, "merged against its base, the four-part patch is incoherent");
   assert.ok(
-    checked.success === false && checked.issues.some((issue) => issue.includes("must omit novelty")),
+    checked.success === false &&
+      checked.issues.some((issue) => issue.includes('the patch changes the "paper" body')),
     "the feedback names the rule the merged whole breaks",
   );
 

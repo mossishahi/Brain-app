@@ -71,13 +71,6 @@ export const OUTPUT_SHAPES = [
 
 export type OutputShape = (typeof OUTPUT_SHAPES)[number];
 
-/** Shapes whose output is positioned against a literature map. */
-export const NOVELTY_SHAPES: ReadonlySet<OutputShape> = new Set<OutputShape>([
-  "paper",
-  "resolution",
-  "survey",
-]);
-
 /** The three review verdicts (mirrored by catalog/verdicts.json). */
 export const VERDICTS = ["Pass", "Build", "Interrupt"] as const;
 export type Verdict = (typeof VERDICTS)[number];
@@ -1615,30 +1608,6 @@ export const cotStepPartsSchema = z
 
 export type CotStepParts = z.infer<typeof cotStepPartsSchema>;
 
-/**
- * The novelty rule every chain-carrying artifact shares: a shape positioned
- * against a literature map states its novelty, and a shape that is not must
- * omit it. One copy, called by the string-chain schemas and the four-part
- * one alike — a second would let the two forms disagree about what a paper
- * owes the moment NOVELTY_SHAPES changes.
- */
-const requireShapeNovelty = (
-  value: { readonly output: DevelopedOutput; readonly novelty?: string },
-  ctx: z.RefinementCtx,
-): void => {
-  const shape = OUTPUT_SHAPES.find(
-    (candidate) => value.output[candidate] !== undefined && value.output[candidate] !== null,
-  );
-  if (!shape) return; // the envelope's own refinement already reports this
-  const wantsNovelty = NOVELTY_SHAPES.has(shape);
-  if (wantsNovelty && value.novelty === undefined) {
-    ctx.addIssue({ code: "custom", path: ["novelty"], message: `a "${shape}" output requires a novelty statement` });
-  }
-  if (!wantsNovelty && value.novelty !== undefined) {
-    ctx.addIssue({ code: "custom", path: ["novelty"], message: `a "${shape}" output must omit novelty` });
-  }
-};
-
 export const brainIdeaSchema = z
   .object({
     output: developedOutputSchema,
@@ -1646,15 +1615,16 @@ export const brainIdeaSchema = z
     cot: z.array(paragraphs(1)).min(3).max(9),
     /**
      * One paragraph naming the closest prior works and what this idea does
-     * that none of them does. Required only for shapes positioned against a
-     * literature map (paper, resolution, survey); omitted otherwise.
+     * that none of them does. Always OPTIONAL: a member includes it when its
+     * treatment genuinely positions against specific works, and omits it
+     * otherwise — no shape requires or forbids the claim (enforcement was
+     * removed deliberately; the review examines a claim wherever one is made).
      */
     novelty: paragraphs(1).optional(),
     /** The works the literature review surfaced; omit when none were found. */
     literature: z.array(paperSchema).max(30).optional(),
   })
-  .strict()
-  .superRefine(requireShapeNovelty);
+  .strict();
 
 export type BrainIdea = z.infer<typeof brainIdeaSchema>;
 
@@ -1676,8 +1646,7 @@ export const brainIdeaPartsSchema = z
     novelty: paragraphs(1).optional(),
     literature: z.array(paperSchema).max(30).optional(),
   })
-  .strict()
-  .superRefine(requireShapeNovelty);
+  .strict();
 
 export type BrainIdeaParts = z.infer<typeof brainIdeaPartsSchema>;
 
@@ -1698,8 +1667,7 @@ export const redevelopmentSchema = z
     steps: z.array(paragraphs(1)).min(3).max(9),
     novelty: paragraphs(1).optional(),
   })
-  .strict()
-  .superRefine(requireShapeNovelty);
+  .strict();
 
 export type Redevelopment = z.infer<typeof redevelopmentSchema>;
 

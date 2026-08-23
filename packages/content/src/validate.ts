@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { artifactSchemas, NOVELTY_SHAPES, SHAPE_FIELDS, type OutputShape } from "./schemas/artifacts.js";
+import { artifactSchemas, SHAPE_FIELDS } from "./schemas/artifacts.js";
 import type {
   ActivityRegistry,
   BindValue,
@@ -37,6 +37,23 @@ const SESSION_ROOT = "session";
 const BUNDLE_ROOT = "bundle";
 /** Per-seat review state; only addressable inside a repeatUntil review round. */
 const REVIEWS_ROOT = "reviews";
+/**
+ * Per-seat recorded thinking, one entry per chain step. The RUNTIME writes it
+ * beside `ideas[<seat>]` in the same store step that records a chain-writing
+ * agent's output (the first pass fills the array; a redevelopment replaces
+ * the touched steps' entries), so the root exists exactly when the idea does
+ * — which is why definedRoots() adds it for every chain-writing node rather
+ * than reading it off an output key it never appears in.
+ */
+const THOUGHTS_ROOT = "thoughts";
+/** The output schemas whose store step also writes `thoughts[<seat>]`. */
+const THOUGHT_WRITING_SCHEMAS = new Set([
+  "brainIdea",
+  "brainIdeaParts",
+  "redevelopment",
+  "redevelopmentPatch",
+  "redevelopmentPatchParts",
+]);
 /**
  * The fields a seat carries under `reviews[<seat>]`. `history` is the flat
  * ledger every round of the walk appends to; `record` is that ledger scoped to
@@ -228,6 +245,12 @@ function definedRoots(node: WorkflowNode): Set<string> {
   walkNodes(node, (n) => {
     if (n.kind === "agent" || n.kind === "activity") {
       roots.add(refRoot(n.output.key));
+      // A chain-writing agent's store step also records the thinking behind
+      // each step under thoughts[<seat>], so the root becomes addressable for
+      // every later reader exactly when the idea does.
+      if (n.kind === "agent" && THOUGHT_WRITING_SCHEMAS.has(n.output.schema)) {
+        roots.add(THOUGHTS_ROOT);
+      }
     }
   });
   return roots;
@@ -332,35 +355,11 @@ function validateInputTypes(inputTypes: ContentBundle["catalogs"]["inputTypes"],
     }
   }
 
-  // A shape's prose rule must agree with NOVELTY_SHAPES about whether the
-  // novelty field exists. They disagreed once in shipped content — the
-  // resolution rule told the model to omit a field the validator required — and
-  // both texts land in the SAME prompt, so whichever the model followed, either
-  // validation or review saw a violation. Checked at load rather than trusted.
-  // shapeGuides is keyed by TYPE (the loader projects each shape's rule onto the
-  // types that map to it), so resolve the shape before consulting NOVELTY_SHAPES.
-  for (const [typeName, rule] of Object.entries(inputTypes.shapeGuides)) {
-    if (rule.trim().length === 0) continue;
-    const shape = inputTypes.shapes[typeName];
-    if (!shape) continue;
-    const saysOmit = /No `novelty` field for this shape/i.test(rule);
-    const saysRequired = /`novelty`[^\n]*required for this shape/i.test(rule);
-    const wantsNovelty = NOVELTY_SHAPES.has(shape as OutputShape);
-    if (wantsNovelty && saysOmit) {
-      issues.push({
-        code: "SHAPE_NOVELTY_CONTRADICTION",
-        path: `${at} > shapeRules.${shape}`,
-        message: `shape "${shape}" requires a novelty statement but its rule tells the model to omit it`,
-      });
-    }
-    if (!wantsNovelty && saysRequired) {
-      issues.push({
-        code: "SHAPE_NOVELTY_CONTRADICTION",
-        path: `${at} > shapeRules.${shape}`,
-        message: `shape "${shape}" carries no novelty field but its rule tells the model one is required`,
-      });
-    }
-  }
+  // The novelty statement is deliberately unenforced: the field is optional
+  // for every shape (a member includes it when its treatment genuinely
+  // positions against specific works), so there is no required/forbidden
+  // split for a shape rule's prose to contradict — the cross-check that once
+  // lived here went with the enforcement.
 
   for (const [typeName, outline] of Object.entries(inputTypes.outlines)) {
     const shape = inputTypes.shapes[typeName];
@@ -1029,6 +1028,21 @@ function checkRef(ref: string, scope: Set<string>, inRepeatUntil: boolean, ctx: 
       ctx.issues.push({ code: "UNKNOWN_REF", path: at, message: `"${ref}" is not a known review field` });
     }
     return;
+  }
+  if (root === THOUGHTS_ROOT) {
+    // Seat-qualified for the same reason `reviews` is: the map is keyed by
+    // member, and a bare `thoughts.<x>` would address every seat at once —
+    // the seat-independent access that breaks parallel review. Whether the
+    // root is DEFINED here falls through to the ordinary scope check below,
+    // because it only exists once a chain-writing node has stored.
+    if (!/^thoughts\[/.test(ref)) {
+      ctx.issues.push({
+        code: "UNKNOWN_REF",
+        path: at,
+        message: `"${ref}" must address a single seat as thoughts[<seat>]`,
+      });
+      return;
+    }
   }
   if (!scope.has(root)) {
     ctx.issues.push({

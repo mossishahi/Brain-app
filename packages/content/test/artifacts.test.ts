@@ -370,10 +370,14 @@ test("brain idea: paragraph counts and chain length limits are enforced", () => 
 
   assert.equal(brainIdeaSchema.safeParse({ ...good, cot: [para(1), para(1)] }).success, false, "chain too short");
 
-  assert.equal(
+  // The novelty statement is deliberately unenforced: optional for EVERY
+  // shape, so a member states it when its treatment genuinely positions
+  // against specific works and stays silent otherwise. Both directions must
+  // parse for both kinds of shape — requiring it here once turned honest
+  // omissions into failed runs.
+  assert.ok(
     brainIdeaSchema.safeParse({ ...good, novelty: undefined }).success,
-    false,
-    "a paper-shaped output requires a novelty statement",
+    "a paper-shaped output may omit the novelty statement",
   );
 
   const verificationOutput = {
@@ -391,11 +395,10 @@ test("brain idea: paragraph counts and chain length limits are enforced", () => 
     brainIdeaSchema.safeParse({ output: verificationOutput, cot: [para(1), para(1), para(1)] }).success,
     "a verification-shaped output needs no novelty statement",
   );
-  assert.equal(
+  assert.ok(
     brainIdeaSchema.safeParse({ output: verificationOutput, cot: [para(1), para(1), para(1)], novelty: para(1) })
       .success,
-    false,
-    "a verification-shaped output must omit novelty entirely",
+    "a verification-shaped output may still state one",
   );
   assert.equal(
     brainIdeaSchema.safeParse({
@@ -808,10 +811,9 @@ test("redevelopment: re-emits the complete chain within the fixed step bounds", 
     false,
     "the retired tail-splice fields are no longer accepted",
   );
-  assert.equal(
+  assert.ok(
     redevelopmentSchema.safeParse({ ...good, output: validDevelopedOutput, novelty: undefined }).success,
-    false,
-    "a paper-shaped output still requires novelty on a redevelopment",
+    "novelty stays optional on a redevelopment — the claim is never enforced",
   );
 });
 
@@ -1004,10 +1006,9 @@ test("brainIdeaParts: the same first pass with a four-part chain", () => {
     false,
     "a parts chain never accepts the legacy string steps",
   );
-  assert.equal(
+  assert.ok(
     brainIdeaPartsSchema.safeParse({ ...good, novelty: undefined }).success,
-    false,
-    "the shape/novelty rule is carried over, not re-decided",
+    "novelty stays optional on the four-part form too — the claim is never enforced",
   );
   // And the legacy schema is untouched by the new one existing beside it.
   assert.ok(
