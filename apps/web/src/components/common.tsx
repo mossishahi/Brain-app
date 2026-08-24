@@ -342,7 +342,20 @@ function whereTitle(where: StageActivityEntry["where"]): string {
  * `.activity-entry` has to be the element holding these — the `<li>` normally,
  * the `<a>` when the row leads somewhere.
  */
-function ActivityCells({ entry }: { entry: StageActivityEntry }) {
+function ActivityCells({
+  entry,
+  seated,
+}: {
+  entry: StageActivityEntry;
+  /**
+   * Whether THIS feed carries seat annotations at all. The WHO and WHERE
+   * columns exist for the seated stages (first pass, review); a feed whose
+   * rows never name a seat — process, decompose — would render two wide
+   * columns of dashes, which reads as a gap, not as alignment. Decided per
+   * FEED rather than per row, so within one feed the messages still line up.
+   */
+  seated: boolean;
+}) {
   return (
     <>
       <time dateTime={new Date(entry.at).toISOString()}>
@@ -352,27 +365,31 @@ function ActivityCells({ entry }: { entry: StageActivityEntry }) {
           second: "2-digit",
         })}
       </time>
-      {/* WHAT, WHO, WHERE — three fixed columns, so the messages beside
-          them stay in one line down the feed even when a row has none of
-          the three (a pre-panel stage, a run-level event). An empty column
-          renders a dim dash rather than nothing, because a blank gap reads
-          as a rendering fault. */}
+      {/* WHAT, WHO, WHERE — fixed columns, so the messages beside them stay
+          in one line down the feed even when a row has none of the three (a
+          run-level event in a seated feed). An empty column renders a dim
+          dash rather than nothing, because a blank gap next to filled
+          neighbours reads as a rendering fault. */}
       <span className="activity-role" title={roleTitle(entry.role)}>
         {entry.role ?? "—"}
       </span>
-      <span
-        className="activity-actor"
-        title={
-          entry.actor !== undefined
-            ? `${entry.actor} is doing this`
-            : "not a seat — the role alone says who is working"
-        }
-      >
-        {entry.actor ?? "—"}
-      </span>
-      <span className="activity-where" title={whereTitle(entry.where)}>
-        {entry.where ? <Where where={entry.where} /> : "—"}
-      </span>
+      {seated && (
+        <span
+          className="activity-actor"
+          title={
+            entry.actor !== undefined
+              ? `${entry.actor} is doing this`
+              : "not a seat — the role alone says who is working"
+          }
+        >
+          {entry.actor ?? "—"}
+        </span>
+      )}
+      {seated && (
+        <span className="activity-where" title={whereTitle(entry.where)}>
+          {entry.where ? <Where where={entry.where} /> : "—"}
+        </span>
+      )}
       <span className="activity-marker" aria-hidden />
       <span className="activity-message">{entry.message}</span>
       {entry.turn !== undefined && (
@@ -425,6 +442,11 @@ export function ActivityFeed({
     const list = listRef.current;
     if (list && pinnedRef.current) list.scrollTop = list.scrollHeight;
   }, [entries.length]);
+  // One decision for the whole feed: seat columns exist only where some row
+  // actually names a seat or a walk position (see ActivityCells.seated).
+  const seated = visible.some(
+    (entry) => entry.actor !== undefined || entry.where !== undefined,
+  );
   if (visible.length === 0) return null;
   const lastAt = visible[visible.length - 1]!.at;
   const quietMs = active && now !== undefined ? now - lastAt : 0;
@@ -461,12 +483,12 @@ export function ActivityFeed({
                 download
                 title="download exactly what was sent to the model for this call"
               >
-                <ActivityCells entry={entry} />
+                <ActivityCells entry={entry} seated={seated} />
               </a>
             </li>
           ) : (
             <li key={entry.id} className={`activity-entry activity-${entry.kind}`}>
-              <ActivityCells entry={entry} />
+              <ActivityCells entry={entry} seated={seated} />
             </li>
           );
         })}

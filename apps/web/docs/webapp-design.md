@@ -278,15 +278,20 @@ panel, which stops being the roster the moment the gate shrinks or adds. Stamped
 proposal, an added seat's words landed under a seat that was never seated and its first-pass card
 never showed its member thinking.
 
-Every Activity row is annotated with three fixed columns between the timestamp and the message,
-because a review's feed is otherwise a wall of messages with no way to tell whose work is whose:
-**what** the agent is (`COMMENTER`, `JUDGE`, `THINKER`, `REDEVELOPER`, `BRIDGE` — small caps, the
-row's category), **who** is doing it (`Seat 2`, mono, full weight — the row's subject), and **where**
-it is happening (`Seat 4 → step 5 > round 3`). The columns are sized against the widest thing each
-can say, measured rather than guessed, and truncate with a hover rather than pushing the message
-around; a row with none of the three (a pre-panel stage) shows a dim dash, since a blank gap reads as
-a rendering fault. Below 900px the role and place drop, below 700px the actor too — the message is
-worth more than any of them.
+Every Activity row is annotated with fixed columns between the timestamp and the message, because a
+review's feed is otherwise a wall of messages with no way to tell whose work is whose: **what** the
+agent is (`Commenter`, `Judge`, `Thinker`, `Redeveloper`, `Bridge` — the row's category), **who** is
+doing it (`Seat 2`, mono, full weight — the row's subject), and **where** it is happening
+(`Seat 4 → step 5 > round 3`). The columns are sized against the widest thing each can say, measured
+rather than guessed, and truncate with a hover rather than pushing the message around. The **who**
+and **where** columns exist only in feeds where some row actually names a seat (first pass, review):
+a stage whose rows never do — process, decompose — would render two wide columns of dashes, a gap
+posing as alignment, so the feed decides once from its own rows and drops them. Within a seated
+feed, a row missing a value (a run-level event) still shows a dim dash, since a blank next to filled
+neighbours reads as a rendering fault. Below 900px the role and place drop, below 700px the actor
+too — the message is worth more than any of them. The list scrolls on both axes so a long message
+is panned to rather than wrapped, but only the vertical bar is drawn: the horizontal bar under
+every feed read as permanent chrome, and the pan still works without it.
 
 The **who** and the **where** are different questions, and for a commenter they have different
 answers: the actor is the seat writing, the place is the seat being read. A round's commentors are

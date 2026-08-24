@@ -2759,6 +2759,17 @@ section.drawer-section:not(.drawer-updates) {
      a whole search query — is read by scrolling sideways instead of being folded
      into two lines that break the column alignment. */
   overflow: auto;
+  /* Firefox cannot hide one axis's bar, so both go thin there. */
+  scrollbar-width: thin;
+}
+
+/* The sideways scroll stays; its BAR goes. A permanent horizontal bar under
+   every feed read as chrome, not content — the rows still pan with a
+   trackpad, shift-wheel, or keyboard, and the vertical bar (the one that
+   says how much history there is) stays. */
+.activity-list::-webkit-scrollbar:horizontal {
+  display: none;
+  height: 0;
 }
 
 /* A row is as wide as its content needs; the list scrolls to reach the rest. */
