@@ -525,7 +525,7 @@ function flawLines(flaws: readonly FlawEntryView[]): readonly string[] {
 function commentCopyText(selected: "judge" | string, round: ReviewRoundView): string {
   if (selected === "judge") {
     const d = round.decision;
-    if (!d) return `round ${round.round}: judgement in progress`;
+    if (!d) return `round ${round.round}: the chair is waiting for comments of others`;
     const issues = (d.issues ?? [])
       .map(
         (issue, i) =>
@@ -708,7 +708,7 @@ function CommentsPanel({
               // The judgement is being written; this is where it will appear.
               <LiveThread text={liveJudge.text} label="Judge" />
             ) : (
-              <p className="dim small">judgement in progress — comments land first</p>
+              <p className="dim small">the chair is waiting for comments of others…</p>
             )
           ) : (
             (() => {

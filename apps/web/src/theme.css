@@ -3453,7 +3453,12 @@ a.activity-entry:focus-visible {
 
 .member-head {
   display: flex;
-  align-items: baseline;
+  /* Center, not baseline: the row mixes text with BOXES — the token chip,
+     the 32px brain anchor, the status dot — and a baseline row places each
+     box by a synthesized baseline of its own, so no two of them ever sat on
+     one line. Centering aligns every item's midline; the two text sizes
+     differ by 2px, so their midlines agree to a pixel. */
+  align-items: center;
   gap: 8px;
   flex-wrap: wrap;
 }
@@ -4225,12 +4230,6 @@ a.activity-entry:focus-visible {
   text-decoration: underline;
 }
 
-/* The member head aligns its TEXT by baseline (umbrella against department);
-   the brain anchor has no baseline worth aligning and floated high — the
-   icon centers against the line instead. */
-.member-head > .thoughts-anchor {
-  align-self: center;
-}
 
 .thoughts-pop {
   position: absolute;
