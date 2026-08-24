@@ -374,6 +374,15 @@ export const stageActivityCsvUrl = (jobId: string, stageId: string): string =>
 export const thoughtsFileUrl = (jobId: string, ref: string): string =>
   `${API_BASE}/jobs/${encodeURIComponent(jobId)}/thoughts.txt?ref=${encodeURIComponent(ref)}`;
 
+/**
+ * One seat's tracked output changes as a markdown document: the first
+ * version whole, then what each review round changed in the MAIN section.
+ * A URL for the usual reason: the edit icon LINKS at it, the browser
+ * downloads, the server names the file.
+ */
+export const outputChangesUrl = (jobId: string, memberId: string): string =>
+  `${API_BASE}/jobs/${encodeURIComponent(jobId)}/members/${encodeURIComponent(memberId)}/output-changes.md`;
+
 export function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }

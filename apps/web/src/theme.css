@@ -4255,6 +4255,37 @@ a.activity-entry:focus-visible {
   opacity: 0.55;
 }
 
+/* -------------------------------------- output change tracking (Changes tab)
+   Latest main section against the first pass: carried words wear the same
+   dim as a round card's, additions the accent at full weight, and removals —
+   which the chain deck implies by paging — struck through in red, in place. */
+.odiff-text {
+  white-space: pre-wrap;
+  line-height: 1.6;
+  font-size: 13px;
+}
+
+.odiff-added {
+  color: var(--accent);
+}
+
+.odiff-removed {
+  color: var(--bad);
+  text-decoration: line-through;
+  opacity: 0.85;
+}
+
+.odiff-legend {
+  margin: 0 0 8px;
+}
+
+/* The tracked-changes document: an anchor wearing the ghost-button look,
+   pushed to the tab row's far end. */
+.tab-row > .idea-changes-download {
+  margin-left: auto;
+  text-decoration: none;
+}
+
 /* A step written in FOUR PARTS renders as four labelled blocks, wherever a
    step is shown — the chain tab, the round deck, the walk inspector. The
    blocks sit apart far enough to read as four pieces of one step and no

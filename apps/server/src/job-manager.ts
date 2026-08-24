@@ -39,6 +39,7 @@ import {
   type JobStatus,
   type JobSummary,
   type LiveTextEntry,
+  type OutputVersionView,
   type PanelMemberView,
   type ServerSettings,
   type StageActivityEntry,
@@ -48,6 +49,7 @@ import {
 import {
   ingestAttachments,
 } from "./attachments.js";
+import { outputChangesMarkdown } from "./output-changes.js";
 import {
   buildOrchestrationCommand,
   renderSlurmTemplate,
@@ -1269,6 +1271,8 @@ export class JobManager {
       value: JobDetail;
       /** The full per-stage activity history the detail's window came from. */
       activity: ReadonlyMap<StageId, readonly StageActivityEntry[]>;
+      /** Per member: every version of the seat's main output section. */
+      outputHistory: ReadonlyMap<string, readonly OutputVersionView[]>;
     }
   >();
 
@@ -1289,15 +1293,58 @@ export class JobManager {
     ].join("|");
     const cached = this.detailCache.get(jobId);
     if (cached && cached.fingerprint === fingerprint) return cached.value;
-    const { detail: value, activity } = buildJobDetailWithActivity({
+    const { detail: value, activity, outputHistory } = buildJobDetailWithActivity({
       record,
       status,
       sessionDir,
       jobDir,
       settings,
     });
-    this.detailCache.set(jobId, { fingerprint, value, activity });
+    this.detailCache.set(jobId, { fingerprint, value, activity, outputHistory });
     return value;
+  }
+
+  /**
+   * One seat's tracked output changes as a markdown document: the first
+   * version whole, then what each redevelopment changed in the MAIN section
+   * (additions bold, removals struck). Undefined when the run holds no
+   * output for that member at all.
+   */
+  async outputChanges(
+    jobId: string,
+    memberId: string,
+  ): Promise<{ readonly markdown: string; readonly filename: string } | undefined> {
+    const detail = await this.detail(jobId);
+    const versions = this.detailCache.get(jobId)?.outputHistory.get(memberId);
+    if (versions === undefined || versions.length === 0) return undefined;
+    // The seat's dashboard identity: the review's own label when it exists,
+    // the seat's first-pass position otherwise.
+    let seat: string | undefined;
+    let expertise: string | undefined;
+    for (const stage of detail.stages) {
+      if (stage.id === "review-members") {
+        seat ??= stage.members.find((member) => member.memberId === memberId)?.label;
+      }
+      if (stage.id === "first-pass") {
+        const index = stage.members.findIndex((member) => member.memberId === memberId);
+        if (index >= 0) {
+          seat ??= `Seat ${index + 1}`;
+          const member = stage.members[index]!;
+          expertise = [member.department, member.umbrella]
+            .filter((part) => part.length > 0)
+            .join(" / ");
+        }
+      }
+    }
+    if (seat === undefined) return undefined;
+    const markdown = outputChangesMarkdown({
+      seat,
+      ...(expertise !== undefined && expertise.length > 0 ? { expertise } : {}),
+      topic: detail.topic,
+      versions,
+    });
+    const filename = `output-changes-${seat.toLowerCase().replace(/[^a-z0-9]+/g, "-")}.md`;
+    return { markdown, filename };
   }
 
   /**

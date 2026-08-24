@@ -56,6 +56,7 @@ import {
   type LiveReviewThread,
 } from "../live-threads";
 import { BackIcon, CopyIcon, DownloadIcon, ForwardIcon } from "../Icons";
+import { outputChangesUrl } from "../../api";
 import { IdeaTabs } from "./FirstPassPanel";
 import {
   crossEntryKey,
@@ -1598,7 +1599,13 @@ export function ReviewStagePanels({
                           })()}
                         </summary>
                         <div className="review-fold-body">
-                          <IdeaTabs idea={seat.finalIdea} />
+                          <IdeaTabs
+                            idea={seat.finalIdea}
+                            {...(firstPassMember(seat.memberId)?.idea !== undefined
+                              ? { original: firstPassMember(seat.memberId)!.idea! }
+                              : {})}
+                            changesUrl={outputChangesUrl(jobId, seat.memberId)}
+                          />
                         </div>
                       </details>
                     );

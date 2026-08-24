@@ -61,6 +61,16 @@ export function GearIcon({ size = 18 }: IconProps) {
  * recorded thinking behind a version card — grey like every ghost control,
  * so it reads as a peek at working material rather than as an artifact.
  */
+/** A pencil over a writing line: the tracked-changes document control. */
+export function EditIcon({ size = 16 }: IconProps) {
+  return (
+    <svg {...frame(size)}>
+      <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4L16.5 3.5Z" />
+      <path d="M13.5 6.5l3 3M4 21h16" />
+    </svg>
+  );
+}
+
 export function BrainIcon({ size = 16 }: IconProps) {
   return (
     <svg {...frame(size)}>

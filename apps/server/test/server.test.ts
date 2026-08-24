@@ -3799,6 +3799,27 @@ test("GET /api/jobs/:id/thoughts.txt downloads the full thinking behind a handle
       `${server.url}/api/jobs/${jobId}/thoughts.txt?ref=${encodeURIComponent("nope#1")}`,
     );
     assert.equal(wrong.status, 404);
+
+    // The same completed run also serves each seat's tracked output changes
+    // as a named markdown download; an unknown member is a 404, never a 500.
+    const withIdea = firstPass.members.find((member) => member.idea !== undefined);
+    assert.ok(withIdea, "an offline run leaves first-pass outputs behind");
+    const changes = await fetch(
+      `${server.url}/api/jobs/${encodeURIComponent(jobId)}/members/${encodeURIComponent(withIdea.memberId)}/output-changes.md`,
+    );
+    assert.equal(changes.status, 200);
+    assert.match(changes.headers.get("content-type") ?? "", /^text\/markdown/);
+    assert.match(
+      changes.headers.get("content-disposition") ?? "",
+      /^attachment; filename="output-changes-seat-\d+\.md"$/,
+    );
+    const document = await changes.text();
+    assert.match(document, /— final output, tracked changes/);
+    assert.match(document, /## First version — first pass/);
+    const wrongMember = await fetch(
+      `${server.url}/api/jobs/${jobId}/members/nobody/output-changes.md`,
+    );
+    assert.equal(wrongMember.status, 404);
   } finally {
     await server.close();
     await removeWorkspace(workspace);

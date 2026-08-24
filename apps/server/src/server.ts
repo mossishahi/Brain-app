@@ -1528,6 +1528,31 @@ export async function startBrainServer(
         return;
       }
 
+      // One seat's tracked output changes, as a markdown file the browser
+      // saves. Before the job-detail matcher below, which would otherwise
+      // swallow it.
+      const outputChangesMatch =
+        /^\/api\/jobs\/([^/]+)\/members\/([^/]+)\/output-changes\.md$/.exec(path);
+      if (req.method === "GET" && outputChangesMatch) {
+        const jobId = decodeURIComponent(outputChangesMatch[1]!);
+        const memberId = decodeURIComponent(outputChangesMatch[2]!);
+        // unknown run -> 404 outside; an unknown member is its own 404
+        const changes = await manager.outputChanges(jobId, memberId);
+        if (changes === undefined) {
+          throw new HttpError(404, "that member's output record was not found");
+        }
+        res.writeHead(200, {
+          "content-type": "text/markdown; charset=utf-8",
+          "content-length": Buffer.byteLength(changes.markdown),
+          "content-disposition": `attachment; filename="${changes.filename}"`,
+          // The record grows while the review does; the next click gets the
+          // newer document.
+          "cache-control": "no-store",
+        });
+        res.end(changes.markdown);
+        return;
+      }
+
       // The FULL text behind a thoughts handle, as a file the browser saves —
       // the popover previews the journal's capped slice, this serves the
       // untruncated trace. Before the job-detail matcher below, which would

@@ -75,8 +75,9 @@ import {
   type DecomposeStepView,
   type StageView,
   type TokenUsageView,
+  type OutputVersionView,
 } from "@brainstorm-agentic/protocol";
-import { jobIsExecuting } from "@brainstorm-agentic/protocol";
+import { jobIsExecuting, outputSections } from "@brainstorm-agentic/protocol";
 
 import {
   mergeRedevelopment,
@@ -2482,7 +2483,13 @@ function buildReviews(
   dismissedSeat: (
     memberId: string,
   ) => { readonly dismissed: DismissedSeatView } | Record<string, never> = () => ({}),
-): { members: ReviewMemberView[]; maxRounds: number; complete: boolean } {
+): {
+  members: ReviewMemberView[];
+  maxRounds: number;
+  complete: boolean;
+  /** Per member INDEX: every main-section version a redevelopment produced. */
+  outputVersions: Map<number, OutputVersionView[]>;
+} {
   const rounds = new Map<string, {
     cot?: CotStepView;
     comments: Map<number, CommentView>;
@@ -2495,6 +2502,12 @@ function buildReviews(
   // Per-member revision replay: how many redevelopments landed, and the last
   // one's raw record — the source of the member's final output envelope.
   const memberRevisions = new Map<number, { count: number; last: Record<string, unknown> }>();
+  // Every version the replay assembles of each member's MAIN section, in
+  // walk order — the record the output change tracker (Changes tab, change
+  // document) diffs. A revision that rewrote only chain steps still
+  // snapshots: the document then says "no change" at that moment, keeping
+  // the timeline complete instead of silently skipping rounds.
+  const outputVersions = new Map<number, OutputVersionView[]>();
   const roundFor = (member: number, step: number, round: number) => {
     const key = `${member}:${step}:${round}`;
     let found = rounds.get(key);
@@ -2667,6 +2680,22 @@ function buildReviews(
             ...(novelty !== undefined ? { novelty } : {}),
           },
         });
+        // Snapshot the main section as this revision leaves it, addressed by
+        // the review moment that produced it (1-based, as the deck counts).
+        const versionIdea = brainIdea({
+          output: envelope,
+          cot: [...chain],
+          ...(novelty !== undefined ? { novelty } : {}),
+        });
+        if (versionIdea !== undefined) {
+          const versions = outputVersions.get(at.member) ?? [];
+          versions.push({
+            step: at.step + 1,
+            round: at.round + 1,
+            sections: outputSections(versionIdea),
+          });
+          outputVersions.set(at.member, versions);
+        }
       }
     }
   }
@@ -2851,7 +2880,7 @@ function buildReviews(
         step.outcome === "passed" || step.outcome === "force-passed"
       )
     );
-  return { members: withProgress, maxRounds, complete };
+  return { members: withProgress, maxRounds, complete, outputVersions };
 }
 
 /**
@@ -3042,6 +3071,13 @@ export interface JobDetailWithActivity {
    * sees exactly the rows the feed is made of, merged the same way.
    */
   readonly activity: ReadonlyMap<StageId, readonly StageActivityEntry[]>;
+  /**
+   * Per member ID: every version of the seat's MAIN output section, first
+   * pass first (step/round 0), then one entry per applied redevelopment in
+   * walk order. The change document is built from this; it never rides the
+   * JobDetail wire, because it repeats the whole body once per revision.
+   */
+  readonly outputHistory: ReadonlyMap<string, readonly OutputVersionView[]>;
 }
 
 export function buildJobDetail(input: MapperInput): JobDetail {
@@ -3915,6 +3951,17 @@ export function buildJobDetailWithActivity(input: MapperInput): JobDetailWithAct
     stages,
     ...(pendingGateView ? { pendingGate: pendingGateView } : {}),
   };
+  const outputHistory = new Map<string, readonly OutputVersionView[]>();
+  for (const [index, member] of finalPanel.entries()) {
+    const first = ideas.get(member.id);
+    const revisions = review.outputVersions.get(index) ?? [];
+    if (first === undefined && revisions.length === 0) continue;
+    outputHistory.set(member.id, [
+      // The first pass is version zero — the base every change is against.
+      { step: 0, round: 0, sections: first !== undefined ? outputSections(first) : [] },
+      ...revisions,
+    ]);
+  }
   return {
     detail,
     activity: new Map(
@@ -3923,6 +3970,7 @@ export function buildJobDetailWithActivity(input: MapperInput): JobDetailWithAct
         stageTimings.get(id)!.activity.map(wireRow),
       ]),
     ),
+    outputHistory,
   };
 }
 

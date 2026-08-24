@@ -637,6 +637,27 @@ activity feed, fold), and the *walk inspector* sits below in its own panel.
   history is never rewritten. The same final versions are saved as readable copies under the
   session's `final/` directory (one JSON per member, plus the proposal), which is what the CLI
   names when a run finishes.
+- **The MAIN section's changes are tracked**, the way the chain deck tracks steps — but for the
+  output body alone (never the chain, the novelty claim, or the papers, which have their own
+  records). Two views of the same record:
+  - a **Changes tab** on the final-version fold, comparing the LATEST version against the FIRST:
+    carried words dimmed exactly like a round card's, additions in accent at full weight, and —
+    unlike the chain deck, whose paging implies them — deletions shown in place, struck through
+    in red. The tab appears only when something actually changed. The comparison is computed
+    client-side from the two versions already on the wire, with the diff and the text projection
+    both imported from protocol, so the tab and the document below can never disagree;
+  - an **edit-icon download** (pencil, in the tab row) saving the whole history as markdown
+    (`GET /api/jobs/:id/members/:memberId/output-changes.md`): the first version in full, then one
+    section per review moment ("Step k · round r", the deck's own coordinates) documenting what
+    that redevelopment changed — additions bold, removals struck, a no-op round saying so
+    explicitly. Built from the server's replay of every intermediate version (a patch names only
+    what it changes, so only the replay knows what stood between first and latest); the versions
+    ride the fingerprint-cached detail build and never the JobDetail wire, because they repeat
+    the whole body once per revision.
+  The projection that turns a shape body into diffable text is GENERIC over the body's fields
+  (labels from field names, arrays stacked, nested objects joined) rather than a hand-written
+  mirror per shape — a new shape is tracked the day it ships, and the projection cannot drift
+  from a renderer it never copied.
 - Empty state (stage pending): collapsed row like every other stage.
 
 **7. Proposal** — the synthesis. Body, in order: title (h2), framing paragraph, then a three-column

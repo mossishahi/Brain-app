@@ -6,6 +6,11 @@
  * constants — no runtime dependencies.
  */
 
+// Shared pure logic both sides must agree on, not just shapes: the output
+// change tracker's diff and its text projection (see each module's header).
+export * from "./diff-inline.js";
+export * from "./output-sections.js";
+
 /* ------------------------------------------------------------------ stages */
 
 /**

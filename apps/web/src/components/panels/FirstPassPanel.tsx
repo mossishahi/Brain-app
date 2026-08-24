@@ -4,8 +4,11 @@
  * submission-type chip shows the catalog label the run was classified as,
  * followed by the shared Chain / Novelty / Papers tabs where applicable.
  */
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import type { ReactNode } from "react";
+import { diffInline, outputSections } from "@brainstorm-agentic/protocol";
+import type { InlineDiffSegment } from "@brainstorm-agentic/protocol";
+import { EditIcon } from "../Icons";
 import type {
   AssessFeasibilityOutputView,
   BrainIdeaView,
@@ -33,7 +36,7 @@ import {
   textStepBlocks,
 } from "../common";
 
-type TabId = "primary" | "requested" | "chain" | "novelty" | "papers";
+type TabId = "primary" | "requested" | "chain" | "novelty" | "papers" | "changes";
 
 /** The primary tab label for each output shape. */
 const PRIMARY_TAB: Record<OutputShape, string> = {
@@ -574,19 +577,89 @@ function memberStatus(status: FirstPassMemberView["status"]): { text: string; do
   }
 }
 
+/**
+ * The latest main section against the FIRST, section by section: kept words
+ * dimmed exactly like a round card's carried text, additions at full accent
+ * weight, and — unlike the chain deck, whose paging implies them — deletions
+ * shown in place, struck through in red.
+ */
+function outputChangesOf(
+  idea: BrainIdeaView,
+  original: BrainIdeaView | undefined,
+):
+  | {
+      readonly sections: readonly {
+        readonly label: string;
+        readonly segments: readonly InlineDiffSegment[];
+      }[];
+      readonly changed: boolean;
+    }
+  | undefined {
+  if (original === undefined) return undefined;
+  const before = outputSections(original);
+  const after = outputSections(idea);
+  if (before.length === 0 && after.length === 0) return undefined;
+  const earlier = new Map(before.map((section) => [section.label, section.text]));
+  const sections = after.map((section) => {
+    const base = earlier.get(section.label);
+    return {
+      label: section.label,
+      segments:
+        base === undefined
+          ? ([{ kind: "added", text: section.text }] as const)
+          : base === section.text
+            ? ([{ kind: "kept", text: section.text }] as const)
+            : diffInline(base, section.text),
+    };
+  });
+  const labels = new Set(after.map((section) => section.label));
+  const dropped = before
+    .filter((section) => !labels.has(section.label))
+    .map((section) => ({
+      label: section.label,
+      segments: [{ kind: "removed", text: section.text }] as const,
+    }));
+  const all = [...sections, ...dropped];
+  return {
+    sections: all,
+    changed: all.some((section) =>
+      section.segments.some((segment) => segment.kind !== "kept"),
+    ),
+  };
+}
+
 /** Shared idea renderer: the shape tab plus Requested/Chain/Novelty/Papers.
- * Also used by the review stage to show each member's final version. */
-export function IdeaTabs({ idea }: { idea: BrainIdeaView }) {
+ * Also used by the review stage to show each member's final version, where
+ * it additionally tracks the main section's changes against the first pass. */
+export function IdeaTabs({
+  idea,
+  original,
+  changesUrl,
+}: {
+  idea: BrainIdeaView;
+  /** The seat's FIRST version; present enables the Changes tab. */
+  original?: BrainIdeaView;
+  /** The tracked-changes document; present enables the edit-icon download. */
+  changesUrl?: string;
+}) {
   const [tab, setTab] = useState<TabId>("primary");
   const literature = idea.literature ?? [];
   const requested = idea.requested ?? [];
   const hasPapers = literature.length > 0;
   const hasNovelty = idea.novelty !== undefined;
   const hasRequested = requested.length > 0;
+  // Diffing the whole body is real work; do it once per version pair, and
+  // only when a Changes tab could exist at all.
+  const changes = useMemo(
+    () => outputChangesOf(idea, original),
+    [idea, original],
+  );
+  const hasChanges = changes?.changed === true;
   const active: TabId =
     (tab === "papers" && !hasPapers) ||
     (tab === "novelty" && !hasNovelty) ||
-    (tab === "requested" && !hasRequested)
+    (tab === "requested" && !hasRequested) ||
+    (tab === "changes" && !hasChanges)
       ? "primary"
       : tab;
 
@@ -597,6 +670,7 @@ export function IdeaTabs({ idea }: { idea: BrainIdeaView }) {
     { id: "chain", label: "Chain" },
     ...(hasNovelty ? [{ id: "novelty" as const, label: "Novelty" }] : []),
     ...(hasPapers ? [{ id: "papers" as const, label: "Papers" }] : []),
+    ...(hasChanges ? [{ id: "changes" as const, label: "Changes" }] : []),
   ];
 
   return (
@@ -614,6 +688,20 @@ export function IdeaTabs({ idea }: { idea: BrainIdeaView }) {
             {t.label}
           </button>
         ))}
+        {/* The whole change history as a file: every step, every round,
+            additions and removals marked — the tab beside it shows only the
+            end-to-end comparison. */}
+        {changesUrl !== undefined && (
+          <a
+            className="ghost-btn idea-changes-download"
+            href={changesUrl}
+            download
+            title="download the main section's tracked changes — every step, every round"
+            aria-label="download the main section's tracked changes as a document"
+          >
+            <EditIcon />
+          </a>
+        )}
       </div>
       <div className="idea-tab-content">
         {active === "primary" && <PrimaryBody idea={idea} />}
@@ -642,6 +730,35 @@ export function IdeaTabs({ idea }: { idea: BrainIdeaView }) {
         )}
         {active === "novelty" && <div className="callout">{idea.novelty}</div>}
         {active === "papers" && <PaperTable papers={literature} />}
+        {active === "changes" && changes && (
+          <div>
+            <p className="dim small odiff-legend">
+              the latest main section against the first pass — carried words
+              dimmed, additions in blue, removals struck through
+            </p>
+            {changes.sections.map((section) => (
+              <div key={section.label} className="paper-section">
+                <p className="section-label">{section.label}</p>
+                <div className="odiff-text">
+                  {section.segments.map((segment, index) => (
+                    <span
+                      key={index}
+                      className={
+                        segment.kind === "added"
+                          ? "odiff-added"
+                          : segment.kind === "removed"
+                            ? "odiff-removed"
+                            : "diff-keep"
+                      }
+                    >
+                      {segment.text}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
