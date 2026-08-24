@@ -3753,6 +3753,58 @@ test("GET /api/jobs/:id/stages/:stageId/activity pages the merged history and ex
   }
 });
 
+test("GET /api/jobs/:id/thoughts.txt downloads the full thinking behind a handle", async () => {
+  const workspace = tempRoot();
+  const server = await startTestBrainServer({ workspace, port: 0 });
+  try {
+    await putSettings(server, {
+      runner: "local",
+      panelConfirmation: "auto",
+      llm: { provider: "offline" },
+    });
+    const jobId = await submit(server, "A run whose thinking can be downloaded");
+    const detail = await waitFor(server, jobId, "completed");
+
+    // The first-pass card's whole-task handle, minted by the offline run's
+    // own captured trace.
+    const firstPass = detail.stages.find((stage) => stage.id === "first-pass");
+    assert.ok(firstPass && firstPass.id === "first-pass");
+    const seat = firstPass.members.find((member) => member.thoughts !== undefined);
+    assert.ok(seat?.thoughts, "an offline seat records thinking, so it carries a handle");
+
+    const served = await fetch(
+      `${server.url}/api/jobs/${encodeURIComponent(jobId)}/thoughts.txt?ref=${encodeURIComponent(seat.thoughts)}`,
+    );
+    assert.equal(served.status, 200);
+    assert.match(served.headers.get("content-type") ?? "", /^text\/plain/);
+    assert.match(
+      served.headers.get("content-disposition") ?? "",
+      /^attachment; filename="thoughts-seat-\d+-develop-idea-full\.txt"$/,
+    );
+    const body = await served.text();
+    assert.ok(body.length > 0, "the file carries the recorded thinking");
+
+    // The preview endpoint resolves the same handle.
+    const preview = await requestJson<{ text: string }>(
+      server,
+      `/api/jobs/${jobId}/thoughts?ref=${encodeURIComponent(seat.thoughts)}`,
+    );
+    assert.equal(preview.status, 200);
+    assert.ok(preview.value.text.length > 0);
+
+    // No ref is a 400; a handle no run recorded is a 404.
+    const bare = await fetch(`${server.url}/api/jobs/${jobId}/thoughts.txt`);
+    assert.equal(bare.status, 400);
+    const wrong = await fetch(
+      `${server.url}/api/jobs/${jobId}/thoughts.txt?ref=${encodeURIComponent("nope#1")}`,
+    );
+    assert.equal(wrong.status, 404);
+  } finally {
+    await server.close();
+    await removeWorkspace(workspace);
+  }
+});
+
 test("POST /api/jobs/:id/resume rejects unknown and non-blocked jobs", async () => {
   const workspace = tempRoot();
   const server = await startTestBrainServer({ workspace, port: 0 });

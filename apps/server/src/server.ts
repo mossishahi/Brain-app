@@ -1528,6 +1528,32 @@ export async function startBrainServer(
         return;
       }
 
+      // The FULL text behind a thoughts handle, as a file the browser saves —
+      // the popover previews the journal's capped slice, this serves the
+      // untruncated trace. Before the job-detail matcher below, which would
+      // otherwise swallow it.
+      const thoughtsFileMatch = /^\/api\/jobs\/([^/]+)\/thoughts\.txt$/.exec(path);
+      if (req.method === "GET" && thoughtsFileMatch) {
+        const jobId = decodeURIComponent(thoughtsFileMatch[1]!);
+        const ref = url.searchParams.get("ref") ?? "";
+        if (ref.length === 0) {
+          throw new HttpError(400, "the ref query parameter is required");
+        }
+        // unknown run -> 404 outside; an unknown handle is its own 404
+        const full = manager.fullThoughts(jobId, ref);
+        if (full === undefined) {
+          throw new HttpError(404, "that thoughts record was not found");
+        }
+        res.writeHead(200, {
+          "content-type": "text/plain; charset=utf-8",
+          "content-length": Buffer.byteLength(full.text),
+          "content-disposition": `attachment; filename="${full.filename}"`,
+          "cache-control": "no-store",
+        });
+        res.end(full.text);
+        return;
+      }
+
       // Before the job-detail matcher below, which would otherwise swallow it.
       const thoughtsMatch = /^\/api\/jobs\/([^/]+)\/thoughts$/.exec(path);
       if (req.method === "GET" && thoughtsMatch) {

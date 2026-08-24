@@ -1,6 +1,13 @@
 /** Shared UI primitives used across panels: dots, clamps, chips, evidence. */
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { getStageActivity, promptRecordUrl, stageActivityCsvUrl } from "../api";
+import {
+  getStageActivity,
+  getThoughts,
+  promptRecordUrl,
+  stageActivityCsvUrl,
+  thoughtsFileUrl,
+} from "../api";
+import { BrainIcon } from "./Icons";
 import { revealStep } from "./live-threads";
 import type { CSSProperties, ReactNode } from "react";
 import type {
@@ -729,6 +736,123 @@ export function ActivityFeed({
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * Fetched thoughts, cached for the page's life: a recorded slice is
+ * immutable (it lives in the run's journal), so a card hovered twice must
+ * not fetch twice. Failures are NOT cached — a transient error retries on
+ * the next hover.
+ */
+const thoughtsCache = new Map<string, string>();
+
+/**
+ * The literal a capped slice's text ends with (the worker stamps it at
+ * capture time). Matched verbatim — journals already carry exactly this
+ * string — so the popover can swap it for a working download link.
+ */
+const THOUGHTS_TRUNCATION_MARK = "… [thoughts truncated]";
+
+/**
+ * The grey brain beside a card: hovering (or focusing) it opens a scrollable
+ * window with the recorded thinking behind exactly what the card shows — the
+ * same words the live thread streamed while it was being written, kept now
+ * as the task's captured trace. Clicking it downloads the FULL text as a
+ * file: the preview is the journal's capped slice, and a slice that was cut
+ * ends in a download link instead of a dead "truncated" notice. Styled like
+ * the live thread on purpose: this is working material, not an artifact,
+ * and it must never read as the chain.
+ */
+export function ThoughtsButton({ jobId, refId }: { jobId: string; refId: string }) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState<string | undefined>(() => thoughtsCache.get(refId));
+  const [failed, setFailed] = useState(false);
+  const closeTimer = useRef<number | undefined>(undefined);
+  const fileUrl = thoughtsFileUrl(jobId, refId);
+
+  const show = () => {
+    if (closeTimer.current !== undefined) {
+      window.clearTimeout(closeTimer.current);
+      closeTimer.current = undefined;
+    }
+    setOpen(true);
+    if (thoughtsCache.has(refId)) {
+      setText(thoughtsCache.get(refId));
+      return;
+    }
+    setFailed(false);
+    void getThoughts(jobId, refId).then(
+      (response) => {
+        thoughtsCache.set(refId, response.text);
+        setText(response.text);
+      },
+      () => setFailed(true),
+    );
+  };
+  // A short grace on leave, so crossing the gap between the icon and the
+  // window never snaps it shut mid-read.
+  const hide = () => {
+    closeTimer.current = window.setTimeout(() => setOpen(false), 200);
+  };
+
+  // The preview, with its tail made honest: a slice the journal capped ends
+  // in the link to the whole text instead of announcing a dead end.
+  const truncated = text !== undefined && text.endsWith(THOUGHTS_TRUNCATION_MARK);
+  const body = truncated ? text.slice(0, -THOUGHTS_TRUNCATION_MARK.length) : text;
+
+  return (
+    <span
+      className="thoughts-anchor"
+      onMouseEnter={show}
+      onMouseLeave={hide}
+      onFocus={show}
+      onBlur={hide}
+      onKeyDown={(event) => {
+        if (event.key === "Escape") setOpen(false);
+      }}
+    >
+      {/* An anchor, not a button: the click DOWNLOADS the full text (the
+          browser's own download, nothing through this page's state), while
+          hover and focus keep opening the preview. */}
+      <a
+        className="ghost-btn thoughts-btn"
+        href={fileUrl}
+        download
+        aria-label="download the full thoughts behind this version — hover to preview"
+        aria-expanded={open}
+      >
+        <BrainIcon />
+      </a>
+      {open && (
+        <div className="thoughts-pop" role="note">
+          <div className="thoughts-pop-head">
+            thoughts behind this version — recorded while it was written, not
+            part of the chain
+          </div>
+          <div className="thoughts-pop-body">
+            {failed ? (
+              <span className="dim">
+                could not load the thoughts — hover again to retry
+              </span>
+            ) : body === undefined ? (
+              <span className="dim">loading…</span>
+            ) : body.length === 0 ? (
+              <span className="dim">nothing was recorded for this version</span>
+            ) : (
+              <>
+                {body}
+                {truncated && (
+                  <a className="thoughts-download-line" href={fileUrl} download>
+                    … [download full version]
+                  </a>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+      )}
+    </span>
   );
 }
 

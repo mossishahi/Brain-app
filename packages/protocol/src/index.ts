@@ -944,6 +944,15 @@ export interface FirstPassMemberView {
   readonly idea?: BrainIdeaView;
   /** What this member's first-pass task(s) spent. */
   readonly usage?: TokenUsageView;
+  /**
+   * Handle for the thinking recorded while this seat wrote its FIRST
+   * version — the whole develop task's trace, not one step's slice.
+   * Preview at GET /api/jobs/:jobId/thoughts, full download at
+   * GET /api/jobs/:jobId/thoughts.txt, both `?ref=` this value. Absent when
+   * the run captured no thinking (offline runs, models without a reasoning
+   * channel).
+   */
+  readonly thoughts?: string;
   /** Set when the submitter dismissed this seat mid-run. */
   readonly dismissed?: DismissedSeatView;
 }

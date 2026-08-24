@@ -68,7 +68,9 @@ import {
   buildJobDetailWithActivity,
   compactJobDetail,
   liveIdentityPanel,
+  resolveFullThoughts,
   resolveThoughtsRef,
+  thoughtsFilename,
 } from "./stage-mapper.js";
 
 export interface JobManagerOptions {
@@ -922,6 +924,27 @@ export class JobManager {
     const checkpoint = this.checkpoint(jobId);
     if (!checkpoint) return undefined;
     return resolveThoughtsRef(checkpoint.journal, ref);
+  }
+
+  /**
+   * The FULL text behind a thoughts handle, as a named download: re-cut
+   * untruncated from the task's .thinking.json artifact when it exists,
+   * the journal's capped slice otherwise — the most that still exists.
+   */
+  fullThoughts(
+    jobId: string,
+    ref: string,
+  ): { readonly text: string; readonly filename: string } | undefined {
+    this.record(jobId); // "was not found" maps to 404 in the route's handler
+    const checkpoint = this.checkpoint(jobId);
+    if (!checkpoint) return undefined;
+    const text = resolveFullThoughts(
+      checkpoint.journal,
+      this.sessionDir(jobId),
+      ref,
+    );
+    if (text === undefined) return undefined;
+    return { text, filename: thoughtsFilename(ref) };
   }
 
   private checkpointStatus(jobId: string): JobStatus | undefined {

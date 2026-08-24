@@ -2,9 +2,12 @@ import { join } from "node:path";
 
 import {
   addUsage,
+  sliceThoughtsBySteps,
+  wholeThinkingTrace,
   type AgentResult,
   type JournalEntry,
   type JsonObject,
+  type JsonValue,
   type RunEvent,
   type TokenUsage,
   type WorkflowCheckpoint,
@@ -91,6 +94,10 @@ interface ArtifactRefFile {
     readonly nodeId?: string;
     readonly schema?: string;
     readonly path?: string;
+    /** "thinking" on reasoning-trace captures (see ThinkingArtifactAgentExecutor). */
+    readonly kind?: string;
+    /** The task whose trace a "thinking" artifact holds. */
+    readonly taskId?: string;
   };
 }
 
@@ -318,33 +325,120 @@ function stepThoughtsOf(entry: JournalEntry): Map<number, string> {
 }
 
 /**
- * The opaque handle a review view carries for one step's recorded thinking:
- * the journal key of the result holding the slice, then the step. The
- * thoughts endpoint parses it back and reads the same journal entry, so no
- * lookup table exists anywhere — the journal is the record on both sides.
+ * The opaque handle a view carries for recorded thinking: the journal key of
+ * the result holding the slices, then the step — or step 0 for the WHOLE
+ * task's thinking (a first-pass card's handle). The thoughts endpoints parse
+ * it back and read the same journal entry, so no lookup table exists
+ * anywhere — the journal is the record on both sides.
  */
 function thoughtsRef(journalKey: string, step: number): string {
   return `${journalKey}#${step}`;
 }
 
+/** A parsed handle: the journal key and the step (0 = the whole task). */
+function parseThoughtsRef(
+  ref: string,
+): { readonly key: string; readonly step: number } | undefined {
+  const hash = ref.lastIndexOf("#");
+  if (hash <= 0) return undefined;
+  const step = Number(ref.slice(hash + 1));
+  if (!Number.isSafeInteger(step) || step < 0) return undefined;
+  return { key: ref.slice(0, hash), step };
+}
+
 /**
- * Resolves a thoughts handle against the run's journal: the slice's text, or
- * undefined when the run never recorded it (an unknown key, a step the task
- * never submitted, or a handle from a different run). Exported for the
- * server's GET /api/jobs/:jobId/thoughts route.
+ * A task's whole recorded thinking as the JOURNAL holds it: every step's
+ * (already capped) slice in step order, headed so the boundaries stay
+ * legible. The preview of a whole-task handle; the untruncated original
+ * lives in the thinking artifact (see resolveFullThoughts).
+ */
+function joinedSlices(slices: ReadonlyMap<number, string>): string | undefined {
+  if (slices.size === 0) return undefined;
+  return [...slices.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([step, text]) => `— step ${step} —\n${text}`)
+    .join("\n\n");
+}
+
+/**
+ * Resolves a thoughts handle against the run's journal: the slice's text
+ * (step 0: every slice of the task, joined), or undefined when the run never
+ * recorded it (an unknown key, a step the task never submitted, or a handle
+ * from a different run). Exported for the server's
+ * GET /api/jobs/:jobId/thoughts route.
  */
 export function resolveThoughtsRef(
   entries: readonly JournalEntry[],
   ref: string,
 ): string | undefined {
-  const hash = ref.lastIndexOf("#");
-  if (hash <= 0) return undefined;
-  const key = ref.slice(0, hash);
-  const step = Number(ref.slice(hash + 1));
-  if (!Number.isSafeInteger(step) || step < 1) return undefined;
-  const entry = entries.find((candidate) => candidate.key === key);
+  const parsed = parseThoughtsRef(ref);
+  if (!parsed) return undefined;
+  const entry = entries.find((candidate) => candidate.key === parsed.key);
   if (!entry) return undefined;
-  return stepThoughtsOf(entry).get(step);
+  const slices = stepThoughtsOf(entry);
+  return parsed.step === 0 ? joinedSlices(slices) : slices.get(parsed.step);
+}
+
+/**
+ * The FULL text behind a thoughts handle, for the download endpoint: re-cut
+ * untruncated from the task's .thinking.json artifact (the whole stream for
+ * a step-0 handle, the step's own slice otherwise). Runs whose artifact is
+ * gone or predates trace capture fall back to the journal's capped slice —
+ * the most that still exists anywhere.
+ */
+export function resolveFullThoughts(
+  entries: readonly JournalEntry[],
+  sessionDir: string,
+  ref: string,
+): string | undefined {
+  const parsed = parseThoughtsRef(ref);
+  if (!parsed) return undefined;
+  const entry = entries.find((candidate) => candidate.key === parsed.key);
+  if (!entry || entry.kind !== "agent") return undefined;
+  const taskId = object(entry.value)?.taskId;
+  if (typeof taskId === "string" && taskId.length > 0) {
+    const trace = object(
+      readArtifacts(sessionDir).find(
+        ({ ref: candidate }) =>
+          candidate.metadata?.kind === "thinking" &&
+          candidate.metadata.taskId === taskId,
+      )?.value,
+    );
+    if (trace !== undefined) {
+      const segments = trace.segments as JsonValue | undefined;
+      const full =
+        parsed.step === 0
+          ? wholeThinkingTrace(segments)
+          : sliceThoughtsBySteps(
+              segments,
+              trace.stepTurns as JsonValue | undefined,
+              Infinity,
+            ).find((slice) => slice.step === parsed.step)?.text;
+      if (full !== undefined && full.length > 0) return full;
+    }
+  }
+  return resolveThoughtsRef(entries, ref);
+}
+
+/**
+ * A legible filename for a downloaded thoughts handle: the seat (when the
+ * key names one), the task node, and the step — e.g.
+ * "thoughts-seat-3-develop-idea-step-2.txt", "-full" for a whole-task
+ * handle. Never empty and never OS-hostile, whatever the ref carried.
+ */
+export function thoughtsFilename(ref: string): string {
+  const parsed = parseThoughtsRef(ref);
+  if (!parsed) return "thoughts.txt";
+  const member = /\/member\[(\d+)\]\//.exec(parsed.key);
+  const node = parsed.key
+    .replace(/::result$/, "")
+    .split("/")
+    .pop()!
+    .replace(/-execute$/, "")
+    .replace(/[^A-Za-z0-9._-]+/g, "-");
+  const seat = member ? `seat-${Number(member[1]) + 1}-` : "";
+  const step = parsed.step === 0 ? "full" : `step-${parsed.step}`;
+  return `thoughts-${seat}${node}-${step}.txt`;
 }
 
 /** The token-usage record of a journaled or evented value, when well-formed. */
@@ -3161,6 +3255,21 @@ export function buildJobDetailWithActivity(input: MapperInput): JobDetailWithAct
   const firstPassMembers: FirstPassMemberView[] = finalPanel.map((member, index) => {
     const idea = ideas.get(member.id);
     const usage = firstPassUsage(index);
+    // The thinking recorded while this seat wrote its FIRST version: a
+    // whole-task handle (step 0) on the develop task's journal entry —
+    // stamped only when the task actually recorded slices, so old runs and
+    // no-reasoning models simply show no icon.
+    const developEntry = entries.find(
+      (entry) =>
+        entry.kind === "agent" &&
+        entry.key.includes("/first-pass/") &&
+        entry.key.includes(`/member[${index}]/`) &&
+        /\/develop-idea(?:\/develop-idea-execute)?::result$/.test(entry.key),
+    );
+    const thoughts =
+      developEntry !== undefined && stepThoughtsOf(developEntry).size > 0
+        ? thoughtsRef(developEntry.key, 0)
+        : undefined;
     // Only the LAST lifecycle event decides failure: a member whose task
     // failed and then started again (auto-resume) is running, not failed.
     const lastLifecycle = [...events].reverse().find(
@@ -3193,6 +3302,7 @@ export function buildJobDetailWithActivity(input: MapperInput): JobDetailWithAct
             : "pending",
       ...(idea ? { idea } : {}),
       ...(usage !== undefined ? { usage } : {}),
+      ...(thoughts !== undefined ? { thoughts } : {}),
       ...dismissedSeat(member.id),
     };
   });

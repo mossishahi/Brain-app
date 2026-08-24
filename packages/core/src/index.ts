@@ -22,6 +22,7 @@ export * from "./model/dispatch.js";
 // Agent, skill, and tool contracts
 export * from "./agent/contracts.js";
 export * from "./agent/skill.js";
+export * from "./agent/thought-slices.js";
 export * from "./agent/tool.js";
 export * from "./agent/tool-detail.js";
 

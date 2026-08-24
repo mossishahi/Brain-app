@@ -666,7 +666,7 @@ export function Dashboard({
       case "first-pass": {
         const stage = stageOf(job, id);
         return stage && stage.members.length > 0 ? (
-          <FirstPassBody members={stage.members} live={liveByThinker} />
+          <FirstPassBody members={stage.members} live={liveByThinker} jobId={jobId} />
         ) : null;
       }
       case "review-members":

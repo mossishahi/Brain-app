@@ -542,16 +542,26 @@ activity feed, fold), and the *walk inspector* sits below in its own panel.
   "an earlier version", which restated what the pager arrows already show and labeled most of the
   deck for no decision it helped anyone make.
 - **Every version card carries a grey brain icon beside its copy icon** when the run recorded the
-  thinking behind that version. Hovering it (or focusing, or clicking) opens a scrollable window —
-  dressed like the live thread (dashed border, dim mono), never like an artifact — holding the
-  recorded per-step slice of the author's native-thinking stream: the SAME words the panel
-  streamed live while that version was being written, kept now as the task's captured trace. The
-  "Original thought" card shows the first-pass slice; a round's own card shows the redeveloper's
-  slice for the step it rewrote; a cross-edit card shows the origin round's slice for the step it
-  landed on. The text is fetched on demand (GET /api/jobs/:id/thoughts?ref=…) and cached — thoughts
+  thinking behind that version. Hovering it (or focusing) opens a scrollable window — dressed like
+  the live thread (dashed border, dim mono), never like an artifact — holding the recorded
+  per-step slice of the author's native-thinking stream: the SAME words the panel streamed live
+  while that version was being written, kept now as the task's captured trace. The "Original
+  thought" card shows the first-pass slice; a round's own card shows the redeveloper's slice for
+  the step it rewrote; a cross-edit card shows the origin round's slice for the step it landed
+  on. The preview is fetched on demand (GET /api/jobs/:id/thoughts?ref=…) and cached — thoughts
   are large and never ride the job snapshots. No icon renders when nothing was recorded: a
   withheld thinking channel is a normal answer, and a control that opens on emptiness reads as
   broken.
+- **Clicking the brain downloads the whole text as a file** (GET /api/jobs/:id/thoughts.txt?ref=…,
+  named like `thoughts-seat-3-develop-idea-step-2.txt`). The preview shows the journal's slice,
+  which is CAPPED at capture time so checkpoints stay bounded; the download is re-cut untruncated
+  from the task's own `.thinking.json` artifact (runs whose artifact is gone get the capped slice
+  — the most that still exists). A preview that was cut no longer ends in the dead
+  "… [thoughts truncated]" notice: its last line is "… [download full version]", a working link to
+  the same file the icon downloads.
+- **First-pass cards carry the same brain icon in their header**, holding the thinking recorded
+  while that seat wrote its FIRST version — a whole-task handle (the develop task's entire trace,
+  step-headed in the preview, the raw stream in the download) rather than one step's slice.
 - Round text: the step text as it came OUT of that round (its number is an identity, not a
   verdict — that round's verdict rides with its comments, one card back), full height, never
   clamped or scrolled. Words carried from earlier rounds render dimmed; the round's own changes

@@ -4186,8 +4186,26 @@ a.activity-entry:focus-visible {
   display: inline-flex;
 }
 
+/* An anchor wearing the ghost-button look: the click downloads, so it must
+   not read as a link mid-prose. */
 .thoughts-btn {
   color: var(--text-dim);
+  text-decoration: none;
+}
+
+/* A capped preview's tail: the link to the whole text, on its own line, in
+   the accent that says "this goes somewhere" — replacing the dead
+   "[thoughts truncated]" notice the slice itself ends with. */
+.thoughts-download-line {
+  display: block;
+  margin-top: 6px;
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.thoughts-download-line:hover,
+.thoughts-download-line:focus-visible {
+  text-decoration: underline;
 }
 
 .thoughts-pop {

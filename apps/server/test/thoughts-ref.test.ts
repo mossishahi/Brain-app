@@ -8,7 +8,12 @@ import type { JournalEntry } from "@brainstorm-agentic/core";
 import type { ServerSettings } from "@brainstorm-agentic/protocol";
 
 import type { JobRecord } from "../src/model.js";
-import { buildJobDetail, resolveThoughtsRef } from "../src/stage-mapper.js";
+import {
+  buildJobDetail,
+  resolveFullThoughts,
+  resolveThoughtsRef,
+  thoughtsFilename,
+} from "../src/stage-mapper.js";
 
 const settings: ServerSettings = {
   slurmTemplate: "{{BRAIN_COMMAND}}",
@@ -86,6 +91,94 @@ test("an unknown key, step, or malformed handle resolves to nothing", () => {
   // An EMPTY recorded slice is dropped at capture, so it never resolves —
   // matching the view side, which mints no handle for it.
   assert.equal(resolveThoughtsRef(journal, `${DEVELOP_KEY}#2`), undefined);
+});
+
+test("a whole-task handle (step 0) joins every recorded slice, step-headed", () => {
+  assert.equal(
+    resolveThoughtsRef(journal, `${DEVELOP_KEY}#0`),
+    "— step 1 —\nthe thinking behind step one",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// resolveFullThoughts: the download's half — the artifact's untruncated cut
+// ---------------------------------------------------------------------------
+
+test("the full text is re-cut from the thinking artifact; a missing artifact falls back to the journal", () => {
+  const workspace = mkdtempSync(join(tmpdir(), "thoughts-full-test-"));
+  try {
+    const sessionDir = join(workspace, "session");
+    mkdirSync(join(sessionDir, "artifacts"), { recursive: true });
+    writeFileSync(
+      join(sessionDir, "artifacts", "index.json"),
+      JSON.stringify({
+        refs: [
+          {
+            id: "a-thinking",
+            metadata: { kind: "thinking", taskId: "t-develop" },
+          },
+        ],
+      }),
+    );
+    // The artifact's trace differs from the journal's capped slice on
+    // purpose: whichever text comes back names its source.
+    writeFileSync(
+      join(sessionDir, "artifacts", "a-thinking"),
+      JSON.stringify({
+        taskId: "t-develop",
+        nodePath: "first-pass/member[0]/develop-idea",
+        segments: [
+          { turn: 1, text: "the UNCUT thinking behind step one" },
+          { turn: 2, text: "the tail written after the last step" },
+        ],
+        stepTurns: [{ index: 1, turn: 1 }],
+      }),
+    );
+
+    // A step handle: the artifact's own slice, not the journal's.
+    assert.equal(
+      resolveFullThoughts(journal, sessionDir, `${DEVELOP_KEY}#1`),
+      "the UNCUT thinking behind step one",
+    );
+    // A whole-task handle: the entire stream, tail included.
+    assert.equal(
+      resolveFullThoughts(journal, sessionDir, `${DEVELOP_KEY}#0`),
+      "the UNCUT thinking behind step one\n\nthe tail written after the last step",
+    );
+    // A handle whose task has no artifact (trimmed, or captured before the
+    // artifact existed): the journal's capped slice is the most that exists.
+    const bare = mkdtempSync(join(tmpdir(), "thoughts-bare-test-"));
+    try {
+      mkdirSync(join(bare, "artifacts"), { recursive: true });
+      writeFileSync(join(bare, "artifacts", "index.json"), JSON.stringify({ refs: [] }));
+      assert.equal(
+        resolveFullThoughts(journal, bare, `${DEVELOP_KEY}#1`),
+        "the thinking behind step one",
+      );
+    } finally {
+      rmSync(bare, { recursive: true, force: true });
+    }
+    // Handles that resolve to nothing stay nothing.
+    assert.equal(resolveFullThoughts(journal, sessionDir, "some-other-key#1"), undefined);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("a downloaded file's name says whose thinking it is and which step", () => {
+  assert.equal(
+    thoughtsFilename(`${DEVELOP_KEY}#0`),
+    "thoughts-seat-1-develop-idea-full.txt",
+  );
+  assert.equal(
+    thoughtsFilename(`${DEVELOP_KEY}#2`),
+    "thoughts-seat-1-develop-idea-step-2.txt",
+  );
+  assert.equal(
+    thoughtsFilename(`${REVISION_KEY}#2`),
+    "thoughts-seat-1-redevelop-idea-step-2.txt",
+  );
+  assert.equal(thoughtsFilename("malformed"), "thoughts.txt");
 });
 
 // ---------------------------------------------------------------------------
@@ -244,6 +337,19 @@ test("review views carry resolvable handles for the original and the rewrite", (
       resolveThoughtsRef(entries, rewrite.thoughts),
       "the reviser's thinking behind the repair",
     );
+
+    // The first-pass card's handle: the WHOLE develop task's thinking
+    // (step 0), minted only for the seat whose task recorded slices.
+    const firstPass = detail.stages.find((candidate) => candidate.id === "first-pass");
+    assert.ok(firstPass && firstPass.id === "first-pass");
+    const seatOne = firstPass.members.find((member) => member.memberId === "member-1");
+    assert.equal(seatOne?.thoughts, `${DEVELOP_KEY}#0`);
+    assert.equal(
+      resolveThoughtsRef(entries, seatOne!.thoughts!),
+      "— step 1 —\nfirst-pass thinking behind step one\n\n— step 2 —\nfirst-pass thinking behind step two",
+    );
+    const seatTwo = firstPass.members.find((member) => member.memberId === "member-2");
+    assert.equal(seatTwo?.thoughts, undefined, "no recorded slices, no handle");
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }

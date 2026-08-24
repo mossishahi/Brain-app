@@ -28,6 +28,7 @@ import {
   EvidenceBlock,
   LiveThread,
   StepBlocks,
+  ThoughtsButton,
   TokenChip,
   textStepBlocks,
 } from "../common";
@@ -649,10 +650,13 @@ export function IdeaTabs({ idea }: { idea: BrainIdeaView }) {
 function MemberCard({
   member,
   live,
+  jobId,
 }: {
   member: FirstPassMemberView;
   /** What this seat is saying while it thinks; absent once its idea exists. */
   live?: string;
+  /** The run the card belongs to; addresses the thoughts preview/download. */
+  jobId: string;
 }) {
   const status = memberStatus(member.status);
   return (
@@ -661,6 +665,11 @@ function MemberCard({
         <span className="member-umbrella">{member.umbrella}</span>
         <span className="member-dept">{member.department}</span>
         {member.usage && <TokenChip usage={member.usage} />}
+        {/* The thinking recorded while this seat wrote its first version:
+            hover previews, click downloads the whole trace. */}
+        {member.thoughts !== undefined && (
+          <ThoughtsButton jobId={jobId} refId={member.thoughts} />
+        )}
         <span className="member-status">
           <Dot state={status.dot} />
           {status.text}
@@ -678,10 +687,13 @@ function MemberCard({
 export function FirstPassBody({
   members,
   live,
+  jobId,
 }: {
   members: readonly FirstPassMemberView[];
   /** Live text per seat id, for the seats still thinking. */
   live?: ReadonlyMap<string, string>;
+  /** The run the cards belong to; addresses each card's thoughts handle. */
+  jobId: string;
 }) {
   return (
     <div className="member-grid">
@@ -689,6 +701,7 @@ export function FirstPassBody({
         <MemberCard
           key={m.memberId}
           member={m}
+          jobId={jobId}
           {...(live?.get(m.memberId) !== undefined ? { live: live.get(m.memberId)! } : {})}
         />
       ))}

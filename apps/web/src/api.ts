@@ -364,6 +364,16 @@ export const getStageActivity = (
 export const stageActivityCsvUrl = (jobId: string, stageId: string): string =>
   `${API_BASE}/jobs/${encodeURIComponent(jobId)}/stages/${encodeURIComponent(stageId)}/activity.csv`;
 
+/**
+ * The FULL text behind a thoughts handle, as a file. The popover previews
+ * the journal's capped slice; this serves the untruncated trace (re-cut from
+ * the task's thinking artifact). A URL for the same reason as above: the
+ * brain icon and the popover's tail LINK at it, the browser downloads, and
+ * the server names the file.
+ */
+export const thoughtsFileUrl = (jobId: string, ref: string): string =>
+  `${API_BASE}/jobs/${encodeURIComponent(jobId)}/thoughts.txt?ref=${encodeURIComponent(ref)}`;
+
 export function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
