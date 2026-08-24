@@ -3463,6 +3463,33 @@ a.activity-entry:focus-visible {
   flex-wrap: wrap;
 }
 
+/* The identity strip: takes all the room the pinned controls leave, and PANS
+   sideways when the expertise outgrows it — by the user's own scroll only
+   (nothing auto-moves), and with no bar drawn (Firefox gets none via
+   scrollbar-width, WebKit via the pseudo-element). Text only, so its items
+   align by baseline among themselves while the head centers the strip as
+   one box beside the chip and the icons. */
+.member-identity {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+  white-space: nowrap;
+}
+
+.member-identity::-webkit-scrollbar {
+  display: none;
+}
+
+/* Nothing inside the strip shrinks, wraps, or ellipsises: the strip scrolls
+   instead, so every subfield stays reachable. */
+.member-identity > * {
+  flex: 0 0 auto;
+}
+
 .member-umbrella {
   font-weight: 600;
 }
@@ -3470,11 +3497,12 @@ a.activity-entry:focus-visible {
 .member-dept {
   font-size: 12px;
   color: var(--text-dim);
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+}
+
+.member-subfields {
+  font-size: 12px;
+  color: var(--text-dim);
+  opacity: 0.8;
 }
 
 .member-status {

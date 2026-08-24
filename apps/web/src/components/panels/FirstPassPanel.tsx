@@ -779,8 +779,17 @@ function MemberCard({
   return (
     <div className={`member-card${member.dismissed ? " member-dismissed" : ""}`}>
       <div className="member-head">
-        <span className="member-umbrella">{member.umbrella}</span>
-        <span className="member-dept">{member.department}</span>
+        {/* The seat's whole expertise — umbrella, department, subfields — in
+            a strip that pans horizontally under the pointer when it runs out
+            of card. The controls to the right stay pinned; only the identity
+            scrolls. */}
+        <span className="member-identity">
+          <span className="member-umbrella">{member.umbrella}</span>
+          <span className="member-dept">{member.department}</span>
+          {member.subfields.length > 0 && (
+            <span className="member-subfields">{member.subfields.join(" · ")}</span>
+          )}
+        </span>
         {member.usage && <TokenChip usage={member.usage} />}
         {/* The thinking recorded while this seat wrote its first version:
             hover previews, click downloads the whole trace. */}
