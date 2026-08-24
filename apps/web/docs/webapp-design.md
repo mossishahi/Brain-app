@@ -553,12 +553,16 @@ activity feed, fold), and the *walk inspector* sits below in its own panel.
   withheld thinking channel is a normal answer, and a control that opens on emptiness reads as
   broken.
 - **Clicking the brain downloads the whole text as a file** (GET /api/jobs/:id/thoughts.txt?ref=…,
-  named like `thoughts-seat-3-develop-idea-step-2.txt`). The preview shows the journal's slice,
-  which is CAPPED at capture time so checkpoints stay bounded; the download is re-cut untruncated
-  from the task's own `.thinking.json` artifact (runs whose artifact is gone get the capped slice
-  — the most that still exists). A preview that was cut no longer ends in the dead
-  "… [thoughts truncated]" notice: its last line is "… [download full version]", a working link to
-  the same file the icon downloads.
+  named like `thoughts-seat-3-develop-idea-step-2.txt`); hovering it colors the icon accent, since
+  unlike its grey ghost-button neighbours this control goes somewhere. The preview shows at most
+  the first four paragraphs of the journal's slice (the file is one click away, so the hover
+  window stopped being a reading surface for whole traces); the slice itself is CAPPED at capture
+  time so checkpoints stay bounded, and the download is re-cut untruncated from the task's own
+  `.thinking.json` artifact (runs whose artifact is gone get the capped slice — the most that
+  still exists). A preview that was cut — by the paragraph cap or the capture-time mark — ends in
+  "… [download full version]": the brackets stay quiet prose, the words are the link, and the
+  download runs through a detached anchor with selection disabled, because a press that drifts a
+  few pixels otherwise becomes a drag-select and a drag-selected link click navigates nowhere.
 - **First-pass cards carry the same brain icon in their header**, holding the thinking recorded
   while that seat wrote its FIRST version — a whole-task handle (the develop task's entire trace,
   step-headed in the preview, the raw stream in the download) rather than one step's slice.

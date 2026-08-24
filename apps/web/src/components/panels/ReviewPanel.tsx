@@ -983,6 +983,8 @@ function RoundDeck({
 
   // The card for the version being written: the same frame its output will
   // have, with the words as they arrive in the body the output will fill.
+  // The head carries no status label — the live thread right below already
+  // says who is thinking, and said it twice when the head did too.
   if (entry === undefined && pending !== undefined) {
     return (
       <div className="round-card" key="pending">
@@ -992,7 +994,6 @@ function RoundDeck({
             Round <span className="round-num-active">{nextRound}</span>
           </span>
           {newerButton}
-          <span className="review-step-meta">being written now</span>
         </div>
         <LiveThread text={pending.text} label={pending.actor ?? "redeveloper"} />
       </div>

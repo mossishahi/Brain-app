@@ -755,6 +755,29 @@ const thoughtsCache = new Map<string, string>();
 const THOUGHTS_TRUNCATION_MARK = "… [thoughts truncated]";
 
 /**
+ * How much of the thoughts a PREVIEW shows. The full text is one click away
+ * now, so the hover window stops being a reading surface for whole traces —
+ * four paragraphs say what the thinking was about; the file carries the rest
+ * (a whole-task preview otherwise pours hundreds of KB into a 280px window).
+ */
+const THOUGHTS_PREVIEW_PARAGRAPHS = 4;
+
+/**
+ * Downloads through a detached anchor, immune to the popover's own life
+ * cycle: the rendered link sits inside a window that closes on blur and
+ * whose text can be swept into a selection mid-click — a drag-select on a
+ * link navigates nowhere, which shipped as "the download link does nothing".
+ */
+function saveFromUrl(url: string): void {
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = "";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+}
+
+/**
  * The grey brain beside a card: hovering (or focusing) it opens a scrollable
  * window with the recorded thinking behind exactly what the card shows — the
  * same words the live thread streamed while it was being written, kept now
@@ -796,10 +819,20 @@ export function ThoughtsButton({ jobId, refId }: { jobId: string; refId: string 
     closeTimer.current = window.setTimeout(() => setOpen(false), 200);
   };
 
-  // The preview, with its tail made honest: a slice the journal capped ends
-  // in the link to the whole text instead of announcing a dead end.
-  const truncated = text !== undefined && text.endsWith(THOUGHTS_TRUNCATION_MARK);
-  const body = truncated ? text.slice(0, -THOUGHTS_TRUNCATION_MARK.length) : text;
+  // The preview: at most a few paragraphs, its tail made honest. Whether the
+  // cut is ours (the paragraph cap) or the journal's (the capture-time
+  // truncation mark), the tail is the link to the whole text instead of a
+  // dead notice.
+  const paragraphs = text?.split("\n\n");
+  const capped =
+    paragraphs !== undefined && paragraphs.length > THOUGHTS_PREVIEW_PARAGRAPHS;
+  const marked = text !== undefined && text.endsWith(THOUGHTS_TRUNCATION_MARK);
+  const truncated = capped || marked;
+  const body = capped
+    ? paragraphs.slice(0, THOUGHTS_PREVIEW_PARAGRAPHS).join("\n\n")
+    : marked
+      ? text.slice(0, -THOUGHTS_TRUNCATION_MARK.length)
+      : text;
 
   return (
     <span
@@ -843,9 +876,25 @@ export function ThoughtsButton({ jobId, refId }: { jobId: string; refId: string 
               <>
                 {body}
                 {truncated && (
-                  <a className="thoughts-download-line" href={fileUrl} download>
-                    … [download full version]
-                  </a>
+                  <span className="thoughts-download-line dim">
+                    {"… ["}
+                    <a
+                      href={fileUrl}
+                      download
+                      draggable={false}
+                      // No focus steal, no selection start: a press that
+                      // drifts a few pixels otherwise becomes a drag-select,
+                      // and a drag-selected link click navigates nowhere.
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={(event) => {
+                        event.preventDefault();
+                        saveFromUrl(fileUrl);
+                      }}
+                    >
+                      download full version
+                    </a>
+                    {"]"}
+                  </span>
                 )}
               </>
             )}
@@ -1177,8 +1226,12 @@ export function LiveThread({ text, label }: { text: string; label?: string }) {
     <div className="live-thread">
       <div className="live-thread-head">
         <span className="dot dot-accent pulse" aria-hidden />
-        <span>{label ?? "thinking aloud"}</span>
-        <span className="dim">— live, replaced by the result</span>
+        {/* "Seat 2 is thinking", the verb breathing on the shared soft-pulse —
+            which already stops for prefers-reduced-motion and paused runs. */}
+        <span>
+          {label !== undefined && `${label} is `}
+          <span className="pulse">thinking</span>
+        </span>
       </div>
       <div
         className="live-thread-body"

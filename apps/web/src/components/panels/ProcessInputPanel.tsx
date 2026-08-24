@@ -397,8 +397,11 @@ export function ClassificationGateCard({
 /** The classification record once the gate is no longer pending. */
 export function ClassificationDecided({
   classification,
+  cotSteps,
 }: {
   classification: ClassificationStageView;
+  /** The chain length, riding the decided line's chips when known. */
+  cotSteps?: number;
 }) {
   const { gate } = classification;
   if (gate.state === "not-reached") return null;
@@ -412,15 +415,22 @@ export function ClassificationDecided({
   return (
     <div className="classification-decided">
       <p className="gate-decided">
-        {text}
-        {gate.decidedAt !== undefined && ` · ${formatClock(gate.decidedAt)}`}
-        <span className="dim small">
-          {" "}
-          (alternative was "
-          {chosen === classification.alternative.type
-            ? classification.primary.type
-            : classification.alternative.type}
-          ")
+        {/* The stage's two facts lead the line they used to sit under. */}
+        <span className="chip chip-accent">{chosen}</span>
+        {cotSteps !== undefined && (
+          <span className="chip chip-dim">{cotSteps} chain steps</span>
+        )}
+        <span>
+          {text}
+          {gate.decidedAt !== undefined && ` · ${formatClock(gate.decidedAt)}`}
+          <span className="dim small">
+            {" "}
+            (alternative was "
+            {chosen === classification.alternative.type
+              ? classification.primary.type
+              : classification.alternative.type}
+            ")
+          </span>
         </span>
       </p>
     </div>
@@ -455,24 +465,33 @@ export function RoleLive({ thread }: { thread: RoleThread | undefined }) {
 export function ProcessInputBody({
   output,
   files,
+  factChips = true,
 }: {
   output: ProcessorOutputView;
   files?: FilePartitionView;
+  /**
+   * Whether the type/chain chips render here. Off once the classification's
+   * decided line exists — the chips lead THAT line then, and a second copy
+   * below it read as two different facts.
+   */
+  factChips?: boolean;
 }) {
   return (
     <div>
-      <div className="fact-row">
-        {/* What kind of submission this is; shapes the First pass primary tab.
-            Absent while the run sits between preprocessing and classification. */}
-        {output.type !== undefined ? (
-          <span className="chip chip-accent">{output.type}</span>
-        ) : (
-          <span className="chip chip-dim">type: classifying…</span>
-        )}
-        {output.cotSteps !== undefined && (
-          <span className="chip chip-dim">{output.cotSteps} chain steps</span>
-        )}
-      </div>
+      {factChips && (
+        <div className="fact-row">
+          {/* What kind of submission this is; shapes the First pass primary tab.
+              Absent while the run sits between preprocessing and classification. */}
+          {output.type !== undefined ? (
+            <span className="chip chip-accent">{output.type}</span>
+          ) : (
+            <span className="chip chip-dim">type: classifying…</span>
+          )}
+          {output.cotSteps !== undefined && (
+            <span className="chip chip-dim">{output.cotSteps} chain steps</span>
+          )}
+        </div>
+      )}
       <h3 className="artifact-title">{output.title}</h3>
       <blockquote className="question">{output.question}</blockquote>
       <Clamp text={output.context} />

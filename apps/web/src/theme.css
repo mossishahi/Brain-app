@@ -3410,6 +3410,12 @@ a.activity-entry:focus-visible {
 .gate-decided {
   font-size: 13px;
   color: var(--text-dim);
+  /* Chips and sentence share the line: flex centers the pills against the
+     text instead of dropping them onto a row of their own. */
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 /* -------------------------------------------------------------- first pass */
@@ -4187,25 +4193,43 @@ a.activity-entry:focus-visible {
 }
 
 /* An anchor wearing the ghost-button look: the click downloads, so it must
-   not read as a link mid-prose. */
+   not read as a link mid-prose. Hover and focus take the accent — this
+   control GOES somewhere, unlike its grey ghost-button neighbours. */
 .thoughts-btn {
   color: var(--text-dim);
   text-decoration: none;
 }
 
-/* A capped preview's tail: the link to the whole text, on its own line, in
-   the accent that says "this goes somewhere" — replacing the dead
-   "[thoughts truncated]" notice the slice itself ends with. */
+.thoughts-btn:hover,
+.thoughts-btn:focus-visible {
+  color: var(--accent);
+}
+
+/* A capped preview's tail, replacing the dead "[thoughts truncated]" notice
+   the slice itself ends with. The brackets stay quiet prose; only the words
+   that GO somewhere wear the accent. */
 .thoughts-download-line {
   display: block;
   margin-top: 6px;
-  color: var(--accent);
-  text-decoration: none;
 }
 
-.thoughts-download-line:hover,
-.thoughts-download-line:focus-visible {
+.thoughts-download-line > a {
+  color: var(--accent);
+  text-decoration: none;
+  /* Belt to the mousedown handler's braces: never a text-selection target. */
+  user-select: none;
+}
+
+.thoughts-download-line > a:hover,
+.thoughts-download-line > a:focus-visible {
   text-decoration: underline;
+}
+
+/* The member head aligns its TEXT by baseline (umbrella against department);
+   the brain anchor has no baseline worth aligning and floated high — the
+   icon centers against the line instead. */
+.member-head > .thoughts-anchor {
+  align-self: center;
 }
 
 .thoughts-pop {

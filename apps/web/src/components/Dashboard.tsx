@@ -617,7 +617,10 @@ export function Dashboard({
               />
             )}
             {!classificationPending && stage?.classification && (
-              <ClassificationDecided classification={stage.classification} />
+              <ClassificationDecided
+                classification={stage.classification}
+                cotSteps={stage.output?.cotSteps}
+              />
             )}
             {/* Each thread waits where its OWN output will appear, and is
                 replaced by it: the classifier's reading in the card above, the
@@ -627,7 +630,12 @@ export function Dashboard({
               <RoleLive thread={threadFor(threads, "Classifier")} />
             )}
             {stage?.output ? (
-              <ProcessInputBody output={stage.output} files={stage.files} />
+              <ProcessInputBody
+                output={stage.output}
+                files={stage.files}
+                // The decided line above carries the chips once it exists.
+                factChips={classificationPending || !stage.classification}
+              />
             ) : (
               <RoleLive thread={threadFor(threads, "Processor")} />
             )}
