@@ -298,22 +298,45 @@ answers: the actor is the seat writing, the place is the seat being read. A roun
 the panel minus the seat under review, in seat order, so the index in an execution path only becomes
 a seat once it is projected back over the roster — the server does that, and sends no paths.
 
-The Activity feed's cap RESERVES its newest rows for entries without a capability icon — model
-turns, agent starts and completions. Tool rows otherwise win the whole cap (a live review was
-observed holding 200 rows, all 200 of them capability rows), and since the quiet-period warning is
-measured from the newest row the client was sent, the feed's clock then ticked only on tool calls:
-a long stretch of pure reasoning rendered as "no new events for 26m" on a run that was working.
+**An operation is ONE row, not two.** A tool call and an agent task are spans — they start, they
+end — and the old feed logged each end as its own line, so half the feed was "X finished" echoes of
+lines a few rows up. The server now folds the finish into the start's row: the line appears when the
+work starts, and when it ends the same line gains its **status** ("finished" green, "failed" red,
+empty while it still runs), its elapsed time, and — for an agent task — its token spend. The status
+lives in its own fixed column so the eye can scan outcomes down the feed, and the row's dot takes
+the outcome's colour. The event log itself stays append-only (starts and finishes are separate
+journal lines, which is what makes this work retroactively for every old run); the fold happens
+where the rows are built, and the row is addressed by the start's id, so a client that already
+rendered the open row simply sees it update in place.
+
+**The feed has no cap — it has a window.** The server keeps every stage's whole history
+(`activityTotal` counts it) and embeds only the newest ~200 rows in a detail, plus a handful of
+"late edits": older rows whose span just closed, riding along so an already-rendered line still
+gains its outcome. `activityFloor` names the row id from which the embedded window is gap-free —
+the anchor the client pages against. Scrolling toward the top fetches the previous page
+(`GET /api/jobs/:jobId/stages/:stageId/activity?before=<id>`) and joins it seamlessly below the
+floor, so the reader can walk from the newest row to the very first. The list is virtualized: only
+the rows in view (plus a small overscan) exist in the DOM, with two spacers standing in for the
+rest — a feed of any length costs the browser a couple dozen nodes, which is what makes unbounded
+history affordable. Every row is exactly 28px tall by stylesheet contract; the spacer arithmetic
+depends on it.
+
+**The whole log is one click away.** The download arrow in the feed's header links to
+`GET /api/jobs/:jobId/stages/:stageId/activity.csv` — every merged row of that stage at that
+moment, with the same columns the feed shows (time, status, role, actor, where, message, tool,
+elapsed, spend, capability, call detail). An anchor with `download`, not a handler: the browser
+saves the file the server names, and none of it passes through the page's state.
 
 The Activity feed scrolls in BOTH directions: rows never wrap, so a long line — a command with its
 flags, a file path, a whole search query — is read by scrolling sideways rather than folded into two
 lines that break the column alignment. The column gutters are tight (4px) because five columns of
 small text read as a table, not as prose.
 
-While an agent is active, the frame also shows a bounded **Activity** feed (latest 20 of up to 200
-stored events): agent start/completion, model turns, WebSearch/WebFetch/Read/Glob/Grep/Bash starts,
-five-second tool heartbeats, API retries, context compaction, and artifact validation. These are
-sanitized operational events only — assistant prose, chain-of-thought, prompts, credentials, tool
-outputs, and command contents are never logged or sent to the browser.
+While an agent is active, the frame also shows the **Activity** feed's live tail: agent spans,
+model turns, WebSearch/WebFetch/Read/Glob/Grep/Bash calls, five-second tool heartbeats, API
+retries, context compaction, and artifact validation. These are sanitized operational events only —
+assistant prose, chain-of-thought, prompts, credentials, tool outputs, and command contents are
+never logged or sent to the browser.
 
 **1. Process input** — the classifier. Body: a row of facts — the submission-type chip (accent
 outline; the label is whatever the bundle's `catalog/input-types.json` defines — that file is the

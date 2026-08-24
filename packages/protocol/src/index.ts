@@ -92,6 +92,16 @@ export interface StageActivityEntry {
   readonly toolName?: string;
   readonly turn?: number;
   readonly elapsedMs?: number;
+  /**
+   * How the operation this row describes ENDED. An operation is a paired
+   * span — a tool call, an agent task — whose start and finish the mapper
+   * folds into the start's single row: the finish stamps this field (and the
+   * elapsed time, and for agents the spend) onto the row a reader is already
+   * looking at, instead of appending a second "finished" line. Absent while
+   * the operation still runs, and on rows that are not operations at all
+   * (model turns, retries, validation notes).
+   */
+  readonly outcome?: "finished" | "failed";
   /** Present on tool events whose tool maps to a semantic capability. */
   readonly capability?: ActivityCapability;
   /** Present when the executor attached the call's operational detail. */
@@ -165,10 +175,35 @@ export interface StageBase {
    * newest message for compatibility.
    */
   readonly errors?: readonly StageErrorView[];
-  /** Sanitized operational events, oldest to newest (never chain-of-thought). */
+  /**
+   * Sanitized operational events, oldest to newest (never chain-of-thought).
+   * A WINDOW, not the whole log: the newest rows, plus a handful of older
+   * rows whose operation just ended (their line gains its outcome in place).
+   * The full history is served page by page at
+   * GET /api/jobs/:jobId/stages/:stageId/activity.
+   */
   readonly activity?: readonly StageActivityEntry[];
+  /** How many activity rows the stage has IN TOTAL, beyond the window. */
+  readonly activityTotal?: number;
+  /**
+   * The row id from which `activity` is GAP-FREE to the end. Rows before it
+   * (late edits of old operations) may have unsent neighbours, so a reader
+   * paging backwards anchors joins here, not at the array's first element.
+   */
+  readonly activityFloor?: string;
   /** Total token spend of the stage's agent tasks (all fan-out branches). */
   readonly usage?: TokenUsageView;
+}
+
+/**
+ * One page of a stage's full activity history, oldest to newest. `entries`
+ * are the `limit` rows immediately before the `before` row id (exclusive),
+ * or the newest rows when `before` is absent; `total` is the whole history's
+ * length, which is how a reader knows there is more above.
+ */
+export interface StageActivityPage {
+  readonly entries: readonly StageActivityEntry[];
+  readonly total: number;
 }
 
 /* --------------------------------------------------- per-stage artifact views */

@@ -127,33 +127,32 @@ interface StageTiming {
 }
 
 /**
- * An activity row while the mapper still holds it: the wire shape plus the two
- * things the annotation is derived from. Both are stripped on the way out — the
- * client is shown who and where, not the execution path they were read from.
- *
- * They are carried rather than resolved on the spot because the ROSTER is not
- * known yet when the rows are built: the panel the run executed depends on the
- * confirmation gate's answer, which is read further down.
+ * An activity row while the mapper still holds it: the wire shape (writable,
+ * because a finish event EDITS the start's row in place) plus what the wire
+ * never carries. `path` and `taskKind` feed the who/where annotation — the
+ * roster they resolve against depends on the confirmation gate's answer,
+ * read further down — and `lastIndex` is the position of the row's newest
+ * event, which is what the embedded window is selected by (see base()).
+ * All three are stripped on the way out.
  */
-interface ActivityRow extends StageActivityEntry {
+type ActivityRow = {
+  -readonly [K in keyof StageActivityEntry]: StageActivityEntry[K];
+} & {
   readonly path: string;
-  readonly taskKind?: string;
-}
+  taskKind?: string;
+  lastIndex: number;
+};
 
 /** Failures kept per stage and attempt; older ones roll off first. */
 const MAX_STAGE_ERRORS = 20;
 
-/** Activity rows kept per stage; the newest survive. */
-const ACTIVITY_CAP = 200;
-
 /**
- * Of that cap, how many newest rows are held for entries WITHOUT a capability
- * icon — model turns, agent starts and completions, heartbeats. They are the
- * only evidence that the run is moving at all, and the client's quiet-period
- * warning is measured from the newest row it was sent, so starving them makes
- * a working run look stalled.
+ * Activity rows EMBEDDED per stage in a JobDetail — a window, not a cap: the
+ * stage keeps its whole history (activityTotal counts it), older rows are
+ * served page by page, and this is just how much of the newest end rides
+ * along with every detail.
  */
-const RESERVED_PLAIN_ROWS = 60;
+const ACTIVITY_WINDOW = 200;
 
 /**
  * Records one node:failed event on its stage, collapsing the propagation
@@ -599,6 +598,21 @@ function timings(
   const result = new Map<StageId, StageTiming>(
     STAGE_IDS.map((id) => [id, { active: false, errors: [], activity: [] }]),
   );
+  // Open operations still waiting for their finish event. A finish EDITS its
+  // start's row (outcome, elapsed, spend) instead of appending a second
+  // "finished" line — one operation, one row. The events carry no call id, so
+  // a finish finds its start by key: tool spans by path + tool name, agent
+  // spans by path + task id. Newest-open-first on collision, which is the
+  // right answer for the collisions that exist — a retried task re-starts
+  // under the same key, and the attempt that finished is the newest one; the
+  // abandoned start stays legibly unfinished.
+  const openTools = new Map<string, ActivityRow[]>();
+  const openAgents = new Map<string, ActivityRow[]>();
+  const pushOpen = (map: Map<string, ActivityRow[]>, key: string, row: ActivityRow) => {
+    const stack = map.get(key);
+    if (stack === undefined) map.set(key, [row]);
+    else stack.push(row);
+  };
   // Activity entries are identified and ORDERED by their position in the
   // event log, never by event.seq: every resume restarts seq at 0, and one
   // job's log carries every attempt, so seq collides across attempts and a
@@ -619,12 +633,32 @@ function timings(
           ? toolCapability(event.progress.toolName)
           : undefined;
         const detail = activityDetail(event.progress);
-        timing.activity.push({
+        if (event.progress.kind === "tool_end") {
+          const open = openTools
+            .get(`${event.path}|${event.progress.toolName ?? ""}`)
+            ?.pop();
+          if (open !== undefined) {
+            open.outcome = event.progress.failed === true ? "failed" : "finished";
+            open.elapsedMs =
+              event.progress.elapsedMs ?? Math.max(0, event.at - open.at);
+            // Some executors attach the call detail to the finish only.
+            if (open.detail === undefined && detail !== undefined) {
+              open.detail = detail;
+            }
+            open.lastIndex = eventIndex;
+            continue;
+          }
+          // No start to edit — a log that begins mid-span (rotation,
+          // truncation) or predates start events. The finish stands alone,
+          // still carrying its outcome.
+        }
+        const row: ActivityRow = {
           id: String(eventIndex),
           at: event.at,
           kind: event.progress.kind,
           message: event.progress.message,
           path: event.path,
+          lastIndex: eventIndex,
           ...(event.taskKind !== undefined ? { taskKind: event.taskKind } : {}),
           ...(event.progress.toolName
             ? { toolName: event.progress.toolName }
@@ -645,55 +679,67 @@ function timings(
             : {}),
           ...(capability ? { capability } : {}),
           ...(detail ? { detail } : {}),
-        });
+          ...(event.progress.kind === "tool_end"
+            ? {
+                outcome:
+                  event.progress.failed === true
+                    ? ("failed" as const)
+                    : ("finished" as const),
+              }
+            : {}),
+        };
+        timing.activity.push(row);
+        if (event.progress.kind === "tool_start") {
+          pushOpen(
+            openTools,
+            `${event.path}|${event.progress.toolName ?? ""}`,
+            row,
+          );
+        }
       } else {
         const role = event.taskKind.replace(/^brainstorm\./, "");
-        // Completion rows carry the spend: the event's own usage is THIS
-        // attempt's; older runs whose events predate usage stamping fall
-        // back to the journaled task total.
-        const usage =
-          event.type === "agent:completed"
-            ? (event.usage ?? taskUsage.get(event.taskId))
-            : undefined;
-        timing.activity.push({
-          id: String(eventIndex),
-          at: event.at,
-          kind: "status",
-          path: event.path,
-          taskKind: event.taskKind,
-          message:
-            event.type === "agent:started"
-              ? `${role} agent started`
-              : `${role} agent ${event.status === "ok" ? "completed" : "failed"}`,
-          ...(usage !== undefined ? { usage } : {}),
-        });
-      }
-      if (timing.activity.length > ACTIVITY_CAP) {
-        // Trim to the cap, but evict icon-less progress ticks FIRST: the
-        // capability rows (file reads, searches, commands) are the feed's
-        // audit trail, and a busy review otherwise flushes them out with
-        // heartbeats — observed as "the capability icons disappear by the
-        // time the run finishes".
-        //
-        // The newest plain rows are RESERVED from that rule, because they are
-        // what says the run is alive. Without the reserve, a stage that has
-        // ever made ACTIVITY_CAP tool calls keeps nothing else — a live review
-        // was observed holding 200 rows, all 200 of them capability rows — so
-        // the feed's clock ticked only on tool calls and any long stretch of
-        // pure model turns rendered as "no new events for 26m", which the
-        // reader is invited to read as a stall.
-        const capability = timing.activity.filter(
-          (entry) => entry.capability !== undefined,
-        );
-        const plain = timing.activity.filter((entry) => entry.capability === undefined);
-        const keptPlain = plain.slice(
-          -Math.max(RESERVED_PLAIN_ROWS, ACTIVITY_CAP - capability.length),
-        );
-        const keptCapability = capability.slice(-(ACTIVITY_CAP - keptPlain.length));
-        const kept = [...keptCapability, ...keptPlain].sort(
-          (a, b) => Number(a.id) - Number(b.id),
-        );
-        timing.activity.splice(0, timing.activity.length, ...kept);
+        const key = `${event.path}|${event.taskId}`;
+        if (event.type === "agent:started") {
+          const row: ActivityRow = {
+            id: String(eventIndex),
+            at: event.at,
+            kind: "status",
+            path: event.path,
+            taskKind: event.taskKind,
+            lastIndex: eventIndex,
+            message: `${role} agent started`,
+          };
+          timing.activity.push(row);
+          pushOpen(openAgents, key, row);
+        } else {
+          // Completion carries the spend: the event's own usage is THIS
+          // attempt's; older runs whose events predate usage stamping fall
+          // back to the journaled task total.
+          const usage = event.usage ?? taskUsage.get(event.taskId);
+          const outcome = event.status === "ok" ? ("finished" as const) : ("failed" as const);
+          const open = openAgents.get(key)?.pop();
+          if (open !== undefined) {
+            // "<role> agent started" becomes the task's whole span: the
+            // outcome column says how it ended, the chips say what it took.
+            open.message = `${role} agent`;
+            open.outcome = outcome;
+            open.elapsedMs = Math.max(0, event.at - open.at);
+            if (usage !== undefined) open.usage = usage;
+            open.lastIndex = eventIndex;
+          } else {
+            timing.activity.push({
+              id: String(eventIndex),
+              at: event.at,
+              kind: "status",
+              path: event.path,
+              taskKind: event.taskKind,
+              lastIndex: eventIndex,
+              message: `${role} agent ${event.status === "ok" ? "completed" : "failed"}`,
+              outcome,
+              ...(usage !== undefined ? { usage } : {}),
+            });
+          }
+        }
       }
       continue;
     }
@@ -2796,6 +2842,49 @@ function stageStatus(
   return "pending";
 }
 
+/** One row leaving the mapper: everything the wire carries, nothing it doesn't. */
+function wireRow(row: ActivityRow): StageActivityEntry {
+  const { path: _path, taskKind: _kind, lastIndex: _last, ...wire } = row;
+  return wire;
+}
+
+/**
+ * Of the embedded window, how many rows may be LATE EDITS: rows older than
+ * the window whose operation ended inside it — a long agent task closing, a
+ * slow tool call resolving. They ride along so a client that buffered the
+ * open copy sees that same line gain its outcome. Capped, because they sit
+ * below the window's gap-free floor and each one is a hole a paging reader
+ * has to be told about (see StageBase.activityFloor).
+ */
+const ACTIVITY_LATE_EDITS = 20;
+
+/**
+ * The window a JobDetail embeds: the newest ACTIVITY_WINDOW rows — gap-free
+ * by construction, `floor` names where that guarantee starts — preceded by
+ * the late edits described above, all in start order.
+ */
+function activityWindow(rows: readonly ActivityRow[]): {
+  readonly window: StageActivityEntry[];
+  readonly floor: string;
+} {
+  const start = Math.max(0, rows.length - ACTIVITY_WINDOW);
+  const tail = rows.slice(start);
+  const floor = tail[0]!.id;
+  // "Recent" for an old row means: its span was still open when the window's
+  // first event was logged, and has closed since.
+  const horizon = Number(floor);
+  const lateEdits =
+    start === 0
+      ? []
+      : rows
+          .slice(0, start)
+          .filter((row) => row.lastIndex >= horizon)
+          .sort((a, b) => b.lastIndex - a.lastIndex)
+          .slice(0, ACTIVITY_LATE_EDITS)
+          .sort((a, b) => Number(a.id) - Number(b.id));
+  return { window: [...lateEdits, ...tail].map(wireRow), floor };
+}
+
 function base(
   id: StageId,
   status: StageStatus,
@@ -2809,7 +2898,14 @@ function base(
     ...(timing.error ? { error: timing.error } : {}),
     ...(timing.errors.length > 0 ? { errors: timing.errors } : {}),
     ...(timing.activity.length > 0
-      ? { activity: timing.activity.map(({ path: _path, taskKind: _kind, ...row }) => row) }
+      ? (() => {
+          const { window, floor } = activityWindow(timing.activity);
+          return {
+            activity: window,
+            activityTotal: timing.activity.length,
+            activityFloor: floor,
+          };
+        })()
       : {}),
     ...(timing.usage !== undefined ? { usage: timing.usage } : {}),
   };
@@ -2843,7 +2939,22 @@ function pendingGate(
   };
 }
 
+export interface JobDetailWithActivity {
+  readonly detail: JobDetail;
+  /**
+   * Every stage's FULL activity history, wire-shaped and in start order —
+   * what the detail's embedded window is a window of. The pagination and
+   * CSV endpoints serve from this, so a reader scrolling up or exporting
+   * sees exactly the rows the feed is made of, merged the same way.
+   */
+  readonly activity: ReadonlyMap<StageId, readonly StageActivityEntry[]>;
+}
+
 export function buildJobDetail(input: MapperInput): JobDetail {
+  return buildJobDetailWithActivity(input).detail;
+}
+
+export function buildJobDetailWithActivity(input: MapperInput): JobDetailWithActivity {
   const checkpoint = readCheckpoint(input.sessionDir);
   const events = readEvents(input.jobDir);
   const artifacts = readArtifacts(input.sessionDir);
@@ -3647,7 +3758,7 @@ export function buildJobDetail(input: MapperInput): JobDetail {
           : {}),
       }
     : undefined;
-  return {
+  const detail: JobDetail = {
     jobId: input.record.jobId,
     topic: input.record.topic,
     status: input.status,
@@ -3693,6 +3804,15 @@ export function buildJobDetail(input: MapperInput): JobDetail {
       : {}),
     stages,
     ...(pendingGateView ? { pendingGate: pendingGateView } : {}),
+  };
+  return {
+    detail,
+    activity: new Map(
+      STAGE_IDS.map((id) => [
+        id,
+        stageTimings.get(id)!.activity.map(wireRow),
+      ]),
+    ),
   };
 }
 

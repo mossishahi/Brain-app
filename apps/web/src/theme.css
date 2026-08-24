@@ -2744,10 +2744,30 @@ section.drawer-section:not(.drawer-updates) {
 .activity-head {
   display: flex;
   justify-content: space-between;
+  align-items: center;
   padding: 7px 10px;
   border-bottom: 1px solid var(--border);
   font-size: 11px;
   font-weight: 600;
+}
+
+.activity-head-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* The whole log, one click: an anchor styled as an icon button. It downloads
+   (the server names the file), so no state of this page is involved. */
+.activity-download {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-dim);
+}
+
+.activity-download:hover,
+.activity-download:focus-visible {
+  color: var(--accent);
 }
 
 .activity-list {
@@ -2787,10 +2807,20 @@ section.drawer-section:not(.drawer-updates) {
   /* Half of what it was: five columns of small text read as a table, and the
      wide gutters were doing more separating than the eye needs. */
   gap: 4px;
-  min-height: 28px;
+  /* EXACTLY this tall, not at-least: the feed is virtualized, and the spacer
+     that stands in for off-screen rows is this height times their count. A
+     row that grew would make the arithmetic lie. Content cannot need more —
+     every cell is one nowrap line. */
+  height: 28px;
   padding: 4px 10px;
   font-size: 12px;
   white-space: nowrap;
+}
+
+/* Stands in for the off-screen part of the feed; its inline height is the
+   exact pixels those rows would occupy. */
+.activity-spacer {
+  display: block;
 }
 
 .activity-entry > time {
@@ -2832,6 +2862,24 @@ section.drawer-section:not(.drawer-updates) {
      a full panel on a nine-step chain at the round cap — with slack. */
   flex: 0 0 180px;
   font-family: var(--mono);
+}
+
+/* HOW an operation ended — "finished", "failed", or (still running / not an
+   operation) nothing. Sized to its longest word; empty cells keep the
+   messages aligned without drawing anything. */
+.activity-entry > .activity-outcome {
+  flex: 0 0 46px;
+  overflow: hidden;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.activity-entry > .activity-outcome.is-finished {
+  color: var(--ok);
+}
+
+.activity-entry > .activity-outcome.is-failed {
+  color: var(--bad);
 }
 
 /* Narrow panes: the columns are worth less than the message, so they go first.
@@ -2926,6 +2974,17 @@ a.activity-entry:focus-visible {
 
 .activity-retry .activity-marker {
   background: var(--warn);
+}
+
+/* An operation's row is one line for its whole span: the dot runs accent
+   while it works (its kind's colour above) and takes the outcome's colour
+   when the finish edits the row. After the kind rules, so outcome wins. */
+.activity-entry.outcome-finished .activity-marker {
+  background: var(--ok);
+}
+
+.activity-entry.outcome-failed .activity-marker {
+  background: var(--bad);
 }
 
 .activity-message {

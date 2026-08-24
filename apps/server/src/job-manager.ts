@@ -41,6 +41,8 @@ import {
   type LiveTextEntry,
   type PanelMemberView,
   type ServerSettings,
+  type StageActivityEntry,
+  type StageId,
   type TrashJobResponse,
 } from "@brainstorm-agentic/protocol";
 import {
@@ -63,7 +65,7 @@ import {
 } from "./settings.js";
 import {
   agentIdentity,
-  buildJobDetail,
+  buildJobDetailWithActivity,
   compactJobDetail,
   liveIdentityPanel,
   resolveThoughtsRef,
@@ -1239,7 +1241,12 @@ export class JobManager {
    */
   private readonly detailCache = new Map<
     string,
-    { fingerprint: string; value: JobDetail }
+    {
+      fingerprint: string;
+      value: JobDetail;
+      /** The full per-stage activity history the detail's window came from. */
+      activity: ReadonlyMap<StageId, readonly StageActivityEntry[]>;
+    }
   >();
 
   async detail(jobId: string): Promise<JobDetail> {
@@ -1259,15 +1266,29 @@ export class JobManager {
     ].join("|");
     const cached = this.detailCache.get(jobId);
     if (cached && cached.fingerprint === fingerprint) return cached.value;
-    const value = buildJobDetail({
+    const { detail: value, activity } = buildJobDetailWithActivity({
       record,
       status,
       sessionDir,
       jobDir,
       settings,
     });
-    this.detailCache.set(jobId, { fingerprint, value });
+    this.detailCache.set(jobId, { fingerprint, value, activity });
     return value;
+  }
+
+  /**
+   * One stage's WHOLE activity history, oldest to newest — what the detail's
+   * embedded window is cut from. Piggybacks on the detail build (and its
+   * fingerprint cache), so a page request while nothing changed costs stats,
+   * not a rebuild, and always describes the same state the feed shows.
+   */
+  async stageActivity(
+    jobId: string,
+    stageId: StageId,
+  ): Promise<readonly StageActivityEntry[]> {
+    await this.detail(jobId);
+    return this.detailCache.get(jobId)?.activity.get(stageId) ?? [];
   }
 
   /** Statuses whose workspace files no process writes to anymore. */

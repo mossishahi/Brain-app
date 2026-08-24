@@ -26,6 +26,7 @@ import type {
   ServerSettingsUpdate,
   SearchServerFilesResponse,
   SendDiagnosticsResponse,
+  StageActivityPage,
   SubmitJobRequest,
   SubmitJobResponse,
   ThoughtsResponse,
@@ -336,6 +337,32 @@ export const jobStreamUrl = (jobId: string): string =>
  */
 export const promptRecordUrl = (jobId: string, promptId: string): string =>
   `${API_BASE}/jobs/${encodeURIComponent(jobId)}/prompt/${encodeURIComponent(promptId)}`;
+
+/**
+ * One page of a stage's activity scrollback: the `limit` rows immediately
+ * before the `before` row id, or the newest rows when `before` is absent.
+ */
+export const getStageActivity = (
+  jobId: string,
+  stageId: string,
+  options: { readonly before?: string; readonly limit?: number } = {},
+): Promise<StageActivityPage> => {
+  const params = new URLSearchParams();
+  if (options.before !== undefined) params.set("before", options.before);
+  if (options.limit !== undefined) params.set("limit", String(options.limit));
+  const query = params.size > 0 ? `?${params.toString()}` : "";
+  return request(
+    `/jobs/${encodeURIComponent(jobId)}/stages/${encodeURIComponent(stageId)}/activity${query}`,
+  );
+};
+
+/**
+ * The whole activity log of one stage as CSV. A URL, not a fetch helper: the
+ * feed's download arrow LINKS at it and the browser's own download does the
+ * rest — the server names the file.
+ */
+export const stageActivityCsvUrl = (jobId: string, stageId: string): string =>
+  `${API_BASE}/jobs/${encodeURIComponent(jobId)}/stages/${encodeURIComponent(stageId)}/activity.csv`;
 
 export function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);

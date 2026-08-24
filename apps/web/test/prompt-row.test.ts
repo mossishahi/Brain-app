@@ -31,7 +31,9 @@ test("an llm_call row is a link, so the keyboard reaches it too", () => {
     /entry\.kind === "llm_call" && entry\.promptId !== undefined/,
     "the row is clickable only when there is a record behind it",
   );
-  assert.match(code, /<a\s+className=\{`activity-entry activity-\$\{entry\.kind\}`\}/);
+  // Both branches wear the same computed row class (kind + outcome).
+  assert.match(code, /const rowClass = `activity-entry activity-\$\{entry\.kind\}/);
+  assert.match(code, /<a\s+className=\{rowClass\}/);
   assert.match(code, /href=\{promptHref\}/);
   assert.match(code, /\bdownload\b/);
 });
@@ -42,7 +44,7 @@ test("no other row kind became clickable", () => {
   const code = source("components/common.tsx");
   assert.match(
     code,
-    /<li key=\{entry\.id\} className=\{`activity-entry activity-\$\{entry\.kind\}`\}>\s*<ActivityCells entry=\{entry\}[^/]*\/>\s*<\/li>/,
+    /<li key=\{entry\.id\} className=\{rowClass\}>\s*<ActivityCells entry=\{entry\}[^/]*\/>\s*<\/li>/,
     "the non-linked branch must stay a bare list item",
   );
   assert.doesNotMatch(

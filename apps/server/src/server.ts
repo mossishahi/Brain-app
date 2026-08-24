@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   READINESS_CHECK_IDS,
+  STAGE_IDS,
   type AttachmentSelectionKind,
   type GateAnswerRequest,
   type HealthResponse,
@@ -25,8 +26,11 @@ import {
   type ModelOptionsResponse,
   type ReadinessCheckId,
   type ServerEvent,
+  type StageActivityPage,
+  type StageId,
   type SubmitJobRequest,
 } from "@brainstorm-agentic/protocol";
+import { activityCsv } from "./activity-csv.js";
 
 import { createReadinessAdvisor } from "./advisor.js";
 import { JobConflictError, JobManager } from "./job-manager.js";
@@ -1538,6 +1542,56 @@ export async function startBrainServer(
           throw new HttpError(404, "that thoughts record was not found");
         }
         sendJson(res, 200, { ref, text });
+        return;
+      }
+
+      // A stage's activity history: pages for the feed's scrollback, CSV for
+      // the whole log. Both serve the same merged rows the embedded window is
+      // cut from. Before the job-detail matcher below, which would otherwise
+      // swallow them.
+      const activityMatch =
+        /^\/api\/jobs\/([^/]+)\/stages\/([^/]+)\/activity(\.csv)?$/.exec(path);
+      if (req.method === "GET" && activityMatch) {
+        const jobId = decodeURIComponent(activityMatch[1]!);
+        const stageId = decodeURIComponent(activityMatch[2]!);
+        if (!(STAGE_IDS as readonly string[]).includes(stageId)) {
+          throw new HttpError(404, `"${stageId}" is not a stage`);
+        }
+        // unknown run -> 404 outside
+        const full = await manager.stageActivity(jobId, stageId as StageId);
+        if (activityMatch[3] !== undefined) {
+          const body = activityCsv(full);
+          res.writeHead(200, {
+            "content-type": "text/csv; charset=utf-8",
+            "content-length": Buffer.byteLength(body),
+            "content-disposition": `attachment; filename="${jobId}-${stageId}-activity.csv"`,
+            // The log grows while the run does; the next click gets the newer file.
+            "cache-control": "no-store",
+          });
+          res.end(body);
+          return;
+        }
+        const limitRaw = Number(url.searchParams.get("limit"));
+        const limit = Number.isFinite(limitRaw)
+          ? Math.min(500, Math.max(1, Math.trunc(limitRaw)))
+          : 200;
+        // Row ids are event-log positions: ascending, so "the page before this
+        // row" is a slice ending where that id would sit.
+        const before = url.searchParams.get("before");
+        let end = full.length;
+        if (before !== null) {
+          const beforeId = Number(before);
+          if (!Number.isFinite(beforeId)) {
+            throw new HttpError(400, "the before parameter must be a row id");
+          }
+          const at = full.findIndex((row) => Number(row.id) >= beforeId);
+          end = at === -1 ? full.length : at;
+        }
+        const page: StageActivityPage = {
+          entries: full.slice(Math.max(0, end - limit), end),
+          total: full.length,
+        };
+        sendJson(res, 200, page);
         return;
       }
 

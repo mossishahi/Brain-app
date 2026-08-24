@@ -3652,6 +3652,107 @@ test("GET /api/jobs/:id/prompt/:promptId serves the record, and 404s what it can
   }
 });
 
+test("GET /api/jobs/:id/stages/:stageId/activity pages the merged history and exports CSV", async () => {
+  const workspace = tempRoot();
+  const server = await startTestBrainServer({ workspace, port: 0 });
+  try {
+    await putSettings(server, {
+      runner: "local",
+      panelConfirmation: "auto",
+      llm: { provider: "offline" },
+    });
+    const jobId = await submit(server, "A run whose activity log pages and exports");
+    await waitFor(server, jobId, "completed");
+
+    // Synthetic tool spans appended after the run settled: file positions
+    // are ids, so these land at the log's end under the first-pass stage.
+    const eventsFile = join(workspace, "workspace", "jobs", jobId, "events.jsonl");
+    const path = "brainstorm-root/first-pass/member[0]/develop-idea";
+    const synthetic: string[] = [];
+    for (let i = 0; i < 30; i += 1) {
+      synthetic.push(
+        JSON.stringify({
+          type: "agent:progress",
+          seq: 9000 + i * 2,
+          at: 9_000_000 + i * 2,
+          path,
+          progress: { kind: "tool_start", message: `synthetic read ${i}`, toolName: "Read" },
+        }),
+        JSON.stringify({
+          type: "agent:progress",
+          seq: 9001 + i * 2,
+          at: 9_000_001 + i * 2,
+          path,
+          progress: { kind: "tool_end", message: `synthetic read ${i} done`, toolName: "Read", elapsedMs: i },
+        }),
+      );
+    }
+    appendFileSync(eventsFile, synthetic.join("\n") + "\n");
+
+    const whole = await requestJson<{ entries: { id: string; message: string; outcome?: string; elapsedMs?: number }[]; total: number }>(
+      server,
+      `/api/jobs/${jobId}/stages/first-pass/activity?limit=500`,
+    );
+    assert.equal(whole.status, 200);
+    const { entries, total } = whole.value;
+    assert.ok(entries.length > 0);
+    // Each synthetic pair became ONE row, its outcome and elapsed on the line.
+    const merged = entries.filter((entry) => /^synthetic read \d+$/.test(entry.message));
+    assert.equal(merged.length, 30);
+    assert.ok(merged.every((entry) => entry.outcome === "finished"));
+    assert.equal(merged[7]!.elapsedMs, 7);
+    assert.ok(
+      !entries.some((entry) => entry.message.endsWith("done")),
+      "no second 'finished' line reaches the wire",
+    );
+
+    // The whole history in one page when it fits — and pages that tile it.
+    if (entries.length < 500) assert.equal(total, entries.length);
+    const cut = entries.length - 7;
+    const page = await requestJson<{ entries: { id: string }[]; total: number }>(
+      server,
+      `/api/jobs/${jobId}/stages/first-pass/activity?before=${entries[cut]!.id}&limit=5`,
+    );
+    assert.equal(page.status, 200);
+    assert.equal(page.value.total, total);
+    assert.deepEqual(
+      page.value.entries.map((entry) => entry.id),
+      entries.slice(cut - 5, cut).map((entry) => entry.id),
+      "a page is the id-ordered slice ending exactly at `before`",
+    );
+
+    // The detail's embedded feed names the same total, so the client knows
+    // how much history the pages hold.
+    const detail = (await requestJson<JobDetail>(server, `/api/jobs/${jobId}`)).value;
+    const firstPass = detail.stages.find((stage) => stage.id === "first-pass");
+    assert.equal(firstPass?.activityTotal, total);
+    assert.ok(firstPass?.activityFloor !== undefined);
+
+    // CSV: the whole log as a named download, one line per row.
+    const csv = await fetch(`${server.url}/api/jobs/${jobId}/stages/first-pass/activity.csv`);
+    assert.equal(csv.status, 200);
+    assert.match(csv.headers.get("content-type") ?? "", /^text\/csv/);
+    assert.equal(
+      csv.headers.get("content-disposition"),
+      `attachment; filename="${jobId}-first-pass-activity.csv"`,
+    );
+    const body = await csv.text();
+    const lines = body.trimEnd().split("\r\n");
+    assert.equal(lines[0], "time,status,kind,role,actor,where,message,tool,turn,elapsed_ms,tokens_in,tokens_out,capability,detail_kind,detail");
+    assert.equal(lines.length, total + 1, "every row of the history is a CSV line");
+    assert.ok(lines.some((line) => line.includes("synthetic read 3") && line.includes("finished")));
+
+    // Unknown stage and unknown run are 404s, never 500s.
+    const wrongStage = await fetch(`${server.url}/api/jobs/${jobId}/stages/nonsense/activity`);
+    assert.equal(wrongStage.status, 404);
+    const wrongJob = await fetch(`${server.url}/api/jobs/no-such-job/stages/first-pass/activity`);
+    assert.equal(wrongJob.status, 404);
+  } finally {
+    await server.close();
+    await removeWorkspace(workspace);
+  }
+});
+
 test("POST /api/jobs/:id/resume rejects unknown and non-blocked jobs", async () => {
   const workspace = tempRoot();
   const server = await startTestBrainServer({ workspace, port: 0 });

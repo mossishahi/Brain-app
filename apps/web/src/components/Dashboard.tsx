@@ -154,6 +154,8 @@ function StageFrame({
   error,
   errors,
   activity,
+  activityTotal,
+  activityFloor,
   usage,
   selected,
   expanded,
@@ -175,6 +177,10 @@ function StageFrame({
   error?: string;
   errors?: readonly StageErrorView[];
   activity?: readonly StageActivityEntry[];
+  /** The stage's whole history length; the feed pages back toward it. */
+  activityTotal?: number;
+  /** The id from which `activity` is gap-free (see StageBase.activityFloor). */
+  activityFloor?: string;
   usage?: TokenUsageView;
   selected: boolean;
   expanded: boolean;
@@ -241,6 +247,9 @@ function StageFrame({
               active={status === "active" && live}
               now={now}
               jobId={jobId}
+              stageId={id}
+              total={activityTotal}
+              floor={activityFloor}
             />
             {children ??
               (status === "active" && live && (activity?.length ?? 0) === 0 ? (
@@ -940,6 +949,8 @@ export function Dashboard({
             error={stage?.error}
             errors={stage?.errors}
             activity={stage?.activity}
+            activityTotal={stage?.activityTotal}
+            activityFloor={stage?.activityFloor}
             usage={stage?.usage}
             selected={false}
             expanded={!collapsed.has(selected)}

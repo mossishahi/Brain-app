@@ -1,6 +1,6 @@
 /** Shared UI primitives used across panels: dots, clamps, chips, evidence. */
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { promptRecordUrl } from "../api";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { getStageActivity, promptRecordUrl, stageActivityCsvUrl } from "../api";
 import { revealStep } from "./live-threads";
 import type { CSSProperties, ReactNode } from "react";
 import type {
@@ -14,6 +14,7 @@ import type {
   Verdict,
 } from "@brainstorm-agentic/protocol";
 import { partLabel, stepTextBlocks } from "../steps";
+import { formatDuration } from "../format";
 import type { DotState } from "../format";
 
 /** 1234 -> "1.2k", 1230000 -> "1.2M": token counts at chip scale. */
@@ -390,6 +391,24 @@ function ActivityCells({
           {entry.where ? <Where where={entry.where} /> : "—"}
         </span>
       )}
+      {/* HOW IT ENDED. An operation's start and finish are one row: the row
+          appears when the work starts and this cell fills in when it ends.
+          Empty (not a dash) elsewhere — most rows are not operations, and a
+          column of dashes would drown the few words that matter. */}
+      <span
+        className={`activity-outcome${
+          entry.outcome !== undefined ? ` is-${entry.outcome}` : ""
+        }`}
+        title={
+          entry.outcome === "finished"
+            ? "this operation finished"
+            : entry.outcome === "failed"
+              ? "this operation failed"
+              : undefined
+        }
+      >
+        {entry.outcome ?? ""}
+      </span>
       <span className="activity-marker" aria-hidden />
       <span className="activity-message">{entry.message}</span>
       {entry.turn !== undefined && (
@@ -397,7 +416,11 @@ function ActivityCells({
       )}
       {entry.elapsedMs !== undefined && (
         <span className="activity-meta">
-          {(entry.elapsedMs / 1000).toFixed(0)}s
+          {/* Sub-minute spans keep the terse "3s"; an agent task's span is
+              minutes and "1354s" is a puzzle, not a duration. */}
+          {entry.elapsedMs < 60_000
+            ? `${(entry.elapsedMs / 1000).toFixed(0)}s`
+            : formatDuration(entry.elapsedMs)}
         </span>
       )}
       {entry.usage && (
@@ -414,47 +437,233 @@ function ActivityCells({
   );
 }
 
+/** Every activity row is exactly this tall; the virtual window is arithmetic on it. */
+const ACTIVITY_ROW_PX = 28;
+/** Rows rendered beyond each visible edge, so fast scrolling meets no blank strip. */
+const ACTIVITY_OVERSCAN = 12;
+/** Scrollback page size. */
+const ACTIVITY_PAGE = 200;
+/** How close to the top edge (px) the reader gets before the next page loads. */
+const ACTIVITY_FETCH_EDGE_PX = 200;
+/** The list's CSS max-height, used as the viewport guess before first measure. */
+const ACTIVITY_LIST_PX = 260;
+
+/**
+ * Everything one feed has accumulated. The server embeds a WINDOW of the
+ * newest rows in every detail; this buffer is what keeps rows a reader
+ * scrolled past from vanishing when the window slides on, and where fetched
+ * scrollback pages land. `floor` is the row id from which the buffer is
+ * known gap-free to the newest row — the join point every page fetch anchors
+ * to. Rows BELOW the floor arrive only as late edits of old operations; one
+ * we already hold is updated in place, one we never held is skipped (paging
+ * delivers it in order when the reader gets there).
+ */
+interface ActivityBuffer {
+  key: string;
+  rows: Map<number, StageActivityEntry>;
+  floor: number;
+  newest: number;
+  exhausted: boolean;
+  loading: boolean;
+  /** Rows the last page fetch added above the view, to keep it still. */
+  prepended: number;
+}
+
+const emptyActivityBuffer = (key: string): ActivityBuffer => ({
+  key,
+  rows: new Map(),
+  floor: Infinity,
+  newest: -Infinity,
+  exhausted: false,
+  loading: false,
+  prepended: 0,
+});
+
 export function ActivityFeed({
   entries,
   active,
   now,
   jobId,
+  stageId,
+  total,
+  floor,
 }: {
   entries: readonly StageActivityEntry[];
   active: boolean;
   /** Current time for the quiet-period ticker; omit to disable it. */
   now?: number;
   /**
-   * The run these rows belong to, which is half of a captured prompt's address.
-   * Omit and `llm_call` rows render as ordinary rows — correct for any caller
-   * that is not showing one run's feed.
+   * The run these rows belong to, which is half of a captured prompt's address
+   * and half of the scrollback/CSV endpoints' address. Omit and `llm_call`
+   * rows render as ordinary rows — correct for any caller that is not showing
+   * one run's feed.
    */
   jobId?: string;
+  /** The stage the rows belong to; with jobId, enables scrollback and CSV. */
+  stageId?: string;
+  /** The stage's whole history length (StageBase.activityTotal). */
+  total?: number;
+  /** The id from which `entries` is gap-free (StageBase.activityFloor). */
+  floor?: string;
 }) {
-  // Render the full server-provided window (capped server-side): trimming to
-  // a client tail dropped the capability rows once a run's closing heartbeats
-  // outnumbered them. The list scrolls; keep it pinned to the newest entry
-  // unless the reader has scrolled back through the history.
-  const visible = entries;
   const listRef = useRef<HTMLOListElement>(null);
   const pinnedRef = useRef(true);
+  const bufferRef = useRef<ActivityBuffer>(emptyActivityBuffer(""));
+  const [revision, setRevision] = useState(0);
+  // Start the virtual window at the list's END: the feed opens pinned to the
+  // newest row, and starting anywhere else would render a slice only to jump
+  // away from it on the first layout pass.
+  const [viewTop, setViewTop] = useState(() =>
+    Math.max(0, entries.length * ACTIVITY_ROW_PX - ACTIVITY_LIST_PX),
+  );
+  const [viewHeight, setViewHeight] = useState(ACTIVITY_LIST_PX);
+
+  const feedKey = `${jobId ?? ""}|${stageId ?? ""}`;
+  const rows = useMemo(() => {
+    if (bufferRef.current.key !== feedKey) {
+      bufferRef.current = emptyActivityBuffer(feedKey);
+    }
+    const buffer = bufferRef.current;
+    if (entries.length > 0) {
+      const incomingFloor = Number(floor ?? entries[0]!.id);
+      if (buffer.rows.size === 0 || incomingFloor <= buffer.newest) {
+        // The window overlaps (or reaches below) what is buffered: one
+        // gap-free range. A window of an OLDER build (floor above the newest
+        // buffered row would mean rows fell between two refreshes) restarts
+        // the buffer instead — scrolling up re-fetches history in order.
+        buffer.floor = Math.min(buffer.floor, incomingFloor);
+      } else {
+        bufferRef.current = emptyActivityBuffer(feedKey);
+        bufferRef.current.floor = incomingFloor;
+      }
+      const current = bufferRef.current;
+      for (const entry of entries) {
+        const id = Number(entry.id);
+        if (id >= current.floor || current.rows.has(id)) {
+          current.rows.set(id, entry);
+          if (id > current.newest) current.newest = id;
+        }
+      }
+    }
+    return [...bufferRef.current.rows.values()].sort(
+      (a, b) => Number(a.id) - Number(b.id),
+    );
+    // revision counts fetched pages, which land in the buffer, not in props.
+  }, [entries, feedKey, floor, revision]);
+
+  const hasMore =
+    jobId !== undefined &&
+    stageId !== undefined &&
+    total !== undefined &&
+    !bufferRef.current.exhausted &&
+    rows.length < total;
+
+  const loadOlder = () => {
+    const buffer = bufferRef.current;
+    if (buffer.loading || !hasMore || rows.length === 0) return;
+    buffer.loading = true;
+    getStageActivity(jobId!, stageId!, {
+      before: String(buffer.floor),
+      limit: ACTIVITY_PAGE,
+    })
+      .then((page) => {
+        // The page is the id-ordered slice ending exactly at the floor, so
+        // the union stays gap-free and the floor moves to the page's first
+        // row. An empty or short page means the top of the log was reached.
+        if (buffer !== bufferRef.current) return;
+        for (const entry of page.entries) {
+          buffer.rows.set(Number(entry.id), entry);
+        }
+        if (page.entries.length > 0) {
+          buffer.floor = Math.min(buffer.floor, Number(page.entries[0]!.id));
+          buffer.prepended += page.entries.length;
+        }
+        if (page.entries.length < ACTIVITY_PAGE) buffer.exhausted = true;
+      })
+      .catch(() => {
+        // Transient (server restarting, network blip): the next scroll retries.
+      })
+      .finally(() => {
+        buffer.loading = false;
+        setRevision((value) => value + 1);
+      });
+  };
+
   useLayoutEffect(() => {
     const list = listRef.current;
-    if (list && pinnedRef.current) list.scrollTop = list.scrollHeight;
-  }, [entries.length]);
+    if (!list) return;
+    if (list.clientHeight > 0 && list.clientHeight !== viewHeight) {
+      setViewHeight(list.clientHeight);
+    }
+    const buffer = bufferRef.current;
+    if (buffer.prepended > 0) {
+      // A page arrived above the view: shift the scroll by exactly its height
+      // so the row the reader was on does not move.
+      list.scrollTop += buffer.prepended * ACTIVITY_ROW_PX;
+      buffer.prepended = 0;
+      setViewTop(list.scrollTop);
+      return;
+    }
+    // Keep the feed pinned to the newest entry unless the reader has
+    // scrolled back through the history.
+    if (pinnedRef.current) {
+      list.scrollTop = list.scrollHeight;
+      setViewTop(list.scrollTop);
+    }
+  }, [rows.length, viewHeight]);
+
   // One decision for the whole feed: seat columns exist only where some row
   // actually names a seat or a walk position (see ActivityCells.seated).
-  const seated = visible.some(
+  const seated = rows.some(
     (entry) => entry.actor !== undefined || entry.where !== undefined,
   );
-  if (visible.length === 0) return null;
-  const lastAt = visible[visible.length - 1]!.at;
+  if (rows.length === 0) return null;
+  const lastAt = rows[rows.length - 1]!.at;
   const quietMs = active && now !== undefined ? now - lastAt : 0;
+
+  // Only the rows a reader can see (plus overscan) exist in the DOM; two
+  // spacers stand in for the rest, so a feed of any length costs the browser
+  // a couple dozen nodes. The arithmetic works because every row is exactly
+  // ACTIVITY_ROW_PX tall (the stylesheet pins it).
+  const first = Math.max(
+    0,
+    Math.floor(viewTop / ACTIVITY_ROW_PX) - ACTIVITY_OVERSCAN,
+  );
+  const last = Math.min(
+    rows.length,
+    Math.ceil((viewTop + viewHeight) / ACTIVITY_ROW_PX) + ACTIVITY_OVERSCAN,
+  );
+
   return (
     <div className="activity-feed" aria-live={active ? "polite" : "off"}>
       <div className="activity-head">
         <span>Activity</span>
-        <span className="dim">{entries.length} events</span>
+        <span className="activity-head-tools">
+          <span className="dim">{total ?? rows.length} events</span>
+          {jobId !== undefined && stageId !== undefined && (
+            <a
+              className="activity-download"
+              href={stageActivityCsvUrl(jobId, stageId)}
+              download
+              title="download this stage's whole activity log as CSV"
+              aria-label="download this stage's whole activity log as CSV"
+            >
+              <svg
+                viewBox="0 0 16 16"
+                width="14"
+                height="14"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.3"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden
+              >
+                <path d="M8 2v8.5M4.5 7 8 10.5 11.5 7M3 13.5h10" />
+              </svg>
+            </a>
+          )}
+        </span>
       </div>
       <ol
         className="activity-list"
@@ -463,13 +672,25 @@ export function ActivityFeed({
           const list = event.currentTarget;
           pinnedRef.current =
             list.scrollHeight - list.scrollTop - list.clientHeight < 40;
+          setViewTop(list.scrollTop);
+          if (list.scrollTop < ACTIVITY_FETCH_EDGE_PX) loadOlder();
         }}
       >
-        {visible.map((entry) => {
+        {first > 0 && (
+          <li
+            className="activity-spacer"
+            style={{ height: first * ACTIVITY_ROW_PX }}
+            aria-hidden
+          />
+        )}
+        {rows.slice(first, last).map((entry) => {
           const promptHref =
             entry.kind === "llm_call" && entry.promptId !== undefined && jobId !== undefined
               ? promptRecordUrl(jobId, entry.promptId)
               : undefined;
+          const rowClass = `activity-entry activity-${entry.kind}${
+            entry.outcome !== undefined ? ` outcome-${entry.outcome}` : ""
+          }`;
           // An llm_call row is the ONLY row in the feed that goes anywhere: it
           // carries the exact request behind that call. A real anchor rather
           // than a handler, so the keyboard reaches it for free and the
@@ -478,7 +699,7 @@ export function ActivityFeed({
           return promptHref !== undefined ? (
             <li key={entry.id} className="activity-entry-link">
               <a
-                className={`activity-entry activity-${entry.kind}`}
+                className={rowClass}
                 href={promptHref}
                 download
                 title="download exactly what was sent to the model for this call"
@@ -487,11 +708,18 @@ export function ActivityFeed({
               </a>
             </li>
           ) : (
-            <li key={entry.id} className={`activity-entry activity-${entry.kind}`}>
+            <li key={entry.id} className={rowClass}>
               <ActivityCells entry={entry} seated={seated} />
             </li>
           );
         })}
+        {last < rows.length && (
+          <li
+            className="activity-spacer"
+            style={{ height: (rows.length - last) * ACTIVITY_ROW_PX }}
+            aria-hidden
+          />
+        )}
       </ol>
       {quietMs > STALE_AFTER_MS && (
         <div className="activity-stale">

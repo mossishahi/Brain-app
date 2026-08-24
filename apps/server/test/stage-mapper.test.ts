@@ -848,7 +848,7 @@ test("a mismatched or malformed type body yields no idea view instead of wrong c
   assert.equal(member.idea, undefined);
 });
 
-test("the activity cap evicts plain progress ticks before capability rows", () => {
+test("a tool span is ONE row: the start's line gains outcome, elapsed, and detail", () => {
   const workspace = mkdtempSync(join(tmpdir(), "stage-mapper-test-"));
   try {
     const sessionDir = join(workspace, "session");
@@ -870,36 +870,28 @@ test("the activity cap evicts plain progress ticks before capability rows", () =
     );
     writeFileSync(join(sessionDir, "artifacts", "index.json"), JSON.stringify({ refs: [] }));
 
-    // Ten early tool calls, then a long tail of icon-less heartbeats — the
-    // review-phase shape that used to flush every capability row out of the
-    // 200-entry window by the time the run finished.
     const path = "brainstorm-root/review-members/member[0]";
-    const lines: string[] = [];
-    let seq = 0;
-    for (let i = 0; i < 10; i += 1) {
-      seq += 1;
-      lines.push(
-        JSON.stringify({
-          type: "agent:progress",
-          seq,
-          at: seq,
-          path,
-          progress: { kind: "tool", message: `read attachment ${i}`, toolName: "Read" },
-        }),
-      );
-    }
-    for (let i = 0; i < 400; i += 1) {
-      seq += 1;
-      lines.push(
-        JSON.stringify({
-          type: "agent:progress",
-          seq,
-          at: seq,
-          path,
-          progress: { kind: "model", message: "thinking", elapsedMs: 1000 },
-        }),
-      );
-    }
+    const progress = (at: number, body: object) =>
+      JSON.stringify({ type: "agent:progress", seq: at, at, path, progress: body });
+    const lines = [
+      // 0+1: a read that succeeds — the end carries the measured elapsed and
+      // the call detail some executors only attach on the finish.
+      progress(0, { kind: "tool_start", message: "Reading an input file — a.pdf", toolName: "Read" }),
+      progress(1, {
+        kind: "tool_end",
+        message: "File read finished",
+        toolName: "Read",
+        elapsedMs: 1200,
+        data: { detail: { kind: "path", value: "a.pdf" } },
+      }),
+      // 2+3: a read the permission hook refused.
+      progress(2, { kind: "tool_start", message: "Reading an input file — b.pdf", toolName: "Read" }),
+      progress(3, { kind: "tool_end", message: "File read failed", toolName: "Read", failed: true }),
+      // 4: a command still running when the log ends — no outcome.
+      progress(4, { kind: "tool_start", message: "Running a command", toolName: "Bash" }),
+      // 5: a finish with no start in the log (rotation) — stands alone.
+      progress(5, { kind: "tool_end", message: "Search finished", toolName: "Grep", elapsedMs: 5 }),
+    ];
     writeFileSync(join(jobDir, "events.jsonl"), lines.join("\n") + "\n");
 
     const record: JobRecord = {
@@ -920,30 +912,34 @@ test("the activity cap evicts plain progress ticks before capability rows", () =
     const review = detail.stages.find((candidate) => candidate.id === "review-members");
     assert.ok(review);
     const activity = review.activity ?? [];
-    assert.equal(activity.length, 200, "the cap still bounds the feed");
-    const withCapability = activity.filter((entry) => entry.capability !== undefined);
-    assert.equal(
-      withCapability.length,
-      10,
-      "every capability row outlives the heartbeat flood",
+    // Six events, four rows: each pair folded into its start's line.
+    assert.deepEqual(activity.map((entry) => Number(entry.id)), [0, 2, 4, 5]);
+    assert.equal(review.activityTotal, 4);
+    assert.equal(review.activityFloor, "0");
+
+    const read = activity[0]!;
+    assert.equal(read.kind, "tool_start", "the row stays the start's row");
+    assert.equal(read.message, "Reading an input file — a.pdf");
+    assert.equal(read.outcome, "finished");
+    assert.equal(read.elapsedMs, 1200, "the end's measured elapsed lands on the row");
+    assert.equal(read.detail?.value, "a.pdf", "so does the end-only call detail");
+    assert.ok(
+      !activity.some((entry) => entry.message === "File read finished"),
+      "no second 'finished' line exists",
     );
-    // Chronology holds: survivors stay in event order, ending at the newest
-    // tick. Ids are file positions (0-based), never per-attempt seqs.
-    const ids = activity.map((entry) => Number(entry.id));
-    assert.deepEqual([...ids].sort((a, b) => a - b), ids);
-    assert.equal(ids[ids.length - 1], 409);
+
+    assert.equal(activity[1]!.outcome, "failed");
+    assert.equal(activity[1]!.elapsedMs, 1, "without a measured elapsed, the span's own clock serves");
+    assert.equal(activity[2]!.outcome, undefined, "still running reads as no outcome");
+    // The orphan finish keeps its own kind and its outcome.
+    assert.equal(activity[3]!.kind, "tool_end");
+    assert.equal(activity[3]!.outcome, "finished");
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
 });
 
-test("a stage past the cap in tool calls still shows its newest model turns", () => {
-  // The other side of the eviction rule, and a live defect: a review that has
-  // made more tool calls than the whole cap kept NOTHING else — 200 rows, all
-  // 200 of them capability rows. The client measures its quiet-period warning
-  // from the newest row it was sent, so the feed's clock ticked only on tool
-  // calls and a long stretch of pure model turns rendered as "no new events for
-  // 26m" on a run that was working.
+test("an agent task is one row, and a long span re-enters the window as a late edit", () => {
   const workspace = mkdtempSync(join(tmpdir(), "stage-mapper-test-"));
   try {
     const sessionDir = join(workspace, "session");
@@ -965,34 +961,42 @@ test("a stage past the cap in tool calls still shows its newest model turns", ()
     );
     writeFileSync(join(sessionDir, "artifacts", "index.json"), JSON.stringify({ refs: [] }));
 
+    // One agent whose task outlives the whole embedded window: it starts at
+    // event 0, works through 250 model turns, and completes at the end.
     const path = "brainstorm-root/review-members/member[0]";
-    const lines: string[] = [];
-    let seq = 0;
-    for (let i = 0; i < 400; i += 1) {
-      seq += 1;
+    const lines: string[] = [
+      JSON.stringify({
+        type: "agent:started",
+        seq: 0,
+        at: 0,
+        path,
+        taskId: "t1",
+        taskKind: "brainstorm.commentor",
+      }),
+    ];
+    for (let i = 1; i <= 250; i += 1) {
       lines.push(
         JSON.stringify({
           type: "agent:progress",
-          seq,
-          at: seq,
+          seq: i,
+          at: i,
           path,
-          progress: { kind: "tool", message: `ran a command ${i}`, toolName: "Bash" },
+          progress: { kind: "model", message: `turn ${i}` },
         }),
       );
     }
-    // Then the redeveloper reasons for a while without touching a tool.
-    for (let i = 0; i < 20; i += 1) {
-      seq += 1;
-      lines.push(
-        JSON.stringify({
-          type: "agent:progress",
-          seq,
-          at: seq,
-          path,
-          progress: { kind: "model", message: `turn ${i}`, turn: i },
-        }),
-      );
-    }
+    lines.push(
+      JSON.stringify({
+        type: "agent:completed",
+        seq: 251,
+        at: 251,
+        path,
+        taskId: "t1",
+        taskKind: "brainstorm.commentor",
+        status: "ok",
+        usage: { inputTokens: 5, outputTokens: 7 },
+      }),
+    );
     writeFileSync(join(jobDir, "events.jsonl"), lines.join("\n") + "\n");
 
     const record: JobRecord = {
@@ -1013,20 +1017,99 @@ test("a stage past the cap in tool calls still shows its newest model turns", ()
     const review = detail.stages.find((candidate) => candidate.id === "review-members");
     assert.ok(review);
     const activity = review.activity ?? [];
-    assert.equal(activity.length, 200, "the cap still bounds the feed");
-    const plain = activity.filter((entry) => entry.capability === undefined);
-    assert.equal(plain.length, 20, "every model turn since the last tool call survives");
-    const newest = activity[activity.length - 1]!;
-    assert.equal(
-      newest.kind,
-      "model",
-      "the feed ends on the newest EVENT, so the client's quiet clock is honest",
-    );
-    assert.equal(Number(newest.id), 419);
+    // 252 events, 251 rows total (the completion edited the start's row); the
+    // window is the newest 200 of them PLUS the edited row riding along ahead
+    // of its gap-free floor.
+    assert.equal(review.activityTotal, 251);
+    assert.equal(review.activityFloor, "51");
+    assert.equal(activity.length, 201);
+
+    const agent = activity[0]!;
+    assert.equal(agent.id, "0", "the late edit is the task's own original row");
+    assert.equal(agent.message, "commentor agent", "'started' no longer suits a span that ended");
+    assert.equal(agent.outcome, "finished");
+    assert.equal(agent.elapsedMs, 251, "the span's own clock is the task's duration");
+    assert.equal(agent.usage?.inputTokens, 5, "the completion's spend lands on the row");
     assert.ok(
-      activity.some((entry) => entry.capability !== undefined),
-      "and the capability audit trail is still there",
+      !activity.some((entry) => entry.message === "commentor agent completed"),
+      "no second 'completed' line exists",
     );
+    // Above the floor the window is gap-free and chronological.
+    assert.equal(activity[1]!.id, "51");
+    assert.equal(activity[activity.length - 1]!.id, "250");
+    const ids = activity.map((entry) => Number(entry.id));
+    assert.deepEqual([...ids].sort((a, b) => a - b), ids);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("a failed agent's one row says failed", () => {
+  const workspace = mkdtempSync(join(tmpdir(), "stage-mapper-test-"));
+  try {
+    const sessionDir = join(workspace, "session");
+    const jobDir = join(workspace, "job");
+    mkdirSync(join(sessionDir, "artifacts"), { recursive: true });
+    mkdirSync(jobDir, { recursive: true });
+    writeFileSync(
+      join(sessionDir, "checkpoint.json"),
+      JSON.stringify({
+        runId: "job-1",
+        workflowId: "brainstorm",
+        status: "running",
+        input: {},
+        journal: [],
+        pendingGates: [],
+        seq: 1,
+        updatedAt: Date.now(),
+      }),
+    );
+    writeFileSync(join(sessionDir, "artifacts", "index.json"), JSON.stringify({ refs: [] }));
+    const path = "brainstorm-root/first-pass/member[0]/develop-idea";
+    writeFileSync(
+      join(jobDir, "events.jsonl"),
+      [
+        JSON.stringify({
+          type: "agent:started",
+          seq: 0,
+          at: 10,
+          path,
+          taskId: "t1",
+          taskKind: "brainstorm.brain",
+        }),
+        JSON.stringify({
+          type: "agent:completed",
+          seq: 1,
+          at: 25,
+          path,
+          taskId: "t1",
+          taskKind: "brainstorm.brain",
+          status: "error",
+        }),
+      ].join("\n") + "\n",
+    );
+    const record: JobRecord = {
+      jobId: "job-1",
+      topic: "topic",
+      status: "running",
+      runner: "local",
+      createdAt: 1,
+      updatedAt: 2,
+    };
+    const detail = buildJobDetail({
+      record,
+      status: "running",
+      sessionDir,
+      jobDir,
+      settings,
+    });
+    const stage = detail.stages.find((candidate) => candidate.id === "first-pass");
+    assert.ok(stage);
+    const activity = stage.activity ?? [];
+    assert.equal(activity.length, 1);
+    assert.equal(activity[0]!.message, "brain agent");
+    assert.equal(activity[0]!.outcome, "failed");
+    assert.equal(activity[0]!.elapsedMs, 15);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
