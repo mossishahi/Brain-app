@@ -269,7 +269,9 @@ export function GateCard({
         {pendingGate?.prompt ?? "The panel is waiting for your confirmation."}
       </p>
       {members.length > 0 ? (
-        <div className="seat-grid">
+        // Stacked like the selection stage's roster, so the two views of
+        // the same panel read the same.
+        <div className="seat-grid seat-stack">
           {members.map((member, i) => (
             <SeatCard
               key={member.id}

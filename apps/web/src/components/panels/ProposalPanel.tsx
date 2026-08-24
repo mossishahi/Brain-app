@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { ProposalView } from "@brainstorm-agentic/protocol";
 import { proposalToMarkdown, slugify } from "../../format";
+import { copyText } from "../../clipboard";
 
 export function ProposalActions({ proposal }: { proposal: ProposalView }) {
   const [copied, setCopied] = useState(false);
@@ -9,13 +10,10 @@ export function ProposalActions({ proposal }: { proposal: ProposalView }) {
   useEffect(() => () => window.clearTimeout(timer.current), []);
 
   const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(JSON.stringify(proposal, null, 2));
+    if (await copyText(JSON.stringify(proposal, null, 2))) {
       setCopied(true);
       window.clearTimeout(timer.current);
       timer.current = window.setTimeout(() => setCopied(false), 1500);
-    } catch {
-      // clipboard unavailable; leave the label as-is
     }
   };
 

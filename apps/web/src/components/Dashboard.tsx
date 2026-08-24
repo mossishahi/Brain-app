@@ -720,8 +720,10 @@ export function Dashboard({
         <a href="#/" className="ghost-btn" aria-label="back to all jobs">
           <BackIcon />
         </a>
+        {/* The name follows the run: the worked-out title once processing is
+            done, the submitted text before that — which stays on hover. */}
         <h1 className="dash-title" title={job.topic}>
-          {job.topic}
+          {job.title ?? job.topic}
         </h1>
         {job.contentBundle && (
           <span

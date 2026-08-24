@@ -61,6 +61,25 @@ export function GearIcon({ size = 18 }: IconProps) {
  * recorded thinking behind a version card — grey like every ghost control,
  * so it reads as a peek at working material rather than as an artifact.
  */
+/** A circular arrow: redo — prefill a fresh run from an existing job. */
+export function RedoIcon({ size = 16 }: IconProps) {
+  return (
+    <svg {...frame(size)}>
+      <path d="M21 7v6h-6" />
+      <path d="M21 13a9 9 0 1 1-2.6-7L21 8.6" />
+    </svg>
+  );
+}
+
+/** A paperclip: the attachments-so-far control in the composer. */
+export function PaperclipIcon({ size = 16 }: IconProps) {
+  return (
+    <svg {...frame(size)}>
+      <path d="M20.5 11.5 12 20a5.5 5.5 0 0 1-7.8-7.8l8.5-8.5a3.7 3.7 0 0 1 5.2 5.2l-8.5 8.5a1.9 1.9 0 0 1-2.6-2.6l7.8-7.8" />
+    </svg>
+  );
+}
+
 /** A pencil over a writing line: the tracked-changes document control. */
 export function EditIcon({ size = 16 }: IconProps) {
   return (

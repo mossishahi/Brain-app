@@ -3765,6 +3765,12 @@ test("GET /api/jobs/:id/thoughts.txt downloads the full thinking behind a handle
     const jobId = await submit(server, "A run whose thinking can be downloaded");
     const detail = await waitFor(server, jobId, "completed");
 
+    // The run's NAME: the processor's title, stamped onto the detail (and
+    // through it every summary) once the process stage completed. The topic
+    // stays the record of what was submitted.
+    assert.ok(typeof detail.title === "string" && detail.title.length > 0);
+    assert.equal(detail.topic, "A run whose thinking can be downloaded");
+
     // The first-pass card's whole-task handle, minted by the offline run's
     // own captured trace.
     const firstPass = detail.stages.find((stage) => stage.id === "first-pass");

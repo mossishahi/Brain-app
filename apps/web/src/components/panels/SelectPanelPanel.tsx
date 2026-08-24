@@ -12,7 +12,9 @@ export function SelectPanelBody({
   const panel = stage.panel ?? [];
   return (
     <div>
-      <div className="seat-grid">
+      {/* Wide cards, one per row: a seat's identity is a few short lines,
+          and the wrapped grid read as a mosaic rather than a roster. */}
+      <div className="seat-grid seat-stack">
         {panel.map((member, i) => (
           <SeatCard key={member.id} seat={i + 1} member={member} removed={removedIds.has(member.id)} />
         ))}

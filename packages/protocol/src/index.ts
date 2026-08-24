@@ -1063,6 +1063,20 @@ export type RunnerKind = "slurm" | "local";
 export interface JobSummary {
   readonly jobId: string;
   readonly topic: string;
+  /**
+   * The run's NAME once it has one: the processor's title for the
+   * submission, present only after the process stage completed. Until then
+   * the run goes by its `topic` (the submitted text) — readers should show
+   * `title ?? topic`. The topic itself never changes; it stays the record
+   * of what was submitted.
+   */
+  readonly title?: string;
+  /**
+   * The submission's ORIGINAL attachment paths/URLs, exactly as submitted —
+   * what the redo control replays into a fresh composer. Absent when the
+   * run was submitted without attachments.
+   */
+  readonly attachments?: readonly string[];
   readonly status: JobStatus;
   readonly runner: RunnerKind;
   readonly createdAt: number;

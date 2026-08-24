@@ -57,6 +57,7 @@ import {
 } from "../live-threads";
 import { BackIcon, CopyIcon, DownloadIcon, ForwardIcon } from "../Icons";
 import { outputChangesUrl } from "../../api";
+import { copyText } from "../../clipboard";
 import { IdeaTabs } from "./FirstPassPanel";
 import {
   crossEntryKey,
@@ -296,30 +297,12 @@ function stepOutcomeHint(step: ReviewStepView): string {
 }
 
 /**
- * Copies text for pasting into a bug report. The async clipboard API needs a
- * secure context and can be denied outright; the hidden-textarea copy still
- * works on a real click, and a bug-report affordance must not fail silently.
+ * Copies text for pasting into a bug report — the shared copyText, which
+ * falls back to the selection path where the async clipboard API is missing
+ * or denied: a bug-report affordance must not fail silently.
  */
 async function copyForBugReport(value: string): Promise<boolean> {
-  try {
-    await navigator.clipboard.writeText(value);
-    return true;
-  } catch {
-    try {
-      const area = document.createElement("textarea");
-      area.value = value;
-      area.setAttribute("readonly", "");
-      area.style.position = "fixed";
-      area.style.opacity = "0";
-      document.body.appendChild(area);
-      area.select();
-      const ok = document.execCommand("copy");
-      area.remove();
-      return ok;
-    } catch {
-      return false;
-    }
-  }
+  return copyText(value);
 }
 
 /** Copy-to-clipboard ghost button with the app's transient "copied" state. */
@@ -381,29 +364,29 @@ function DiffBody({
 }
 
 /**
- * The flaws a reviewer marked, each under the part it names. An absent part
- * key means the reviewer said nothing there — the empties are stripped before
- * the record is written — so a step shows only the parts that drew a remark.
+ * The flaws a reviewer marked, as plain located lines: "Step 3 > part 4:"
+ * and the remark. ONLY the places actually marked appear — a step whose
+ * entry carries no part text is bookkeeping, not a finding, and the old
+ * step-chip per entry drowned the one real flaw in a wall of tags.
  */
 function FlawList({ flaws }: { flaws: readonly FlawEntryView[] }) {
+  const lines = flaws.flatMap((entry) =>
+    COT_STEP_PARTS.filter((part) => (entry[part] ?? "") !== "").map((part) => ({
+      key: `${entry.step}:${part}`,
+      place: `Step ${entry.step} > ${partLabel(part)}:`,
+      text: entry[part]!,
+    })),
+  );
   return (
     <div>
       <span className="detail-label">flaws</span>
-      {/* An empty list is a claim of its own: this reviewer was shown the
-          parts and marked nothing. A run that records no parts at all has no
-          list here, and says nothing either way. */}
-      {flaws.length === 0 && <p className="dim small">no flaws marked</p>}
-      {flaws.map((entry, index) => (
-        <div key={index} className="comment-detail">
-          <div className="assessment-row">
-            <span className="badge">step {entry.step}</span>
-          </div>
-          {COT_STEP_PARTS.filter((part) => (entry[part] ?? "") !== "").map((part) => (
-            <div key={part}>
-              <span className="detail-label">{partLabel(part)}</span>
-              <div>{entry[part]}</div>
-            </div>
-          ))}
+      {/* No marks anywhere is a claim of its own: this reviewer was shown
+          the parts and faulted nothing. A run that records no parts at all
+          has no list here, and says nothing either way. */}
+      {lines.length === 0 && <p className="dim small">no flaws marked</p>}
+      {lines.map((line) => (
+        <div key={line.key} className="flaw-line">
+          <span className="flaw-place">{line.place}</span> {line.text}
         </div>
       ))}
     </div>

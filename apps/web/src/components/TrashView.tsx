@@ -63,7 +63,7 @@ export function TrashView() {
                 className="job-card-main"
                 href={`#/jobs/${encodeURIComponent(job.jobId)}`}
               >
-                <span className="job-topic">{job.topic}</span>
+                <span className="job-topic">{job.title ?? job.topic}</span>
                 <span className="job-status-line">
                   <Dot state={jobDot(job.status)} />
                   <span>

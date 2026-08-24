@@ -40,7 +40,7 @@ import {
   validateAttachments,
 } from "../api";
 import { EnvironmentStatus } from "./EnvironmentStatus";
-import { SendIcon } from "./Icons";
+import { PaperclipIcon, SendIcon } from "./Icons";
 
 // Ant Design's directory tree is substantial; load it only when the user
 // opens the server picker so the normal landing page stays small.
@@ -375,12 +375,70 @@ function AttachmentPicker({
   );
 }
 
+/**
+ * The composer's draft, kept in sessionStorage: navigating into a run and
+ * back unmounts this component, and a long prompt with attachments used to
+ * vanish with it. Per tab, cleared on successful launch; a restored
+ * attachment is still revalidated at submit like any other.
+ */
+const DRAFT_KEY = "brainstorm-composer-draft";
+
+interface ComposerDraft {
+  readonly topic: string;
+  readonly attachments: readonly ValidatedAttachment[];
+}
+
+function readDraft(): ComposerDraft | undefined {
+  try {
+    const raw = sessionStorage.getItem(DRAFT_KEY);
+    if (raw === null) return undefined;
+    const parsed = JSON.parse(raw) as ComposerDraft;
+    if (typeof parsed.topic !== "string" || !Array.isArray(parsed.attachments)) {
+      return undefined;
+    }
+    return parsed;
+  } catch {
+    return undefined;
+  }
+}
+
+function writeDraft(draft: ComposerDraft): void {
+  try {
+    if (draft.topic.length === 0 && draft.attachments.length === 0) {
+      sessionStorage.removeItem(DRAFT_KEY);
+    } else {
+      sessionStorage.setItem(DRAFT_KEY, JSON.stringify(draft));
+    }
+  } catch {
+    // Storage full or unavailable: the draft just does not survive.
+  }
+}
+
+/**
+ * The kind a bare path most plausibly is, for replaying a job's original
+ * attachments (the record keeps paths only). Folders cannot be told from
+ * files by name, so the caller probes "folder" first; a wrong guess here
+ * simply comes back invalid and shows red for the user to fix.
+ */
+function guessAttachmentKind(path: string): AttachmentSelectionKind {
+  if (/^https?:\/\//i.test(path)) return "web";
+  const ext = path.slice(path.lastIndexOf(".")).toLowerCase();
+  if (ext === ".zip") return "zip";
+  if (ext === ".pdf") return "pdf";
+  if ([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".svg"].includes(ext)) {
+    return "image";
+  }
+  if ([".mp4", ".mov", ".webm", ".mkv", ".avi"].includes(ext)) return "video";
+  return "file";
+}
+
 export function SubmissionBox({
   onSubmit,
   onOpenSettings,
   readiness,
   onRecheckReadiness,
   onDiagnoseReadiness,
+  prefill,
 }: {
   readonly onSubmit: (
     topic: string,
@@ -391,8 +449,17 @@ export function SubmissionBox({
   readonly readiness: ReadinessReport | null;
   readonly onRecheckReadiness: (checks?: readonly ReadinessCheckId[]) => void;
   readonly onDiagnoseReadiness: (check: ReadinessCheckId) => void;
+  /**
+   * A redo request: put this topic in the box and replay these attachment
+   * paths (revalidated). The nonce distinguishes two redos of the same job.
+   */
+  readonly prefill?: {
+    readonly topic: string;
+    readonly attachmentPaths: readonly string[];
+    readonly nonce: number;
+  };
 }) {
-  const [value, setValue] = useState("");
+  const [value, setValue] = useState(() => readDraft()?.topic ?? "");
   /** A submission held until every required environment check is green. */
   const [heldSubmission, setHeldSubmission] = useState<{
     readonly topic: string;
@@ -401,7 +468,30 @@ export function SubmissionBox({
   } | null>(null);
   const [attachments, setAttachments] = useState<
     readonly ValidatedAttachment[]
-  >([]);
+  >(() => readDraft()?.attachments ?? []);
+  // The attachments-so-far tray: a paperclip in the footer whose hover (or
+  // focus) opens the list UPWARD. Chips used to render inline and wrap onto
+  // the footer's row once they filled a line.
+  const [trayOpen, setTrayOpen] = useState(false);
+  const trayTimer = useRef<number | undefined>(undefined);
+  const showTray = () => {
+    if (trayTimer.current !== undefined) {
+      window.clearTimeout(trayTimer.current);
+      trayTimer.current = undefined;
+    }
+    setTrayOpen(true);
+  };
+  // A short grace on leave, so crossing the gap between the clip and the
+  // list never snaps it shut mid-read.
+  const hideTray = () => {
+    trayTimer.current = window.setTimeout(() => setTrayOpen(false), 200);
+  };
+  // Every keystroke and attachment change lands in the tab's draft, so
+  // opening a run and coming back does not eat the composition. A successful
+  // launch clears both states, which clears the draft with them.
+  useEffect(() => {
+    writeDraft({ topic: value, attachments });
+  }, [value, attachments]);
   const [pickerKind, setPickerKind] = useState<
     Exclude<AttachmentSelectionKind, "web"> | null
   >(null);
@@ -442,6 +532,71 @@ export function SubmissionBox({
   const pastedRef = useRef(false);
   const capabilityPickerRef = useRef<HTMLDivElement | null>(null);
   const modelPickerRef = useRef<HTMLDivElement | null>(null);
+
+  // A redo request from a job card: the topic lands in the box, the job's
+  // original attachments are revalidated and re-attached — folders probed
+  // first, since only the server can tell a folder from a file by path —
+  // and the composer takes focus, ready to edit or launch. Keyed by the
+  // nonce so redoing the same job twice replays twice.
+  useEffect(() => {
+    if (prefill === undefined) return;
+    setValue(prefill.topic);
+    setSelectionError(null);
+    setAttachments([]);
+    ref.current?.focus();
+    ref.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    if (prefill.attachmentPaths.length === 0) return;
+    let live = true;
+    void (async () => {
+      try {
+        const paths = prefill.attachmentPaths.slice(
+          0,
+          ATTACHMENT_LIMITS.maxReferences,
+        );
+        const resolved = new Map<string, ValidatedAttachment>();
+        const disk = paths.filter((path) => guessAttachmentKind(path) !== "web");
+        const urls = paths.filter((path) => guessAttachmentKind(path) === "web");
+        if (disk.length > 0) {
+          const folders = await validateAttachments("folder", disk);
+          for (const entry of folders.attachments) {
+            if (entry.valid) resolved.set(entry.path, entry);
+          }
+          const rest = disk.filter((path) => !resolved.has(path));
+          const byKind = new Map<AttachmentSelectionKind, string[]>();
+          for (const path of rest) {
+            const kind = guessAttachmentKind(path);
+            byKind.set(kind, [...(byKind.get(kind) ?? []), path]);
+          }
+          for (const [kind, kindPaths] of byKind) {
+            const result = await validateAttachments(kind, kindPaths);
+            for (const entry of result.attachments) {
+              resolved.set(entry.path, entry);
+            }
+          }
+        }
+        if (urls.length > 0) {
+          const result = await validateAttachments("web", urls);
+          for (const entry of result.attachments) {
+            resolved.set(entry.path, entry);
+          }
+        }
+        if (!live) return;
+        // Original submission order, whatever order the probes resolved in.
+        setAttachments(
+          paths.flatMap((path) => {
+            const entry = resolved.get(path);
+            return entry !== undefined ? [entry] : [];
+          }),
+        );
+      } catch (error) {
+        if (live) setSelectionError(errorMessage(error));
+      }
+    })();
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefill?.nonce]);
 
   // Light-dismiss for the composer popovers, same contract as the attachment
   // fan: a pointer press anywhere outside a popover (and its trigger) closes
@@ -823,51 +978,6 @@ export function SubmissionBox({
         />
 
         <div className="attach-zone">
-        {attachments.length > 0 && (
-          <div className="attach-list">
-            {attachments.map((attachment) => (
-              <span
-                key={attachment.path}
-                className={`attach-chip ${attachment.valid ? "validated" : "invalid"}`}
-                title={
-                  attachment.valid
-                    ? attachment.path
-                    : attachment.reason
-                }
-              >
-                <span className="attach-status">
-                  {attachment.valid ? "validated" : "invalid"}
-                </span>
-                <span className="attach-kind">
-                  {attachment.kind}
-                </span>
-                <span className="attach-chip-text">
-                  {attachment.name}
-                </span>
-                <span className="attach-meta">
-                  {attachmentMeta(attachment)}
-                </span>
-                <button
-                  type="button"
-                  className="attach-remove"
-                  aria-label={`remove attachment ${attachment.path}`}
-                  disabled={submitting}
-                  onClick={() =>
-                    setAttachments(
-                      attachments.filter(
-                        (item) =>
-                          item.path !== attachment.path,
-                      ),
-                    )
-                  }
-                >
-                  ×
-                </button>
-              </span>
-            ))}
-          </div>
-        )}
-
         {urlOpen && (
           <div className="attach-input-row">
             <input
@@ -945,9 +1055,73 @@ export function SubmissionBox({
                 }
                 onSelect={openPicker}
               />
+              {/* The attachments so far: a paperclip and a count, whose
+                  hover opens the list UPWARD — scrollable, each entry
+                  removable. Nothing here is green; a problem shows red. */}
               {attachments.length > 0 && (
-                <span className="attach-summary">
-                  {attachments.length} attached
+                <span
+                  className="attach-tray"
+                  onMouseEnter={showTray}
+                  onMouseLeave={hideTray}
+                  onFocus={showTray}
+                  onBlur={hideTray}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") setTrayOpen(false);
+                  }}
+                >
+                  <button
+                    type="button"
+                    className={`ghost-btn attach-tray-btn${
+                      attachments.some((item) => !item.valid) ? " has-invalid" : ""
+                    }`}
+                    aria-label={`${attachments.length} attachment${
+                      attachments.length === 1 ? "" : "s"
+                    } — hover to review or remove`}
+                    aria-expanded={trayOpen}
+                    onClick={() => (trayOpen ? setTrayOpen(false) : showTray())}
+                  >
+                    <PaperclipIcon />
+                    <span className="attach-tray-count">{attachments.length}</span>
+                  </button>
+                  {trayOpen && (
+                    <div
+                      className="attach-tray-pop"
+                      role="dialog"
+                      aria-label="attachments for the next run"
+                    >
+                      {attachments.map((attachment) => (
+                        <div
+                          key={attachment.path}
+                          className={`attach-tray-row${attachment.valid ? "" : " invalid"}`}
+                          title={attachment.valid ? attachment.path : attachment.reason}
+                        >
+                          <span className="attach-kind">{attachment.kind}</span>
+                          <span className="attach-tray-name">{attachment.name}</span>
+                          <span className="attach-meta">
+                            {attachmentMeta(attachment)}
+                          </span>
+                          {!attachment.valid && (
+                            <span className="attach-tray-invalid">invalid</span>
+                          )}
+                          <button
+                            type="button"
+                            className="attach-remove"
+                            aria-label={`remove attachment ${attachment.path}`}
+                            disabled={submitting}
+                            onClick={() =>
+                              setAttachments(
+                                attachments.filter(
+                                  (item) => item.path !== attachment.path,
+                                ),
+                              )
+                            }
+                          >
+                            ×
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </span>
               )}
             </div>

@@ -35,9 +35,11 @@ import {
 import { jobDot, jobStatusLine } from "../format";
 import { runIsLive } from "../liveness";
 import { Dot } from "./common";
+import { copyText } from "../clipboard";
 import {
   CopyIcon,
   ForwardIcon,
+  RedoIcon,
   PauseIcon,
   ResumeIcon,
   TrashIcon,
@@ -53,7 +55,14 @@ import {
 } from "./ProviderOnboarding";
 import { SubmissionBox } from "./SubmissionBox";
 
-function JobCard({ job }: { readonly job: JobSummary }) {
+function JobCard({
+  job,
+  onRedo,
+}: {
+  readonly job: JobSummary;
+  /** Prefill the composer with this job's prompt and attachments. */
+  readonly onRedo: (job: JobSummary) => void;
+}) {
   const [confirming, setConfirming] = useState<"cancel" | "trash" | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [resuming, setResuming] = useState(false);
@@ -96,12 +105,11 @@ function JobCard({ job }: { readonly job: JobSummary }) {
   }, [expanded, job.jobId, job.status]);
 
   const copyPrompt = async (): Promise<void> => {
-    try {
-      await navigator.clipboard.writeText(job.topic);
+    // copyText falls back to the selection path on insecure origins, where
+    // this button used to do nothing at all.
+    if (await copyText(job.topic)) {
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1_500);
-    } catch {
-      // Clipboard unavailable (non-secure context); the text stays selectable.
     }
   };
   const cancellable =
@@ -192,7 +200,10 @@ function JobCard({ job }: { readonly job: JobSummary }) {
           <Dot state={jobDot(job.status)} />
           <span>{jobStatusLine(job)}</span>
         </span>
-        <span className="job-topic">{job.topic}</span>
+        {/* The run's NAME: the processor's title once the process stage is
+            done, the submitted text until then. The expanded prompt box
+            below always keeps the original submission. */}
+        <span className="job-topic">{job.title ?? job.topic}</span>
       </button>
       <a
         className="ghost-btn"
@@ -204,6 +215,18 @@ function JobCard({ job }: { readonly job: JobSummary }) {
       >
         <ForwardIcon size={16} />
       </a>
+      {/* Redo: a fresh composer preloaded with this run's prompt and its
+          original attachments — edit and launch, nothing about THIS run
+          changes. */}
+      <button
+        type="button"
+        className="ghost-btn"
+        aria-label={`redo — prefill a new run with this job's prompt and attachments: ${job.topic}`}
+        data-tooltip="redo — prefill a new run from this job"
+        onClick={() => onRedo(job)}
+      >
+        <RedoIcon size={16} />
+      </button>
       {confirming !== null ? (
         <div className="cancel-zone">
           <span className="cancel-question">
@@ -423,6 +446,14 @@ export function Landing({
       .catch(() => undefined);
   }, []);
 
+  // A redo request riding from a job card into the composer: its prompt and
+  // its original attachments, ready to edit and launch as a fresh run.
+  const [prefill, setPrefill] = useState<{
+    readonly topic: string;
+    readonly attachmentPaths: readonly string[];
+    readonly nonce: number;
+  } | null>(null);
+
   const submit = async (
     topic: string,
     attachmentPaths: readonly string[],
@@ -463,6 +494,7 @@ export function Landing({
           readiness={readiness}
           onRecheckReadiness={recheck}
           onDiagnoseReadiness={diagnose}
+          {...(prefill !== null ? { prefill } : {})}
         />
         {submitError && (
           <p className="error-text submit-error">{submitError}</p>
@@ -473,7 +505,17 @@ export function Landing({
         {sorted.length > 0 && (
           <ul className="job-list">
             {sorted.map((job) => (
-              <JobCard key={job.jobId} job={job} />
+              <JobCard
+                key={job.jobId}
+                job={job}
+                onRedo={(target) =>
+                  setPrefill({
+                    topic: target.topic,
+                    attachmentPaths: target.attachments ?? [],
+                    nonce: Date.now(),
+                  })
+                }
+              />
             ))}
           </ul>
         )}

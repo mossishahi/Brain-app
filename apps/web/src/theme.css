@@ -1308,34 +1308,84 @@ select:disabled {
   border-color: var(--accent);
 }
 
-.attach-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+/* ------------------------------------------------ the attachments-so-far tray
+   Chips used to render inline above the footer and, once they wrapped onto a
+   second line, collided with the Capabilities row. The attachments live
+   behind a paperclip now: hover (or focus) opens the list UPWARD, it scrolls
+   past ten entries, every entry keeps its remove button — and nothing in it
+   is green. Valid is the quiet default; only a problem takes a colour. */
+.attach-tray {
+  position: relative;
+  display: inline-flex;
 }
 
-.attach-chip {
+.attach-tray-btn {
+  width: auto;
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  max-width: 100%;
+  padding: 0 8px;
+}
+
+.attach-tray-btn.has-invalid {
+  color: var(--bad);
+}
+
+.attach-tray-count {
+  font-size: 11px;
+}
+
+.attach-tray-pop {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: 30;
+  width: min(440px, 80vw);
+  max-height: 240px;
+  overflow-y: auto;
   border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--card-shadow, 0 4px 16px rgba(0, 0, 0, 0.12));
+  padding: 6px;
+}
+
+.attach-tray-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
   border-radius: 6px;
-  padding: 3px 4px 3px 7px;
   font-size: 12px;
   color: var(--text-dim);
+}
+
+.attach-tray-row:hover {
+  background: color-mix(in srgb, var(--text) 5%, transparent);
+}
+
+.attach-tray-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.attach-tray-row.invalid .attach-tray-name {
+  color: var(--bad);
+}
+
+.attach-tray-invalid {
+  color: var(--bad);
+  font-size: 10px;
+  font-weight: 600;
 }
 
 .attach-kind {
   color: var(--accent);
   font-size: 10px;
-}
-
-.attach-chip-text {
-  max-width: 300px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .attach-meta {
@@ -1353,34 +1403,9 @@ select:disabled {
   color: var(--bad);
 }
 
-.attach-summary {
-  color: var(--text-dim);
-  font-size: 11px;
-}
-
 .attach-error {
   margin: 0;
   font-size: 12px;
-}
-
-.attach-chip.validated {
-  border-color: color-mix(in srgb, var(--ok) 55%, var(--border));
-  background: color-mix(in srgb, var(--ok) 8%, transparent);
-}
-
-.attach-chip.invalid {
-  border-color: color-mix(in srgb, var(--bad) 55%, var(--border));
-  background: color-mix(in srgb, var(--bad) 8%, transparent);
-}
-
-.attach-status {
-  color: var(--ok);
-  font-size: 10px;
-  font-weight: 600;
-}
-
-.attach-chip.invalid .attach-status {
-  color: var(--bad);
 }
 
 .attachment-submit-status {
@@ -1743,10 +1768,6 @@ button.server-file-name {
 }
 
 @media (max-width: 720px) {
-  .attach-chip-text {
-    max-width: 210px;
-  }
-
   .server-picker-backdrop {
     padding: 8px;
   }
@@ -1790,6 +1811,15 @@ button.server-file-name {
 .chatbox:focus-within {
   border-color: color-mix(in srgb, var(--text) 30%, var(--border));
   box-shadow: 0 16px 38px color-mix(in srgb, var(--text) 10%, transparent);
+}
+
+/* The PROMPT composer alone sheds the stroke and the shadow: it is the
+   page's centerpiece and reads better as a quiet surface. Other chatbox
+   frames (the held-submission card) keep theirs. */
+.chatbox.composer,
+.chatbox.composer:focus-within {
+  border-color: transparent;
+  box-shadow: none;
 }
 
 .chatbox textarea {
@@ -3323,6 +3353,15 @@ a.activity-entry:focus-visible {
   gap: 12px;
 }
 
+/* The roster variant: wide cards stacked one per row. The wrapped grid put
+   four seats on one line and the fifth alone on the next — a mosaic, not a
+   roster. The classification gate keeps the grid: its two readings are an
+   either/or and belong side by side. */
+.seat-grid.seat-stack {
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+
 .seat-card {
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -4142,6 +4181,16 @@ a.activity-entry:focus-visible {
 
 .detail-label {
   font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* One reviewer finding: its place as quiet prose, the remark at full weight.
+   Plain lines, no chips — only marked places render at all. */
+.flaw-line {
+  margin: 4px 0;
+}
+
+.flaw-line > .flaw-place {
   color: var(--text-dim);
 }
 

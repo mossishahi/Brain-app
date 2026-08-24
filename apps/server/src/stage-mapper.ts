@@ -3907,6 +3907,20 @@ export function buildJobDetailWithActivity(input: MapperInput): JobDetailWithAct
   const detail: JobDetail = {
     jobId: input.record.jobId,
     topic: input.record.topic,
+    // The run's name: the processor's title once the process stage is DONE —
+    // not while it still runs — so a run goes by the submitted text first
+    // and by its worked-out title from then on. The topic stays untouched
+    // as the record of what was submitted.
+    ...(statuses.get("process-input") === "completed" &&
+    processorOutput !== undefined &&
+    processorOutput.title.length > 0
+      ? { title: processorOutput.title }
+      : {}),
+    // The original attachment paths, for the redo control: a fresh composer
+    // replays them and revalidates each one before launch.
+    ...(input.record.attachments !== undefined && input.record.attachments.length > 0
+      ? { attachments: input.record.attachments }
+      : {}),
     status: input.status,
     runner: input.record.runner,
     createdAt: input.record.createdAt,
