@@ -4396,18 +4396,25 @@ a.activity-entry:focus-visible {
   gap: 10px;
 }
 
+/* A part renders as a bullet item: marker beside body, no "part N" label —
+   the parts carry no assigned meaning, and naming them dressed plain
+   paragraphs as form fields. */
 .step-part {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
+  align-items: flex-start;
+  gap: 8px;
 }
 
-/* The label is a LOCATOR and nothing more — the parts carry no assigned
-   meaning — so it stays at label size and label colour and never competes
-   with the words under it. */
-.step-part-label {
-  font-size: 11px;
+.step-part-bullet {
+  flex: 0 0 auto;
   color: var(--text-dim);
+  /* Sits on the first text line, not the box's top edge. */
+  line-height: 1.6;
+}
+
+.step-part-body {
+  flex: 1;
+  min-width: 0;
 }
 
 .diff-red {

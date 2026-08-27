@@ -20,7 +20,7 @@ import type {
   TokenUsageView,
   Verdict,
 } from "@brainstorm-agentic/protocol";
-import { partLabel, stepTextBlocks } from "../steps";
+import { stepTextBlocks } from "../steps";
 import { formatDuration } from "../format";
 import type { DotState } from "../format";
 
@@ -131,10 +131,16 @@ export function StepBlocks({ blocks }: { blocks: readonly StepBlock[] }) {
     <div className="step-parts">
       {blocks.map((block, index) => (
         <div key={block.part ?? index} className="step-part">
+          {/* A bullet, not a "part N" label: the parts carry no assigned
+              meaning, and naming them dressed plain paragraphs as form
+              fields. Reviewers still LOCATE a remark by part — that naming
+              lives where remarks render (the flaws lines), not here. */}
           {block.part !== undefined && (
-            <span className="step-part-label">{partLabel(block.part)}</span>
+            <span className="step-part-bullet" aria-hidden>
+              •
+            </span>
           )}
-          {block.body}
+          <div className="step-part-body">{block.body}</div>
         </div>
       ))}
     </div>
