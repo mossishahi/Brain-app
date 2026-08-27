@@ -1746,6 +1746,29 @@ export async function startBrainServer(
         return;
       }
 
+      // The run's whole record — journal, thinking, logs, results — as one
+      // zip, packaged to fit the attachment rules so it can be re-attached to
+      // a new run and traced by its board. Before the job-detail matcher
+      // below, which would otherwise swallow it.
+      const traceMatch = /^\/api\/jobs\/([^/]+)\/trace\.zip$/.exec(path);
+      if (req.method === "GET" && traceMatch) {
+        const jobId = decodeURIComponent(traceMatch[1]!);
+        // unknown run -> 404 outside
+        const archive = await manager.exportTrace(jobId);
+        if (archive === undefined) {
+          throw new HttpError(409, "this run has not recorded anything to export yet");
+        }
+        res.writeHead(200, {
+          "content-type": "application/zip",
+          "content-length": archive.length,
+          "content-disposition": `attachment; filename="trace-${jobId}.zip"`,
+          // The record grows while the run does; the next click gets the newer file.
+          "cache-control": "no-store",
+        });
+        res.end(archive);
+        return;
+      }
+
       // Before the job-detail matcher below, which would otherwise swallow it.
       const promptMatch = /^\/api\/jobs\/([^/]+)\/prompt\/([^/]+)$/.exec(path);
       if (req.method === "GET" && promptMatch) {

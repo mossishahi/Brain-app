@@ -2196,6 +2196,7 @@ export interface ToolUsageReport {
  *   POST /api/jobs/:jobId/gate-hold           -> JobDetail           (permanently pauses the gate's auto-approve countdown)
  *   POST /api/jobs/:jobId/dismiss-member      -> JobDetail           (body: DismissMemberRequest; stops one seat mid-run and resumes the rest from the last checkpoint)
  *   GET  /api/jobs/:jobId/tool-usage          -> ToolUsageReport     (aggregated from the job's event log)
+ *   GET  /api/jobs/:jobId/trace.zip           -> application/zip     (the run's whole record — journal by stage/seat, thinking, event/search logs, final outputs — packaged to fit the attachment rules for re-submission; 409 before the first checkpoint)
  *   GET  /api/jobs/:jobId/prompt/:promptId    -> text/markdown       (the prompt behind one "llm_call" row, rendered for download; 404 when the run or the record is unknown)
  *   GET  /api/jobs/:jobId/thoughts?ref=...    -> ThoughtsResponse    (the recorded thinking behind one version of one chain step; 404 when the run or the handle is unknown)
  *   GET  /api/stream                          -> SSE of ServerEvent{type:"jobs"|"readiness"}

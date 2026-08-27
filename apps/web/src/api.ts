@@ -365,6 +365,15 @@ export const stageActivityCsvUrl = (jobId: string, stageId: string): string =>
   `${API_BASE}/jobs/${encodeURIComponent(jobId)}/stages/${encodeURIComponent(stageId)}/activity.csv`;
 
 /**
+ * The run's whole record — journal, thinking, event/search logs, final
+ * outputs — as one zip, packaged to fit the attachment rules so it can be
+ * re-attached to a new run. A URL, not a fetch helper: the job card's export
+ * control LINKS at it, the browser downloads, and the server names the file.
+ */
+export const jobTraceUrl = (jobId: string): string =>
+  `${API_BASE}/jobs/${encodeURIComponent(jobId)}/trace.zip`;
+
+/**
  * The FULL text behind a thoughts handle, as a file. The popover previews
  * the journal's capped slice; this serves the untruncated trace (re-cut from
  * the task's thinking artifact). A URL for the same reason as above: the

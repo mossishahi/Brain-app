@@ -22,6 +22,7 @@ import {
   getJobs,
   getReadiness,
   getSettings,
+  jobTraceUrl,
   jobsStreamUrl,
   prefetchJobDetail,
   recheckReadiness,
@@ -38,6 +39,7 @@ import { Dot } from "./common";
 import { copyText } from "../clipboard";
 import {
   CopyIcon,
+  DownloadIcon,
   ForwardIcon,
   RedoIcon,
   PauseIcon,
@@ -227,6 +229,21 @@ function JobCard({
       >
         <RedoIcon size={16} />
       </button>
+      {/* Export: the run's whole record — journal, thinking, logs, results —
+          as one zip, packaged to re-attach to a new run. An anchor with
+          download, not a handler: the browser saves the file the server
+          names. Hidden while the run is queued with nothing recorded yet. */}
+      {job.status !== "queued" && (
+        <a
+          className="ghost-btn"
+          href={jobTraceUrl(job.jobId)}
+          download
+          aria-label={`export this run's whole record as a zip: ${job.topic}`}
+          data-tooltip="export the run's record (zip)"
+        >
+          <DownloadIcon size={16} />
+        </a>
+      )}
       {confirming !== null ? (
         <div className="cancel-zone">
           <span className="cancel-question">

@@ -102,6 +102,12 @@ One rectangle per job, newest first, same 640px column. The list streams live fr
   confirm/deny buttons replacing the X, not a browser alert). Confirm calls POST cancel.
 - The whole card (except the X) is clickable and navigates to `#/jobs/<jobId>`.
 - Completed/cancelled cards stay listed (history is loaded from the server on refresh).
+- An export control (download glyph, `GET /api/jobs/:id/trace.zip`) saves the run's whole
+  record as one zip — the checkpoint journal dealt into named stage/seat files, the full
+  thinking traces as prose, the event and search logs, and the readable final outputs —
+  packaged to fit the attachment rules (400 files, 25 MB per file), so a finished run can be
+  re-attached to a new run and traced by its board. An anchor with `download`, not a handler;
+  hidden while the run is queued with nothing recorded yet.
 
 ## Settings drawer (gear icon)
 

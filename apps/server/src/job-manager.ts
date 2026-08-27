@@ -50,6 +50,8 @@ import {
   ingestAttachments,
 } from "./attachments.js";
 import { outputChangesMarkdown } from "./output-changes.js";
+import { buildRunTrace } from "./trace-export.js";
+import { zipArchive } from "./zip.js";
 import {
   buildOrchestrationCommand,
   renderSlurmTemplate,
@@ -947,6 +949,24 @@ export class JobManager {
     );
     if (text === undefined) return undefined;
     return { text, filename: thoughtsFilename(ref) };
+  }
+
+  /**
+   * The run's whole record as one zip: the checkpoint journal dealt into
+   * named stage/seat files, the full thinking traces, the event and search
+   * logs, and the readable final outputs — packaged to fit the attachment
+   * rules, so a finished run can be re-attached to a new one and traced.
+   * Undefined while the run has no checkpoint: nothing is recorded yet.
+   */
+  async exportTrace(jobId: string): Promise<Buffer | undefined> {
+    this.record(jobId); // "was not found" maps to 404 in the route's handler
+    const files = await buildRunTrace({
+      runId: jobId,
+      sessionDir: this.sessionDir(jobId),
+      jobDir: this.jobDir(jobId),
+    });
+    if (files === undefined) return undefined;
+    return zipArchive(files);
   }
 
   private checkpointStatus(jobId: string): JobStatus | undefined {
