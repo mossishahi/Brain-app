@@ -43,15 +43,16 @@ test("an agent SDK offers native attachment reads only when the run has roots to
       `${provider} must withdraw them when there is nothing to read: offering them ` +
         "resolves the capability available and then denies every path",
     );
-    // Withdrawing the attachment offers must not disturb the rest: search,
-    // fetch and execution do not depend on an attachment store.
+    // Withdrawing the attachment offers must not disturb the rest — and web
+    // operations are never offered natively: the web is HOST-OWNED, so
+    // web.search/web.fetch resolve to the unified host web tools everywhere.
     assert.deepEqual(
       otherOps(nativeOffersFor(provider, { attachmentRootsPresent: false })),
-      ["code.execute", "web.fetch", "web.search"],
+      ["code.execute"],
     );
     assert.deepEqual(
       otherOps(nativeOffersFor(provider, { attachmentRootsPresent: true })),
-      ["code.execute", "web.fetch", "web.search"],
+      ["code.execute"],
     );
   }
 });
@@ -59,11 +60,12 @@ test("an agent SDK offers native attachment reads only when the run has roots to
 test("the developer API serves attachments host-side, so its offers never change", () => {
   // The Messages API path has no file tools of its own — attachment access is
   // the registered host tools there, which buildRuntime removes when there are
-  // no roots. Its native offers are the same either way.
+  // no roots. Its native offers are the same either way — and carry no web
+  // operations, because the web is host-owned on every backend.
   assert.deepEqual(attachmentOps(nativeOffersFor("anthropic", { attachmentRootsPresent: true })), []);
   assert.deepEqual(
     otherOps(nativeOffersFor("anthropic", { attachmentRootsPresent: false })),
-    ["code.execute", "web.fetch", "web.search"],
+    ["code.execute"],
   );
   assert.deepEqual(
     nativeOffersFor("anthropic", { attachmentRootsPresent: true }),

@@ -1217,6 +1217,46 @@ export interface ClaudeAgentSettings {
   readonly fallbackModel?: string;
 }
 
+/**
+ * The host-owned web layer's deployment settings. Web search and web fetch
+ * run through the app's OWN unified pipeline on every backend — no model
+ * provider's built-in search is ever offered — so this section is what
+ * decides which upstream search providers the pipeline uses:
+ *
+ * - `provider` selects the ONE general/news search provider: Tavily, Brave,
+ *   a self-hosted SearXNG you point at ("searxng"), or a SearXNG instance
+ *   the app itself launches and supervises on this deployment's own machine
+ *   ("searxng-local" — keyless, no query ever passes a third-party search
+ *   API). "none" leaves general search unconfigured and general queries get
+ *   an explicit configuration error.
+ * - `scholarly` (default on) enables the keyless scholarly chain — OpenAlex,
+ *   Crossref, arXiv, Semantic Scholar — which is what paper/citation
+ *   searches route to. Keys for these only raise rate limits.
+ * - `cacheEnabled` turns on the cross-run keyword cache (per-workspace,
+ *   TTL-bounded); every cache hit is still logged in the run's search log.
+ *
+ * Provider API keys are write-only exactly like the LLM credentials; the
+ * server returns only the `…Configured` flags.
+ */
+export interface WebSearchSettings {
+  readonly provider: "none" | "tavily" | "brave" | "searxng" | "searxng-local";
+  /** Base URL of the self-hosted SearXNG instance (provider = "searxng"). */
+  readonly searxngBaseUrl?: string;
+  /** The keyless scholarly chain (OpenAlex/Crossref/arXiv/Semantic Scholar). */
+  readonly scholarly: boolean;
+  /** Cross-run keyword cache. */
+  readonly cacheEnabled: boolean;
+  /** Cache TTL in hours (default 24). */
+  readonly cacheTtlHours?: number;
+  /** Polite-pool contact for OpenAlex/Crossref (recommended, not secret). */
+  readonly contactEmail?: string;
+  /** Public status only; the keys themselves are never returned. */
+  readonly tavilyKeyConfigured?: boolean;
+  readonly braveKeyConfigured?: boolean;
+  readonly semanticScholarKeyConfigured?: boolean;
+  readonly openAlexKeyConfigured?: boolean;
+}
+
 export interface LlmSettings {
   /**
    * "anthropic": developer Messages API + API key.
@@ -1349,6 +1389,8 @@ export interface ServerSettings {
   readonly hostTools?: {
     readonly enabledToolIds: readonly string[];
   };
+  /** The host-owned web layer's provider configuration. */
+  readonly webSearch?: WebSearchSettings;
   /**
    * Per-run capability overrides, snapshotted into the job's execution
    * settings at submit time. Keys are capability ids from the content
@@ -1527,6 +1569,29 @@ export interface ServerSettingsUpdate {
   /** Host tools the user wants enabled. Absent = keep current. */
   readonly hostTools?: {
     readonly enabledToolIds: readonly string[];
+  };
+  /**
+   * Absent = keep the stored web-search configuration untouched. Present =
+   * replace it. Provider API keys are write-only, exactly like the LLM
+   * credentials: a submitted key is verified with a real one-result search
+   * through the selected provider before it is stored, an omitted/blank one
+   * keeps the configured secret, and a clear flag removes it.
+   */
+  readonly webSearch?: {
+    readonly provider: "none" | "tavily" | "brave" | "searxng" | "searxng-local";
+    readonly searxngBaseUrl?: string;
+    readonly scholarly?: boolean;
+    readonly cacheEnabled?: boolean;
+    readonly cacheTtlHours?: number;
+    readonly contactEmail?: string;
+    readonly tavilyApiKey?: string;
+    readonly clearTavilyApiKey?: boolean;
+    readonly braveApiKey?: string;
+    readonly clearBraveApiKey?: boolean;
+    readonly semanticScholarApiKey?: string;
+    readonly clearSemanticScholarApiKey?: boolean;
+    readonly openAlexApiKey?: string;
+    readonly clearOpenAlexApiKey?: boolean;
   };
 }
 

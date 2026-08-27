@@ -30,6 +30,7 @@ import {
 import {
   ATTACHMENT_MANIFESTS,
   TAXONOMY_MANIFESTS,
+  WEB_SEARCH_MANIFESTS,
   prepareCodeWorkspace,
   slurmClusterArgs,
   slurmClusterFrom,
@@ -46,6 +47,7 @@ import {
 
 import { renderSlurmTemplate, shellQuote } from "./command.js";
 import { atomicWriteJson, readJsonFile } from "./files.js";
+import { searxngLocalUrl } from "./searxng-launcher.js";
 import type { ContentRegistryRuntimeStatus } from "./model.js";
 import type {
   AnthropicConnectionValidator,
@@ -344,7 +346,11 @@ export function defaultReadinessProbes(
       const providerOffers = nativeOffersFor(provider, {
         attachmentRootsPresent: true,
       });
-      const hostTools = [...ATTACHMENT_MANIFESTS, ...TAXONOMY_MANIFESTS];
+      const hostTools = [
+        ...ATTACHMENT_MANIFESTS,
+        ...TAXONOMY_MANIFESTS,
+        ...WEB_SEARCH_MANIFESTS,
+      ];
       const enabledHostToolIds = new Set<string>(
         context.settings.hostTools?.enabledToolIds ??
           hostTools.filter((manifest) => manifest.defaultEnabled).map((m) => m.toolId),
@@ -354,6 +360,33 @@ export function defaultReadinessProbes(
       // real run wires one (the registry's live store, or the bundle seed).
       for (const manifest of TAXONOMY_MANIFESTS) {
         enabledHostToolIds.add(manifest.toolId);
+      }
+      // Same mirror for the host-owned web layer: a run builds a manager
+      // whenever ANYTHING backs a search — the keyless scholarly chain (on
+      // by default) or a configured general provider — and then enables the
+      // web tools. Modelled from the same settings the run's environment is
+      // written from, so this promise cannot drift from what a run does.
+      {
+        const web = context.settings.webSearch;
+        const generalBacked =
+          web?.provider === "tavily"
+            ? web.tavilyKeyConfigured === true
+            : web?.provider === "brave"
+              ? web.braveKeyConfigured === true
+              : web?.provider === "searxng"
+                ? typeof web.searxngBaseUrl === "string" && web.searxngBaseUrl !== ""
+                : web?.provider === "searxng-local"
+                  ? // The app-launched instance counts only while its state
+                    // file says it is actually running — a selected-but-dead
+                    // launcher must not promise a search no run can make.
+                    searxngLocalUrl(context.workspace) !== undefined
+                  : false;
+        const webBacked =
+          provider !== "offline" && (web?.scholarly !== false || generalBacked);
+        for (const manifest of WEB_SEARCH_MANIFESTS) {
+          if (webBacked) enabledHostToolIds.add(manifest.toolId);
+          else enabledHostToolIds.delete(manifest.toolId);
+        }
       }
       const coreCapabilities: CapabilityDeclaration[] = [
         { capabilityId: "web-search", operations: ["web.search", "web.fetch"], whenUnavailable: "" },

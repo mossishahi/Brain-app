@@ -20,17 +20,70 @@ export {
   ATTACHMENT_MANIFESTS,
 } from "./attachment-tools.js";
 
-// Web tools (web_fetch fully implemented; web_search awaits its first backend)
+// Web tools: manifests, the ONE hardened fetch, and the unified layer
 export {
   WEB_SEARCH_MANIFEST,
   WEB_FETCH_MANIFEST,
   WEB_SEARCH_MANIFESTS,
   WEB_FETCH_TOOL_NAMES,
+  performWebFetch,
   webFetchTools,
   htmlToText,
   isPublicAddress,
 } from "./web-search.js";
-export type { SearchHit, SearchBackend, WebFetchOptions } from "./web-search.js";
+export type {
+  SearchHit,
+  SearchBackend,
+  WebFetchOptions,
+  WebFetchOutcome,
+} from "./web-search.js";
+
+// Unified web layer: one manager routes, bounds, coalesces, caches, and logs
+// every agent's web_search/web_fetch, whichever backend executes the agent.
+export {
+  WebAccessManager,
+  WebAccessError,
+  searchCacheKey,
+} from "./web/manager.js";
+export type { WebAccessManagerOptions } from "./web/manager.js";
+export {
+  buildWebAccessManager,
+  resolveGeneralProvider,
+} from "./web/config.js";
+export type {
+  BuildWebAccessManagerOptions,
+  GeneralSearchProviderId,
+  WebSearchRuntimeConfig,
+  WebSearchSecrets,
+} from "./web/config.js";
+export {
+  arxivProvider,
+  braveProvider,
+  crossrefProvider,
+  offlineSearchProvider,
+  openAlexProvider,
+  ProviderRequestError,
+  searxngProvider,
+  semanticScholarProvider,
+  tavilyProvider,
+} from "./web/providers.js";
+export type {
+  ProviderAnswer,
+  ProviderFetch,
+  ProviderSearchRequest,
+  WebSearchProvider,
+} from "./web/providers.js";
+export {
+  FsWebSearchCache,
+  LayeredWebSearchCache,
+  MemoryWebSearchCache,
+} from "./web/cache.js";
+export type { WebSearchCache } from "./web/cache.js";
+export {
+  WEB_ACCESS_TOOL_NAMES,
+  parseWebSearchInput,
+  webAccessTools,
+} from "./web/tools.js";
 
 // Code execution (workspace preparation + executable tool)
 export {

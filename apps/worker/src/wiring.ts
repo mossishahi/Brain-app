@@ -39,6 +39,7 @@ import {
   type ProviderNativeOffer,
   type RunEventListener,
   type TaxonomyAccess,
+  type WebAccess,
 } from "@brainstorm-agentic/core";
 import {
   isCreditLimitMessage,
@@ -61,13 +62,17 @@ import {
   GPU_RUN_MANIFESTS,
   TAXONOMY_MANIFESTS,
   TAXONOMY_TOOL_NAMES,
+  WEB_SEARCH_MANIFESTS,
   codeExecutionTools,
   createHostToolRegistry,
   gpuRunTools,
   taxonomyTools,
+  webAccessTools,
   webFetchTools,
   type CodeRuntimeEnvironment,
   type GpuRunConfig,
+  type WebSearchRuntimeConfig,
+  type WebSearchSecrets,
 } from "@brainstorm-agentic/host-tools";
 import { OfflineBrainstormExecutor } from "./offline-executor.js";
 import type { PromptSink } from "./prompt-capture.js";
@@ -153,6 +158,15 @@ export interface RuntimeWiringOptions {
    * only source; absent config resolves the capability unavailable.
    */
   readonly gpuRun?: GpuRunConfig;
+  /**
+   * The unified host web layer (one manager per worker process: provider
+   * routing, bounded parallelism, coalescing, optional cache, and the
+   * verbatim per-call search log). The web is HOST-OWNED — no backend offers
+   * web.search/web.fetch natively any more — so this is the ONLY source of
+   * both operations; absent, the capability resolves unavailable and every
+   * agent is told so honestly.
+   */
+  readonly web?: WebAccess;
   readonly bundle: ContentBundle;
   readonly skillResolver?: SkillResolver;
   readonly onEvent?: RunEventListener;
@@ -248,6 +262,7 @@ export function buildAgentExecutor(
   taxonomy?: TaxonomyAccess,
   codeEnvironment?: CodeRuntimeEnvironment,
   gpuRun?: GpuRunConfig,
+  web?: WebAccess,
 ): AgentExecutor {
   if (config.provider === "offline") {
     return new OfflineBrainstormExecutor({ ...(inputTypes ? { inputTypes } : {}) });
@@ -270,6 +285,9 @@ export function buildAgentExecutor(
       ...(taxonomy ? { taxonomy } : {}),
       // Same for GPU runs: no built-in submits cluster jobs.
       ...(gpuRun ? { gpuRun } : {}),
+      // The web is host-owned: Cursor's own webSearch/webFetch never enter
+      // the tools allowlist, and the unified host web tools serve instead.
+      ...(web ? { web } : {}),
       outputValidator: new ContentArtifactOutputValidator(),
       maxValidationAttempts: 3,
       ...(model ? { model } : {}),
@@ -315,6 +333,9 @@ export function buildAgentExecutor(
       // Same for GPU runs: no SDK built-in submits cluster jobs, so the
       // gpu_run tool is bridged in-process when the deployment set it up.
       ...(gpuRun ? { gpuRun } : {}),
+      // The web is host-owned: Claude Code's WebSearch/WebFetch are always
+      // disallowed, and the unified host web tools serve instead.
+      ...(web ? { web } : {}),
       outputValidator: new ContentArtifactOutputValidator(),
       maxValidationAttempts: 3,
       ...(model ? { model } : {}),
@@ -372,10 +393,15 @@ export function buildAgentExecutor(
   if (gpuRun) {
     for (const tool of gpuRunTools(gpuRun)) registry.register(tool);
   }
-  // Registered unconditionally (it needs no backing store), but the model is
-  // only offered it when the capability plan selects it — with a provider
-  // that offers native web tools, the broker prefers those.
-  for (const tool of webFetchTools()) registry.register(tool);
+  // The web is host-owned: with a manager wired, BOTH web tools run through
+  // it (routed, bounded, coalesced, and logged verbatim); without one, the
+  // bare hardened fetch still registers so web.fetch keeps working — the
+  // model is only offered whichever the capability plan selects.
+  if (web) {
+    for (const tool of webAccessTools(web)) registry.register(tool);
+  } else {
+    for (const tool of webFetchTools()) registry.register(tool);
+  }
   return new ToolLoopAgentExecutor({
     provider,
     tools: registry,
@@ -635,6 +661,17 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
       enabledHostToolIds.delete(manifest.toolId);
     }
   }
+  // The web tools follow the same deployment-resource rule as taxonomy: the
+  // web is host-owned (no backend offers web.search/web.fetch natively any
+  // more), so whenever a web manager is wired the tools are enabled — they
+  // are the ONLY thing that can satisfy the web-search capability — and when
+  // none is wired they are removed so the broker's verdict stays truthful.
+  // A submitter still switches search off per run through the capability
+  // override, which resolves every web operation "withheld" plan-wide.
+  for (const manifest of WEB_SEARCH_MANIFESTS) {
+    if (options.web) enabledHostToolIds.add(manifest.toolId);
+    else enabledHostToolIds.delete(manifest.toolId);
+  }
 
   /**
    * What this host is willing to VOUCH for as legitimately empty.
@@ -715,6 +752,7 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
         options.gpuRun !== undefined && enabledHostToolIds.has(GPU_RUN_MANIFESTS[0]!.toolId)
           ? options.gpuRun
           : undefined,
+        options.web,
       ),
       options.providerConfig.creditRecovery,
     ),
@@ -860,33 +898,83 @@ function credentialsFromFile(env: NodeJS.ProcessEnv): {
   claudeSetupToken?: string;
   cursorApiKey?: string;
   openRouterApiKey?: string;
+  tavilyApiKey?: string;
+  braveApiKey?: string;
+  semanticScholarApiKey?: string;
+  openAlexApiKey?: string;
 } {
   const path = env.BRAINSTORM_AGENTIC_CREDENTIALS_FILE?.trim();
   if (!path) return {};
   try {
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as {
-      anthropicApiKey?: unknown;
-      claudeSetupToken?: unknown;
-      cursorApiKey?: unknown;
-      openRouterApiKey?: unknown;
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    const field = (name: string): { [key: string]: string } | Record<string, never> => {
+      const value = parsed[name];
+      return typeof value === "string" && value !== "" ? { [name]: value } : {};
     };
     return {
-      ...(typeof parsed.anthropicApiKey === "string" && parsed.anthropicApiKey
-        ? { anthropicApiKey: parsed.anthropicApiKey }
-        : {}),
-      ...(typeof parsed.claudeSetupToken === "string" && parsed.claudeSetupToken
-        ? { claudeSetupToken: parsed.claudeSetupToken }
-        : {}),
-      ...(typeof parsed.cursorApiKey === "string" && parsed.cursorApiKey
-        ? { cursorApiKey: parsed.cursorApiKey }
-        : {}),
-      ...(typeof parsed.openRouterApiKey === "string" && parsed.openRouterApiKey
-        ? { openRouterApiKey: parsed.openRouterApiKey }
-        : {}),
+      ...field("anthropicApiKey"),
+      ...field("claudeSetupToken"),
+      ...field("cursorApiKey"),
+      ...field("openRouterApiKey"),
+      ...field("tavilyApiKey"),
+      ...field("braveApiKey"),
+      ...field("semanticScholarApiKey"),
+      ...field("openAlexApiKey"),
     };
   } catch {
     return {};
   }
+}
+
+/**
+ * The web-search runtime configuration this run executes with: the JSON
+ * config from the submission environment (BRAINSTORM_AGENTIC_WEB_SEARCH,
+ * written by the server from settings) plus provider secrets from the
+ * scheduler environment or the owner-only credentials file — secrets never
+ * ride the JSON config. An absent variable means the DEFAULT config
+ * (scholarly chain on, no general provider), so a fresh install searches
+ * scholarly indexes out of the box; an unparsable one is announced and then
+ * treated as absent, because the server writes it and a parse failure is a
+ * real defect, not user error.
+ */
+export function webSearchRuntimeFromEnv(env: NodeJS.ProcessEnv): {
+  readonly config: WebSearchRuntimeConfig;
+  readonly secrets: WebSearchSecrets;
+} {
+  let config: WebSearchRuntimeConfig = {};
+  const raw = env.BRAINSTORM_AGENTIC_WEB_SEARCH?.trim();
+  if (raw !== undefined && raw !== "") {
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+        config = parsed as WebSearchRuntimeConfig;
+      }
+    } catch (error) {
+      console.error(
+        `[config] BRAINSTORM_AGENTIC_WEB_SEARCH could not be parsed, so the DEFAULT web ` +
+          `search configuration is being used: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+      );
+    }
+  }
+  const fileCredentials = credentialsFromFile(env);
+  const secret = (value: string | undefined): string | undefined =>
+    value !== undefined && value.trim() !== "" ? value.trim() : undefined;
+  const tavily = secret(env.TAVILY_API_KEY) ?? fileCredentials.tavilyApiKey;
+  const brave = secret(env.BRAVE_SEARCH_API_KEY) ?? fileCredentials.braveApiKey;
+  const semanticScholar =
+    secret(env.SEMANTIC_SCHOLAR_API_KEY) ?? fileCredentials.semanticScholarApiKey;
+  const openAlex = secret(env.OPENALEX_API_KEY) ?? fileCredentials.openAlexApiKey;
+  return {
+    config,
+    secrets: {
+      ...(tavily !== undefined ? { tavilyApiKey: tavily } : {}),
+      ...(brave !== undefined ? { braveApiKey: brave } : {}),
+      ...(semanticScholar !== undefined ? { semanticScholarApiKey: semanticScholar } : {}),
+      ...(openAlex !== undefined ? { openAlexApiKey: openAlex } : {}),
+    },
+  };
 }
 
 export function providerConfigFromEnv(env: NodeJS.ProcessEnv, offline: boolean): ProviderConfig {

@@ -45,6 +45,22 @@ function clip(value: string, limit: number): string {
 }
 
 /**
+ * A tool's short name: in-process MCP tools reach the executors as
+ * `mcp__<server>__<tool>`, and the exclusion contract is about the TOOL —
+ * `submit_step` transports chain content whichever server carries it, while
+ * `web_search` is operational whether it arrives bare (Messages path) or
+ * MCP-bridged (agent-SDK paths). Keying the exclusion on the full name once
+ * hid every bridged operational call — a search's query showed on one
+ * backend and vanished on the other two.
+ */
+function shortToolName(toolName: string): string {
+  if (!toolName.startsWith("mcp__")) return toolName;
+  const rest = toolName.slice("mcp__".length);
+  const separator = rest.indexOf("__");
+  return separator >= 0 ? rest.slice(separator + 2) : toolName;
+}
+
+/**
  * The displayable detail of one tool call, or undefined when the tool is
  * excluded, the input carries no recognized field, or the field is empty.
  */
@@ -52,7 +68,7 @@ export function toolCallDetail(
   toolName: string,
   input: JsonValue | undefined,
 ): ToolCallDetail | undefined {
-  if (EXCLUDED_TOOLS.has(toolName) || toolName.startsWith("mcp__")) {
+  if (EXCLUDED_TOOLS.has(shortToolName(toolName))) {
     return undefined;
   }
   if (typeof input !== "object" || input === null || Array.isArray(input)) {

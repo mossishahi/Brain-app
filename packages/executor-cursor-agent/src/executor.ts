@@ -48,6 +48,7 @@ import {
   type SystemPrompt,
   type TaxonomyAccess,
   type TokenUsage,
+  type WebAccess,
 } from "@brainstorm-agentic/core";
 import {
   isCreditLimitMessage,
@@ -60,6 +61,10 @@ import {
   ATTACHMENT_LIST_MANIFEST,
   ATTACHMENT_SEARCH_MANIFEST,
   GPU_RUN_MANIFEST,
+  WEB_FETCH_MANIFEST,
+  WEB_SEARCH_MANIFEST,
+  parseWebSearchInput,
+  WebAccessError,
   type GpuRunConfig,
 } from "@brainstorm-agentic/host-tools";
 
@@ -213,6 +218,16 @@ export interface CursorAgentExecutorConfig {
    */
   readonly gpuRun?: GpuRunConfig;
   /**
+   * The unified host web layer. The web is HOST-OWNED throughout the
+   * pipeline: Cursor's own webSearch/webFetch never enter the tools
+   * allowlist (see the adapter registry's host-owned-web note), and when
+   * this is set the host web_search/web_fetch tools are bridged in-process
+   * to any task whose skill declares the `web-search` capability — routed,
+   * bounded, and logged by the one manager every backend shares. Without it
+   * the capability resolves unavailable and the agent is told so.
+   */
+  readonly web?: WebAccess;
+  /**
    * Maximum model turns per task, enforced by this executor: the SDK
    * declares no turn ceiling of its own, so the run is cancelled when the
    * count is exceeded — the shared "every loop is bounded" invariant.
@@ -290,9 +305,13 @@ export interface ValidateCursorApiKeyInput {
 /**
  * Capability id -> Cursor public built-in tool names. The vocabulary is the
  * SDK's `tools` option (the same names its tool_call stream events carry).
+ *
+ * `web-search` is deliberately absent: the web is host-owned (see the
+ * adapter registry's note), so Cursor's own webSearch/webFetch never enter
+ * the exact tools allowlist — the capability is served by the in-process
+ * host web tools bridged in webCustomTools instead.
  */
 const CAPABILITY_TOOLS: Readonly<Record<string, readonly string[]>> = {
-  "web-search": ["webSearch", "webFetch"],
   "code-execution": ["shell"],
   "attachment-access": ["read", "grep", "glob", "ls"],
 };
@@ -1341,6 +1360,84 @@ function attachmentCustomTools(
   };
 }
 
+/**
+ * The unified host web tools bridged in-process. Cursor's own
+ * webSearch/webFetch are never offered (the web is host-owned), so every
+ * search and fetch on this backend goes through the injected WebAccess — the
+ * same manager, the same provider chains, and the same verbatim per-call log
+ * as every other backend. A WebAccessError's message is the answer the model
+ * hears (an unconfigured kind, an exhausted chain, a refused fetch).
+ */
+function webCustomTools(
+  web: WebAccess,
+  task: AgentTask,
+  context: AgentExecutionContext,
+): CustomToolMap {
+  const attribution = {
+    taskId: task.taskId,
+    ...(task.agentId !== undefined ? { agentId: task.agentId } : {}),
+    nodePath: context.nodePath,
+  };
+  return {
+    web_search: {
+      description: WEB_SEARCH_MANIFEST.definition.description ?? "",
+      inputSchema: {
+        type: "object",
+        properties: {
+          query: { type: "string", minLength: 1 },
+          kind: { type: "string", enum: ["general", "scholarly", "news"] },
+          max_results: { type: "integer", minimum: 1, maximum: 10 },
+          recency: { type: "string", enum: ["day", "week", "month", "year"] },
+          domains: { type: "array", items: { type: "string" }, maxItems: 8 },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
+      execute: reported("web_search", context, async (args) => {
+        const parsed = parseWebSearchInput(args as JsonValue);
+        if (parsed === undefined) {
+          return toolError("query must be a non-empty string.");
+        }
+        try {
+          return (await web.search(parsed, attribution)) as unknown as JsonValue;
+        } catch (error) {
+          if (error instanceof WebAccessError) return toolError(error.message);
+          throw error;
+        }
+      }),
+    },
+    web_fetch: {
+      description: WEB_FETCH_MANIFEST.definition.description ?? "",
+      inputSchema: {
+        type: "object",
+        properties: {
+          url: { type: "string", minLength: 1 },
+          max_chars: { type: "integer", minimum: 1000, maximum: 48000 },
+        },
+        required: ["url"],
+        additionalProperties: false,
+      },
+      execute: reported("web_fetch", context, async (args) => {
+        if (typeof args.url !== "string" || args.url.trim() === "") {
+          return toolError("url must be a non-empty string.");
+        }
+        try {
+          return (await web.fetch(
+            {
+              url: args.url,
+              ...(typeof args.max_chars === "number" ? { maxChars: args.max_chars } : {}),
+            },
+            attribution,
+          )) as unknown as JsonValue;
+        } catch (error) {
+          if (error instanceof WebAccessError) return toolError(error.message);
+          throw error;
+        }
+      }),
+    },
+  };
+}
+
 /** The gpu_run host tool bridged in-process (bug-report-to-submitter contract). */
 function gpuCustomTools(
   config: GpuRunConfig,
@@ -1724,6 +1821,7 @@ async function executeAttempt(
     (config.attachmentRoots?.length ?? 0) > 0 &&
     taskUsesCapability(task, "attachment-access");
   const wantsGpu = config.gpuRun !== undefined && taskUsesCapability(task, "gpu-execution");
+  const wantsWeb = config.web !== undefined && taskUsesCapability(task, "web-search");
 
   const customTools: CustomToolMap = {
     ...(capture.stepwise !== undefined
@@ -1735,6 +1833,7 @@ async function executeAttempt(
     ...(wantsTaxonomy ? taxonomyCustomTools(config.taxonomy!, context) : {}),
     ...(wantsAttachments ? attachmentCustomTools(config.attachmentRoots!, context) : {}),
     ...(wantsGpu ? gpuCustomTools(config.gpuRun!, context) : {}),
+    ...(wantsWeb ? webCustomTools(config.web!, task, context) : {}),
   };
   const hasCustomTools = Object.keys(customTools).length > 0;
   const builtinTools = allowedBuiltinTools(task);

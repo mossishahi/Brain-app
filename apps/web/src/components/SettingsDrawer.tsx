@@ -50,6 +50,7 @@ const SECTION_IDS = [
   "review",
   "panel",
   "tools",
+  "webSearch",
   "recovery",
 ] as const;
 type SectionId = (typeof SECTION_IDS)[number];
@@ -208,6 +209,16 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
     "attachment_list",
     "attachment_read",
   ]);
+  /** The host-owned web layer: provider, scholarly chain, cache, and keys. */
+  const [webProvider, setWebProvider] = useState<
+    "none" | "tavily" | "brave" | "searxng" | "searxng-local"
+  >("none");
+  const [searxngBaseUrl, setSearxngBaseUrl] = useState("");
+  const [webScholarly, setWebScholarly] = useState(true);
+  const [webCacheEnabled, setWebCacheEnabled] = useState(false);
+  const [webContactEmail, setWebContactEmail] = useState("");
+  const [tavilyApiKey, setTavilyApiKey] = useState("");
+  const [braveApiKey, setBraveApiKey] = useState("");
 
   const drawerRef = useRef<HTMLDivElement>(null);
 
@@ -359,6 +370,11 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
         if (s.hostTools?.enabledToolIds) {
           setEnabledHostTools([...s.hostTools.enabledToolIds]);
         }
+        setWebProvider(s.webSearch?.provider ?? "none");
+        setSearxngBaseUrl(s.webSearch?.searxngBaseUrl ?? "");
+        setWebScholarly(s.webSearch?.scholarly !== false);
+        setWebCacheEnabled(s.webSearch?.cacheEnabled === true);
+        setWebContactEmail(s.webSearch?.contactEmail ?? "");
       })
       .catch((e: unknown) => {
         if (live) setLoadError(errorMessage(e));
@@ -1322,10 +1338,11 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                 />
                 Attachment access (list, read, and search submission files)
               </label>
-              <label className="radio-row">
-                <input type="checkbox" checked={false} disabled />
-                Web search (not yet implemented)
-              </label>
+              <span className="field-note" style={{ display: "block" }}>
+                Web search and web fetch always run through the app's own
+                unified search pipeline — never a model provider's built-in
+                search — and are configured in the Web search section below.
+              </span>
               <label className="radio-row">
                 <input
                   type="checkbox"
@@ -1341,6 +1358,323 @@ export function SettingsDrawer({ onClose }: { onClose: () => void }) {
                 Code execution (host scratch workspace; providers with native
                 execution keep using it)
               </label>
+            </Section>
+
+            <Section
+              title="Web search"
+              state={saveState.webSearch}
+              error={saveError.webSearch}
+            >
+              <span className="field-note" style={{ display: "block", marginBottom: "0.5rem" }}>
+                Every agent's web search runs through the app's own pipeline:
+                one manager routes each query to the providers below, runs
+                searches in parallel, and writes every request and answer —
+                verbatim — to the run's search log. Model providers' built-in
+                search is never used.
+              </span>
+              <div className="field">
+                <label className="field-label" htmlFor="settings-web-provider">
+                  General web search provider
+                </label>
+                <select
+                  id="settings-web-provider"
+                  value={webProvider}
+                  onChange={(e) => {
+                    const next = e.target.value as
+                      | "none"
+                      | "tavily"
+                      | "brave"
+                      | "searxng"
+                      | "searxng-local";
+                    setWebProvider(next);
+                    // Selecting a keyed provider is completed by its Save
+                    // button below; only keyless selections save on change.
+                    if (
+                      next === "none" ||
+                      next === "searxng-local" ||
+                      (next === "tavily" && loaded?.webSearch?.tavilyKeyConfigured) ||
+                      (next === "brave" && loaded?.webSearch?.braveKeyConfigured)
+                    ) {
+                      void save("webSearch", {
+                        webSearch: {
+                          provider: next,
+                          ...(searxngBaseUrl.trim() !== ""
+                            ? { searxngBaseUrl: searxngBaseUrl.trim() }
+                            : {}),
+                          scholarly: webScholarly,
+                          cacheEnabled: webCacheEnabled,
+                          ...(webContactEmail.trim() !== ""
+                            ? { contactEmail: webContactEmail.trim() }
+                            : {}),
+                        },
+                      });
+                    }
+                  }}
+                >
+                  <option value="none">None (scholarly indexes only)</option>
+                  <option value="searxng-local">
+                    SearXNG — launched by the app on this machine (keyless)
+                  </option>
+                  <option value="tavily">Tavily (agent search API)</option>
+                  <option value="brave">Brave Search API</option>
+                  <option value="searxng">SearXNG (your own instance)</option>
+                </select>
+                <span className="field-note">
+                  Answers "general" and "news" queries. Scholarly queries
+                  (papers, citations) use the keyless scholarly indexes below
+                  either way.
+                </span>
+              </div>
+              {webProvider === "searxng-local" && (
+                <span className="field-note" style={{ display: "block" }}>
+                  The app starts and supervises a private SearXNG search
+                  service on this deployment's own machine (needs Docker,
+                  Podman, or Apptainer). No key, and no query ever passes a
+                  third-party search API. The first start downloads the search
+                  image and can take a few minutes; the Agent capabilities
+                  readiness check turns green once it is up.
+                </span>
+              )}
+              {webProvider === "tavily" && (
+                <div className="field">
+                  <label className="field-label" htmlFor="settings-tavily-key">
+                    Tavily API key
+                  </label>
+                  <div className="field-with-action">
+                    <input
+                      id="settings-tavily-key"
+                      type="password"
+                      value={tavilyApiKey}
+                      autoComplete="new-password"
+                      placeholder={
+                        loaded.webSearch?.tavilyKeyConfigured
+                          ? "Verified key saved — enter a new key to replace it"
+                          : "tvly-… from app.tavily.com"
+                      }
+                      onChange={(e) => setTavilyApiKey(e.target.value)}
+                    />
+                    <div className="credential-actions">
+                      <button
+                        type="button"
+                        className="btn btn-primary btn-small"
+                        disabled={
+                          tavilyApiKey.trim() === "" ||
+                          saveState.webSearch === "saving"
+                        }
+                        onClick={() => {
+                          void save("webSearch", {
+                            webSearch: {
+                              provider: "tavily",
+                              scholarly: webScholarly,
+                              cacheEnabled: webCacheEnabled,
+                              ...(webContactEmail.trim() !== ""
+                                ? { contactEmail: webContactEmail.trim() }
+                                : {}),
+                              tavilyApiKey: tavilyApiKey.trim(),
+                            },
+                          }).then((saved) => {
+                            if (saved) setTavilyApiKey("");
+                          });
+                        }}
+                      >
+                        {saveState.webSearch === "saving" ? "Verifying…" : "Save"}
+                      </button>
+                    </div>
+                  </div>
+                  <span className="field-note">
+                    Verified with one real search before saving; never returned
+                    to the browser.
+                  </span>
+                </div>
+              )}
+              {webProvider === "brave" && (
+                <div className="field">
+                  <label className="field-label" htmlFor="settings-brave-key">
+                    Brave Search API key
+                  </label>
+                  <div className="field-with-action">
+                    <input
+                      id="settings-brave-key"
+                      type="password"
+                      value={braveApiKey}
+                      autoComplete="new-password"
+                      placeholder={
+                        loaded.webSearch?.braveKeyConfigured
+                          ? "Verified key saved — enter a new key to replace it"
+                          : "From api-dashboard.search.brave.com"
+                      }
+                      onChange={(e) => setBraveApiKey(e.target.value)}
+                    />
+                    <div className="credential-actions">
+                      <button
+                        type="button"
+                        className="btn btn-primary btn-small"
+                        disabled={
+                          braveApiKey.trim() === "" ||
+                          saveState.webSearch === "saving"
+                        }
+                        onClick={() => {
+                          void save("webSearch", {
+                            webSearch: {
+                              provider: "brave",
+                              scholarly: webScholarly,
+                              cacheEnabled: webCacheEnabled,
+                              ...(webContactEmail.trim() !== ""
+                                ? { contactEmail: webContactEmail.trim() }
+                                : {}),
+                              braveApiKey: braveApiKey.trim(),
+                            },
+                          }).then((saved) => {
+                            if (saved) setBraveApiKey("");
+                          });
+                        }}
+                      >
+                        {saveState.webSearch === "saving" ? "Verifying…" : "Save"}
+                      </button>
+                    </div>
+                  </div>
+                  <span className="field-note">
+                    Verified with one real search before saving; never returned
+                    to the browser.
+                  </span>
+                </div>
+              )}
+              {webProvider === "searxng" && (
+                <div className="field">
+                  <label className="field-label" htmlFor="settings-searxng-url">
+                    SearXNG base URL
+                  </label>
+                  <div className="field-with-action">
+                    <input
+                      id="settings-searxng-url"
+                      type="text"
+                      value={searxngBaseUrl}
+                      placeholder="https://searx.example.org"
+                      onChange={(e) => setSearxngBaseUrl(e.target.value)}
+                    />
+                    <div className="credential-actions">
+                      <button
+                        type="button"
+                        className="btn btn-primary btn-small"
+                        disabled={
+                          searxngBaseUrl.trim() === "" ||
+                          saveState.webSearch === "saving"
+                        }
+                        onClick={() => {
+                          void save("webSearch", {
+                            webSearch: {
+                              provider: "searxng",
+                              searxngBaseUrl: searxngBaseUrl.trim(),
+                              scholarly: webScholarly,
+                              cacheEnabled: webCacheEnabled,
+                              ...(webContactEmail.trim() !== ""
+                                ? { contactEmail: webContactEmail.trim() }
+                                : {}),
+                            },
+                          });
+                        }}
+                      >
+                        {saveState.webSearch === "saving" ? "Verifying…" : "Save"}
+                      </button>
+                    </div>
+                  </div>
+                  <span className="field-note">
+                    Your self-hosted instance, keyless. Verified with one real
+                    search before saving.
+                  </span>
+                </div>
+              )}
+              <label className="radio-row">
+                <input
+                  type="checkbox"
+                  checked={webScholarly}
+                  onChange={(e) => {
+                    setWebScholarly(e.target.checked);
+                    void save("webSearch", {
+                      webSearch: {
+                        provider: webProvider,
+                        ...(searxngBaseUrl.trim() !== ""
+                          ? { searxngBaseUrl: searxngBaseUrl.trim() }
+                          : {}),
+                        scholarly: e.target.checked,
+                        cacheEnabled: webCacheEnabled,
+                        ...(webContactEmail.trim() !== ""
+                          ? { contactEmail: webContactEmail.trim() }
+                          : {}),
+                      },
+                    });
+                  }}
+                />
+                Scholarly indexes (OpenAlex, Crossref, arXiv, Semantic Scholar)
+              </label>
+              <span className="field-note">
+                Keyless and on by default — paper and citation searches answer
+                from these with DOIs, authors, venues, and citation counts.
+              </span>
+              <label className="radio-row">
+                <input
+                  type="checkbox"
+                  checked={webCacheEnabled}
+                  onChange={(e) => {
+                    setWebCacheEnabled(e.target.checked);
+                    void save("webSearch", {
+                      webSearch: {
+                        provider: webProvider,
+                        ...(searxngBaseUrl.trim() !== ""
+                          ? { searxngBaseUrl: searxngBaseUrl.trim() }
+                          : {}),
+                        scholarly: webScholarly,
+                        cacheEnabled: e.target.checked,
+                        ...(webContactEmail.trim() !== ""
+                          ? { contactEmail: webContactEmail.trim() }
+                          : {}),
+                      },
+                    });
+                  }}
+                />
+                Cache keyword results across runs (24h)
+              </label>
+              <span className="field-note">
+                The same keyword asked twice — by two seats or two runs — costs
+                one upstream call. Cache hits still appear in the search log.
+              </span>
+              <div className="field">
+                <label className="field-label" htmlFor="settings-web-contact">
+                  Contact email <span className="dim">(optional)</span>
+                </label>
+                <input
+                  id="settings-web-contact"
+                  type="text"
+                  value={webContactEmail}
+                  placeholder="you@example.org — polite-pool contact for OpenAlex/Crossref"
+                  onChange={(e) => {
+                    setWebContactEmail(e.target.value);
+                    saveSoon("webSearch", () => {
+                      const email = webContactEmail;
+                      void email;
+                      const trimmed = e.target.value.trim();
+                      if (trimmed !== "" && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) {
+                        return null;
+                      }
+                      return {
+                        webSearch: {
+                          provider: webProvider,
+                          ...(searxngBaseUrl.trim() !== ""
+                            ? { searxngBaseUrl: searxngBaseUrl.trim() }
+                            : {}),
+                          scholarly: webScholarly,
+                          cacheEnabled: webCacheEnabled,
+                          ...(trimmed !== "" ? { contactEmail: trimmed } : {}),
+                        },
+                      };
+                    });
+                  }}
+                />
+                <span className="field-note">
+                  Shared with the scholarly indexes' polite pools for faster,
+                  more reliable answers. Never required.
+                </span>
+              </div>
             </Section>
 
             <Section

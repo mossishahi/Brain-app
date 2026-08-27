@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   ANTHROPIC_ADAPTER,
   CLAUDE_AGENT_ADAPTER,
+  CURSOR_AGENT_ADAPTER,
 } from "../src/capability/adapter-registry.js";
 
 /**
@@ -15,16 +16,30 @@ import {
  * removed. These tests pin what those consumers actually depend on.
  */
 
-test("the Anthropic adapter offers exactly its three server tools", () => {
+test("the Anthropic adapter offers exactly its one server tool", () => {
   assert.equal(ANTHROPIC_ADAPTER.providerId, "anthropic");
   assert.equal(ANTHROPIC_ADAPTER.kind, "model-loop");
-  // Attachment and taxonomy operations stay host-side on this path by design:
-  // adding a fourth offer here would silently stop the host tools being
-  // offered to the model, because provider-native always wins in the broker.
+  // Attachment, taxonomy, AND web operations stay host-side on this path by
+  // design: the web is host-owned (one unified, logged pipeline), and adding
+  // an offer here would silently stop the host tools being offered to the
+  // model, because provider-native always wins in the broker.
   assert.deepEqual(
     ANTHROPIC_ADAPTER.staticOffers.map((offer) => offer.operationId).sort(),
-    ["code.execute", "web.fetch", "web.search"],
+    ["code.execute"],
   );
+});
+
+test("no adapter offers web.search or web.fetch — the web is host-owned", () => {
+  // Restoring a native web offer would silently split the pipeline's search
+  // across backends again and route it around the unified search log.
+  for (const adapter of [ANTHROPIC_ADAPTER, CLAUDE_AGENT_ADAPTER, CURSOR_AGENT_ADAPTER]) {
+    for (const offer of adapter.staticOffers) {
+      assert.ok(
+        !offer.operationId.startsWith("web."),
+        `${adapter.providerId} must not offer ${offer.operationId} natively`,
+      );
+    }
+  }
 });
 
 test("the Claude Agent adapter additionally covers file access natively", () => {

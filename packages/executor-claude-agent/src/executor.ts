@@ -32,6 +32,7 @@ import {
   type TaxonomyAccess,
   type TokenUsage,
   type ToolCallDetail,
+  type WebAccess,
 } from "@brainstorm-agentic/core";
 import {
   isCreditLimitMessage,
@@ -44,6 +45,10 @@ import {
   ATTACHMENT_LIST_MANIFEST,
   ATTACHMENT_SEARCH_MANIFEST,
   GPU_RUN_MANIFEST,
+  WEB_FETCH_MANIFEST,
+  WEB_SEARCH_MANIFEST,
+  parseWebSearchInput,
+  WebAccessError,
   type GpuRunConfig,
 } from "@brainstorm-agentic/host-tools";
 
@@ -86,6 +91,16 @@ export interface ClaudeAgentExecutorConfig {
    * declares the `gpu-execution` capability.
    */
   readonly gpuRun?: GpuRunConfig;
+  /**
+   * The unified host web layer. The web is HOST-OWNED throughout the
+   * pipeline: Claude Code's own WebSearch/WebFetch are always disallowed
+   * (see the adapter registry's host-owned-web note), and when this is set
+   * the host web_search/web_fetch tools are delivered as in-process MCP
+   * tools to any task whose skill declares the `web-search` capability —
+   * routed, bounded, and logged by the one manager every backend shares.
+   * Without it the capability resolves unavailable and the agent is told so.
+   */
+  readonly web?: WebAccess;
   readonly maxTurns?: number;
   readonly maxBudgetUsd?: number;
   readonly effort?: "low" | "medium" | "high" | "xhigh" | "max";
@@ -162,8 +177,14 @@ export interface ValidateClaudeSetupTokenInput {
   readonly timeoutMs?: number;
 }
 
+/**
+ * Capability -> Claude Code BUILT-IN tools. `web-search` is deliberately
+ * absent: the web is host-owned (see the adapter registry's note), so the
+ * SDK's WebSearch/WebFetch never enter the allowed set — they land in
+ * disallowedTools with every other unlisted built-in — and the capability is
+ * served by the in-process web MCP server below instead.
+ */
 const CAPABILITY_TOOLS: Readonly<Record<string, readonly string[]>> = {
-  "web-search": ["WebSearch", "WebFetch"],
   "code-execution": ["Bash"],
   "attachment-access": ["Read", "Glob", "Grep"],
 };
@@ -839,6 +860,97 @@ function gpuServer(
   });
 }
 
+/** In-process MCP server name carrying the unified host web tools. */
+const WEB_SERVER = "web";
+
+/** Full Claude Code tool names for the in-process web MCP server. */
+function webSdkToolNames(): readonly string[] {
+  return [`mcp__${WEB_SERVER}__web_search`, `mcp__${WEB_SERVER}__web_fetch`];
+}
+
+/** True when the task's skill declared the web-search capability. */
+function taskUsesWeb(task: AgentTask): boolean {
+  return taskUsesCapability(task, "web-search");
+}
+
+/**
+ * In-process MCP server exposing the unified host web tools. Claude Code's
+ * own WebSearch/WebFetch are permanently disallowed (the web is host-owned),
+ * so every search and fetch this backend performs goes through the injected
+ * WebAccess — the same manager, the same provider chains, and the same
+ * verbatim per-call log as every other backend. A WebAccessError's message
+ * is what the model is told (an unconfigured kind, an exhausted chain, a
+ * refused fetch) — honest, actionable, and never a crashed task.
+ */
+function webServer(
+  web: WebAccess,
+  attribution: { taskId?: string; agentId?: string; nodePath?: string },
+  watchdog: SessionWatchdog,
+): ReturnType<typeof createSdkMcpServer> {
+  const textResult = (value: unknown, isError = false) => ({
+    content: [
+      {
+        type: "text" as const,
+        text: typeof value === "string" ? value : JSON.stringify(value),
+      },
+    ],
+    ...(isError ? { isError: true as const } : {}),
+  });
+  const run = async (work: () => Promise<unknown>) => {
+    try {
+      return textResult(await work());
+    } catch (error) {
+      if (error instanceof WebAccessError) return textResult(error.message, true);
+      return textResult(error instanceof Error ? error.message : String(error), true);
+    }
+  };
+  return createSdkMcpServer({
+    name: WEB_SERVER,
+    version: "1.0.0",
+    tools: [
+      sdkTool(
+        "web_search",
+        WEB_SEARCH_MANIFEST.definition.description ?? "",
+        {
+          query: z.string().min(1),
+          kind: z.enum(["general", "scholarly", "news"]).optional(),
+          max_results: z.number().int().min(1).max(10).optional(),
+          recency: z.enum(["day", "week", "month", "year"]).optional(),
+          domains: z.array(z.string()).max(8).optional(),
+        },
+        watchdog.held(async (args) =>
+          run(async () => {
+            const parsed = parseWebSearchInput(args as JsonValue);
+            if (parsed === undefined) {
+              throw new WebAccessError("query must be a non-empty string.");
+            }
+            return web.search(parsed, attribution);
+          }),
+        ),
+      ),
+      sdkTool(
+        "web_fetch",
+        WEB_FETCH_MANIFEST.definition.description ?? "",
+        {
+          url: z.string().min(1),
+          max_chars: z.number().int().min(1000).max(48000).optional(),
+        },
+        watchdog.held(async (args) =>
+          run(async () =>
+            web.fetch(
+              {
+                url: String(args.url ?? ""),
+                ...(typeof args.max_chars === "number" ? { maxChars: args.max_chars } : {}),
+              },
+              attribution,
+            ),
+          ),
+        ),
+      ),
+    ],
+  });
+}
+
 function record(value: unknown): UnknownRecord {
   return typeof value === "object" && value !== null
     ? (value as UnknownRecord)
@@ -1079,6 +1191,14 @@ function toolMessage(name: string, input: unknown): string {
         ? `Running a GPU job — ${jobName}`
         : "Running a GPU job";
     }
+    case `mcp__${WEB_SERVER}__web_search`: {
+      const query = shortText(args.query);
+      return query ? `Searching the web — ${query}` : "Searching the web";
+    }
+    case `mcp__${WEB_SERVER}__web_fetch`: {
+      const url = shortText(args.url);
+      return url ? `Fetching a source — ${url}` : "Fetching a source";
+    }
     case STRUCTURED_OUTPUT_TOOL:
       return "Submitting the structured output";
     default:
@@ -1096,6 +1216,8 @@ const TOOL_END_LABELS: Readonly<Record<string, string>> = {
   [`mcp__${ATTACHMENTS_SERVER}__attachment_list`]: "Attachment inventory",
   [`mcp__${ATTACHMENTS_SERVER}__attachment_search`]: "Attachment search",
   [`mcp__${GPU_SERVER}__gpu_run`]: "GPU job",
+  [`mcp__${WEB_SERVER}__web_search`]: "Web search",
+  [`mcp__${WEB_SERVER}__web_fetch`]: "Source fetch",
   [STRUCTURED_OUTPUT_TOOL]: "Structured output",
 };
 
@@ -1728,6 +1850,7 @@ function fileAccessHooks(
 function queryOptions(
   config: ClaudeAgentExecutorConfig,
   task: AgentTask,
+  context: AgentExecutionContext,
   controller: AbortController,
   nativeStructuredOutput: boolean,
   capture: TraceCapture,
@@ -1740,6 +1863,7 @@ function queryOptions(
     (config.attachmentRoots?.length ?? 0) > 0 &&
     taskUsesCapability(task, "attachment-access");
   const wantsGpu = config.gpuRun !== undefined && taskUsesGpu(task);
+  const wantsWeb = config.web !== undefined && taskUsesWeb(task);
   const tools = [
     ...builtinTools,
     ...(capture.stepwise !== undefined
@@ -1748,6 +1872,7 @@ function queryOptions(
     ...(wantsTaxonomy ? taxonomySdkToolNames() : []),
     ...(wantsAttachments ? attachmentsSdkToolNames() : []),
     ...(wantsGpu ? gpuSdkToolNames() : []),
+    ...(wantsWeb ? webSdkToolNames() : []),
   ];
   const disallowedTools = KNOWN_BUILTIN_TOOLS.filter(
     (name) => !tools.includes(name),
@@ -1791,6 +1916,19 @@ function queryOptions(
       ? { [ATTACHMENTS_SERVER]: attachmentsServer(config.attachmentRoots!, watchdog) }
       : {}),
     ...(wantsGpu ? { [GPU_SERVER]: gpuServer(config.gpuRun!, watchdog) } : {}),
+    ...(wantsWeb
+      ? {
+          [WEB_SERVER]: webServer(
+            config.web!,
+            {
+              taskId: task.taskId,
+              ...(task.agentId !== undefined ? { agentId: task.agentId } : {}),
+              nodePath: context.nodePath,
+            },
+            watchdog,
+          ),
+        }
+      : {}),
   };
   if (Object.keys(mcpServers).length > 0) {
     options.mcpServers = mcpServers;
@@ -1892,6 +2030,16 @@ function offeredTools(
     described.set(`mcp__${GPU_SERVER}__gpu_run`, {
       description: GPU_RUN_MANIFEST.definition.description ?? "",
       input: ["script", "time_limit_minutes", "job_name"],
+    });
+  }
+  if (config.web !== undefined && taskUsesWeb(task)) {
+    described.set(`mcp__${WEB_SERVER}__web_search`, {
+      description: WEB_SEARCH_MANIFEST.definition.description ?? "",
+      input: ["query", "kind", "max_results", "recency", "domains"],
+    });
+    described.set(`mcp__${WEB_SERVER}__web_fetch`, {
+      description: WEB_FETCH_MANIFEST.definition.description ?? "",
+      input: ["url", "max_chars"],
     });
   }
   const names = Array.isArray(options.tools) ? options.tools.map(String) : [];
@@ -2090,6 +2238,7 @@ async function executeQuery(
     const options = queryOptions(
       config,
       task,
+      context,
       controller,
       nativeStructuredOutput,
       capture,

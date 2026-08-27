@@ -162,6 +162,25 @@ Sections:
 5. **Credit recovery** — auto-resume toggle (default on), safety-buffer seconds, OpenRouter parser
    model (`openrouter/free`), and optional write-only OpenRouter API key. Known reset messages are
    parsed locally; the free router is used only for unknown formats.
+6. **Web search** — the host-owned web layer's providers. Every agent's web search runs through
+   the app's OWN unified pipeline (one manager: routing by query kind, parallel dispatch under
+   caps, failover, optional cross-run keyword cache, and a verbatim per-call log) — a model
+   provider's built-in search is never offered, on any backend. The section holds: the general
+   provider select (`None (scholarly indexes only)` default / `SearXNG — launched by the app on
+   this machine` / Tavily / Brave / `SearXNG (your own instance)`), the selected provider's
+   write-only API key with its own Save button (verified with one real one-result search before
+   it is stored, exactly like the LLM credentials; a pointed-at SearXNG takes a base URL instead
+   of a key), the scholarly-indexes toggle (OpenAlex, Crossref, arXiv, Semantic Scholar —
+   keyless, on by default, what paper/citation searches answer from), the cross-run cache toggle
+   (off by default; hits still appear in the search log), and an optional polite-pool contact
+   email. Selecting the app-launched SearXNG saves immediately and starts the instance in the
+   background (the server finds Docker/Podman/Apptainer, downloads the search image on first
+   start — a few minutes — and supervises it; the Agent capabilities readiness check turns green
+   once it is up, and no query ever passes a third-party search API). The run's whole search
+   record is served per job: `GET /api/jobs/:id/searches` (table rows carrying every named
+   failure — a failed-over provider, a CAPTCHA-blocked engine — plus a per-run `failureSummary`
+   counting each cause), `searches.csv`, and `searches.jsonl` (raw, every character of every
+   request and answer).
 
 Each section persists via PUT /api/settings carrying ONLY its own fields; the server keeps every
 section the request omits, so one panel's save can never disturb another's.

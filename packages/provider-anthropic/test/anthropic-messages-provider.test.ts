@@ -678,6 +678,12 @@ test("native operations become server tools; their activity round-trips and is s
     apiKey: "not-used-by-mock",
     model: "claude-default",
     client,
+    // web_search left the BUILT-IN map when the web became host-owned; a
+    // deployment that really wants a provider-side server tool pins it here,
+    // which is also what makes this test exercise the documented merge path.
+    nativeTools: {
+      web_search: { type: "web_search_20250305", name: "web_search", max_uses: 8 },
+    },
   });
   const response = await provider.complete({
     modelId: "claude-request",
@@ -780,6 +786,10 @@ test("pause_turn responses continue automatically and concatenate the full turn"
     apiKey: "not-used-by-mock",
     model: "claude-default",
     client,
+    // Deployment-pinned server tool (web left the built-in map; see above).
+    nativeTools: {
+      web_search: { type: "web_search_20250305", name: "web_search", max_uses: 8 },
+    },
   });
   const response = await provider.complete({
     modelId: "claude-request",
@@ -972,6 +982,10 @@ test("pause_turn continuations re-derive one tail breakpoint, skipping unmarkabl
   const provider = new AnthropicMessagesProvider({
     apiKey: "not-used-by-mock",
     model: "claude-default",
+    // Deployment-pinned server tool (web left the built-in map; see above).
+    nativeTools: {
+      web_search: { type: "web_search_20250305", name: "web_search", max_uses: 8 },
+    },
     client: {
       messages: {
         async create(body) {

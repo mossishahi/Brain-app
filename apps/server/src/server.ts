@@ -51,6 +51,12 @@ import {
   renderPromptMarkdown,
 } from "./prompt-record.js";
 import { aggregateToolUsage } from "./tool-usage.js";
+import { SearxngLauncher } from "./searxng-launcher.js";
+import {
+  readSearchLogText,
+  readSearchTable,
+  searchTableCsv,
+} from "./web-search-log.js";
 import {
   applyAppUpdate as applyAppUpdateDefault,
   checkAppUpdate,
@@ -133,6 +139,12 @@ const TELEMETRY_FLUSH_MS = 60_000;
 const CLOSE_DRAIN_GRACE_MS = 5_000;
 /** Interrupted-job scans hit squeue/sacct, so they poll far less often. */
 const INTERRUPTED_SCAN_MS = 30_000;
+/**
+ * How often the local-SearXNG supervisor re-checks its instance. A dead
+ * container is restarted within one tick (boundedly — see the launcher);
+ * a healthy one costs a single in-memory status read.
+ */
+const SEARXNG_SUPERVISION_MS = 60_000;
 /**
  * How long a graceful post-update shutdown may take before the process is
  * ended hard. The close path's own drains are bounded well below this; the
@@ -232,6 +244,8 @@ export interface StartBrainServerOptions {
   readonly listCursorModels?: (
     apiKey: string,
   ) => Promise<readonly { id: string; displayName?: string }[]>;
+  /** Test seam; production launches a real local SearXNG container. */
+  readonly searxngLauncher?: SearxngLauncher;
   /** How long one live registry verification stays cached. Default 60s. */
   readonly registryProbeTtlMs?: number;
   readonly validateOpenRouter?: (
@@ -781,6 +795,43 @@ export async function startBrainServer(
     ...(options.env ? { env: options.env } : {}),
     onChange: broadcastReadiness,
   });
+
+  // The app-launched local SearXNG (webSearch.provider = "searxng-local").
+  // The server OWNS its lifetime: started when the setting selects it (at
+  // boot and on every settings save), supervised on a poller (a container
+  // that died is restarted, boundedly), and stopped when deselected or at
+  // shutdown. Runs and the readiness probe read only its STATE FILE in the
+  // workspace, so nothing else holds a handle to this object.
+  const searxng =
+    options.searxngLauncher ??
+    new SearxngLauncher({
+      workspace: options.workspace,
+      advertiseHost: host,
+      ...(options.env ? { env: options.env } : {}),
+    });
+  let searxngLastState: string = searxng.status().state;
+  const syncSearxng = (): void => {
+    const wanted =
+      manager.settings.get().webSearch?.provider === "searxng-local";
+    const settle = (state: string): void => {
+      // A state transition changes what the capabilities probe would say,
+      // so the readiness panel re-verifies once — never on every tick.
+      if (state !== searxngLastState) {
+        searxngLastState = state;
+        readiness.refresh(["capabilities"]);
+        broadcastReadiness();
+      }
+    };
+    if (wanted) {
+      void searxng.ensureRunning().then((status) => settle(status.state));
+    } else if (searxng.status().state !== "off") {
+      void searxng.stop().then(() => settle("off"));
+    }
+  };
+  syncSearxng();
+  const searxngPoll = setInterval(syncSearxng, SEARXNG_SUPERVISION_MS);
+  searxngPoll.unref();
+
   // Starting points for the file picker, not a boundary: any server-readable
   // path can be attached. Defaults cover home, the launch workspace, and the
   // storage mounts HPC sites conventionally export as env vars ($SCRATCH,
@@ -1002,6 +1053,13 @@ export async function startBrainServer(
           const before = manager.settings.get();
           const settings = await manager.settings.put(body);
           broadcast();
+          // The app-launched search instance follows the setting: selecting
+          // it starts the launch (in the background — the first start may
+          // download the image for minutes), deselecting it stops the
+          // instance. The save answers immediately either way.
+          if (settings.webSearch?.provider !== before.webSearch?.provider) {
+            syncSearxng();
+          }
           // Provider/runner changes flip which checks matter, so those re-verify.
           // Nothing else does: with each section saving on its own, refreshing
           // on every save would re-probe the provider (a real request) every
@@ -1528,6 +1586,48 @@ export async function startBrainServer(
         return;
       }
 
+      // The unified web log: one row per web_search/web_fetch call across the
+      // whole pipeline, written verbatim by the worker's one manager. Three
+      // renditions of the same file — the JSON table, its CSV, and the raw
+      // verbatim records — all before the job-detail matcher below, which
+      // would otherwise swallow them.
+      const searchesMatch =
+        /^\/api\/jobs\/([^/]+)\/searches(\.csv|\.jsonl)?$/.exec(path);
+      if (req.method === "GET" && searchesMatch) {
+        const jobId = decodeURIComponent(searchesMatch[1]!);
+        await manager.detail(jobId); // "was not found" maps to 404 in the outer handler
+        const sessionDir = manager.sessionDir(jobId);
+        if (searchesMatch[2] === ".jsonl") {
+          const raw = readSearchLogText(sessionDir);
+          if (raw === undefined) {
+            throw new HttpError(404, "this run has no web log yet");
+          }
+          res.writeHead(200, {
+            "content-type": "application/jsonl; charset=utf-8",
+            "content-length": Buffer.byteLength(raw),
+            "content-disposition": `attachment; filename="${jobId}-searches.jsonl"`,
+            // The log grows while the run does; the next click gets the newer file.
+            "cache-control": "no-store",
+          });
+          res.end(raw);
+          return;
+        }
+        const table = readSearchTable(sessionDir);
+        if (searchesMatch[2] === ".csv") {
+          const body = searchTableCsv(table);
+          res.writeHead(200, {
+            "content-type": "text/csv; charset=utf-8",
+            "content-length": Buffer.byteLength(body),
+            "content-disposition": `attachment; filename="${jobId}-searches.csv"`,
+            "cache-control": "no-store",
+          });
+          res.end(body);
+          return;
+        }
+        sendJson(res, 200, table);
+        return;
+      }
+
       // One seat's tracked output changes, as a markdown file the browser
       // saves. Before the job-detail matcher below, which would otherwise
       // swallow it.
@@ -1803,7 +1903,11 @@ export async function startBrainServer(
       clearInterval(interruptedPoll);
       clearInterval(registryPoll);
       clearInterval(telemetryPoll);
+      clearInterval(searxngPoll);
       if (appUpdateTimer) clearInterval(appUpdateTimer);
+      // Politely, before the listener goes down: the container is a child of
+      // this deployment and must never outlive it.
+      await searxng.stop().catch(() => undefined);
       readiness.close();
       watchers.forEach((entry) => entry.close());
       for (const stream of [...jobStreams]) stream.close();

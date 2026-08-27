@@ -31,10 +31,12 @@ import type {
 } from "@brainstorm-agentic/core";
 
 import {
+  buildWebAccessManager,
   prepareCodeWorkspace,
   type CodeRuntimeEnvironment,
   type GpuRunConfig,
 } from "@brainstorm-agentic/host-tools";
+import type { WebAccess } from "@brainstorm-agentic/core";
 
 import { defaultSessionRoot, loadDotEnv, workspaceRootFromSessionRoot } from "./env.js";
 import { manifestPathFor } from "./attachment-store.js";
@@ -57,10 +59,12 @@ import {
   TELEMETRY_SCHEMA_VERSION,
   type TelemetryEvent,
 } from "@brainstorm-agentic/telemetry";
+import { createSearchLog, type SearchLog } from "./search-log.js";
 import {
   buildRuntime,
   modelsByRouteFromEnv,
   providerConfigFromEnv,
+  webSearchRuntimeFromEnv,
 } from "./wiring.js";
 import { openLazyRegistryContent, type LazyRegistryContent } from "./registry-content.js";
 import {
@@ -145,6 +149,38 @@ async function prepareRunCodeEnvironment(
     );
     return undefined;
   }
+}
+
+/**
+ * The run's unified web layer: ONE manager (provider routing, bounded
+ * parallelism, coalescing, optional cross-run keyword cache) plus its
+ * verbatim per-call log at `<session>/<runId>/searches.jsonl`. The log lives
+ * in the SESSION directory — it is part of the run's record, like the
+ * artifacts, not transport residue — and a resume APPENDS: the journal
+ * replays finished tasks instead of re-searching, so the earlier worker's
+ * records are the only copy of those calls.
+ *
+ * Offline runs build none: the capability broker already vouches web-search
+ * as vacant there, and a manager with providers would contradict it.
+ */
+function webLayerForRun(
+  sessionRoot: string,
+  runId: string,
+  offline: boolean,
+): { readonly web?: WebAccess; readonly searchLog: SearchLog } {
+  const searchLog = createSearchLog(
+    join(sessionRoot, runId, "searches.jsonl"),
+    fsStoreOptions(process.env),
+  );
+  if (offline) return { searchLog };
+  const { config, secrets } = webSearchRuntimeFromEnv(process.env);
+  const web = buildWebAccessManager({
+    config,
+    secrets,
+    log: (record) => searchLog.note(record),
+    cacheDir: join(workspaceRootFromSessionRoot(sessionRoot), "web-cache"),
+  });
+  return { ...(web !== undefined ? { web } : {}), searchLog };
 }
 
 /**
@@ -1019,6 +1055,7 @@ async function main(): Promise<void> {
       offline,
     );
     const gpuRun = gpuRunForRun(sessionRoot, runId, offline);
+    const { web, searchLog } = webLayerForRun(sessionRoot, runId, offline);
     const interdisciplinarySeat = interdisciplinarySeatFromEnv(process.env);
     const runtime = buildRuntime({
       providerConfig: providerConfigFromEnv(process.env, offline),
@@ -1034,6 +1071,7 @@ async function main(): Promise<void> {
       ...(taxonomy ? { taxonomy } : {}),
       ...(codeEnvironment ? { codeEnvironment } : {}),
       ...(gpuRun ? { gpuRun } : {}),
+      ...(web ? { web } : {}),
       ...(interdisciplinarySeat !== undefined ? { interdisciplinarySeat } : {}),
       bundle: lazy?.bundle ?? loadContent(contentDir!),
       ...(lazy ? { skillResolver: lazy.skillResolver } : {}),
@@ -1059,6 +1097,7 @@ async function main(): Promise<void> {
       await eventLog.flush();
       await liveText.close();
       await prompts.close();
+      await searchLog.close();
       // Opt-out is honored here: with telemetry off, no record is produced at
       // all rather than one written and then withheld.
       if (process.env.BRAINSTORM_AGENTIC_TELEMETRY !== "off") {
@@ -1133,6 +1172,7 @@ async function main(): Promise<void> {
       offline,
     );
     const gpuRun = gpuRunForRun(sessionRoot, runId, offline);
+    const { web, searchLog } = webLayerForRun(sessionRoot, runId, offline);
     const resumeInterdisciplinarySeat = interdisciplinarySeatFromEnv(process.env);
     const runtime = buildRuntime({
       providerConfig: providerConfigFromEnv(process.env, offline),
@@ -1148,6 +1188,7 @@ async function main(): Promise<void> {
       ...(taxonomy ? { taxonomy } : {}),
       ...(codeEnvironment ? { codeEnvironment } : {}),
       ...(gpuRun ? { gpuRun } : {}),
+      ...(web ? { web } : {}),
       ...(resumeInterdisciplinarySeat !== undefined
         ? { interdisciplinarySeat: resumeInterdisciplinarySeat }
         : {}),
@@ -1167,6 +1208,7 @@ async function main(): Promise<void> {
       await eventLog.flush();
       await liveText.close();
       await prompts.close();
+      await searchLog.close();
       // Opt-out is honored here: with telemetry off, no record is produced at
       // all rather than one written and then withheld.
       if (process.env.BRAINSTORM_AGENTIC_TELEMETRY !== "off") {

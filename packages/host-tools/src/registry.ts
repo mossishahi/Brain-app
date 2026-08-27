@@ -24,7 +24,8 @@ import {
   type GpuRunConfig,
 } from "./gpu-run.js";
 import { TAXONOMY_MANIFESTS, TAXONOMY_TOOL_NAMES, taxonomyTools } from "./taxonomy-tools.js";
-import type { TaxonomyAccess } from "@brainstorm-agentic/core";
+import { WEB_ACCESS_TOOL_NAMES, webAccessTools } from "./web/tools.js";
+import type { TaxonomyAccess, WebAccess } from "@brainstorm-agentic/core";
 
 // ---------------------------------------------------------------------------
 // Complete manifest catalog
@@ -56,6 +57,8 @@ export interface HostToolRegistryConfig {
   readonly codeEnvironment?: CodeRuntimeEnvironment;
   /** GPU submission config (user-completed template). Required for gpu_run. */
   readonly gpuRun?: GpuRunConfig;
+  /** The unified web layer. Required for web_search AND web_fetch. */
+  readonly web?: WebAccess;
   /** User-enabled tool IDs. Only these are registered on the runtime registry. */
   readonly enabledToolIds: ReadonlySet<string>;
 }
@@ -112,12 +115,22 @@ export function createHostToolRegistry(
     }
   }
 
-  // Web fetch needs no backing configuration (outbound reachability is the
-  // readiness check's concern); web_search still waits on its first backend.
-  for (const tool of webFetchTools()) {
-    if (config.enabledToolIds.has(tool.definition.name)) {
-      registry.register(tool);
-      registeredNames.push(tool.definition.name);
+  // Web tools: the unified layer serves BOTH when a manager is wired (that
+  // path is logged, bounded, and routed); without one, the bare hardened
+  // fetch still registers so web.fetch keeps working un-searched.
+  if (config.web) {
+    for (const tool of webAccessTools(config.web)) {
+      if (config.enabledToolIds.has(tool.definition.name)) {
+        registry.register(tool);
+        registeredNames.push(tool.definition.name);
+      }
+    }
+  } else {
+    for (const tool of webFetchTools()) {
+      if (config.enabledToolIds.has(tool.definition.name)) {
+        registry.register(tool);
+        registeredNames.push(tool.definition.name);
+      }
     }
   }
 
@@ -133,6 +146,7 @@ export function executableHostToolIds(config: {
   taxonomy?: TaxonomyAccess;
   codeEnvironment?: CodeRuntimeEnvironment;
   gpuRun?: GpuRunConfig;
+  web?: WebAccess;
 }): ReadonlySet<string> {
   const ids = new Set<string>();
   if (config.attachmentRoots && config.attachmentRoots.length > 0) {
@@ -153,6 +167,12 @@ export function executableHostToolIds(config: {
   // gpu_run exists only after the deployment owner completes the template.
   if (config.gpuRun) {
     for (const name of GPU_RUN_TOOL_NAMES) {
+      ids.add(name);
+    }
+  }
+  // web_search exists only over a wired manager with something behind it.
+  if (config.web && config.web.backedKinds().length > 0) {
+    for (const name of WEB_ACCESS_TOOL_NAMES) {
       ids.add(name);
     }
   }

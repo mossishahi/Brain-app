@@ -169,13 +169,16 @@ test("executes a structured task with setup-token auth and capability tools", as
     type: "adaptive",
     display: "omitted",
   });
+  // The web is host-owned: `web-search` in allowedCapabilities maps to NO
+  // built-in tool (Claude Code's WebSearch/WebFetch stay disallowed), and
+  // with no WebAccess configured the capability simply resolves nowhere.
   assert.deepEqual(options.tools, [
-    "WebSearch",
-    "WebFetch",
     "Read",
     "Glob",
     "Grep",
   ]);
+  assert.ok((options.disallowedTools as string[]).includes("WebSearch"));
+  assert.ok((options.disallowedTools as string[]).includes("WebFetch"));
   assert.deepEqual(options.outputFormat, {
     type: "json_schema",
     schema: {
@@ -572,6 +575,91 @@ test("gpu-capable tasks get the gpu_run MCP tool; tasks and deployments without 
   );
 });
 
+test("the host web layer is bridged as MCP tools and the SDK's own web tools stay disallowed", async () => {
+  const captured: ClaudeAgentQueryInput[] = [];
+  const searches: Array<{ query: string; kind?: string }> = [];
+  const web = {
+    async search(query: { query: string; kind?: "general" | "scholarly" | "news" }) {
+      searches.push({ query: query.query, ...(query.kind ? { kind: query.kind } : {}) });
+      return {
+        query: query.query,
+        kind: query.kind ?? ("general" as const),
+        provider: "offline",
+        results: [],
+      };
+    },
+    async fetch(query: { url: string }) {
+      return {
+        url: query.url,
+        finalUrl: query.url,
+        status: 200,
+        contentType: "text/plain",
+        text: "fetched",
+        truncated: false,
+        fetchedBytes: 7,
+      };
+    },
+    backedKinds() {
+      return ["general" as const, "scholarly" as const];
+    },
+  };
+  const webTask: AgentTask = {
+    ...structuredTask,
+    capabilityPlan: {
+      operations: [
+        {
+          operationId: "web.search",
+          source: "host",
+          toolNames: ["web_search"],
+          capabilityId: "web-search",
+        },
+        {
+          operationId: "web.fetch",
+          source: "host",
+          toolNames: ["web_fetch"],
+          capabilityId: "web-search",
+        },
+      ],
+      hostToolDefinitions: [],
+      providerNativeKeys: [],
+      capabilities: [
+        {
+          capabilityId: "web-search",
+          availability: "available",
+          unavailableOperations: [],
+        },
+      ],
+      unavailableInstructions: "",
+    },
+  };
+  await new ClaudeAgentExecutor({
+    token: "setup-token-secret",
+    web,
+    queryFn: successQuery(captured),
+  }).execute(webTask, { runId: "run-web", nodePath: "root/brain" });
+  const options = captured[0]!.options;
+  const tools = options.tools as string[];
+  assert.ok(tools.includes("mcp__web__web_search"));
+  assert.ok(tools.includes("mcp__web__web_fetch"));
+  assert.ok(!tools.includes("WebSearch"));
+  assert.ok(!tools.includes("WebFetch"));
+  const disallowed = options.disallowedTools as string[];
+  assert.ok(disallowed.includes("WebSearch"), "the SDK's own search is blocked");
+  assert.ok(disallowed.includes("WebFetch"), "the SDK's own fetch is blocked");
+  const servers = options.mcpServers as Record<string, unknown>;
+  assert.ok(servers.web !== undefined, "the in-process web MCP server is delivered");
+
+  // A task with NO web config gets neither the bridge nor the built-ins.
+  const capturedBare: ClaudeAgentQueryInput[] = [];
+  await new ClaudeAgentExecutor({
+    token: "setup-token-secret",
+    queryFn: successQuery(capturedBare),
+  }).execute(webTask, { runId: "run-web-bare", nodePath: "root/brain" });
+  const bareTools = capturedBare[0]!.options.tools as string[];
+  assert.ok(!bareTools.includes("mcp__web__web_search"));
+  assert.ok(!bareTools.includes("WebSearch"));
+});
+
 test("a per-run-disabled attachment capability removes builtin and MCP attachment tools", async () => {
   const captured: ClaudeAgentQueryInput[] = [];
   const root = mkdtempSync(join(tmpdir(), "claude-agent-attachments-"));
@@ -642,7 +730,9 @@ test("a per-run-disabled attachment capability removes builtin and MCP attachmen
     assert.ok(!tools.includes("Grep"));
     assert.ok(!tools.includes("mcp__attachments__attachment_list"));
     assert.ok(!tools.includes("mcp__attachments__attachment_search"));
-    assert.ok(tools.includes("WebSearch"));
+    // Even a stale plan that names the SDK's WebSearch as provider-native
+    // adds nothing: the web is host-owned and the built-in stays disallowed.
+    assert.ok(!tools.includes("WebSearch"));
     const servers = options.mcpServers as Record<string, unknown> | undefined;
     assert.ok(!servers || servers.attachments === undefined);
     assert.ok(!captured[0]!.prompt.includes("attachment_search"));

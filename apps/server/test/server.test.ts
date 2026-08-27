@@ -830,6 +830,96 @@ test("GPU run settings validate the tag, persist across updates, and reach the w
   }
 });
 
+test("web search settings verify the provider key, stay write-only, and reach the worker environment", async () => {
+  const workspace = tempRoot();
+  const verified: Array<{ provider: string; apiKey?: string }> = [];
+  try {
+    const store = new SettingsStore(workspace, {
+      validateAnthropic: async () => undefined,
+      validateWebSearch: async (input) => {
+        verified.push({ provider: input.provider, ...(input.apiKey ? { apiKey: input.apiKey } : {}) });
+        if (input.apiKey === "bad-key") throw new Error("Tavily rejected the key");
+      },
+    });
+    // The default: no general provider, scholarly on, cache off — and the
+    // worker env carries the config so the run builds the scholarly chain.
+    assert.deepEqual(store.get().webSearch, {
+      provider: "none",
+      scholarly: true,
+      cacheEnabled: false,
+      tavilyKeyConfigured: false,
+      braveKeyConfigured: false,
+      semanticScholarKeyConfigured: false,
+      openAlexKeyConfigured: false,
+    });
+    await store.put({
+      ...store.get(),
+      llm: { provider: "anthropic", model: "claude-x", apiKey: "key" },
+    });
+    const defaultEnv = store.executionEnvironment({}, store.get());
+    assert.deepEqual(JSON.parse(defaultEnv.BRAINSTORM_AGENTIC_WEB_SEARCH!), {
+      scholarly: true,
+    });
+    assert.equal(defaultEnv.TAVILY_API_KEY, undefined);
+
+    // A rejected key changes nothing.
+    await assert.rejects(
+      store.put({
+        ...store.get(),
+        llm: { provider: "anthropic", model: "claude-x" },
+        webSearch: { provider: "tavily", tavilyApiKey: "bad-key" },
+      }),
+      /Tavily rejected the key/,
+    );
+    assert.equal(store.get().webSearch?.provider, "none");
+    assert.equal(store.get().webSearch?.tavilyKeyConfigured, false);
+
+    // A verified key is stored write-only and travels to the worker.
+    await store.put({
+      ...store.get(),
+      llm: { provider: "anthropic", model: "claude-x" },
+      webSearch: {
+        provider: "tavily",
+        cacheEnabled: true,
+        cacheTtlHours: 6,
+        tavilyApiKey: "tvly-good",
+      },
+    });
+    const settings = store.get();
+    assert.equal(settings.webSearch?.provider, "tavily");
+    assert.equal(settings.webSearch?.tavilyKeyConfigured, true);
+    assert.equal(JSON.stringify(settings).includes("tvly-good"), false, "keys never leave the server");
+    const env = store.executionEnvironment({}, settings);
+    assert.equal(env.TAVILY_API_KEY, "tvly-good");
+    assert.deepEqual(JSON.parse(env.BRAINSTORM_AGENTIC_WEB_SEARCH!), {
+      general: "tavily",
+      scholarly: true,
+      cache: { enabled: true, ttlHours: 6 },
+    });
+
+    // An unrelated save re-verifies nothing (the connection did not change).
+    const before = verified.length;
+    await store.put({
+      ...store.get(),
+      llm: { provider: "anthropic", model: "claude-x" },
+      gateAutoApprove: false,
+    });
+    assert.equal(verified.length, before, "an unrelated edit never re-tests the search key");
+
+    // SearXNG requires its base URL at validation time.
+    await assert.rejects(
+      store.put({
+        ...store.get(),
+        llm: { provider: "anthropic", model: "claude-x" },
+        webSearch: { provider: "searxng" },
+      }),
+      /searxngBaseUrl is required/,
+    );
+  } finally {
+    await removeWorkspace(workspace);
+  }
+});
+
 test("OpenRouter parser credentials are verified and kept write-only", async () => {
   const workspace = tempRoot();
   const attempts: Array<{ apiKey: string; model: string }> = [];

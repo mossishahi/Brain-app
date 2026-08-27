@@ -27,17 +27,31 @@ export interface ProviderAdapterDescriptor {
 // Built-in adapter descriptors
 // ---------------------------------------------------------------------------
 
+/**
+ * Web search and web fetch are deliberately offered by NO adapter.
+ *
+ * Every backend used to offer its own (Anthropic server tools, Claude Code's
+ * WebSearch/WebFetch, Cursor's webSearch/webFetch), and a provider-side
+ * search is a black box: its query rewriting, its index, its ranking, and
+ * what actually came back never reach the host, so the run's record cannot
+ * say what was searched or read — and three backends meant three different
+ * searches for the same pipeline. The web is therefore HOST-OWNED: the
+ * broker resolves web.search/web.fetch to the host web tools (backed by the
+ * WebAccess manager — one implementation, one provider configuration, one
+ * unified per-run log), and the executors withhold the SDK's own web tools
+ * so a model cannot reach the provider's search at all. Restoring a native
+ * offer here would silently split the pipeline's search across backends
+ * again; do not add one without also deciding what happens to the log.
+ */
 export const ANTHROPIC_ADAPTER: ProviderAdapterDescriptor = {
   providerId: "anthropic",
   displayName: "Anthropic API",
   kind: "model-loop",
   // Server tools executed on Anthropic's infrastructure: the broker prefers
   // these over host tools, and the provider adapter translates each native
-  // key into its wire tool object. Attachment and taxonomy operations stay
-  // host-side by design.
+  // key into its wire tool object. Attachment, taxonomy, and web operations
+  // stay host-side by design (web: see the host-owned-web note above).
   staticOffers: [
-    { operationId: "web.search", nativeKey: "web_search" },
-    { operationId: "web.fetch", nativeKey: "web_fetch" },
     { operationId: "code.execute", nativeKey: "code_execution" },
   ],
 };
@@ -46,9 +60,9 @@ export const CLAUDE_AGENT_ADAPTER: ProviderAdapterDescriptor = {
   providerId: "claude-agent",
   displayName: "Claude Agent SDK",
   kind: "agent-executor",
+  // Web operations stay host-side (see the host-owned-web note above); the
+  // executor additionally disallows the SDK's own WebSearch/WebFetch tools.
   staticOffers: [
-    { operationId: "web.search", nativeKey: "WebSearch" },
-    { operationId: "web.fetch", nativeKey: "WebFetch" },
     { operationId: "code.execute", nativeKey: "Bash" },
     { operationId: "attachment.list", nativeKey: "Glob" },
     { operationId: "attachment.read", nativeKey: "Read" },
@@ -61,10 +75,9 @@ export const CURSOR_AGENT_ADAPTER: ProviderAdapterDescriptor = {
   kind: "agent-executor",
   // Cursor's local agent ships the same operation families as built-in
   // tools (public tool vocabulary names). Attachment search stays host-side
-  // by design, exactly like the Claude Agent SDK path.
+  // by design, exactly like the Claude Agent SDK path — and web operations
+  // stay host-side everywhere (see the host-owned-web note above).
   staticOffers: [
-    { operationId: "web.search", nativeKey: "webSearch" },
-    { operationId: "web.fetch", nativeKey: "webFetch" },
     { operationId: "code.execute", nativeKey: "shell" },
     { operationId: "attachment.list", nativeKey: "glob" },
     { operationId: "attachment.read", nativeKey: "read" },

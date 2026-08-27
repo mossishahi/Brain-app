@@ -17,9 +17,11 @@
  *   egress and enforces its own policy; the pre-flight still applies);
  * - download size, total time, and returned characters are all bounded.
  *
- * `web_search` remains an extension surface: the manifest and the
- * SearchBackend contract are declared, and the executable tool arrives with
- * its first backend implementation.
+ * `web_search` is implemented by the unified web layer (see ./web/): the
+ * WebAccessManager routes each query kind to its configured provider chain
+ * (general SERP APIs, scholarly indexes) and logs every call verbatim. This
+ * module keeps the manifests, the tool definitions, and the ONE hardened
+ * fetch implementation (`performWebFetch`) the manager wraps.
  */
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
@@ -29,6 +31,7 @@ import type {
   JsonValue,
   Tool,
   ToolResult,
+  WebFetchAnswer,
 } from "@brainstorm-agentic/core";
 import { Agent, fetch as httpFetch } from "undici";
 
@@ -232,17 +235,40 @@ export function htmlToText(html: string): { title?: string; text: string } {
 const WEB_SEARCH_DEFINITION = {
   name: "web_search",
   description:
-    "Search the public web or scholarly indexes. Returns a list of results with title, URL, and snippet.",
+    "Search the public web or scholarly indexes. Returns a list of results with title, URL, " +
+    "and snippet; scholarly results also carry DOI, authors, venue, year, and citation count " +
+    "where the index reports them. Set kind to \"scholarly\" for papers, preprints, and " +
+    "citation questions (answered by scholarly indexes such as OpenAlex, Crossref, arXiv, and " +
+    "Semantic Scholar), \"news\" for current events, and \"general\" (the default) for " +
+    "everything else. Prefer one focused query per fact over one broad query for everything.",
   inputSchema: {
     type: "object",
     properties: {
       query: { type: "string", description: "Search query." },
+      kind: {
+        type: "string",
+        enum: ["general", "scholarly", "news"],
+        description:
+          'What kind of question this is: "scholarly" for papers and citations, "news" for ' +
+          'current events, "general" (default) otherwise.',
+      },
       max_results: {
         type: "integer",
         description: "Maximum number of results to return.",
         minimum: 1,
         maximum: 10,
         default: 5,
+      },
+      recency: {
+        type: "string",
+        enum: ["day", "week", "month", "year"],
+        description: "Bias toward material published within this window, where supported.",
+      },
+      domains: {
+        type: "array",
+        items: { type: "string" },
+        maxItems: 8,
+        description: "Restrict results to these domains, where supported.",
       },
     },
     required: ["query"],
@@ -443,12 +469,151 @@ function isHtml(contentType: string): boolean {
   return type === "text/html" || type === "application/xhtml+xml";
 }
 
-/** The executable web_fetch tool. */
-export function webFetchTools(options: WebFetchOptions = {}): readonly Tool[] {
+/** One fetch's outcome: the delivered answer, or the refusal the model hears. */
+export type WebFetchOutcome =
+  | { readonly ok: WebFetchAnswer }
+  | { readonly refusal: string };
+
+/**
+ * THE web fetch implementation — exactly one exists. The web_fetch host tool
+ * wraps it for the Messages path, and the WebAccessManager wraps it for the
+ * unified (logged, concurrency-bounded) layer every backend shares. A second
+ * fetch path would fork the SSRF guard, so keep every caller on this one.
+ *
+ * Returns a refusal (what the model is told) for every anticipated failure;
+ * throws only when `signal` reports an external cancellation.
+ */
+export async function performWebFetch(
+  input: { readonly url: string; readonly maxChars?: number },
+  options: WebFetchOptions = {},
+  signal?: AbortSignal,
+): Promise<WebFetchOutcome> {
   const allowPrivate = options.allowPrivateAddresses === true;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
 
+  const rawUrl = input.url;
+  if (typeof rawUrl !== "string" || rawUrl.trim() === "") {
+    return { refusal: "url must be a non-empty string." };
+  }
+  const maxChars = clampChars(input.maxChars);
+
+  const env = options.env ?? process.env;
+  // A returned Agent means a direct connection (with the connect-time
+  // guard); undefined means the process's proxy dispatcher does the
+  // egress. The test seam bypasses both and uses plain fetch.
+  const dispatcher = allowPrivate ? undefined : fetchDispatcher(env);
+  const proxied = !allowPrivate && dispatcher === undefined;
+
+  const timeout = AbortSignal.timeout(timeoutMs);
+  const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
+
+  let target = validateTarget(rawUrl.trim(), allowPrivate);
+  if ("message" in target) return { refusal: target.message };
+  let current = target.url;
+  let response: Awaited<ReturnType<typeof httpFetch>> | undefined;
+
+  try {
+    for (let hop = 0; ; hop += 1) {
+      if (!allowPrivate) {
+        const blocked = await assertPublicHost(current, proxied);
+        if (blocked) return { refusal: blocked };
+      }
+      response = await httpFetch(current.toString(), {
+        ...(dispatcher ? { dispatcher } : {}),
+        redirect: "manual",
+        signal: combined,
+        headers: {
+          "user-agent": "brainstorm-agentic/0.2 (research assistant)",
+          accept:
+            "text/html, application/xhtml+xml, text/plain;q=0.9, application/json;q=0.8, */*;q=0.1",
+          "accept-language": "en",
+        },
+      });
+      const location = response.headers.get("location");
+      if (
+        response.status < 300 ||
+        response.status >= 400 ||
+        location === null
+      ) {
+        break;
+      }
+      await response.body?.cancel().catch(() => undefined);
+      if (hop >= MAX_REDIRECTS) {
+        return { refusal: `gave up after ${MAX_REDIRECTS} redirects at ${current.toString()}` };
+      }
+      let next: URL;
+      try {
+        next = new URL(location, current);
+      } catch {
+        return { refusal: `redirect to an invalid URL: "${location}"` };
+      }
+      target = validateTarget(next.toString(), allowPrivate);
+      if ("message" in target) {
+        return { refusal: `redirect refused: ${target.message}` };
+      }
+      current = target.url;
+    }
+
+    if (response.status >= 400) {
+      await response.body?.cancel().catch(() => undefined);
+      return { refusal: `HTTP ${response.status} fetching ${current.toString()}` };
+    }
+
+    const contentType = response.headers.get("content-type") ?? "";
+    if (!isTextual(contentType)) {
+      await response.body?.cancel().catch(() => undefined);
+      return {
+        refusal:
+          `unsupported content type "${contentType.split(";")[0]!.trim()}" — only textual content (HTML, plain text, JSON, XML) is fetched.`,
+      };
+    }
+
+    const { buffer, truncated: bytesTruncated } = response.body
+      ? await readBounded(response.body as AsyncIterable<Uint8Array>, maxBytes)
+      : { buffer: Buffer.alloc(0), truncated: false };
+    const decoded = decodeBody(buffer, contentType);
+    if (decoded.includes("\u0000")) {
+      return { refusal: "the response is binary data, not text." };
+    }
+
+    const rendered = isHtml(contentType)
+      ? htmlToText(decoded)
+      : { text: decoded.replace(/\r\n/g, "\n").trim() };
+    const charsTruncated = rendered.text.length > maxChars;
+    return {
+      ok: {
+        url: rawUrl.trim(),
+        finalUrl: current.toString(),
+        status: response.status,
+        contentType: contentType.split(";")[0]!.trim(),
+        ...(rendered.title !== undefined ? { title: rendered.title } : {}),
+        text: charsTruncated ? rendered.text.slice(0, maxChars) : rendered.text,
+        truncated: bytesTruncated || charsTruncated,
+        fetchedBytes: buffer.length,
+      },
+    };
+  } catch (error) {
+    // A cancelled run propagates; the executor converts it upstream.
+    if (signal?.aborted) throw error;
+    if (timeout.aborted) {
+      return {
+        refusal: `fetch timed out after ${Math.round(timeoutMs / 1000)}s: ${current.toString()}`,
+      };
+    }
+    const cause = (error as { cause?: unknown }).cause;
+    const message =
+      cause instanceof Error
+        ? cause.message
+        : error instanceof Error
+          ? error.message
+          : String(error);
+    return { refusal: `fetch failed for ${current.toString()}: ${message}` };
+  }
+}
+
+/** The executable web_fetch tool (a thin wrapper over performWebFetch). */
+export function webFetchTools(options: WebFetchOptions = {}): readonly Tool[] {
   const fetchTool: Tool = {
     definition: WEB_FETCH_DEFINITION,
     async execute(input, context): Promise<ToolResult> {
@@ -457,117 +622,16 @@ export function webFetchTools(options: WebFetchOptions = {}): readonly Tool[] {
       if (typeof rawUrl !== "string" || rawUrl.trim() === "") {
         return refusal("url must be a non-empty string.");
       }
-      const maxChars = clampChars(record.max_chars);
-
-      const env = options.env ?? process.env;
-      // A returned Agent means a direct connection (with the connect-time
-      // guard); undefined means the process's proxy dispatcher does the
-      // egress. The test seam bypasses both and uses plain fetch.
-      const dispatcher = allowPrivate ? undefined : fetchDispatcher(env);
-      const proxied = !allowPrivate && dispatcher === undefined;
-
-      const timeout = AbortSignal.timeout(timeoutMs);
-      const signal = context.signal
-        ? AbortSignal.any([context.signal, timeout])
-        : timeout;
-
-      let target = validateTarget(rawUrl.trim(), allowPrivate);
-      if ("message" in target) return refusal(target.message);
-      let current = target.url;
-      let response: Awaited<ReturnType<typeof httpFetch>> | undefined;
-
-      try {
-        for (let hop = 0; ; hop += 1) {
-          if (!allowPrivate) {
-            const blocked = await assertPublicHost(current, proxied);
-            if (blocked) return refusal(blocked);
-          }
-          response = await httpFetch(current.toString(), {
-            ...(dispatcher ? { dispatcher } : {}),
-            redirect: "manual",
-            signal,
-            headers: {
-              "user-agent": "brainstorm-agentic/0.2 (research assistant)",
-              accept:
-                "text/html, application/xhtml+xml, text/plain;q=0.9, application/json;q=0.8, */*;q=0.1",
-              "accept-language": "en",
-            },
-          });
-          const location = response.headers.get("location");
-          if (
-            response.status < 300 ||
-            response.status >= 400 ||
-            location === null
-          ) {
-            break;
-          }
-          await response.body?.cancel().catch(() => undefined);
-          if (hop >= MAX_REDIRECTS) {
-            return refusal(`gave up after ${MAX_REDIRECTS} redirects at ${current.toString()}`);
-          }
-          let next: URL;
-          try {
-            next = new URL(location, current);
-          } catch {
-            return refusal(`redirect to an invalid URL: "${location}"`);
-          }
-          target = validateTarget(next.toString(), allowPrivate);
-          if ("message" in target) {
-            return refusal(`redirect refused: ${target.message}`);
-          }
-          current = target.url;
-        }
-
-        if (response.status >= 400) {
-          await response.body?.cancel().catch(() => undefined);
-          return refusal(`HTTP ${response.status} fetching ${current.toString()}`);
-        }
-
-        const contentType = response.headers.get("content-type") ?? "";
-        if (!isTextual(contentType)) {
-          await response.body?.cancel().catch(() => undefined);
-          return refusal(
-            `unsupported content type "${contentType.split(";")[0]!.trim()}" — only textual content (HTML, plain text, JSON, XML) is fetched.`,
-          );
-        }
-
-        const { buffer, truncated: bytesTruncated } = response.body
-          ? await readBounded(response.body as AsyncIterable<Uint8Array>, maxBytes)
-          : { buffer: Buffer.alloc(0), truncated: false };
-        const decoded = decodeBody(buffer, contentType);
-        if (decoded.includes("\u0000")) {
-          return refusal("the response is binary data, not text.");
-        }
-
-        const rendered = isHtml(contentType)
-          ? htmlToText(decoded)
-          : { text: decoded.replace(/\r\n/g, "\n").trim() };
-        const charsTruncated = rendered.text.length > maxChars;
-        return ok({
-          url: rawUrl.trim(),
-          finalUrl: current.toString(),
-          status: response.status,
-          contentType: contentType.split(";")[0]!.trim(),
-          ...(rendered.title !== undefined ? { title: rendered.title } : {}),
-          text: charsTruncated ? rendered.text.slice(0, maxChars) : rendered.text,
-          truncated: bytesTruncated || charsTruncated,
-          fetchedBytes: buffer.length,
-        });
-      } catch (error) {
-        // A cancelled run propagates; the executor converts it upstream.
-        if (context.signal?.aborted) throw error;
-        if (timeout.aborted) {
-          return refusal(`fetch timed out after ${Math.round(timeoutMs / 1000)}s: ${current.toString()}`);
-        }
-        const cause = (error as { cause?: unknown }).cause;
-        const message =
-          cause instanceof Error
-            ? cause.message
-            : error instanceof Error
-              ? error.message
-              : String(error);
-        return refusal(`fetch failed for ${current.toString()}: ${message}`);
-      }
+      const outcome = await performWebFetch(
+        {
+          url: rawUrl,
+          ...(typeof record.max_chars === "number" ? { maxChars: record.max_chars } : {}),
+        },
+        options,
+        context.signal,
+      );
+      if ("refusal" in outcome) return refusal(outcome.refusal);
+      return ok(outcome.ok as unknown as JsonValue);
     },
   };
 

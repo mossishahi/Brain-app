@@ -131,10 +131,14 @@ const BASE_CAPABILITIES: ModelCapabilities = {
  * key the capability broker selects. Conservative GA versions with bounded
  * per-request use; deployments pin newer dated versions via
  * config.nativeTools.
+ *
+ * `web_search` and `web_fetch` are deliberately ABSENT: the web is
+ * host-owned (see core's adapter registry), so no plan may put Anthropic's
+ * server-side search on the wire — a request that still names one of those
+ * keys fails loudly through the existing unknown-native-key path instead of
+ * quietly re-opening the provider's black-box search.
  */
 const DEFAULT_NATIVE_TOOLS: Readonly<Record<string, WireRecord>> = {
-  web_search: { type: "web_search_20250305", name: "web_search", max_uses: 8 },
-  web_fetch: { type: "web_fetch_20250910", name: "web_fetch", max_uses: 12 },
   code_execution: { type: "code_execution_20250825", name: "code_execution" },
 };
 

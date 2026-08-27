@@ -18,10 +18,17 @@ import {
   type LlmSettings,
   type ServerSettings,
   type ServerSettingsUpdate,
+  type WebSearchSettings,
 } from "@brainstorm-agentic/protocol";
+import {
+  resolveGeneralProvider,
+  type WebSearchRuntimeConfig,
+  type WebSearchSecrets,
+} from "@brainstorm-agentic/host-tools";
 
 import { atomicWriteFile, atomicWriteJson, readJsonFile } from "./files.js";
 import { readJsonCached } from "./read-cache.js";
+import { searxngLocalUrl } from "./searxng-launcher.js";
 
 const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5";
 /**
@@ -58,13 +65,22 @@ type StoredTelemetry = Omit<
   NonNullable<ServerSettings["telemetry"]>,
   "ingestUrl"
 >;
+/** Web search as STORED: the configured flags are read off credentials.json. */
+type StoredWebSearch = Omit<
+  WebSearchSettings,
+  | "tavilyKeyConfigured"
+  | "braveKeyConfigured"
+  | "semanticScholarKeyConfigured"
+  | "openAlexKeyConfigured"
+>;
 type StoredServerSettings = Omit<
   ServerSettings,
-  "llm" | "creditRecovery" | "telemetry"
+  "llm" | "creditRecovery" | "telemetry" | "webSearch"
 > & {
   readonly llm: StoredLlmSettings;
   readonly creditRecovery: StoredCreditRecovery;
   readonly telemetry?: StoredTelemetry;
+  readonly webSearch?: StoredWebSearch;
 };
 
 interface StoredCredentials {
@@ -72,6 +88,10 @@ interface StoredCredentials {
   readonly claudeSetupToken?: string;
   readonly cursorApiKey?: string;
   readonly openRouterApiKey?: string;
+  readonly tavilyApiKey?: string;
+  readonly braveApiKey?: string;
+  readonly semanticScholarApiKey?: string;
+  readonly openAlexApiKey?: string;
 }
 
 export interface AnthropicConnectionInput {
@@ -102,6 +122,16 @@ export type CursorAgentConnectionValidator = (
   input: CursorAgentConnectionInput,
 ) => Promise<void>;
 
+export interface WebSearchConnectionInput {
+  readonly provider: "tavily" | "brave" | "searxng";
+  readonly apiKey?: string;
+  readonly searxngBaseUrl?: string;
+}
+
+export type WebSearchConnectionValidator = (
+  input: WebSearchConnectionInput,
+) => Promise<void>;
+
 export interface SettingsStoreOptions {
   readonly validateAnthropic?: AnthropicConnectionValidator;
   readonly validateClaudeAgent?: ClaudeAgentConnectionValidator;
@@ -110,6 +140,8 @@ export interface SettingsStoreOptions {
     apiKey: string,
     model: string,
   ) => Promise<void>;
+  /** Verifies a search provider with one real one-result query. */
+  readonly validateWebSearch?: WebSearchConnectionValidator;
   /** The deployment's registry endpoint (launch-time CLI/env override). */
   readonly defaultContentRegistryUrl?: string;
 }
@@ -186,6 +218,15 @@ export function defaultServerSettings(
         "taxonomy_resolve",
       ],
     },
+    // The host-owned web layer: the scholarly chain is keyless and ON by
+    // default (it is what this pipeline's searches mostly are), the general
+    // provider waits for the deployment owner to pick one and paste a key,
+    // and the cross-run keyword cache is an explicit opt-in.
+    webSearch: {
+      provider: "none",
+      scholarly: true,
+      cacheEnabled: false,
+    },
     slurmTemplate: DEFAULT_SLURM_TEMPLATE,
     // GPU runs are OFF until the deployment owner completes the template.
     gpu: { template: "", timeLimitMinutes: 60 },
@@ -223,6 +264,7 @@ function validateCommonSettings(value: unknown): {
   readonly interruptedRecovery?: Record<string, unknown>;
   readonly contentRegistry: Record<string, unknown>;
   readonly hostTools?: Record<string, unknown>;
+  readonly webSearch?: Record<string, unknown>;
   readonly updateCheck?: "off" | "notify";
   readonly telemetry?: Record<string, unknown>;
 } {
@@ -284,6 +326,10 @@ function validateCommonSettings(value: unknown): {
     input.hostTools !== undefined
       ? object(input.hostTools, "hostTools")
       : undefined;
+  const webSearch =
+    input.webSearch !== undefined
+      ? object(input.webSearch, "webSearch")
+      : undefined;
   const interruptedRecovery =
     input.interruptedRecovery !== undefined
       ? object(input.interruptedRecovery, "interruptedRecovery")
@@ -315,6 +361,7 @@ function validateCommonSettings(value: unknown): {
     ...(telemetry !== undefined ? { telemetry } : {}),
     contentRegistry,
     hostTools,
+    ...(webSearch !== undefined ? { webSearch } : {}),
     ...(updateCheck !== undefined ? { updateCheck } : {}),
   };
 }
@@ -577,6 +624,77 @@ function validateClaudeAgentSettings(value: unknown): ClaudeAgentSettings {
   };
 }
 
+/**
+ * The web-search section as stored (no keys, no configured flags). Absent =
+ * the default: no general provider, scholarly on, cache off — which is also
+ * what every settings file written before the section existed means.
+ */
+function validateWebSearchSettings(
+  value: Record<string, unknown> | undefined,
+): StoredWebSearch {
+  if (value === undefined) {
+    return { provider: "none", scholarly: true, cacheEnabled: false };
+  }
+  const provider = value.provider;
+  if (
+    provider !== "none" &&
+    provider !== "tavily" &&
+    provider !== "brave" &&
+    provider !== "searxng" &&
+    provider !== "searxng-local"
+  ) {
+    throw new Error(
+      'webSearch.provider must be "none", "tavily", "brave", "searxng", or "searxng-local"',
+    );
+  }
+  const searxngBaseUrl = optionalNonEmptyString(
+    value.searxngBaseUrl,
+    "webSearch.searxngBaseUrl",
+  );
+  if (searxngBaseUrl !== undefined) {
+    let parsed: URL;
+    try {
+      parsed = new URL(searxngBaseUrl);
+    } catch {
+      throw new Error("webSearch.searxngBaseUrl must be a valid URL");
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      throw new Error("webSearch.searxngBaseUrl must be an http(s) URL");
+    }
+  }
+  if (provider === "searxng" && searxngBaseUrl === undefined) {
+    throw new Error("webSearch.searxngBaseUrl is required when SearXNG is selected");
+  }
+  if (value.scholarly !== undefined && typeof value.scholarly !== "boolean") {
+    throw new Error("webSearch.scholarly must be a boolean");
+  }
+  if (value.cacheEnabled !== undefined && typeof value.cacheEnabled !== "boolean") {
+    throw new Error("webSearch.cacheEnabled must be a boolean");
+  }
+  const ttl = value.cacheTtlHours;
+  if (
+    ttl !== undefined &&
+    (typeof ttl !== "number" || !Number.isInteger(ttl) || ttl < 1 || ttl > 24 * 30)
+  ) {
+    throw new Error("webSearch.cacheTtlHours must be an integer between 1 and 720");
+  }
+  const contactEmail = optionalNonEmptyString(
+    value.contactEmail,
+    "webSearch.contactEmail",
+  );
+  if (contactEmail !== undefined && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contactEmail)) {
+    throw new Error("webSearch.contactEmail must be an email address");
+  }
+  return {
+    provider,
+    ...(searxngBaseUrl !== undefined ? { searxngBaseUrl } : {}),
+    scholarly: value.scholarly !== false,
+    cacheEnabled: value.cacheEnabled === true,
+    ...(ttl !== undefined ? { cacheTtlHours: ttl } : {}),
+    ...(contactEmail !== undefined ? { contactEmail } : {}),
+  };
+}
+
 function validateHostTools(
   value: Record<string, unknown> | undefined,
 ): { enabledToolIds: readonly string[] } | undefined {
@@ -622,6 +740,7 @@ function validateStoredSettings(value: unknown): StoredServerSettings {
   const interruptedRecovery = validateInterruptedRecovery(common.interruptedRecovery);
   const contentRegistry = validateContentRegistry(common.contentRegistry);
   const hostTools = validateHostTools(common.hostTools);
+  const webSearch = validateWebSearchSettings(common.webSearch);
   return {
     slurmTemplate: common.slurmTemplate,
     ...(common.gpu !== undefined ? { gpu: common.gpu } : {}),
@@ -646,6 +765,7 @@ function validateStoredSettings(value: unknown): StoredServerSettings {
       agentSdk,
     },
     ...(hostTools !== undefined ? { hostTools } : {}),
+    webSearch,
     ...(common.updateCheck !== undefined ? { updateCheck: common.updateCheck } : {}),
     // Only the enabled flag is the user's; get() recomputes the deployment-owned
     // ingest URL on every read, so storing it would go stale.
@@ -670,6 +790,15 @@ interface ValidatedUpdate {
   readonly clearCursorApiKey: boolean;
   readonly submittedOpenRouterApiKey?: string;
   readonly clearOpenRouterApiKey: boolean;
+  /** Write-only web-search provider keys, verified before they are stored. */
+  readonly submittedTavilyApiKey?: string;
+  readonly clearTavilyApiKey: boolean;
+  readonly submittedBraveApiKey?: string;
+  readonly clearBraveApiKey: boolean;
+  readonly submittedSemanticScholarApiKey?: string;
+  readonly clearSemanticScholarApiKey: boolean;
+  readonly submittedOpenAlexApiKey?: string;
+  readonly clearOpenAlexApiKey: boolean;
   /**
    * As submitted, so put() can tell the three cases apart: absent = keep
    * the stored policy, `{}` = back to the bundle default, `{maxRounds}` =
@@ -777,6 +906,36 @@ function validateSettingsUpdate(value: unknown): ValidatedUpdate {
     );
   }
   const hostTools = validateHostTools(common.hostTools);
+  const webSearch = validateWebSearchSettings(common.webSearch);
+  // The write-only web-search keys ride the same section as its settings;
+  // they are extracted here and never reach the stored document.
+  const webSection = common.webSearch ?? {};
+  const submittedTavilyApiKey = optionalNonEmptyString(
+    webSection.tavilyApiKey,
+    "webSearch.tavilyApiKey",
+  );
+  const submittedBraveApiKey = optionalNonEmptyString(
+    webSection.braveApiKey,
+    "webSearch.braveApiKey",
+  );
+  const submittedSemanticScholarApiKey = optionalNonEmptyString(
+    webSection.semanticScholarApiKey,
+    "webSearch.semanticScholarApiKey",
+  );
+  const submittedOpenAlexApiKey = optionalNonEmptyString(
+    webSection.openAlexApiKey,
+    "webSearch.openAlexApiKey",
+  );
+  for (const flag of [
+    "clearTavilyApiKey",
+    "clearBraveApiKey",
+    "clearSemanticScholarApiKey",
+    "clearOpenAlexApiKey",
+  ] as const) {
+    if (webSection[flag] !== undefined && typeof webSection[flag] !== "boolean") {
+      throw new Error(`webSearch.${flag} must be a boolean`);
+    }
+  }
   return {
     settings: {
       slurmTemplate: common.slurmTemplate,
@@ -802,6 +961,7 @@ function validateSettingsUpdate(value: unknown): ValidatedUpdate {
         agentSdk,
       },
       ...(hostTools !== undefined ? { hostTools } : {}),
+      webSearch,
     },
     ...(submittedApiKey !== undefined ? { submittedApiKey } : {}),
     ...(submittedSetupToken !== undefined ? { submittedSetupToken } : {}),
@@ -814,9 +974,58 @@ function validateSettingsUpdate(value: unknown): ValidatedUpdate {
       : {}),
     clearOpenRouterApiKey:
       common.creditRecovery.clearOpenRouterApiKey === true,
+    ...(submittedTavilyApiKey !== undefined ? { submittedTavilyApiKey } : {}),
+    clearTavilyApiKey: webSection.clearTavilyApiKey === true,
+    ...(submittedBraveApiKey !== undefined ? { submittedBraveApiKey } : {}),
+    clearBraveApiKey: webSection.clearBraveApiKey === true,
+    ...(submittedSemanticScholarApiKey !== undefined
+      ? { submittedSemanticScholarApiKey }
+      : {}),
+    clearSemanticScholarApiKey: webSection.clearSemanticScholarApiKey === true,
+    ...(submittedOpenAlexApiKey !== undefined ? { submittedOpenAlexApiKey } : {}),
+    clearOpenAlexApiKey: webSection.clearOpenAlexApiKey === true,
     ...(common.review !== undefined ? { review: common.review } : {}),
     ...(common.panel !== undefined ? { panel: common.panel } : {}),
   };
+}
+
+/**
+ * Verifies a general-search provider the way every other credential is
+ * verified: with one real, tiny request through the same implementation a
+ * run uses. A key that cannot answer "test" with one result is not stored.
+ */
+export async function validateWebSearchConnection(
+  input: WebSearchConnectionInput,
+): Promise<void> {
+  const config: WebSearchRuntimeConfig = {
+    general: input.provider,
+    ...(input.searxngBaseUrl !== undefined
+      ? { searxngBaseUrl: input.searxngBaseUrl }
+      : {}),
+  };
+  const secrets: WebSearchSecrets = {
+    ...(input.provider === "tavily" && input.apiKey !== undefined
+      ? { tavilyApiKey: input.apiKey }
+      : {}),
+    ...(input.provider === "brave" && input.apiKey !== undefined
+      ? { braveApiKey: input.apiKey }
+      : {}),
+  };
+  const resolved = resolveGeneralProvider(config, secrets);
+  if (resolved === undefined || "missing" in resolved) {
+    throw new Error(
+      resolved === undefined
+        ? "no search provider selected"
+        : resolved.missing,
+    );
+  }
+  const timeout = AbortSignal.timeout(CONNECTION_TIMEOUT_MS);
+  await resolved.provider.search({
+    query: "connectivity check",
+    kind: "general",
+    maxResults: 1,
+    signal: timeout,
+  });
 }
 
 export async function validateAnthropicConnection(
@@ -954,6 +1163,7 @@ export class SettingsStore {
     apiKey: string,
     model: string,
   ) => Promise<void>;
+  private readonly webSearchValidator: WebSearchConnectionValidator;
 
   constructor(
     readonly workspace: string,
@@ -971,6 +1181,8 @@ export class SettingsStore {
       options.validateCursorAgent ?? validateCursorAgentConnection;
     this.openRouterValidator =
       options.validateOpenRouter ?? validateOpenRouterConnection;
+    this.webSearchValidator =
+      options.validateWebSearch ?? validateWebSearchConnection;
     mkdirSync(join(workspace, "workspace", "jobs"), { recursive: true });
     mkdirSync(join(workspace, "workspace", "sessions"), { recursive: true });
     const stored = readJsonFile<unknown>(this.path);
@@ -1030,6 +1242,18 @@ export class SettingsStore {
         enabled: settings.telemetry?.enabled ?? true,
         ingestUrl: ingestUrlFor(this.deploymentRegistryUrl),
       },
+      webSearch: {
+        ...(settings.webSearch ?? {
+          provider: "none",
+          scholarly: true,
+          cacheEnabled: false,
+        }),
+        tavilyKeyConfigured: this.getTavilyApiKey() !== undefined,
+        braveKeyConfigured: this.getBraveApiKey() !== undefined,
+        semanticScholarKeyConfigured:
+          this.getSemanticScholarApiKey() !== undefined,
+        openAlexKeyConfigured: this.getOpenAlexApiKey() !== undefined,
+      },
     };
   }
 
@@ -1059,6 +1283,98 @@ export class SettingsStore {
       this.credentialsPath,
     )?.openRouterApiKey;
     return typeof key === "string" && key.length > 0 ? key : undefined;
+  }
+
+  getTavilyApiKey(): string | undefined {
+    const key = readJsonCached<StoredCredentials>(this.credentialsPath)?.tavilyApiKey;
+    return typeof key === "string" && key.length > 0 ? key : undefined;
+  }
+
+  getBraveApiKey(): string | undefined {
+    const key = readJsonCached<StoredCredentials>(this.credentialsPath)?.braveApiKey;
+    return typeof key === "string" && key.length > 0 ? key : undefined;
+  }
+
+  getSemanticScholarApiKey(): string | undefined {
+    const key = readJsonCached<StoredCredentials>(
+      this.credentialsPath,
+    )?.semanticScholarApiKey;
+    return typeof key === "string" && key.length > 0 ? key : undefined;
+  }
+
+  getOpenAlexApiKey(): string | undefined {
+    const key = readJsonCached<StoredCredentials>(this.credentialsPath)?.openAlexApiKey;
+    return typeof key === "string" && key.length > 0 ? key : undefined;
+  }
+
+  /**
+   * The web-search runtime config a run executes with, derived from settings
+   * — the SAME shape the worker parses out of BRAINSTORM_AGENTIC_WEB_SEARCH,
+   * and the same one the readiness probe models, so the promise made before
+   * a job exists cannot drift from what the run does. Secrets never appear
+   * here; they travel the credential channels.
+   */
+  webSearchRuntimeConfig(settings: ServerSettings = this.get()): WebSearchRuntimeConfig {
+    const stored = settings.webSearch ?? {
+      provider: "none" as const,
+      scholarly: true,
+      cacheEnabled: false,
+    };
+    // The app-launched local instance: the worker only ever sees "searxng
+    // at this URL" — where the URL comes from the launcher's state file in
+    // this workspace. An instance that is not (yet) healthy contributes no
+    // general provider, so a run started during its warm-up answers general
+    // queries with the explicit configuration error rather than a dead URL,
+    // and the readiness panel names the launcher's own state as the cause.
+    const localUrl =
+      stored.provider === "searxng-local"
+        ? searxngLocalUrl(this.workspace)
+        : undefined;
+    const general =
+      stored.provider === "searxng-local"
+        ? localUrl !== undefined
+          ? ("searxng" as const)
+          : undefined
+        : stored.provider !== "none"
+          ? stored.provider
+          : undefined;
+    const searxngBaseUrl = localUrl ?? stored.searxngBaseUrl;
+    return {
+      ...(general !== undefined ? { general } : {}),
+      ...(general === "searxng" && searxngBaseUrl !== undefined
+        ? { searxngBaseUrl }
+        : {}),
+      scholarly: stored.scholarly,
+      ...(stored.cacheEnabled
+        ? {
+            cache: {
+              enabled: true,
+              ...(stored.cacheTtlHours !== undefined
+                ? { ttlHours: stored.cacheTtlHours }
+                : {}),
+            },
+          }
+        : {}),
+      ...(stored.contactEmail !== undefined
+        ? { contactEmail: stored.contactEmail }
+        : {}),
+    };
+  }
+
+  /** The web-search secrets currently configured (for probes; never logged). */
+  webSearchSecrets(): WebSearchSecrets {
+    const tavily = this.getTavilyApiKey();
+    const brave = this.getBraveApiKey();
+    const semanticScholar = this.getSemanticScholarApiKey();
+    const openAlex = this.getOpenAlexApiKey();
+    return {
+      ...(tavily !== undefined ? { tavilyApiKey: tavily } : {}),
+      ...(brave !== undefined ? { braveApiKey: brave } : {}),
+      ...(semanticScholar !== undefined
+        ? { semanticScholarApiKey: semanticScholar }
+        : {}),
+      ...(openAlex !== undefined ? { openAlexApiKey: openAlex } : {}),
+    };
   }
 
   executionEnvironment(
@@ -1167,6 +1483,20 @@ export class SettingsStore {
     if (settings.hostTools?.enabledToolIds) {
       env.BRAINSTORM_AGENTIC_HOST_TOOLS = settings.hostTools.enabledToolIds.join(",");
     }
+    // The host-owned web layer: the JSON config (never secrets) plus each
+    // configured provider key on its own variable, exactly like the LLM
+    // credentials. The worker builds ONE WebAccessManager from these.
+    env.BRAINSTORM_AGENTIC_WEB_SEARCH = JSON.stringify(
+      this.webSearchRuntimeConfig(settings),
+    );
+    const tavilyKey = this.getTavilyApiKey();
+    if (tavilyKey) env.TAVILY_API_KEY = tavilyKey;
+    const braveKey = this.getBraveApiKey();
+    if (braveKey) env.BRAVE_SEARCH_API_KEY = braveKey;
+    const semanticScholarKey = this.getSemanticScholarApiKey();
+    if (semanticScholarKey) env.SEMANTIC_SCHOLAR_API_KEY = semanticScholarKey;
+    const openAlexKey = this.getOpenAlexApiKey();
+    if (openAlexKey) env.OPENALEX_API_KEY = openAlexKey;
     // GPU run setup travels to the worker only when it is actually
     // configured; the worker gates the tool on this AND the enabled ids.
     if (settings.gpu !== undefined && settings.gpu.template.trim() !== "") {
@@ -1212,7 +1542,9 @@ export class SettingsStore {
     const patch = object(value, "settings update");
     // Deliberately the UNCACHED read that put() has always merged against.
     const stored = validateStoredSettings(readJsonFile<unknown>(this.path));
-    const section = (name: "llm" | "creditRecovery" | "hostTools" | "gpu"): unknown => {
+    const section = (
+      name: "llm" | "creditRecovery" | "hostTools" | "gpu" | "webSearch",
+    ): unknown => {
       if (patch[name] === undefined) return (stored as Record<string, unknown>)[name];
       return {
         ...object((stored as Record<string, unknown>)[name] ?? {}, name),
@@ -1229,6 +1561,7 @@ export class SettingsStore {
       creditRecovery: section("creditRecovery"),
       hostTools: section("hostTools"),
       gpu: section("gpu"),
+      webSearch: section("webSearch"),
       interruptedRecovery: patch.interruptedRecovery ?? stored.interruptedRecovery,
       // `review` keeps its own three-way meaning: absent = keep the stored
       // policy, `{}` = follow the bundle default again, `{maxRounds}` = override.
@@ -1370,6 +1703,59 @@ export class SettingsStore {
         update.settings.creditRecovery.openRouterModel,
       );
     }
+    // The general-search connection is verified exactly like the LLM one:
+    // when — and only when — something a real request could disprove has
+    // changed (a newly submitted key, a different provider, a different
+    // SearXNG base URL). The scholarly keys (Semantic Scholar, OpenAlex) are
+    // optional rate-limit raisers over keyless services and are stored
+    // without a live call.
+    {
+      const webSettings = update.settings.webSearch ?? {
+        provider: "none" as const,
+        scholarly: true,
+        cacheEnabled: false,
+      };
+      const currentWeb = currentSettings.webSearch;
+      const provider = webSettings.provider;
+      // "searxng-local" is deliberately NOT verified here: its first start
+      // may download and convert the search image for minutes, and a
+      // settings save must never block that long. The launcher owns its
+      // health — the save selects it, the server starts it in the
+      // background, and the readiness panel reports its state.
+      if (provider === "tavily" || provider === "brave" || provider === "searxng") {
+        const submittedKey =
+          provider === "tavily"
+            ? update.submittedTavilyApiKey
+            : provider === "brave"
+              ? update.submittedBraveApiKey
+              : undefined;
+        const currentKey =
+          provider === "tavily"
+            ? this.getTavilyApiKey()
+            : provider === "brave"
+              ? this.getBraveApiKey()
+              : undefined;
+        const candidateWebKey = submittedKey ?? currentKey;
+        if (provider !== "searxng" && candidateWebKey === undefined) {
+          throw new Error(
+            `A ${provider === "tavily" ? "Tavily" : "Brave Search"} API key is required`,
+          );
+        }
+        const webConnectionChanged =
+          submittedKey !== undefined ||
+          provider !== (currentWeb?.provider ?? "none") ||
+          webSettings.searxngBaseUrl !== currentWeb?.searxngBaseUrl;
+        if (webConnectionChanged) {
+          await this.webSearchValidator({
+            provider,
+            ...(candidateWebKey !== undefined ? { apiKey: candidateWebKey } : {}),
+            ...(webSettings.searxngBaseUrl !== undefined
+              ? { searxngBaseUrl: webSettings.searxngBaseUrl }
+              : {}),
+          });
+        }
+      }
+    }
 
     // Persist only after every validation (including the real provider call)
     // succeeded. Secrets are never written to settings.json. An update that
@@ -1414,6 +1800,10 @@ export class SettingsStore {
       claudeSetupToken?: string;
       cursorApiKey?: string;
       openRouterApiKey?: string;
+      tavilyApiKey?: string;
+      braveApiKey?: string;
+      semanticScholarApiKey?: string;
+      openAlexApiKey?: string;
     } = { ...previousCredentials };
     if (update.clearApiKey) delete nextCredentials.anthropicApiKey;
     if (update.clearSetupToken) delete nextCredentials.claudeSetupToken;
@@ -1421,6 +1811,12 @@ export class SettingsStore {
     if (update.clearOpenRouterApiKey) {
       delete nextCredentials.openRouterApiKey;
     }
+    if (update.clearTavilyApiKey) delete nextCredentials.tavilyApiKey;
+    if (update.clearBraveApiKey) delete nextCredentials.braveApiKey;
+    if (update.clearSemanticScholarApiKey) {
+      delete nextCredentials.semanticScholarApiKey;
+    }
+    if (update.clearOpenAlexApiKey) delete nextCredentials.openAlexApiKey;
     if (update.submittedApiKey !== undefined) {
       nextCredentials.anthropicApiKey = update.submittedApiKey;
     }
@@ -1438,6 +1834,19 @@ export class SettingsStore {
       // clear above had just deleted (currentOpenRouterKey is read before it),
       // so a user could never actually remove their OpenRouter key.
       nextCredentials.openRouterApiKey ??= currentOpenRouterKey;
+    }
+    if (update.submittedTavilyApiKey !== undefined) {
+      nextCredentials.tavilyApiKey = update.submittedTavilyApiKey;
+    }
+    if (update.submittedBraveApiKey !== undefined) {
+      nextCredentials.braveApiKey = update.submittedBraveApiKey;
+    }
+    if (update.submittedSemanticScholarApiKey !== undefined) {
+      nextCredentials.semanticScholarApiKey =
+        update.submittedSemanticScholarApiKey;
+    }
+    if (update.submittedOpenAlexApiKey !== undefined) {
+      nextCredentials.openAlexApiKey = update.submittedOpenAlexApiKey;
     }
     if (Object.keys(nextCredentials).length === 0) {
       if (existsSync(this.credentialsPath)) rmSync(this.credentialsPath);

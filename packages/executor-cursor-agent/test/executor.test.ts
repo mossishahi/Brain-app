@@ -232,10 +232,13 @@ test("structured output rides the submit_result tool; cache-inclusive usage is n
     ],
   });
   // Capabilities map to Cursor's public tool names, plus mcp for the
-  // in-process tools; nothing else (no edit/write/task) is offered.
+  // in-process tools; nothing else (no edit/write/task) is offered. The web
+  // is host-owned, so Cursor's own webSearch/webFetch never appear — the
+  // capability is served by the bridged host web tools when a WebAccess is
+  // configured, and resolves nowhere when none is.
   assert.deepEqual(
     [...state.options[0]!.tools].sort(),
-    ["glob", "grep", "ls", "mcp", "read", "webFetch", "webSearch"].sort(),
+    ["glob", "grep", "ls", "mcp", "read"].sort(),
   );
   // The prompt leads with the role instructions and carries the
   // structured-output contract.
@@ -243,6 +246,80 @@ test("structured output rides the submit_result tool; cache-inclusive usage is n
   assert.match(state.prompts[0]!, /calling the submit_result tool/);
   // Inline config only — ambient Cursor settings must never load.
   assert.deepEqual(state.options[0]!.local.settingSources, []);
+});
+
+test("the host web layer is bridged as custom tools and answers through the one manager", async () => {
+  const state = newState();
+  const searches: Array<{ query: string; kind?: string }> = [];
+  const web = {
+    async search(query: { query: string; kind?: "general" | "scholarly" | "news" }) {
+      searches.push({ query: query.query, ...(query.kind ? { kind: query.kind } : {}) });
+      return {
+        query: query.query,
+        kind: query.kind ?? ("general" as const),
+        provider: "offline",
+        results: [
+          {
+            title: "Result",
+            url: "https://example.org/a",
+            snippet: "snippet",
+            source: "offline",
+          },
+        ],
+      };
+    },
+    async fetch(query: { url: string }) {
+      return {
+        url: query.url,
+        finalUrl: query.url,
+        status: 200,
+        contentType: "text/plain",
+        text: "fetched",
+        truncated: false,
+        fetchedBytes: 7,
+      };
+    },
+    backedKinds() {
+      return ["general" as const];
+    },
+  };
+  let searchAnswer: unknown;
+  const executor = new CursorAgentExecutor({
+    apiKey: "cursor-key",
+    web,
+    listModels: async () => CATALOG,
+    agentFactory: fakeFactory(
+      [
+        {
+          callTools: async (tools) => {
+            assert.ok(tools.web_search, "the host web_search tool is bridged");
+            assert.ok(tools.web_fetch, "the host web_fetch tool is bridged");
+            searchAnswer = await tools.web_search!.execute(
+              { query: "manifold learning", kind: "general" },
+              {},
+            );
+            await tools.submit_result!.execute({ answer: "structured" }, {});
+          },
+          result: finished(""),
+        },
+      ],
+      state,
+    ),
+  });
+  const result = await executor.execute(structuredTask, {
+    runId: "run-web",
+    nodePath: "root/brain",
+  });
+  assert.equal(result.status, "ok");
+  // Cursor's own web tools never enter the allowlist; "mcp" carries the bridge.
+  const tools = [...state.options[0]!.tools];
+  assert.ok(!tools.includes("webSearch"));
+  assert.ok(!tools.includes("webFetch"));
+  assert.ok(tools.includes("mcp"));
+  assert.deepEqual(searches, [{ query: "manifold learning", kind: "general" }]);
+  const answer = searchAnswer as { provider?: string; results?: unknown[] };
+  assert.equal(answer.provider, "offline");
+  assert.equal(answer.results?.length, 1);
 });
 
 test("falls back to salvaging raw JSON when the tool was never called", async () => {
