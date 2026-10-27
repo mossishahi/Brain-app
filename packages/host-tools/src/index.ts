@@ -4,8 +4,9 @@
  * Provider-neutral host-side tools satisfying brainstorm capability contracts.
  * This package owns:
  * - Tool manifests (static metadata for the capability broker)
- * - Runtime tool implementations (attachment, taxonomy, code execution, web fetch)
- * - Extension interfaces for future backends (web search)
+ * - Runtime tool implementations (attachment, taxonomy, code execution, and
+ *   the web tools: web_search, news_search, paper_search, paper_details,
+ *   web_fetch)
  * - A registry factory that creates tool registries from user settings
  */
 
@@ -24,8 +25,12 @@ export {
 export {
   WEB_SEARCH_MANIFEST,
   WEB_FETCH_MANIFEST,
+  NEWS_SEARCH_MANIFEST,
+  PAPER_SEARCH_MANIFEST,
+  PAPER_DETAILS_MANIFEST,
   WEB_SEARCH_MANIFESTS,
   WEB_FETCH_TOOL_NAMES,
+  FIELDS_OF_STUDY,
   performWebFetch,
   webFetchTools,
   htmlToText,
@@ -38,16 +43,20 @@ export type {
   WebFetchOutcome,
 } from "./web-search.js";
 
-// Unified web layer: one manager routes, bounds, coalesces, caches, and logs
-// every agent's web_search/web_fetch, whichever backend executes the agent.
+// Unified web layer: one manager per run routes, paces, coalesces, caches,
+// and logs every agent's web calls, whichever backend executes the agent.
 export {
+  DEFAULT_PAPER_ROUTES,
   WebAccessManager,
   WebAccessError,
   searchCacheKey,
 } from "./web/manager.js";
 export type { WebAccessManagerOptions } from "./web/manager.js";
 export {
+  LOCAL_SEARXNG_ENGINES,
   buildWebAccessManager,
+  localSearxngEngineNames,
+  presetRoutes,
   resolveGeneralProvider,
 } from "./web/config.js";
 export type {
@@ -56,10 +65,31 @@ export type {
   WebSearchRuntimeConfig,
   WebSearchSecrets,
 } from "./web/config.js";
+// Tool availability: the per-purpose order derived from probed states, and
+// the probes the server runs outside a run.
+export { deriveEffectiveOrder } from "./web/availability.js";
+export type { EffectiveOrder, EffectiveOrderEntry, ToolAvailabilityState } from "./web/availability.js";
+export {
+  ARXIV_PROBE_TIMEOUT_MS,
+  KNOWN_WEB_ANSWER,
+  PROBE_TIMEOUT_MS,
+  ProbeLog,
+  loggingFetch,
+  probeStateFromError,
+  redactSecrets,
+  redactUrl,
+  runProbe,
+  withProbeLog,
+  withSearchProbe,
+} from "./web/probe.js";
+export type { ProbeFinding, ProbeLogLine, ProbeOptions, WebSourceStatusWithLog } from "./web/probe.js";
+export { OPENROUTER_EMBEDDINGS_URL, probeOpenRouterEmbeddings } from "./web/embeddings-probe.js";
 export {
   arxivProvider,
+  BRAVE_COST_PER_REQUEST_USD,
   braveProvider,
   crossrefProvider,
+  neutralizeSearxngTokens,
   offlineSearchProvider,
   openAlexProvider,
   ProviderRequestError,
@@ -67,6 +97,31 @@ export {
   semanticScholarProvider,
   tavilyProvider,
 } from "./web/providers.js";
+export {
+  arxivBackend,
+  crossrefBackend,
+  openAlexBackend,
+  parsePaperIdentifier,
+  semanticScholarBackend,
+} from "./web/scholarly.js";
+export type {
+  PaperBackend,
+  PaperBackendAnswer,
+  PaperBackendId,
+  PaperIdentifier,
+} from "./web/scholarly.js";
+export { coreBackend, europePmcBackend, openCitationsBackend } from "./web/scholarly-extra.js";
+export { Breaker, FairGate, SYSTEM_CLOCK, TokenBucket } from "./web/scheduler.js";
+export type { BreakerOptions, BreakerState, SchedulerClock, TokenBucketOptions } from "./web/scheduler.js";
+export { DEFAULT_ENGINE_CANARIES, EnginePool } from "./web/engines.js";
+export {
+  notePaidRequest,
+  paidRequestsInMonth,
+  paidRequestsOfRun,
+  usageFile,
+  usageMonth,
+} from "./web/usage.js";
+export type { EngineCanary, EngineOutcome, EnginePoolOptions, EngineRoute } from "./web/engines.js";
 export type {
   ProviderAnswer,
   ProviderFetch,
@@ -74,16 +129,25 @@ export type {
   WebSearchProvider,
 } from "./web/providers.js";
 export {
+  FsCache,
   FsWebSearchCache,
+  LayeredCache,
   LayeredWebSearchCache,
+  MemoryCache,
   MemoryWebSearchCache,
 } from "./web/cache.js";
 export type { WebSearchCache } from "./web/cache.js";
 export {
   WEB_ACCESS_TOOL_NAMES,
+  parsePaperDetailsInput,
+  parsePaperSearchInput,
+  parseWebFetchInput,
   parseWebSearchInput,
   webAccessTools,
+  webToolNames,
+  webToolSpecs,
 } from "./web/tools.js";
+export type { WebAccessToolName, WebToolSpec } from "./web/tools.js";
 
 // Code execution (workspace preparation + executable tool)
 export {
@@ -93,6 +157,7 @@ export {
   codeExecutionTools,
   prepareCodeWorkspace,
   runProcess,
+  scrubbedEnvironment,
 } from "./code-execution.js";
 
 // GPU runs (agent script spliced into the deployment's submission template)
@@ -102,6 +167,7 @@ export {
   GPU_RUN_MANIFESTS,
   GPU_RUN_TOOL_NAMES,
   gpuRunTools,
+  gpuSubmissionJobIds,
   renderGpuTemplate,
   slurmClusterArgs,
   slurmClusterFrom,
@@ -124,6 +190,48 @@ export {
   TAXONOMY_RESOLVE_MANIFEST,
   TAXONOMY_MANIFESTS,
 } from "./taxonomy-tools.js";
+
+// Thinker notes search (one seat's recorded thinking, scoped per review task)
+export {
+  NOTES_MANIFESTS,
+  NOTES_SEARCH_DEFINITION,
+  NOTES_SEARCH_MANIFEST,
+  NOTES_TOOL_NAMES,
+  notesTools,
+  runNotesSearch,
+} from "./notes-tools.js";
+export type { NotesScopeResolver } from "./notes-tools.js";
+export { buildNotesIndex, paragraphsOf, splitSentences } from "./notes/index-notes.js";
+export type { NoteParagraph, NotesIndex } from "./notes/index-notes.js";
+export {
+  NOTES_MATCHES,
+  NOTES_MODES,
+  NOTES_SOURCES,
+  NOTES_UNITS,
+  NotesQueryError,
+  parseNotesInput,
+  searchNotes,
+} from "./notes/search.js";
+export type { NotesMode, NotesQuery } from "./notes/search.js";
+
+// Fact table (the board's justified facts; the supreme judge verifies submissions)
+export {
+  FACT_MANIFESTS,
+  FACT_TABLE_DEFINITION,
+  FACT_TABLE_MANIFEST,
+  FACT_TABLE_MODES,
+  FACT_TOOL_NAMES,
+  FactQueryError,
+  describeFactTableCall,
+  factEntryView,
+  factTools,
+  formatFactOutcome,
+  parseFactInput,
+  runFactTable,
+} from "./fact-tools.js";
+export type { FactBindingResolver, FactTableMode, FactTableQuery } from "./fact-tools.js";
+export { factTokens, normalizeFactText, rankFacts } from "./facts/rank.js";
+export type { RankedFact } from "./facts/rank.js";
 
 // Registry
 export {

@@ -213,7 +213,7 @@ export function pendingReviewers(
   const landed = new Set(landedLabels);
   return threads.filter(
     (thread) =>
-      thread.role !== "Judge" && thread.actor !== undefined && !landed.has(thread.actor),
+      thread.role !== "Judge" && thread.role !== "Committee chair" && thread.actor !== undefined && !landed.has(thread.actor),
   );
 }
 

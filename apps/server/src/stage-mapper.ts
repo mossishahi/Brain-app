@@ -25,6 +25,9 @@ import {
   type BrainIdeaView,
   type BridgeReportView,
   type CommentView,
+  type GameCritiqueView,
+  type GameChairDecisionView,
+  type GameSettlementView,
   type ContradictionView,
   type ConfidenceView,
   type ConfirmPanelStage,
@@ -86,7 +89,9 @@ import {
   type RedevelopmentPatchParts,
 } from "@brainstorm-agentic/content";
 
+import { gameChairView, gameCritiqueView, gameLedgerFromJournal, gameReviewConfiguration, gameReviewEnabled, gameSettlementView } from "./game-review.js";
 import { readJsonCached, readJsonlCached } from "./read-cache.js";
+import { factCallUsage, factMergeOf, readFactTableView, readFactUpdateJournal, type FactCallUsage, type FactNotice } from "./fact-table-view.js";
 import type { JobRecord } from "./model.js";
 
 interface ArtifactRefFile {
@@ -506,17 +511,32 @@ function taskPath(taskId: string): string {
   return taskId.slice(taskId.indexOf(":") + 1);
 }
 
-/** Token totals per dashboard stage, from the per-task index. */
+/**
+ * The stage a fact-table model call counts in: the stage of the task that
+ * requested it, and the review stage for a reconsideration task of a fact
+ * update (`fact-update:<key>:<attempt>`) and anything it requested.
+ */
+function factUsageStage(taskId: string): StageId | undefined {
+  return taskId.startsWith("fact-update:") ? "review-members" : stageForPath(taskPath(taskId));
+}
+
+/**
+ * Token totals per dashboard stage, from the per-task index plus the fact
+ * table's model calls (verifications, supreme-judge consultations and the
+ * reconsideration tasks of fact updates), which are no workflow tasks.
+ */
 function stageUsageTotals(
   taskUsage: ReadonlyMap<string, TokenUsageView>,
+  factUsage: readonly FactCallUsage[] = [],
 ): Map<StageId, TokenUsageView> {
   const totals = new Map<StageId, TokenUsageView>();
-  for (const [taskId, usage] of taskUsage) {
-    const stage = stageForPath(taskPath(taskId));
-    if (!stage) continue;
+  const add = (stage: StageId | undefined, usage: TokenUsageView): void => {
+    if (!stage) return;
     const seen = totals.get(stage);
     totals.set(stage, seen ? addUsage(seen as TokenUsage, usage as TokenUsage) : usage);
-  }
+  };
+  for (const [taskId, usage] of taskUsage) add(stageForPath(taskPath(taskId)), usage);
+  for (const call of factUsage) add(factUsageStage(call.taskId), call.usage);
   return totals;
 }
 
@@ -582,6 +602,13 @@ const DECOMPOSE_SUBNODES = [
   "place-fields",
   "submit-decisions",
   "bridge-experts",
+  // The paper-based panel composition (workflow with literature retrieval):
+  // retrieval, the optional relevance screen (or its skip), and composition.
+  "retrieve-literature",
+  "maybe-screen-literature",
+  "screen-literature",
+  "skip-screen-literature",
+  "compose-panel",
 ] as const;
 
 /**
@@ -609,6 +636,9 @@ const PREPROCESS_SUBNODES = [
   "classify-input",
   "apply-classification",
   "confirm-classification",
+  // The optional needs confirmation right after it (askUserToConfirmNeeds).
+  "maybe-confirm-needs",
+  "confirm-needs",
 ] as const;
 
 /**
@@ -617,12 +647,25 @@ const PREPROCESS_SUBNODES = [
  * dashboard's Select-panel stage shows is the woven one, so the weave's
  * events and any failure it carries belong to that stage.
  */
-const SELECT_PANEL_SUBNODES = ["weave-panel"] as const;
+const SELECT_PANEL_SUBNODES = ["weave-panel", "seat-panel"] as const;
+
+/**
+ * The fact-update merges at the workflow's root (fact-update workflow): each
+ * waits for the last reconsiderations of the seats' chains right before the
+ * stage that reads the merged chains, so its events and any failure belong to
+ * that stage. Their completion is that stage's progress, not its end.
+ */
+const FACT_UPDATE_ROOT_NODES: ReadonlyMap<string, StageId> = new Map<string, StageId>([
+  ["apply-fact-updates-after-review", "bridge-audit"],
+  ["apply-fact-updates-before-synthesis", "synthesize-proposal"],
+]);
 
 export function stageForPath(path: string): StageId | undefined {
   const segments = path.split("/");
   const direct = STAGE_IDS.find((id) => segments.includes(id));
   if (direct) return direct;
+  const merge = segments.find((segment) => FACT_UPDATE_ROOT_NODES.has(segment));
+  if (merge !== undefined) return FACT_UPDATE_ROOT_NODES.get(merge);
   if (PREPROCESS_SUBNODES.some((node) => segments.includes(node))) {
     return "process-input";
   }
@@ -655,6 +698,13 @@ const TOOL_CAPABILITY: Readonly<Record<string, ActivityCapability>> = {
   web_search: "web-search",
   WebFetch: "web-search",
   web_fetch: "web-search",
+  news_search: "web-search",
+  paper_search: "web-search",
+  paper_details: "web-search",
+  webSearch: "web-search",
+  webFetch: "web-search",
+  notes_search: "notes-access",
+  fact_table: "fact-table",
   taxonomy_tree: "taxonomy-access",
   taxonomy_resolve: "taxonomy-access",
 };
@@ -866,6 +916,8 @@ function timings(
     ) {
       continue;
     }
+    // A root fact-update merge finishing is progress of the stage it opens.
+    if (event.type === "node:completed" && FACT_UPDATE_ROOT_NODES.has(leaf)) continue;
     const timing = result.get(stage)!;
     if (event.type === "node:started") {
       if (
@@ -928,11 +980,15 @@ function coordinates(path: string): Coordinates {
 const ROLE_LABELS: Readonly<Record<string, string>> = {
   brain: "Thinker",
   commentor: "Commenter",
+  "game-commentor": "Commenter",
+  "game-interdisciplinary-commentor": "Bridge",
   // "Bridge" rather than "Interdisciplinary": the seat is named in the next
   // column anyway, and the full word needs a third of the row to itself. It is
   // the workflow's own word for this path (comment-step-bridge).
   "interdisciplinary-commentor": "Bridge",
   judge: "Judge",
+  "review-chair": "Committee chair",
+  "committee-chair": "Committee chair",
   redeveloper: "Redeveloper",
   integrator: "Integrator",
   chair: "Chair",
@@ -1133,8 +1189,35 @@ const CALL_NAMES: Readonly<Record<string, string>> = {
   "comment-step": "commentor task",
   "comment-step-bridge": "interdisciplinary commentor task",
   "judge-step": "judge task",
+  "game-comment-step": "probability report",
+  "game-comment-step-bridge": "interdisciplinary probability report",
+  "chair-step": "committee chair task",
+  "game-settle": "score settlement",
   "redevelop-idea": "redeveloper task",
+  "game-redevelop-idea": "redeveloper task",
+  "game-apply-fact-updates": "fact-update merge",
+  "apply-fact-updates": "fact-update merge",
+  "game-apply-report-updates": "fact-update merge",
+  "game-apply-late-report-updates": "fact-update merge",
+  "apply-comment-updates": "fact-update merge",
+  "apply-late-comment-updates": "fact-update merge",
+  "apply-fact-updates-after-review": "fact-update merge",
+  "apply-fact-updates-before-synthesis": "fact-update merge",
+  "game-chair-reassess": "chair re-assessment",
+  "judge-reassess": "judge re-assessment",
 };
+
+/** The fact-update merge nodes, whose journaled `-run` handler step carries the failure of a merge. */
+const FACT_UPDATE_MERGE_NODES: ReadonlySet<string> = new Set([
+  "game-apply-fact-updates",
+  "apply-fact-updates",
+  "game-apply-report-updates",
+  "game-apply-late-report-updates",
+  "apply-comment-updates",
+  "apply-late-comment-updates",
+  "apply-fact-updates-after-review",
+  "apply-fact-updates-before-synthesis",
+]);
 
 /** The call a failing path names, from its leaf node id. */
 function callNameOf(path: string): string | undefined {
@@ -1142,6 +1225,8 @@ function callNameOf(path: string): string | undefined {
   if (leaf === "" || /^(then|else|member\[\d+\]|iter\[\d+\]|commentor\[\d+\]|cotStep\[\d+\])$/.test(leaf)) {
     return undefined;
   }
+  const merged = /^(.+)-(?:run|apply)$/.exec(leaf);
+  if (merged && FACT_UPDATE_MERGE_NODES.has(merged[1]!)) return CALL_NAMES[merged[1]!];
   const executed = /^(.+)-execute$/.exec(leaf);
   if (executed) return CALL_NAMES[executed[1]!] ?? `${executed[1]!} task`;
   const stored = /^(.+)-store$/.exec(leaf);
@@ -2470,6 +2555,18 @@ function applyRevision(
   }
 }
 
+/** Phase names for both legacy and gamified review paths, including containers. */
+export function reviewPhaseForPath(path: string): ReviewPhase | undefined {
+  if (path.includes("/judge-step") || path.includes("/chair-step") || path.includes("/game-settle")) return "judging";
+  // Fact updates: report merges, late merges and re-assessments belong to the
+  // judging of the round; a chain merge at the round's start precedes its critics.
+  if (/\/(?:game-apply-report-updates|game-apply-late-report-updates|apply-comment-updates|apply-late-comment-updates|maybe-game-chair-reassess|game-chair-reassess|maybe-judge-reassess|judge-reassess)(?:[/-]|$)/.test(path)) return "judging";
+  if (/\/(?:game-)?apply-fact-updates(?:\/|-run|-apply|$)/.test(path)) return "commenting";
+  if (path.includes("/redevelop-idea") || path.includes("/game-redevelop-idea")) return "redeveloping";
+  if (path.includes("/gather-comments") || path.includes("/gather-game-comments") || path.includes("/comment-step") || path.includes("/game-comment-step")) return "commenting";
+  return undefined;
+}
+
 function buildReviews(
   panel: readonly PanelMemberView[],
   ideas: ReadonlyMap<string, BrainIdeaView>,
@@ -2483,6 +2580,8 @@ function buildReviews(
   dismissedSeat: (
     memberId: string,
   ) => { readonly dismissed: DismissedSeatView } | Record<string, never> = () => ({}),
+  /** The fact-update notices by id (fact-updates.jsonl): which badge each deleted and what replaced it. */
+  factNotices: ReadonlyMap<string, FactNotice> = new Map(),
 ): {
   members: ReviewMemberView[];
   maxRounds: number;
@@ -2493,11 +2592,19 @@ function buildReviews(
   const rounds = new Map<string, {
     cot?: CotStepView;
     comments: Map<number, CommentView>;
+    gameCritiques?: Map<number, GameCritiqueView>;
+    gameChair?: GameChairDecisionView;
+    gameSettlement?: GameSettlementView;
     decision?: JudgeDecisionView;
     revision?: {
       touchedSteps: number[];
       rewritten?: { index: number; text: CotStepView; thoughts?: string }[];
     };
+    /** Fact updates: critics whose report or comment was withdrawn, with the deleted badges it answered. */
+    withdrawn?: Map<string, string[]>;
+    /** Fact updates: the chair or judge assessed the round again; the first assessment is kept. */
+    reassessed?: boolean;
+    firstAssessment?: { gameChair?: GameChairDecisionView; decision?: JudgeDecisionView };
   }>();
   // Per-member revision replay: how many redevelopments landed, and the last
   // one's raw record — the source of the member's final output envelope.
@@ -2594,8 +2701,127 @@ function buildReviews(
     return workingNovelty.get(memberIndex);
   };
 
+  // Steps a fact-update reconsideration rewrote after the walk had passed
+  // them, per member index and 1-based step: the notices each rewrite answered.
+  type RevisedMark = NonNullable<ReviewStepView["revisedAfterReview"]>[number];
+  const revisedAfterReview = new Map<number, Map<number, Map<string, RevisedMark>>>();
+  const marksOf = (ids: unknown): RevisedMark[] =>
+    (Array.isArray(ids) ? ids : []).flatMap((id): RevisedMark[] => {
+      const notice = typeof id === "string" ? factNotices.get(id) : undefined;
+      return notice
+        ? [{ notice: notice.id, deleted: notice.deleted, ...(notice.replacedBy !== undefined ? { replacedBy: notice.replacedBy } : {}), at: notice.at }]
+        : [];
+    });
+
+  // A merged chain reconsideration, replayed through the same four-part merge
+  // the runtime folded (mergeRedevelopmentParts), so this view never shows a
+  // chain no reviewer read. A merge at a round's start sits at walk position
+  // p (the step under review): rewritten steps before p are marked revised
+  // after review; the merges after the walks pass every step.
+  const applyChainMerge = (entry: JournalEntry, merge: Record<string, unknown>): void => {
+    const at = coordinates(entry.key);
+    const position = entry.key.includes("/review-members/") && at.step !== undefined ? at.step + 1 : undefined;
+    for (const raw of Array.isArray(merge.merged) ? merge.merged : []) {
+      const item = object(raw);
+      const output = object(item?.output);
+      const key = item?.key;
+      if (typeof key !== "string" || !key.startsWith("chain:") || !output || output.decision !== "revised") continue;
+      const memberIndex = panel.findIndex((member) => `chain:${member.id}` === key);
+      if (memberIndex < 0 || (position !== undefined && at.member !== memberIndex)) continue;
+      const chain = cotFor(memberIndex);
+      const base = chain.filter(isCotStepParts);
+      if (base.length !== chain.length) continue;
+      const steps = Array.isArray(output.steps) ? output.steps : [];
+      const novelty = noveltyFor(memberIndex);
+      let merged: ReturnType<typeof mergeRedevelopmentParts>;
+      try {
+        merged = mergeRedevelopmentParts(
+          { cot: base, output: outputFor(memberIndex), ...(novelty !== undefined ? { novelty } : {}) },
+          {
+            steps,
+            ...(output.outputPatch !== undefined ? { outputPatch: output.outputPatch } : {}),
+            ...(typeof output.novelty === "string" ? { novelty: output.novelty } : {}),
+          } as unknown as RedevelopmentPatchParts,
+        );
+      } catch {
+        continue;
+      }
+      chain.splice(0, chain.length, ...merged.steps);
+      workingOutput.set(memberIndex, merged.output);
+      workingNovelty.set(memberIndex, merged.novelty);
+      const state = memberRevisions.get(memberIndex);
+      memberRevisions.set(memberIndex, {
+        count: (state?.count ?? 0) + 1,
+        last: {
+          output: merged.output,
+          ...(merged.novelty !== undefined ? { novelty: merged.novelty } : {}),
+        },
+      });
+      const marks = marksOf(item?.notices);
+      for (const step of steps) {
+        const index = object(step)?.index;
+        if (typeof index !== "number" || (position !== undefined && index >= position) || marks.length === 0) continue;
+        const forMember = revisedAfterReview.get(memberIndex) ?? new Map<number, Map<string, RevisedMark>>();
+        revisedAfterReview.set(memberIndex, forMember);
+        const forStep = forMember.get(index) ?? new Map<string, RevisedMark>();
+        forMember.set(index, forStep);
+        for (const mark of marks) forStep.set(mark.notice, mark);
+      }
+    }
+  };
+
+  // A merge of this round's revised or withdrawn reports (game) or comments
+  // (standard review), before the chair or judge or after it. A revised one
+  // replaces the view with the merged text; a withdrawn one keeps its view and
+  // is listed with the deleted badges its withdrawal answered.
+  const applyReportMerge = (entry: JournalEntry, node: string, merge: Record<string, unknown>): void => {
+    const at = coordinates(entry.key);
+    if (at.member === undefined || at.step === undefined || at.round === undefined) return;
+    const game = node.startsWith("game-");
+    const round = roundFor(at.member, at.step, at.round);
+    if (round.cot === undefined) {
+      const text = cotFor(at.member)[at.step];
+      if (text !== undefined) round.cot = text;
+    }
+    const critics = panel.filter((member) => member.id !== panel[at.member!]?.id);
+    for (const raw of Array.isArray(merge.merged) ? merge.merged : []) {
+      const item = object(raw);
+      const output = object(item?.output);
+      const key = item?.key;
+      if (typeof key !== "string" || !output || !key.startsWith(game ? "game-report:" : "comment:")) continue;
+      const commentor = critics.findIndex((member) => key.endsWith(`:${member.id}`));
+      const author = critics[commentor];
+      if (!author) continue;
+      if (output.decision === "revised") {
+        if (game) {
+          const view = gameCritiqueView(output.report, author.id, seatLabel(panel.indexOf(author)));
+          const usage = round.gameCritiques?.get(commentor)?.usage;
+          if (view) {
+            round.gameCritiques ??= new Map();
+            round.gameCritiques.set(commentor, { ...view, ...(usage ? { usage } : {}), revisedAfterFactUpdate: true });
+          }
+        } else {
+          const view = comment(output.comment, author, seatLabel(panel.indexOf(author)));
+          const usage = round.comments.get(commentor)?.usage;
+          if (view) round.comments.set(commentor, { ...view, ...(usage ? { usage } : {}), revisedAfterFactUpdate: true });
+        }
+      } else if (output.decision === "withdrawn") {
+        round.withdrawn ??= new Map();
+        round.withdrawn.set(author.id, [...new Set(marksOf(item?.notices).map((mark) => mark.deleted))]);
+      }
+    }
+  };
+
   for (const entry of entries) {
-    const output = agentOutput(entry);
+    // Fact-update merges, in journal order, between the agent results they edit.
+    const factMerge = factMergeOf(entry);
+    if (factMerge !== undefined) {
+      if (/^(?:game-)?apply-fact-updates(?:-after-review|-before-synthesis)?$/.test(factMerge.node)) applyChainMerge(entry, factMerge.value);
+      else applyReportMerge(entry, factMerge.node, factMerge.value);
+      continue;
+    }
+    const isSettlement = entry.kind === "activity" && /\/game-settle(?:-run)?::result$/.test(entry.key);
+    const output = isSettlement ? entry.value : agentOutput(entry);
     if (output === undefined || !entry.key.includes("/review-members/")) continue;
     const at = coordinates(entry.key);
     if (at.member === undefined || at.step === undefined || at.round === undefined) continue;
@@ -2604,7 +2830,42 @@ function buildReviews(
       const text = cotFor(at.member)[at.step];
       if (text !== undefined) round.cot = text;
     }
-    if (
+    if (isSettlement) {
+      const current = object(object(object(object(output)?.reviews)?.[panel[at.member]?.id ?? ""])?.current);
+      const settlement = current?.gameSettlement ?? output;
+      round.gameSettlement = gameSettlementView(settlement);
+      const settledDecision = object(object(settlement)?.decision);
+      if (settledDecision) round.decision = decision({ ...settledDecision, assessment: {} });
+    } else if (agentResultOf(entry.key, "chair-step")) {
+      round.gameChair = gameChairView(output, issueViews(object(output)?.issues));
+    } else if (agentResultOf(entry.key, "game-chair-reassess")) {
+      // The chair's re-assessment after a fact update replaces its first
+      // assessment as the round's result; the first one is kept beside it.
+      const view = gameChairView(output, issueViews(object(output)?.issues));
+      if (view) {
+        if (round.gameChair && round.firstAssessment === undefined) round.firstAssessment = { gameChair: round.gameChair };
+        round.gameChair = view;
+        round.reassessed = true;
+      }
+    } else if (agentResultOf(entry.key, "judge-reassess")) {
+      const view = decision(output);
+      if (view) {
+        if (round.decision && round.firstAssessment === undefined) round.firstAssessment = { decision: round.decision };
+        round.decision = view;
+        round.reassessed = true;
+      }
+    } else if ((agentResultOf(entry.key, "game-comment-step") || agentResultOf(entry.key, "game-comment-step-bridge")) && at.commentor !== undefined) {
+      const author = panel.filter((member) => member.id !== panel[at.member!]?.id)[at.commentor];
+      if (author) {
+        const view = gameCritiqueView(output, author.id, seatLabel(panel.indexOf(author)));
+        const result = object(entry.value);
+        const usage = (typeof result?.taskId === "string" ? taskUsage.get(result.taskId) : undefined) ?? usageView(result?.usage);
+        if (view) {
+          round.gameCritiques ??= new Map();
+          round.gameCritiques.set(at.commentor, usage ? { ...view, usage } : view);
+        }
+      }
+    } else if (
       (agentResultOf(entry.key, "comment-step") ||
         agentResultOf(entry.key, "comment-step-bridge")) &&
       at.commentor !== undefined
@@ -2627,7 +2888,7 @@ function buildReviews(
       }
     } else if (agentResultOf(entry.key, "judge-step")) {
       round.decision = decision(output);
-    } else if (agentResultOf(entry.key, "redevelop-idea")) {
+    } else if (agentResultOf(entry.key, "redevelop-idea") || agentResultOf(entry.key, "game-redevelop-idea")) {
       const revision = object(output);
       if (Array.isArray(revision?.steps)) {
         // A revision arrives in one of two forms: the complete re-emitted
@@ -2720,20 +2981,33 @@ function buildReviews(
             comments: [...value.comments.entries()]
               .sort(([a], [b]) => a - b)
               .map(([, item]) => item),
+            ...(value.gameCritiques ? { gameCritiques: [...value.gameCritiques.entries()].sort(([a], [b]) => a - b).map(([, value]) => value) } : {}),
+            ...(value.gameChair ? { gameChair: value.gameChair } : {}),
+            ...(value.gameSettlement ? { gameSettlement: value.gameSettlement } : {}),
             ...(value.decision ? { decision: value.decision } : {}),
             ...(value.revision ? { revision: value.revision } : {}),
+            ...(value.withdrawn && value.withdrawn.size > 0
+              ? { withdrawnAfterFactUpdate: [...value.withdrawn].map(([criticId, deleted]) => ({ criticId, deleted })) }
+              : {}),
+            ...(value.reassessed ? { reassessed: true } : {}),
+            ...(value.firstAssessment ? { firstAssessment: value.firstAssessment } : {}),
           }];
         })
         .sort((a, b) => a.round - b.round);
       const passed = views.some((round) => round.decision?.verdict === "Pass");
+      const lastRound = views[views.length - 1];
+      const unresolved = !passed && lastRound?.gameSettlement !== undefined &&
+        (lastRound.gameSettlement.status === "no-valid-reports" || views.length >= maxRounds);
       const forcePassed =
-        !passed &&
+        !unresolved && !passed &&
         views.length >= maxRounds &&
         views[views.length - 1]?.decision !== undefined;
       return {
         index: stepIndex + 1,
         outcome: passed
           ? "passed"
+          : unresolved
+            ? "unresolved"
           : forcePassed
             ? "force-passed"
             : views.length > 0
@@ -2742,6 +3016,9 @@ function buildReviews(
         rounds: views,
         ...(developEntry !== undefined && developSlices.has(stepIndex + 1)
           ? { thoughts: thoughtsRef(developEntry.key, stepIndex + 1) }
+          : {}),
+        ...(revisedAfterReview.get(memberIndex)?.get(stepIndex + 1)
+          ? { revisedAfterReview: [...revisedAfterReview.get(memberIndex)!.get(stepIndex + 1)!.values()] }
           : {}),
       };
     });
@@ -2780,12 +3057,6 @@ function buildReviews(
   // Per-seat progress, derived from each seat's OWN deepest active node path.
   // There is deliberately no single cursor: seats may be reviewed concurrently,
   // and a per-seat shape lets a view render each seat independently.
-  const phaseOf = (path: string): ReviewPhase | undefined => {
-    if (path.includes("/judge-step")) return "judging";
-    if (path.includes("/redevelop-idea")) return "redeveloping";
-    if (path.includes("/gather-comments") || path.includes("/comment-step")) return "commenting";
-    return undefined;
-  };
   const deepestByMember = new Map<number, string>();
   for (const path of activePaths(events)) {
     if (!path.includes("/review-members/")) continue;
@@ -2801,7 +3072,7 @@ function buildReviews(
     const at = coordinates(path);
     const member = members[memberIndex];
     if (!member || at.step === undefined) continue;
-    const phase = phaseOf(path);
+    const phase = reviewPhaseForPath(path);
     progressFor.set(memberIndex, {
       step: at.step + 1,
       stepCount: member.steps.length || processorOutput?.cotSteps || 0,
@@ -2877,7 +3148,7 @@ function buildReviews(
     reviewing.every((member) =>
       member.steps.length > 0 &&
       member.steps.every((step) =>
-        step.outcome === "passed" || step.outcome === "force-passed"
+        step.outcome === "passed" || step.outcome === "force-passed" || step.outcome === "unresolved"
       )
     );
   return { members: withProgress, maxRounds, complete, outputVersions };
@@ -2917,7 +3188,7 @@ function reviewSummary(review: {
     (member) =>
       member.steps.length > 0 &&
       member.steps.every(
-        (step) => step.outcome === "passed" || step.outcome === "force-passed",
+        (step) => step.outcome === "passed" || step.outcome === "force-passed" || step.outcome === "unresolved",
       ),
   ).length;
   const only = active.length === 1 ? active[0]!.progress! : undefined;
@@ -3080,6 +3351,48 @@ export interface JobDetailWithActivity {
   readonly outputHistory: ReadonlyMap<string, readonly OutputVersionView[]>;
 }
 
+/**
+ * What the panel-composition gate views read (contract K): the run's
+ * panelEvidence and literature artifacts, the classifier's output (its
+ * embeddingInput feeds the optional confirm-needs gate), the params the run
+ * pinned, and the key of the gate it is suspended on. Read through the same
+ * cached readers as the job detail; every field is absent on runs pinned to
+ * bundles without the paper-based composition.
+ */
+export function compositionInputs(sessionDir: string): {
+  readonly panelEvidence?: unknown;
+  readonly literature?: unknown;
+  readonly classification?: unknown;
+  readonly params?: unknown;
+  readonly pendingGateKey?: string;
+} {
+  const checkpoint = readCheckpoint(sessionDir);
+  const artifacts = readArtifacts(sessionDir);
+  const entries = checkpoint?.journal ?? [];
+  const panelEvidence =
+    artifactLatest(artifacts, "panelEvidence") ??
+    journalNodeOutput(entries, "compose-panel", "panelEvidence");
+  const literature =
+    artifactLatest(artifacts, "literature") ??
+    journalNodeOutput(entries, "retrieve-literature", "literature");
+  const classification =
+    artifactLatest(artifacts, "taskClassification") ??
+    journalAgent(entries, (key) =>
+      key.includes("/classify-input") &&
+      /\/classify-input(?:-execute)?::result$/.test(key)
+    );
+  const params = object(object(checkpoint?.input?.["__brainstormState"])?.["params"]);
+  const pendingGateKey =
+    checkpoint?.status === "suspended" ? checkpoint.pendingGates[0]?.gateKey : undefined;
+  return {
+    ...(panelEvidence !== undefined ? { panelEvidence } : {}),
+    ...(literature !== undefined ? { literature } : {}),
+    ...(classification !== undefined ? { classification } : {}),
+    ...(params !== undefined ? { params } : {}),
+    ...(pendingGateKey !== undefined ? { pendingGateKey } : {}),
+  };
+}
+
 export function buildJobDetail(input: MapperInput): JobDetail {
   return buildJobDetailWithActivity(input).detail;
 }
@@ -3091,7 +3404,7 @@ export function buildJobDetailWithActivity(input: MapperInput): JobDetailWithAct
   const entries = checkpoint?.journal ?? [];
   const taskUsage = taskUsageIndex(entries, events);
   const stageTimings = timings(events, taskUsage);
-  for (const [stage, usage] of stageUsageTotals(taskUsage)) {
+  for (const [stage, usage] of stageUsageTotals(taskUsage, factCallUsage(input.sessionDir))) {
     stageTimings.get(stage)!.usage = usage;
   }
 
@@ -3182,7 +3495,8 @@ export function buildJobDetailWithActivity(input: MapperInput): JobDetailWithAct
   let selectedPanel = panelMembers(
     artifactLatest(artifacts, "panel") ??
       journalNodeOutput(entries, "weave-panel", "panel") ??
-      journalNodeOutput(entries, "select-panel", "panel"),
+      journalNodeOutput(entries, "select-panel", "panel") ??
+      journalNodeOutput(entries, "seat-panel", "panel"),
   );
   if (selectedPanel.length === 0) {
     selectedPanel = panelMembers(
@@ -3370,6 +3684,9 @@ export function buildJobDetailWithActivity(input: MapperInput): JobDetailWithAct
   const reviewJournalPresent = entries.some((entry) =>
     entry.key.includes("/review-members")
   );
+  const gamifiedReview = gameReviewEnabled(checkpoint, input.record.executionSettings);
+  const gameReview = gameReviewConfiguration(checkpoint, input.record.executionSettings);
+  const gameLedger = gamifiedReview ? gameLedgerFromJournal(entries) : undefined;
   const review = buildReviews(
     finalPanel,
     ideas,
@@ -3382,6 +3699,7 @@ export function buildJobDetailWithActivity(input: MapperInput): JobDetailWithAct
     reviewRoundBudget(checkpoint),
     taskUsage,
     dismissedSeat,
+    new Map(readFactUpdateJournal(input.sessionDir).notices.map((notice): [string, FactNotice] => [notice.id, notice])),
   );
 
   // With the executed roster AND the review's own rounds known, every activity
@@ -3501,7 +3819,12 @@ export function buildJobDetailWithActivity(input: MapperInput): JobDetailWithAct
       processorOutput !== undefined &&
         (classificationValue === undefined || processorOutput.type !== undefined),
     ],
-    ["decompose-experts", expertsOutput !== undefined],
+    // Paper-based composition has no experts tree: its evidence record
+    // completes the stage instead.
+    [
+      "decompose-experts",
+      expertsOutput !== undefined || artifact(artifacts, "panelEvidence") !== undefined,
+    ],
     ["select-panel", selectedPanel.length > 0],
     ["confirm-panel", confirmGate.state !== "not-reached" && confirmGate.state !== "pending"],
     [
@@ -3677,6 +4000,7 @@ export function buildJobDetailWithActivity(input: MapperInput): JobDetailWithAct
     doneTiming.finishedAt = terminalEvent.at;
   }
   const doneBase = base("done", statuses.get("done")!, doneTiming);
+  const factTable = readFactTableView(input.sessionDir, { panel: finalPanel, journal: entries, events, artifacts });
 
   const stageDurations = STAGE_IDS.flatMap((id) => {
     const timing = stageTimings.get(id)!;
@@ -3856,6 +4180,9 @@ export function buildJobDetailWithActivity(input: MapperInput): JobDetailWithAct
     {
       ...reviewBase,
       id: "review-members",
+      gamifiedReview,
+      ...(gamifiedReview ? { gameReview } : {}),
+      ...(gameLedger ? { gameLedger } : {}),
       members: review.members,
       maxRounds: review.maxRounds,
     },
@@ -3869,7 +4196,7 @@ export function buildJobDetailWithActivity(input: MapperInput): JobDetailWithAct
       id: "synthesize-proposal",
       ...(proposalOutput ? { proposal: proposalOutput } : {}),
     },
-    { ...doneBase, id: "done", ...(summary ? { summary } : {}) },
+    { ...doneBase, id: "done", ...(summary ? { summary } : {}), ...(factTable ? { factTable } : {}) },
   ];
 
   const activeStage = stages.find(
@@ -3923,6 +4250,8 @@ export function buildJobDetailWithActivity(input: MapperInput): JobDetailWithAct
       : {}),
     status: input.status,
     runner: input.record.runner,
+    gamifiedReview,
+    ...(gamifiedReview ? { gameReview } : {}),
     createdAt: input.record.createdAt,
     updatedAt: Math.max(input.record.updatedAt, checkpoint?.updatedAt ?? 0),
     ...(input.record.slurmJobId ? { slurmJobId: input.record.slurmJobId } : {}),

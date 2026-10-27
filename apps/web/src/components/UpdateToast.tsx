@@ -20,9 +20,10 @@
 import { useEffect, useRef, useState } from "react";
 import type { HealthResponse } from "@brainstorm-agentic/protocol";
 import { errorMessage, getHealth, postUpdateApp, postUpdateCheck } from "../api";
+import { hostStorageKey } from "../desktop/context";
 
 /** Last bundle version this browser has acknowledged as "seen". */
-const BUNDLE_ACK_KEY = "brain-acked-bundle-version";
+const BUNDLE_ACK_KEY = hostStorageKey("brain-acked-bundle-version");
 
 function ackedBundleVersion(): string | null {
   try {
@@ -69,7 +70,7 @@ const UPDATE_DEADLINE_MS = 15 * 60_000;
  * one reload) and confirms the finished update with a check mark until the
  * user clicks anywhere on the page.
  */
-const UPDATE_SUCCESS_KEY = "brain-update-success";
+const UPDATE_SUCCESS_KEY = hostStorageKey("brain-update-success");
 
 function takeUpdateSuccess(): { readonly to?: string } | null {
   try {

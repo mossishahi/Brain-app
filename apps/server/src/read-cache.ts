@@ -8,7 +8,7 @@
  * re-parsing them per call saturates the event loop and every other request
  * — including the webapp's static assets — queues behind it.
  *
- * Every cache here is keyed by a cheap stat stamp (`mtimeMs:size`), so an
+ * Every cache here is keyed by a cheap stat stamp (file identity, mtime, size), so an
  * unchanged file costs one stat instead of a read+parse, and a changed file
  * is re-read exactly once across all concurrent consumers. The event log is
  * additionally read INCREMENTALLY: it is append-only JSONL, so only the
@@ -18,11 +18,13 @@ import { closeSync, openSync, readSync, statSync } from "node:fs";
 
 import { readJsonFile } from "./files.js";
 
-/** `mtimeMs:size` of a path, or undefined when it does not exist. */
+/** Exact file identity plus `mtimeNs:size`, or undefined when the path does not exist. */
 export function statStamp(path: string): string | undefined {
   try {
-    const stats = statSync(path);
-    return `${stats.mtimeMs}:${stats.size}`;
+    // Lustre inode IDs can exceed Number.MAX_SAFE_INTEGER: adjacent files
+    // otherwise collapse to the same cache identity after an atomic rename.
+    const stats = statSync(path, { bigint: true });
+    return `${stats.dev}:${stats.ino}:${stats.mtimeNs}:${stats.size}`;
   } catch {
     return undefined;
   }
@@ -43,10 +45,9 @@ const jsonCache = new Map<string, JsonEntry>();
 /**
  * Read + parse one JSON file, cached by stat stamp. Artifact payloads are
  * immutable once written, and rewritten files (checkpoint.json, job.json,
- * settings.json — all atomic temp+rename writes) change their stamp, so
- * staleness is structurally impossible short of a same-millisecond,
- * same-size in-place overwrite, which the atomic-write discipline rules
- * out.
+ * settings.json — all atomic temp+rename writes) change file identity even
+ * when size and filesystem timestamp are unchanged. Identity is essential:
+ * two same-size settings saves can share a timestamp on a coarse clock.
  */
 export function readJsonCached<T>(path: string): T | undefined {
   const stamp = statStamp(path);
@@ -80,6 +81,9 @@ export function readJsonCached<T>(path: string): T | undefined {
 }
 
 interface JsonlEntry {
+  /** Exact inode identity and last successfully read stat stamp. */
+  identity: string;
+  stamp: string;
   /** Bytes consumed so far (always ends on a line boundary). */
   offset: number;
   /** Size observed at the last read, to skip work when unchanged. */
@@ -107,25 +111,33 @@ function parseLines(text: string, into: unknown[]): void {
  * truncation) resets and re-reads from the start. The final PARTIAL line —
  * a writer mid-append — is left unconsumed until its newline lands.
  */
-export function readJsonlCached(path: string): readonly unknown[] {
+export function readJsonlCached(path: string, onError?: (error: unknown) => void): readonly unknown[] {
+  const previous = jsonlCache.get(path);
   let size: number;
+  let identity: string;
+  let stamp: string;
   try {
-    size = statSync(path).size;
-  } catch {
-    jsonlCache.delete(path);
-    return [];
-  }
-  let entry = jsonlCache.get(path);
-  if (entry && size < entry.offset) entry = undefined; // truncated/rotated
-  if (entry && size === entry.size) return entry.items;
-  if (!entry) {
-    entry = { offset: 0, size: 0, items: [] };
-    jsonlCache.set(path, entry);
-    if (jsonlCache.size > MAX_JSONL_ENTRIES) {
-      const oldest = jsonlCache.keys().next().value;
-      if (oldest !== undefined && oldest !== path) jsonlCache.delete(oldest);
+    const stats = statSync(path, { bigint: true });
+    if (!stats.isFile()) throw new Error("The journal path is not a regular file.");
+    size = Number(stats.size);
+    identity = `${stats.dev}:${stats.ino}`;
+    stamp = `${identity}:${stats.mtimeNs}:${stats.size}`;
+    if (!Number.isSafeInteger(size)) throw new Error("The journal is too large to read safely.");
+  } catch (error) {
+    onError?.(error);
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      jsonlCache.delete(path);
+      return [];
     }
+    return previous?.items ?? [];
   }
+  if (previous?.stamp === stamp) return previous.items;
+  // An append can reuse parsed records. Replacement, truncation, or a rewrite
+  // at the same size must rebuild, even if a coarse clock preserves the mtime.
+  const appending = previous !== undefined && previous.identity === identity && size > previous.size;
+  const entry: JsonlEntry = appending
+    ? { ...previous, stamp, size }
+    : { identity, stamp, offset: 0, size, items: [] };
   if (size > entry.offset) {
     try {
       const fd = openSync(path, "r");
@@ -142,10 +154,18 @@ export function readJsonlCached(path: string): readonly unknown[] {
       } finally {
         closeSync(fd);
       }
-    } catch {
-      // Unreadable tail: serve what is parsed; retried on the next call.
+    } catch (error) {
+      // Retain the last committed state, without caching the failure's stamp:
+      // the next read retries even when no additional bytes were appended.
+      onError?.(error);
+      return previous?.items ?? [];
     }
   }
-  entry.size = size;
+  jsonlCache.delete(path);
+  jsonlCache.set(path, entry);
+  if (jsonlCache.size > MAX_JSONL_ENTRIES) {
+    const oldest = jsonlCache.keys().next().value;
+    if (oldest !== undefined && oldest !== path) jsonlCache.delete(oldest);
+  }
   return entry.items;
 }

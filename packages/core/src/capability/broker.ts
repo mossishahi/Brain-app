@@ -57,7 +57,10 @@ export interface BrokerInput {
  *
  * Resolution order per operation:
  * 1. If the provider natively offers the operation, use provider.
- * 2. Else if an enabled host tool satisfies it, use host.
+ * 2. Else if enabled host tools satisfy it, use host — ALL of them: one
+ *    operation may be served by several specialised tools (web.search by
+ *    web_search, news_search, paper_search and paper_details), and the
+ *    model picks among them by their descriptions.
  * 3. Otherwise mark unavailable.
  */
 export function resolveCapabilityPlan(input: BrokerInput): ResolvedCapabilityPlan {
@@ -111,19 +114,21 @@ export function resolveCapabilityPlan(input: BrokerInput): ResolvedCapabilityPla
       }
 
       // 2. Check enabled host tools
-      const hostTool = input.hostTools.find(
+      const hostTools = input.hostTools.filter(
         (t) => t.operations.includes(opId) && input.enabledHostToolIds.has(t.toolId),
       );
-      if (hostTool) {
+      if (hostTools.length > 0) {
         operations.push({
           operationId: opId,
           source: "host",
-          toolNames: [hostTool.toolId],
+          toolNames: hostTools.map((t) => t.toolId),
           capabilityId: capability.capabilityId,
         });
-        if (!addedHostTools.has(hostTool.toolId)) {
-          hostToolDefs.push(hostTool.definition);
-          addedHostTools.add(hostTool.toolId);
+        for (const hostTool of hostTools) {
+          if (!addedHostTools.has(hostTool.toolId)) {
+            hostToolDefs.push(hostTool.definition);
+            addedHostTools.add(hostTool.toolId);
+          }
         }
         continue;
       }

@@ -10,5 +10,8 @@ export * from "./gates.js";
 export * from "./dismissal.js";
 export * from "./state.js";
 export * from "./compiler.js";
+export * from "./fact-updates.js";
 export * from "./taxonomy-activities.js";
+export * from "./panel-compose.js";
+export * from "./literature-activities.js";
 export * from "./runtime.js";

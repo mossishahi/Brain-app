@@ -18,3 +18,8 @@ coverage/
 # proof of what the test suites actually executed, written by the server suite
 # and read by brain/scripts/publish-bundle.mjs as its publish gate
 .test-bundle-used.json
+
+# Frontend review builds and browser test artifacts
+apps/web/dist-review/
+apps/web/test-results/
+apps/web/playwright-report/

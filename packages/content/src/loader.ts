@@ -8,14 +8,18 @@ import {
   activitiesSchema,
   capabilitiesSchema,
   departmentsCatalogSchema,
+  factTableCatalogSchema,
   inputTypesCatalogSchema,
   routesSchema,
   skillMetaSchema,
+  taxonomyTextsSchema,
   verdictsCatalogSchema,
   workflowSchema,
+  type FactTableCatalog,
   type InputTypesCatalog,
   type LoadedInputTypes,
   type Skill,
+  type TaxonomyTexts,
   type WorkflowDefinition,
 } from "./schemas/workflow.js";
 import {
@@ -126,6 +130,70 @@ function parseJsonFile<T>(
     return undefined;
   }
   const result = schema.safeParse(json);
+  if (!result.success) {
+    for (const issue of result.error.issues) {
+      issues.push(structuralIssue(`${filePath} > ${issue.path.join(".") || "(root)"}`, issue.message));
+    }
+    return undefined;
+  }
+  return result.data;
+}
+
+/** The optional node-texts control (absent in bundles that predate it). */
+const TAXONOMY_TEXTS_PATH = "catalog/taxonomy-texts.json";
+
+/**
+ * Reads catalog/taxonomy-texts.json when the bundle carries it: undefined
+ * when absent (older bundles keep loading unchanged), structurally validated
+ * when present (a malformed file is an issue like any other control's).
+ */
+function parseOptionalTaxonomyTexts(
+  source: ContentSource,
+  issues: ValidationIssue[],
+): TaxonomyTexts | undefined {
+  const filePath = at(source, TAXONOMY_TEXTS_PATH);
+  const raw = source.read(TAXONOMY_TEXTS_PATH);
+  if (raw === undefined) return undefined;
+  let json: unknown;
+  try {
+    json = JSON.parse(raw);
+  } catch (err) {
+    issues.push(structuralIssue(filePath, `not valid JSON: ${(err as Error).message}`));
+    return undefined;
+  }
+  const result = taxonomyTextsSchema.safeParse(json);
+  if (!result.success) {
+    for (const issue of result.error.issues) {
+      issues.push(structuralIssue(`${filePath} > ${issue.path.join(".") || "(root)"}`, issue.message));
+    }
+    return undefined;
+  }
+  return result.data;
+}
+
+/** The optional fact-table control (absent in bundles that predate it). */
+const FACT_TABLE_PATH = "catalog/fact-table.json";
+
+/**
+ * Reads catalog/fact-table.json when the bundle carries it: undefined when
+ * absent (older bundles keep loading unchanged), structurally validated when
+ * present (a malformed file is an issue like any other control's).
+ */
+function parseOptionalFactTable(
+  source: ContentSource,
+  issues: ValidationIssue[],
+): FactTableCatalog | undefined {
+  const filePath = at(source, FACT_TABLE_PATH);
+  const raw = source.read(FACT_TABLE_PATH);
+  if (raw === undefined) return undefined;
+  let json: unknown;
+  try {
+    json = JSON.parse(raw);
+  } catch (err) {
+    issues.push(structuralIssue(filePath, `not valid JSON: ${(err as Error).message}`));
+    return undefined;
+  }
+  const result = factTableCatalogSchema.safeParse(json);
   if (!result.success) {
     for (const issue of result.error.issues) {
       issues.push(structuralIssue(`${filePath} > ${issue.path.join(".") || "(root)"}`, issue.message));
@@ -255,6 +323,8 @@ export function readContentBundle(from: ContentSource | string): ContentBundle {
   const inputTypes = parseJsonFile(source, "catalog/input-types.json", inputTypesCatalogSchema, issues);
   const verdicts = parseJsonFile(source, "catalog/verdicts.json", verdictsCatalogSchema, issues);
   const departments = parseJsonFile(source, "catalog/departments.json", departmentsCatalogSchema, issues);
+  const taxonomyTexts = parseOptionalTaxonomyTexts(source, issues);
+  const factTable = parseOptionalFactTable(source, issues);
 
   const skills: Record<string, Skill> = {};
   for (const file of safeListFiles(source, "skills", ".md", issues)) {
@@ -282,6 +352,8 @@ export function readContentBundle(from: ContentSource | string): ContentBundle {
       departments,
     },
     skills,
+    ...(taxonomyTexts !== undefined ? { taxonomyTexts } : {}),
+    ...(factTable !== undefined ? { factTable } : {}),
   };
 }
 
@@ -348,6 +420,8 @@ export function loadControlContent(
   const inputTypes = parseJsonFile(source, "catalog/input-types.json", inputTypesCatalogSchema, issues);
   const verdicts = parseJsonFile(source, "catalog/verdicts.json", verdictsCatalogSchema, issues);
   const departments = parseJsonFile(source, "catalog/departments.json", departmentsCatalogSchema, issues);
+  const taxonomyTexts = parseOptionalTaxonomyTexts(source, issues);
+  const factTable = parseOptionalFactTable(source, issues);
   if (
     issues.length > 0 ||
     !workflow ||
@@ -371,6 +445,8 @@ export function loadControlContent(
       departments,
     },
     skills: {},
+    ...(taxonomyTexts !== undefined ? { taxonomyTexts } : {}),
+    ...(factTable !== undefined ? { factTable } : {}),
   };
   const validation = validateBundle(bundle, { availableRoleNames });
   if (validation.length > 0) throw new ContentValidationError(validation);

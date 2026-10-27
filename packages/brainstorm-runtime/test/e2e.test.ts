@@ -13,6 +13,12 @@ import {
 } from "@brainstorm-agentic/content";
 import {
   contentCacheBoundaries,
+  factBadgeHash,
+  factStandingRevision,
+  factSubmitContextOf,
+  type FactUseApproval,
+  InMemoryCheckpointStore,
+  EMBEDDER_MANIFEST,
   systemPromptSegments,
   systemPromptText,
   textContent,
@@ -21,6 +27,10 @@ import {
   type AgentTask,
   type JsonObject,
   type JsonValue,
+  type TaxonomyEmbeddings,
+  type WebAccess,
+  type FactEntry,
+  type WorkflowCheckpoint,
 } from "@brainstorm-agentic/core";
 
 import type {
@@ -31,10 +41,13 @@ import type {
 } from "@brainstorm-agentic/core";
 
 import { planTaskCaches } from "../src/cache-plan.js";
+import { gameReviewVersion } from "../src/game-review.js";
 import {
   BrainstormRuntime,
   StaticBrainstormRouteResolver,
   taxonomyActivities,
+  literatureActivities,
+  hashNgramEncoderProvider,
 } from "../src/index.js";
 
 /**
@@ -541,6 +554,7 @@ class FakeBrainstormExecutor implements AgentExecutor {
         output = this.judge(agentId, bindings);
         break;
       case "redeveloper":
+      case "game-redeveloper":
         output = this.redevelop(agentId, bindings, task.outputSchema?.name);
         break;
       case "integrator": {
@@ -866,6 +880,25 @@ test("Pass path walks every seat in step order (seats in parallel) and keeps C-O
   for (const task of executor.tasks("commentor")) {
     assert.notEqual(task.agentId, "member-4", "the seat never uses the disciplinary skill");
     assert.equal(task.bindings.roster, undefined);
+  }
+  // The thinker's notes reach reviewers through a scoped tool, never as a
+  // binding: a bundle declaring thinkerNotes stamps the seat under review
+  // and the walk position on every comment task, and the notes themselves
+  // are absent from the task data. (A bundle without the declaration — the
+  // pinned one — stamps nothing, and the assertion holds either way.)
+  for (const seen of [...executor.tasks("commentor"), ...bridgeComments]) {
+    const metadata = object(seen.task.metadata as JsonValue, "comment metadata");
+    if (metadata.notesScope !== undefined) {
+      const scope = object(metadata.notesScope, "notes scope");
+      assert.match(String(scope.seat), /^member-\d+$/);
+      assert.notEqual(scope.seat, seen.agentId, "a commentor reads the thinker's notes, never its own");
+      assert.equal(scope.throughStep, seen.bindings.currentStep, "the scope ends at the step under review");
+      assert.equal(seen.bindings.thoughts, undefined, "the notes are not pasted into the task");
+      assert.ok(
+        (seen.task.allowedCapabilities ?? []).includes("notes-access"),
+        "the reviewing skill declares notes-access",
+      );
+    }
   }
 
   const chair = executor.tasks("chair")[0]!;
@@ -2786,4 +2819,565 @@ test("a four-part judge is bounded on the flaws it files, not only on the issues
     result.status === "failed" ? result.error.message : "",
     /targeted step 5.*only reached step/,
   );
+});
+
+/** Exercises the shipped optional branch without replacing any old fixture path. */
+class GameBrainstormExecutor extends FakeBrainstormExecutor {
+  private finalFailurePending = true;
+  private readonly gameRounds = new Map<string, number>();
+  constructor(private readonly gameMode: "pass" | "reject" | "repair" | "cap", private readonly failFinalOnce = false) { super(); }
+
+  override async execute(task: AgentTask): Promise<AgentResult> {
+    const input = object(task.input, "task input");
+    const bindings = object(input.bindings, "task bindings");
+    const role = String(input.role);
+    if (role === "chair" && this.failFinalOnce && this.finalFailurePending) {
+      this.finalFailurePending = false;
+      return { taskId: task.taskId, status: "error", error: { name: "TransientFixtureFailure", message: "Retry final synthesis after completed reviews." } };
+    }
+    const schema = task.outputSchema?.name;
+    if (schema !== "gameCritique" && schema !== "gameChairDecision" && schema !== "gameCommitteeDecision") return super.execute(task);
+    const agentId = task.agentId ?? role;
+    this.seen.push({ role, agentId, bindings, task });
+    if (schema === "gameCritique") {
+      const seat = object(task.metadata?.factScope, "critic fact scope").seat;
+      const repair = this.gameMode === "repair" && seat === "member-1" && bindings.currentStep === 2 &&
+        signatures(bindings.chain!).some((value) => value === "COT:member-1:2");
+      return { taskId: task.taskId, status: "ok", output: {
+        q: this.gameMode === "cap" || repair ? 0.9 : 0.25,
+        justification: "The supplied chain states its assumptions, but the comparison may need a control under the fixture assumptions [F:1].",
+      } };
+    }
+    const key = `${agentId}:${bindings.currentStep}`;
+    const round = (this.gameRounds.get(key) ?? 0) + 1;
+    this.gameRounds.set(key, round);
+    const reports = Object.fromEntries(Object.keys(object(bindings.comments, "critiques")).map((id) => [id, {
+      admissible: this.gameMode !== "reject", reason: "The report addresses the reviewed comparison.",
+    }]));
+    const flaw = this.gameMode === "cap" || (this.gameMode === "repair" && agentId === "member-1" && bindings.currentStep === 2 && round === 1);
+    const y = this.gameMode === "reject" ? null : flaw ? 1 : 0;
+    // The fixture chair labels a report decisive exactly when it argues for a
+    // flaw (q at the threshold), so chair-decisive and committee-mean agree
+    // on every fixture round whichever rule the content tree declares.
+    const labelOf = (id: string): string => (Number(object(object(bindings.comments, "critiques")[id], "critique").q) >= 0.5 ? "decisive" : "not-decisive");
+    if (schema === "gameCommitteeDecision") return { taskId: task.taskId, status: "ok", output: {
+      reports: Object.fromEntries(Object.entries(reports).map(([id, assessment]) => [id, { ...assessment, label: labelOf(id),
+        factChecks: [{ factId: "F:1", conditions: "fixture assumptions", supportsConclusion: true, reason: "The cited premise applies to the comparison as stated." }],
+      }])),
+      reason: "The committee checked the supporting premise and the conditions of each submitted argument.",
+    } };
+    return { taskId: task.taskId, status: "ok", output: {
+      reports, y,
+      reason: y === null ? "No report passes admission, so this round is unresolved." : flaw ? "The reported missing control threatens the conclusion." : "The submitted reports do not establish a decisive flaw.",
+      issues: flaw ? [{ step: bindings.currentStep!, part: "part2", point: "The comparison lacks the control its conclusion requires.", basis: "authority", evidence: noEvidence, suggestion: "Supply the missing control.", mustAddress: true }] : [],
+    } };
+  }
+}
+
+function supportsGame(): boolean {
+  return loadContent(registryContentDir).workflows.brainstorm?.params.gamifiedReview !== undefined;
+}
+
+const GAME_TEST_FACT: FactEntry = {
+  id: "F:1", status: "justified", kind: "math", claim: "The fixture comparison requires its stated control.",
+  conditions: "fixture assumptions", method: "re-executed", evidence: "Deterministic test evidence.",
+  createdAt: 0, updatedAt: 0, history: [], requesters: [],
+};
+
+/** Deterministic Supreme receipts survive reconstruction of the runtime fixture. */
+const gameFixtureApprovals = new WeakMap<AgentExecutor, Map<string, FactUseApproval>>();
+
+/** Current pipeline: production retrieval/composition over fixed in-memory dependencies. */
+function gameRuntime(
+  executor: AgentExecutor,
+  stores?: Partial<Pick<BrainstormRuntime, "checkpoints" | "artifacts">>,
+  bundle = loadContent(registryContentDir),
+  dismissedMembers?: readonly string[],
+  facts: readonly FactEntry[] = [GAME_TEST_FACT],
+) {
+  const nodes: TaxonomyEmbeddings["nodes"] = [
+    { id: "D1", name: "Natural Sciences", level: "domain" },
+    { id: "F1", name: "Computer Science", level: "field", parent: "D1" },
+    { id: "F2", name: "Mathematics", level: "field", parent: "D1" },
+    { id: "S1", name: "Artificial Intelligence", level: "subfield", parent: "F1" },
+    { id: "S2", name: "Signal Processing", level: "subfield", parent: "F1" },
+    { id: "S3", name: "Statistics and Probability", level: "subfield", parent: "F2" },
+    { id: "T1", name: "Graph Neural Networks", level: "topic", parent: "S1" },
+    { id: "T2", name: "Belief Propagation", level: "topic", parent: "S2" },
+    { id: "T3", name: "Gaussian Processes", level: "topic", parent: "S3" },
+  ];
+  const taxonomy = new (class extends StubTaxonomy {
+    async embeddings(): Promise<TaxonomyEmbeddings> {
+      return { revision: 7, embedder: EMBEDDER_MANIFEST, nodes, vectors: [] };
+    }
+  })();
+  const papers = nodes.filter((node) => node.level === "topic").flatMap((topic) => [1, 2].map((replicate) => ({
+    title: `${topic.name} for distributional message passing ${replicate}`,
+    doi: `10.5555/game-${topic.id}-${replicate}`, url: `https://example.org/game-${topic.id}-${replicate}`,
+    year: 2020,
+    abstract: `This paper studies ${topic.name.toLowerCase()} for distributional message passing over graphs. ` +
+      "Node states are probability distributions whose uncertainty is propagated through graph structure. " +
+      "We derive the update equations, identify assumptions needed for convergence, and test predictions on held-out graphs with explicit comparison controls.",
+  })));
+  const web: WebAccess = {
+    search: async () => { throw new Error("The game fixture serves scholarly search only."); },
+    fetch: async () => { throw new Error("The game fixture uses fully supplied paper abstracts."); },
+    backedKinds: () => ["scholarly"],
+    status: () => ["arxiv", "crossref", "semantic-scholar"].map((id) => ({ id, state: "unchecked" as const })),
+    searchPapers: async (query) => {
+      const source = query.sources?.[0] ?? "arxiv";
+      return { query: query.query, mode: "topic", route: "paper-topic", providers: [source], papers: papers.map((paper) => ({ ...paper, source })) };
+    },
+    paperDetails: async (query) => ({ papers: [], notFound: [...query.ids], providers: [] }),
+  };
+  const approvals = gameFixtureApprovals.get(executor) ?? new Map<string, FactUseApproval>();
+  gameFixtureApprovals.set(executor, approvals);
+  // This fixture stands in for a completed Supreme consultation. The runtime
+  // still checks actual host receipts against the task, report, and fact revision.
+  const mediatedExecutor: AgentExecutor = {
+    execute: async (task, context) => {
+      const result = await executor.execute(task, context);
+      if (bundle.factTable?.accessMode !== "supreme-mediated/v1" || task.outputSchema?.name !== "gameCommitteeDecision" || result.status !== "ok") return result;
+      const review = factSubmitContextOf(task, context).review!;
+      const output = object(result.output, "committee output");
+      const reports = Object.fromEntries(Object.entries(object(output.reports, "reports")).map(([criticId, raw]) => {
+        const assessment = object(raw, "assessment");
+        const factChecks = (assessment.factChecks as JsonObject[]).map((check) => {
+          const fact = facts.find((entry) => entry.id === check.factId);
+          if (!fact) return check;
+          const approvalId = `${task.taskId}:${criticId}:${fact.id}`;
+          const badgeHash = factBadgeHash(fact);
+          approvals.set(approvalId, { id: approvalId, requesterTaskId: task.taskId, reviewVersion: review.reviewVersion,
+            reportHash: review.reports[criticId]!.reportHash, criticId, citedBadgeId: fact.id, citedBadgeHash: badgeHash,
+            targetBadgeId: fact.id, targetBadgeHash: badgeHash, targetStandingRevision: factStandingRevision(fact),
+            approved: true, reason: "The deterministic Supreme fixture approves this premise for the bound report." });
+          return { ...check, approvalId, badgeHash };
+        });
+        return [criticId, { ...assessment, factChecks }];
+      }));
+      return { ...result, output: { ...output, reports } };
+    },
+  };
+  return new BrainstormRuntime({
+    bundle, agentExecutor: mediatedExecutor, humanGateMode: "autoApproveSkippable",
+    readGameFacts: async () => facts,
+    readGameEvidence: async () => ({ facts, approvals: [...approvals.values()] }),
+    activities: {
+      ...taxonomyActivities(taxonomy),
+      ...literatureActivities({
+        web, taxonomy, encoders: hashNgramEncoderProvider(), now: () => 0,
+        nodeTexts: { texts: async () => ({ sha256: "0".repeat(64), entries: nodes.filter((node) => node.level === "topic").map((node) => ({ id: node.id, text: `${node.name}. ${node.name} for graph distributions and message passing.` })) }) },
+      }),
+    },
+    routeResolver: new StaticBrainstormRouteResolver({
+      reasoning: { modelId: "configured-reasoner", providerId: "fake" },
+      writing: { modelId: "configured-writer", providerId: "fake" },
+      balanced: { modelId: "configured-balanced", providerId: "fake" },
+    }),
+    hostTools: TEST_HOST_TOOLS, enabledHostToolIds: new Set(TEST_HOST_TOOLS.map((manifest) => manifest.toolId)),
+    ...(stores ?? {}),
+    ...(dismissedMembers !== undefined ? { dismissedMembers } : {}),
+  });
+}
+
+for (const mode of ["reject", "cap"] as const) {
+  test(`game ${mode} closes unresolved without invented labels or final-round repairs`, { skip: !supportsGame() }, async () => {
+    const executor = new GameBrainstormExecutor(mode);
+    const app = gameRuntime(executor);
+    const result = await app.run({ runId: `game-${mode}`, submission: "Check the comparison", params: { panelSize: 2, gamifiedReview: true, maxReviewRounds: 1 } });
+    assert.equal(result.status, "completed", result.status === "failed" ? result.error.message : undefined);
+    assert.equal(executor.tasks("game-redeveloper").length, 0);
+    const checkpoint = await app.checkpoints.load(`game-${mode}`);
+    const scores = checkpoint!.journal.filter((entry) => entry.key.endsWith("/game-settle-run::result"));
+    assert.ok(scores.length > 0);
+    for (const entry of scores) {
+      const settlement = object(entry.value, "settlement");
+      assert.equal(settlement.y, mode === "reject" ? null : 1);
+      assert.equal(object(settlement.decision, "decision").verdict, "Interrupt");
+      if (mode === "reject") assert.ok((settlement.rows as JsonObject[]).every((row) => row.score === null));
+    }
+  });
+}
+
+test("game reviews run blind across seats, score before repair, and replay effects once", { skip: !supportsGame() }, async () => {
+  const executor = new GameBrainstormExecutor("repair", true);
+  const app = gameRuntime(executor);
+  const first = await app.run({ runId: "game-replay", submission: "Review and revise the mechanism", params: { panelSize: 2, gamifiedReview: true, maxReviewRounds: 2 } });
+  assert.equal(first.status, "failed");
+  assert.match(first.status === "failed" ? first.error.message : "", /Retry final synthesis/);
+  const before = await app.checkpoints.load("game-replay");
+  const retrieval = before!.journal.find((entry) => entry.key.endsWith("/retrieve-literature-run::result"));
+  assert.ok(retrieval, "the current literature pipeline actually executed");
+  assert.ok((object(retrieval.value, "retrieved literature").papers as JsonObject[]).length >= 2);
+  const composition = before!.journal.find((entry) => entry.key.endsWith("/compose-panel-run::result"));
+  assert.ok(composition, "the production panel composer actually executed");
+  assert.ok((object(composition.value, "panel evidence").seats as JsonObject[]).length >= 2);
+  const scoreEntries = before!.journal.filter((entry) => entry.key.endsWith("/game-settle-run::result"));
+  const critics = executor.seen.filter((entry) => entry.task.outputSchema?.name === "gameCritique");
+  const chairs = executor.tasks("committee-chair");
+  assert.ok(critics.length > 0);
+  assert.equal(scoreEntries.length, chairs.length);
+  const groupCritics = new Map<string, Set<string>>();
+  for (const critic of critics) {
+    for (const key of ["comments", "history", "record", "feedback", "scores", "decision"]) assert.equal(critic.bindings[key], undefined);
+    assert.equal(critic.task.metadata?.notesScope, undefined);
+    assert.equal(critic.task.allowedCapabilities?.includes("notes-access"), false);
+    const scope = object(critic.task.metadata?.factScope, "fact scope");
+    assert.equal(typeof scope.blindReview, "string");
+    const group = String(scope.blindReview);
+    const ids = groupCritics.get(group) ?? new Set<string>(); ids.add(critic.agentId); groupCritics.set(group, ids);
+    assert.equal(JSON.parse(group)[3], gameReviewVersion(critic.bindings.chain!, Number(critic.bindings.currentStep)));
+  }
+  assert.ok(groupCritics.size > 1, "different seats and reviewed versions have different groups");
+  assert.ok([...groupCritics.values()].every((ids) => ids.size >= 2), "same-round peers share the frozen fact view");
+  for (const chair of chairs) {
+    assert.equal(object(chair.task.metadata?.factScope, "chair fact scope").blindReview, undefined);
+    const format = chair.task.modelRequest?.responseFormat;
+    assert.equal(format?.type, "jsonSchema");
+    if (format?.type === "jsonSchema") {
+      const reports = object(object(format.schema.properties, "schema properties").reports, "report schema");
+      assert.deepEqual([...(reports.required as string[])].sort(), Object.keys(object(chair.bindings.comments, "reports")).sort());
+      assert.equal(reports.additionalProperties, false);
+    }
+  }
+  assert.equal(executor.tasks("game-redeveloper").length, 1);
+  const repaired = chairs.filter((chair) => chair.agentId === "member-1" && chair.bindings.currentStep === 2);
+  assert.equal(repaired.length, 2);
+  const versions = repaired.map((chair) => gameReviewVersion(chair.bindings.chain!, 2));
+  assert.notEqual(versions[0], versions[1]);
+  assert.ok(versions.every((version) => scoreEntries.some((entry) => object(entry.value, "settlement").version === version)));
+  const artifactIds = (await app.artifacts.list()).map((ref) => `${ref.name}#${ref.sha256}`).sort();
+  const second = await gameRuntime(executor, { checkpoints: app.checkpoints, artifacts: app.artifacts }).resume("game-replay");
+  assert.equal(second.status, "completed", second.status === "failed" ? second.error.message : undefined);
+  assert.equal(executor.seen.filter((entry) => entry.task.outputSchema?.name === "gameCritique").length, critics.length);
+  assert.equal(executor.tasks("committee-chair").length, chairs.length);
+  const after = await app.checkpoints.load("game-replay");
+  assert.deepEqual(after!.journal.filter((entry) => entry.key.endsWith("/game-settle-run::result")), scoreEntries);
+  const finalIds = (await app.artifacts.list()).map((ref) => `${ref.name}#${ref.sha256}`);
+  assert.ok(artifactIds.every((id) => finalIds.filter((candidate) => candidate === id).length === 1));
+});
+
+test("game critic transport failures remain resumable failures rather than rejected score rows", { skip: !supportsGame() }, async () => {
+  let unavailable = true;
+  const executor = new (class extends GameBrainstormExecutor {
+    override async execute(task: AgentTask): Promise<AgentResult> {
+      if (unavailable && task.outputSchema?.name === "gameCritique") {
+        return { taskId: task.taskId, status: "error", error: { name: "ProviderUnavailable", message: "The provider transport is temporarily unavailable." } };
+      }
+      return super.execute(task);
+    }
+  })("pass");
+  const app = gameRuntime(executor);
+  const first = await app.run({ runId: "game-transport", submission: "Check the supplied reasoning", params: { panelSize: 2, gamifiedReview: true } });
+  assert.equal(first.status, "failed");
+  assert.equal(executor.tasks("committee-chair").length, 0);
+  const failed = await app.checkpoints.load("game-transport");
+  assert.equal(failed!.journal.filter((entry) => entry.key.endsWith("/game-settle-run::result")).length, 0);
+  unavailable = false;
+  const resumed = await app.resume("game-transport");
+  assert.equal(resumed.status, "completed", resumed.status === "failed" ? resumed.error.message : undefined);
+  assert.ok(executor.tasks("committee-chair").length > 0);
+});
+
+for (const leak of ["thinkerNotes", "roleCapability", "techniqueCapability"] as const) {
+  test(`game critics reject ${leak} before any reviewer model call`, { skip: !supportsGame() }, async () => {
+    const source = loadContent(registryContentDir);
+    const clone = structuredClone(source);
+    if (leak === "thinkerNotes") {
+      const visit = (value: unknown): void => {
+        if (typeof value !== "object" || value === null) return;
+        const node = value as Record<string, unknown>;
+        if (node.kind === "agent" && (node.output as { schema?: string } | undefined)?.schema === "gameCritique") {
+          node.thinkerNotes = { seat: "member.id", through: "stepIndex" };
+        }
+        for (const child of Object.values(node)) {
+          if (Array.isArray(child)) child.forEach(visit); else visit(child);
+        }
+      };
+      visit(clone.workflows.brainstorm);
+    } else {
+      const names = leak === "roleCapability" ? ["game-commentor", "game-interdisciplinary-commentor"] : ["game-review"];
+      for (const name of names) {
+        const skill = clone.skills[name]!;
+        (clone.skills as Record<string, typeof skill>)[name] = {
+          ...skill, meta: { ...skill.meta, capabilities: [...skill.meta.capabilities, "notes-access"] },
+        };
+      }
+    }
+    const executor = new GameBrainstormExecutor("pass");
+    const app = gameRuntime(executor, undefined, clone);
+    const result = await app.run({ submission: "Check the supplied reasoning", params: { panelSize: 2, gamifiedReview: true } });
+    assert.equal(result.status, "failed");
+    assert.match(result.status === "failed" ? result.error.message : "", /blind game critic cannot access thinker notes/);
+    assert.equal(executor.seen.filter((entry) => entry.task.outputSchema?.name === "gameCritique").length, 0);
+  });
+}
+
+test("game mode off uses standard reviewers with the current literature-composed panel", { skip: !supportsGame() }, async () => {
+  const executor = new GameBrainstormExecutor("pass");
+  const app = gameRuntime(executor);
+  const result = await app.run({ runId: "game-off", submission: "Check the supplied reasoning", params: { panelSize: 2, gamifiedReview: false } });
+  assert.equal(result.status, "completed", result.status === "failed" ? result.error.message : undefined);
+  assert.ok(executor.tasks("commentor").length > 0);
+  assert.equal(executor.tasks("committee-chair").length, 0);
+  assert.equal(executor.seen.filter((entry) => entry.task.outputSchema?.name === "gameCritique").length, 0);
+  const checkpoint = await app.checkpoints.load("game-off");
+  assert.equal(checkpoint!.journal.filter((entry) => entry.key.endsWith("/game-settle-run::result")).length, 0);
+  assert.ok(checkpoint!.journal.some((entry) => entry.key.endsWith("/retrieve-literature-run::result")));
+});
+
+test("game settlements carry the decision rule the bundle declares, or the legacy rule when it declares none", { skip: !supportsGame() }, async () => {
+  const params = loadContent(registryContentDir).workflows.brainstorm!.params;
+  const declaredRule = params.gameDecisionRule?.default; const declaredLeaveOneOut = params.gameLeaveOneOut?.default;
+  const executor = new GameBrainstormExecutor("cap");
+  const app = gameRuntime(executor);
+  const result = await app.run({ runId: "game-rule", submission: "Check the comparison", params: { panelSize: 2, gamifiedReview: true, maxReviewRounds: 1 } });
+  assert.equal(result.status, "completed", result.status === "failed" ? result.error.message : undefined);
+  const checkpoint = (await app.checkpoints.load("game-rule"))!;
+  const settlements = checkpoint.journal.filter((entry) => entry.key.endsWith("/game-settle-run::result")).map((entry) => object(entry.value, "settlement"));
+  assert.ok(settlements.length > 0);
+  for (const settlement of settlements) {
+    assert.equal(settlement.ruleVersion, "brier-peer/v3");
+    assert.equal(settlement.decisionRule, declaredRule ?? "committee-mean");
+    assert.equal(settlement.leaveOneOut, declaredLeaveOneOut ?? false);
+    assert.equal(settlement.y, 1);
+    for (const row of settlement.rows as JsonObject[]) { assert.equal(row.label, "decisive"); assert.equal(row.scoringLabel, 1); }
+  }
+  // A bundle that declares the rule hands its chair a task schema that REQUIRES the label; a legacy bundle leaves it optional.
+  const chairs = executor.tasks("committee-chair");
+  assert.ok(chairs.length > 0);
+  for (const chair of chairs) {
+    const reports = object(object(object(chair.task.outputSchema?.schema, "task schema").properties, "properties").reports, "reports");
+    for (const report of Object.values(object(reports.properties, "pinned reports"))) {
+      const required = object(report, "report schema").required as JsonValue[];
+      assert.equal(required.includes("label"), declaredRule !== undefined);
+    }
+  }
+  // An unknown rule value fails before any work: rejected by the declared enum, or as an unknown param of a legacy bundle.
+  await assert.rejects(async () => gameRuntime(new GameBrainstormExecutor("pass")).run({ runId: "game-rule-rejected", submission: "Check the comparison", params: { panelSize: 2, gamifiedReview: true, gameDecisionRule: "majority" } }), /gameDecisionRule/);
+});
+
+test("game manual dismissal preserves settled cohorts and scores during replay", { skip: !supportsGame() }, async () => {
+  const executor = new GameBrainstormExecutor("pass", true);
+  const app = gameRuntime(executor);
+  const first = await app.run({ runId: "game-dismiss-settled", submission: "Review the supplied reasoning", params: { panelSize: 2, gamifiedReview: true } });
+  assert.equal(first.status, "failed");
+  assert.match(first.status === "failed" ? first.error.message : "", /Retry final synthesis/);
+  const before = await app.checkpoints.load("game-dismiss-settled");
+  const scores = before!.journal.filter((entry) => entry.key.endsWith("/game-settle-run::result"));
+  assert.ok(scores.some((entry) => (object(entry.value, "settlement").rows as JsonObject[]).some((row) => row.criticId === "member-2")));
+  const criticCalls = executor.seen.filter((entry) => entry.task.outputSchema?.name === "gameCritique").length;
+  const resumed = gameRuntime(executor, { checkpoints: app.checkpoints, artifacts: app.artifacts }, undefined, ["member-2"]);
+  const result = await resumed.resume("game-dismiss-settled");
+  assert.equal(result.status, "completed", result.status === "failed" ? result.error.message : undefined);
+  assert.equal(executor.seen.filter((entry) => entry.task.outputSchema?.name === "gameCritique").length, criticCalls);
+  const after = await app.checkpoints.load("game-dismiss-settled");
+  assert.deepEqual(after!.journal.filter((entry) => entry.key.endsWith("/game-settle-run::result")), scores);
+});
+
+test("game manual dismissal skips new work but retains reports submitted before an unfinished chair", { skip: !supportsGame() }, async () => {
+  let failChair = true;
+  const executor = new (class extends GameBrainstormExecutor {
+    override async execute(task: AgentTask): Promise<AgentResult> {
+      if (failChair && task.outputSchema?.name === "gameCommitteeDecision" && task.agentId === "member-1") {
+        return { taskId: task.taskId, status: "error", error: { name: "InterruptedChair", message: "The first chair was interrupted after all reports were submitted." } };
+      }
+      return super.execute(task);
+    }
+  })("pass");
+  const app = gameRuntime(executor);
+  const first = await app.run({ runId: "game-dismiss-partial", submission: "Review the supplied reasoning", params: { panelSize: 2, gamifiedReview: true } });
+  assert.equal(first.status, "failed");
+  assert.match(first.status === "failed" ? first.error.message : "", /first chair was interrupted/);
+  const beforeCalls = executor.seen.length;
+  failChair = false;
+  const resumed = gameRuntime(executor, { checkpoints: app.checkpoints, artifacts: app.artifacts }, undefined, ["member-2"]);
+  const result = await resumed.resume("game-dismiss-partial");
+  assert.equal(result.status, "completed", result.status === "failed" ? result.error.message : undefined);
+  const newCalls = executor.seen.slice(beforeCalls);
+  assert.ok(newCalls.every((entry) => entry.agentId !== "member-2"), "the dismissed thinker and critic receive no new tasks");
+  const chairs = newCalls.filter((entry) => entry.role === "committee-chair" && entry.agentId === "member-1");
+  const firstChair = chairs.find((entry) => entry.bindings.currentStep === 1)!;
+  assert.ok(firstChair, "the unfinished chair is resumed");
+  assert.ok(object(firstChair.bindings.comments, "first cohort")["member-2"], "already submitted reports stay in the cohort");
+  assert.ok(chairs.some((entry) => entry.bindings.currentStep === 2));
+  for (const chair of chairs.filter((entry) => Number(entry.bindings.currentStep) > 1)) {
+    assert.equal(object(chair.bindings.comments, "later cohort")["member-2"], undefined, "future rounds contain no new dismissed-seat report");
+  }
+});
+
+/** Member 1 loses critic points; its own thinker and repair roles stay active. */
+class BalanceGameExecutor extends GameBrainstormExecutor {
+  constructor() { super("pass"); }
+  override async execute(task: AgentTask): Promise<AgentResult> {
+    const result = await super.execute(task);
+    if (task.outputSchema?.name !== "gameCritique" || result.status !== "ok") return result;
+    return { ...result, output: { ...object(result.output, "critique"), q: task.agentId === "member-1" ? 0.4 : 0.6 } };
+  }
+}
+
+test("game balances span parallel seats, exclude only future criticism, and expose only own feedback", { skip: !supportsGame() }, async () => {
+  const executor = new BalanceGameExecutor();
+  const app = gameRuntime(executor);
+  const result = await app.run({ runId: "game-balances", submission: "Review the supplied mechanism", params: { panelSize: 2, gamifiedReview: true, gameInitialPoints: 0, maxReviewRounds: 2 } });
+  assert.equal(result.status, "completed", result.status === "failed" ? result.error.message : undefined);
+  const checkpoint = (await app.checkpoints.load("game-balances"))!;
+  const settlements = checkpoint.journal.filter((entry) => entry.key.endsWith("/game-settle-run::result"))
+    .map((entry) => object(entry.value, "settlement")).sort((a, b) => Number(a.ledgerSequence) - Number(b.ledgerSequence));
+  assert.deepEqual(settlements.map((value) => value.ledgerSequence), settlements.map((_, index) => index + 1));
+  const excludedAt = settlements.find((value) => (value.rows as JsonObject[]).some((row) => row.criticId === "member-1" && row.excluded === true))!;
+  assert.ok(excludedAt, "the negative score excludes member 1 globally");
+  const dispatches = checkpoint.journal.filter((entry) => entry.kind === "activity" && objectOrUndefined(entry.value)?.kind === "gameCriticDispatch");
+  const future = dispatches.map((entry) => object(entry.value, "dispatch")).filter((value) => value.criticId === "member-1" && Number(value.ledgerSequence) >= Number(excludedAt.ledgerSequence));
+  assert.ok(future.length > 0); assert.ok(future.every((value) => value.eligible === false));
+  assert.ok(executor.tasks("game-redeveloper").some((task) => task.agentId === "member-1" && Number(task.bindings.currentStep) > 1), "exclusion does not suppress the member's own later repair work");
+  let sawOwnHistory = false;
+  for (const critic of executor.seen.filter((entry) => entry.task.outputSchema?.name === "gameCritique")) {
+    const dispatchId = critic.task.taskId.replace(/-execute$/, "-dispatch");
+    const snapshot = object(dispatches.find((entry) => object(entry.value, "dispatch").dispatchId === dispatchId)?.value, "own dispatch");
+    const own = object(critic.bindings.criticState, "private critic state");
+    assert.equal(own.balance, snapshot.balance);
+    assert.deepEqual(own.history, snapshot.history);
+    const priorRows = settlements.filter((value) => Number(value.ledgerSequence) <= Number(snapshot.ledgerSequence))
+      .flatMap((value) => (value.rows as JsonObject[]).filter((row) => row.criticId === critic.agentId).map((row) => ({ settlementId: value.settlementId, score: row.score })));
+    const ownHistory = own.history as JsonObject[];
+    assert.deepEqual(ownHistory.map((item) => ({ settlementId: item.settlementId, score: item.score })), priorRows);
+    sawOwnHistory ||= ownHistory.length > 0;
+    assert.ok(ownHistory.every((item) => !Object.hasOwn(item, "rows") && !Object.hasOwn(item, "peerMeanBaseScore")));
+    for (const field of ["comments", "history", "scores", "feedback"]) assert.equal(critic.bindings[field], undefined);
+  }
+  assert.ok(sawOwnHistory, "later calls receive the critic's settled private history");
+  for (const repair of executor.tasks("game-redeveloper")) {
+    assert.equal(repair.bindings.feedback, undefined); assert.equal(repair.bindings.history, undefined);
+    assert.ok(Array.isArray(repair.bindings.repairArguments));
+  }
+});
+
+function objectOrUndefined(value: JsonValue | undefined): JsonObject | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value as JsonObject : undefined;
+}
+
+for (const mode of ["pass", "repair"] as const) {
+  test(`game direct reasoning without badges follows the ${mode} workflow with an empty fact table`, { skip: !supportsGame() || loadContent(registryContentDir).skills["claim-evidence"] === undefined }, async () => {
+    const step = (valid: boolean): JsonObject => ({
+      part1: valid ? "For a real x with x>=0, |x|=x." : "For every real x, |x|=x.",
+      part2: valid ? "Assume x>=0 and apply the nonnegative branch of the absolute-value definition." : "Use the nonnegative branch without imposing a sign condition on x.",
+      part3: "Substitution into the selected branch gives the proposed identity.",
+      part4: valid ? "The conclusion is conditional on x>=0 and does not assert anything for negative x." : "The conclusion is claimed for negative x as well.",
+    });
+    const executor = new (class extends GameBrainstormExecutor {
+      override async execute(task: AgentTask): Promise<AgentResult> {
+        const result = await super.execute(task);
+        if (result.status !== "ok") return result;
+        const bindings = object(object(task.input, "input").bindings, "bindings");
+        const output = object(result.output, "output");
+        switch (task.outputSchema?.name) {
+          case "brainIdeaParts":
+            return { ...result, output: { ...output, cot: (output.cot as JsonValue[]).map((_, index) => step(!(mode === "repair" && task.agentId === "member-1" && index === 1))) } };
+          case "gameCritique": {
+            const current = object((bindings.chain as JsonValue[])[Number(bindings.currentStep) - 1], "current step");
+            const flawed = current.part1 === "For every real x, |x|=x.";
+            return { ...result, output: {
+              q: flawed ? 0.9 : 0.1,
+              justification: flawed
+                ? "Substitute x=-1 into the claim: |x|=1 but x=-1, so the universal identity fails. Restrict the conclusion to x>=0 before using it."
+                : "Under the explicitly stated x>=0 assumption, substituting into the nonnegative branch of the absolute-value definition gives |x|=x. This displayed conditional inference introduces no independent empirical claim.",
+            } };
+          }
+          case "gameCommitteeDecision":
+            return { ...result, output: {
+              reports: Object.fromEntries(Object.entries(object(bindings.comments, "reports")).map(([id, critique]) => [id, {
+                admissible: true,
+                reason: "The report supplies a directly inspectable conditional derivation or counterexample. Its reasoning needs no external fact-table premise.",
+                label: Number(object(critique, "critique").q) >= 0.5 ? "decisive" : "not-decisive",
+                factChecks: [],
+              }])),
+              reason: "The displayed inference is checked directly under its stated sign condition; the counterexample identifies where a universal claim fails.",
+            } };
+          case "redevelopmentPatchParts":
+            return { ...result, output: { ...output, steps: [{ index: bindings.currentStep!, ...step(true) }] } };
+          default: return result;
+        }
+      }
+    })("pass");
+    const runId = `game-direct-${mode}`;
+    const app = gameRuntime(executor, undefined, undefined, undefined, []);
+    const result = await app.run({ runId, submission: "Check the stated absolute-value inference and repair any missing sign condition.", params: { panelSize: 2, gamifiedReview: true, maxReviewRounds: 2 } });
+    assert.equal(result.status, "completed", result.status === "failed" ? result.error.message : undefined);
+    const checkpoint = (await app.checkpoints.load(runId))!;
+    const settlements = checkpoint.journal.filter((entry) => entry.key.endsWith("/game-settle-run::result"))
+      .map((entry) => object(entry.value, "settlement"));
+    assert.ok(settlements.length > 0);
+    assert.ok(settlements.every((value) => value.status === "settled" && Number(value.admittedCount) > 0));
+    assert.ok(settlements.every((value) => (value.rows as JsonObject[]).every((row) => row.admissible === true && typeof row.score === "number")));
+    assert.equal(settlements.filter((value) => value.y === 1).length, mode === "repair" ? 1 : 0);
+    for (const reviewer of executor.seen.filter((entry) => entry.task.outputSchema?.name === "gameCritique" || entry.role === "committee-chair")) {
+      assert.ok(reviewer.task.skills?.includes("claim-evidence"), "review tasks receive the shared claim-level evidence technique");
+    }
+    for (const chair of executor.tasks("committee-chair")) {
+      assert.deepEqual(chair.bindings.verifiedFacts, loadContent(registryContentDir).factTable?.accessMode === "supreme-mediated/v1" ? undefined : [], "the test injects no badge or fact evidence");
+      for (const critique of Object.values(object(chair.bindings.comments, "comments"))) {
+        assert.doesNotMatch(String(object(critique, "critique").justification), /\[F:/);
+      }
+    }
+    const repairs = executor.tasks("game-redeveloper");
+    assert.equal(repairs.length, mode === "repair" ? 1 : 0);
+    if (mode === "repair") {
+      assert.match((repairs[0]!.bindings.repairArguments as string[]).join(" "), /Substitute x=-1/);
+      const target = executor.tasks("committee-chair").filter((entry) => entry.agentId === "member-1" && entry.bindings.currentStep === 2);
+      assert.equal(target.length, 2);
+      const repairedVersion = gameReviewVersion(target[1]!.bindings.chain!, 2);
+      assert.ok(settlements.some((value) => value.version === repairedVersion && value.y === 0), "the patched conditional argument passes on review");
+    }
+  });
+}
+
+test("game resume skips an uncompleted call despite its old eligible snapshot and replays submitted reports", { skip: !supportsGame(), timeout: 30000 }, async () => {
+  let release!: () => void;
+  const retired = new Promise<void>((resolve) => { release = resolve; });
+  const checkpoints = new (class extends InMemoryCheckpointStore {
+    override async save(checkpoint: WorkflowCheckpoint): Promise<void> {
+      await super.save(checkpoint);
+      if (checkpoint.journal.some((entry) => entry.key.endsWith("/game-settle-run::result") &&
+        (objectOrUndefined(entry.value)?.rows as JsonObject[] | undefined)?.some((row) => row.criticId === "member-1" && row.excluded === true))) release();
+    }
+  })();
+  let interrupted = false;
+  let pendingTaskId = "";
+  let pendingCalls = 0;
+  const executor = new (class extends BalanceGameExecutor {
+    override async execute(task: AgentTask): Promise<AgentResult> {
+      const bindings = object(object(task.input, "input").bindings, "bindings");
+      if (task.outputSchema?.name === "gameCritique" && task.agentId === "member-1" &&
+          object(task.metadata?.factScope, "scope").seat === "member-2" && bindings.currentStep === 1) {
+        pendingCalls += 1; pendingTaskId = task.taskId;
+        if (!interrupted) {
+          interrupted = true;
+          await retired;
+          return { taskId: task.taskId, status: "error", error: { name: "UnfinishedReport", message: "A critic call ended without a report after another seat excluded it." } };
+        }
+      }
+      return super.execute(task);
+    }
+  })();
+  const app = gameRuntime(executor, { checkpoints });
+  const first = await app.run({ runId: "game-excluded-resume", submission: "Review the supplied mechanism", params: { panelSize: 2, gamifiedReview: true, gameInitialPoints: 0, maxReviewRounds: 1 } });
+  assert.equal(first.status, "failed");
+  assert.match(first.status === "failed" ? first.error.message : "", /ended without a report/);
+  const before = (await checkpoints.load("game-excluded-resume"))!;
+  const savedDispatch = before.journal.find((entry) => objectOrUndefined(entry.value)?.dispatchId === pendingTaskId.replace(/-execute$/, "-dispatch"));
+  assert.equal(object(savedDispatch?.value, "pending dispatch").eligible, true);
+  const pendingKey = `${pendingTaskId.slice("game-excluded-resume:".length)}::result`;
+  assert.equal(before.journal.some((entry) => entry.key === pendingKey), false, "transport failure did not become an invalid scored report");
+  const oldSettlements = before.journal.filter((entry) => entry.key.endsWith("/game-settle-run::result"));
+  assert.ok(oldSettlements.length > 0);
+  const previousCriticCalls = executor.seen.filter((entry) => entry.task.outputSchema?.name === "gameCritique" && entry.agentId === "member-1").length;
+  const resumed = gameRuntime(executor, { checkpoints, artifacts: app.artifacts });
+  const result = await resumed.resume("game-excluded-resume");
+  assert.equal(result.status, "completed", result.status === "failed" ? result.error.message : undefined);
+  assert.equal(pendingCalls, 1, "the known excluded critic is not called again even though its old snapshot allowed dispatch");
+  assert.equal(executor.seen.filter((entry) => entry.task.outputSchema?.name === "gameCritique" && entry.agentId === "member-1").length, previousCriticCalls);
+  const after = (await checkpoints.load("game-excluded-resume"))!;
+  for (const old of oldSettlements) assert.deepEqual(after.journal.find((entry) => entry.key === old.key), old);
+  assert.ok(executor.tasks("committee-chair").some((entry) => entry.agentId === "member-1" && Number(entry.bindings.currentStep) > 1), "the excluded critic's thinker walk still completes");
 });

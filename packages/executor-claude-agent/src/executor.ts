@@ -14,9 +14,12 @@ import {
   CreditBlockedError,
   addUsage,
   emptyUsage,
+  factScopeOf,
+  factSubmitContextOf,
   serializeError,
   systemPromptBoundary,
   systemPromptSegments,
+  notesScopeOf,
   textContent,
   toolCallDetail,
   type AgentExecutionContext,
@@ -24,12 +27,17 @@ import {
   type AgentExecutor,
   type AgentResult,
   type AgentTask,
+  type FactAccess,
+  type FactScope,
   type JsonObject,
   type JsonValue,
   type ModelMessage,
+  type NotesAccess,
+  type NotesScope,
   type PromptRecord,
   type SystemPrompt,
   type TaxonomyAccess,
+  type ToolExecutionContext,
   type TokenUsage,
   type ToolCallDetail,
   type WebAccess,
@@ -41,14 +49,18 @@ import {
 } from "@brainstorm-agentic/credit-recovery";
 import {
   attachmentTools,
+  describeFactTableCall,
   gpuRunTools,
   ATTACHMENT_LIST_MANIFEST,
   ATTACHMENT_SEARCH_MANIFEST,
+  FACT_TABLE_DEFINITION,
   GPU_RUN_MANIFEST,
-  WEB_FETCH_MANIFEST,
-  WEB_SEARCH_MANIFEST,
-  parseWebSearchInput,
+  NOTES_SEARCH_DEFINITION,
   WebAccessError,
+  runFactTable,
+  runNotesSearch,
+  webToolNames,
+  webToolSpecs,
   type GpuRunConfig,
 } from "@brainstorm-agentic/host-tools";
 
@@ -95,12 +107,37 @@ export interface ClaudeAgentExecutorConfig {
    * The unified host web layer. The web is HOST-OWNED throughout the
    * pipeline: Claude Code's own WebSearch/WebFetch are always disallowed
    * (see the adapter registry's host-owned-web note), and when this is set
-   * the host web_search/web_fetch tools are delivered as in-process MCP
-   * tools to any task whose skill declares the `web-search` capability —
+   * the host web tools (web_search, news_search, paper_search,
+   * paper_details, web_fetch — whichever the deployment can answer) are
+   * delivered as in-process MCP tools to any task whose skill declares the
+   * `web-search` capability —
    * routed, bounded, and logged by the one manager every backend shares.
    * Without it the capability resolves unavailable and the agent is told so.
    */
   readonly web?: WebAccess;
+  /**
+   * The run's thinker notes. A review task whose metadata carries a
+   * notesScope (stamped by the workflow runtime) and whose skill declares the
+   * `notes-access` capability gets the notes_search tool as an in-process MCP
+   * tool, scoped to that seat and chain position.
+   */
+  readonly notes?: NotesAccess;
+  /**
+   * The run's fact table. A task whose metadata carries a factScope
+   * (stamped by the workflow runtime) and whose skill declares the
+   * `fact-table` capability gets the fact_table tool as an in-process MCP
+   * tool, scoped to that task (role, agent, seat, chain step). The session
+   * watchdog is held while a call runs: a submission waits minutes on the
+   * supreme judge.
+   */
+  readonly facts?: FactAccess;
+  /**
+   * Set ONLY when the deployment handed web search to the agents' own tools
+   * (webSearch.mode "agent"): provider-native web operations in a task's
+   * capability plan then admit Claude Code's own WebSearch/WebFetch. Without
+   * it a plan naming them adds nothing and both stay disallowed.
+   */
+  readonly nativeWeb?: boolean;
   readonly maxTurns?: number;
   readonly maxBudgetUsd?: number;
   readonly effort?: "low" | "medium" | "high" | "xhigh" | "max";
@@ -247,6 +284,7 @@ export class SessionStalledError extends Error {
 class SessionWatchdog {
   private timer: NodeJS.Timeout | undefined;
   private holds = 0;
+  private stopped = false;
   private expire!: (error: SessionStalledError) => void;
   readonly expiry: Promise<never>;
 
@@ -260,7 +298,7 @@ class SessionWatchdog {
   }
 
   touch(): void {
-    if (this.ms <= 0 || this.holds > 0) return;
+    if (this.stopped || this.ms <= 0 || this.holds > 0) return;
     clearTimeout(this.timer);
     // Deliberately NOT unref'd: when the SDK stream wedges, this timer can be
     // the only live handle, and an unref'd watchdog lets the process die (or
@@ -293,6 +331,9 @@ class SessionWatchdog {
   }
 
   stop(): void {
+    // A cancelled MCP tool may release its hold after the stream has closed.
+    // That late release must not resurrect the session's inactivity timer.
+    this.stopped = true;
     clearTimeout(this.timer);
     this.timer = undefined;
   }
@@ -692,6 +733,124 @@ function taxonomyServer(
   });
 }
 
+/** In-process MCP server name carrying the thinker notes search tool. */
+const NOTES_SERVER = "notes";
+
+function notesSdkToolNames(): readonly string[] {
+  return [`mcp__${NOTES_SERVER}__notes_search`];
+}
+
+/** The task's notes scope, when its skill may read notes and the runtime stamped one. */
+function notesScopeFor(task: AgentTask): NotesScope | undefined {
+  return taskUsesCapability(task, "notes-access") ? notesScopeOf(task.metadata) : undefined;
+}
+
+/**
+ * In-process MCP server exposing notes_search for ONE task: the scope is
+ * fixed at construction, so the model can only ever read the seat and the
+ * chain position its task was stamped with.
+ */
+function notesServer(
+  notes: NotesAccess,
+  scope: NotesScope,
+  watchdog: SessionWatchdog,
+): ReturnType<typeof createSdkMcpServer> {
+  return createSdkMcpServer({
+    name: NOTES_SERVER,
+    version: "1.0.0",
+    tools: [
+      sdkTool(
+        "notes_search",
+        NOTES_SEARCH_DEFINITION.description,
+        zodShape(NOTES_SEARCH_DEFINITION.inputSchema),
+        watchdog.held(async (args) => {
+          try {
+            const result = await runNotesSearch(notes, scope, args as unknown as JsonValue);
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: typeof result.output === "string" ? result.output : JSON.stringify(result.output),
+                },
+              ],
+              ...(result.isError === true ? { isError: true as const } : {}),
+            };
+          } catch (error) {
+            return {
+              content: [{ type: "text" as const, text: error instanceof Error ? error.message : String(error) }],
+              isError: true as const,
+            };
+          }
+        }),
+      ),
+    ],
+  });
+}
+
+/** In-process MCP server name carrying the fact table tool. */
+const FACTS_SERVER = "facts";
+
+function factsSdkToolNames(): readonly string[] {
+  return [`mcp__${FACTS_SERVER}__fact_table`];
+}
+
+/** The task's fact scope, when its skill may use the fact table and the runtime stamped one. */
+function factScopeFor(task: AgentTask): FactScope | undefined {
+  return taskUsesCapability(task, "fact-table") ? factScopeOf(task.metadata) : undefined;
+}
+
+/**
+ * In-process MCP server exposing fact_table for ONE task: the scope is fixed
+ * at construction, so submissions are recorded against this task and
+ * `status` reads the badges its chain cites. The handler is held like every
+ * in-process tool: a submission blocks for minutes while the supreme judge
+ * works, and that silence is not a stall.
+ */
+function factsServer(
+  facts: FactAccess,
+  scope: FactScope,
+  task: AgentTask,
+  context: AgentExecutionContext,
+  watchdog: SessionWatchdog,
+): ReturnType<typeof createSdkMcpServer> {
+  return createSdkMcpServer({
+    name: FACTS_SERVER,
+    version: "1.0.0",
+    tools: [
+      sdkTool(
+        "fact_table",
+        FACT_TABLE_DEFINITION.description,
+        zodShape(FACT_TABLE_DEFINITION.inputSchema),
+        watchdog.held(async (args) => {
+          try {
+            const result = await runFactTable(
+              facts,
+              scope,
+              task.taskId,
+              args as unknown as JsonValue,
+              factSubmitContextOf(task, context),
+            );
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: typeof result.output === "string" ? result.output : JSON.stringify(result.output),
+                },
+              ],
+              ...(result.isError === true ? { isError: true as const } : {}),
+            };
+          } catch (error) {
+            return {
+              content: [{ type: "text" as const, text: error instanceof Error ? error.message : String(error) }],
+              isError: true as const,
+            };
+          }
+        }),
+      ),
+    ],
+  });
+}
+
 /** In-process MCP server name carrying the deterministic attachment tools. */
 const ATTACHMENTS_SERVER = "attachments";
 
@@ -810,6 +969,7 @@ function taskUsesGpu(task: AgentTask): boolean {
 function gpuServer(
   config: GpuRunConfig,
   watchdog: SessionWatchdog,
+  context: ToolExecutionContext,
 ): ReturnType<typeof createSdkMcpServer> {
   const [tool] = gpuRunTools(config);
   return createSdkMcpServer({
@@ -828,9 +988,7 @@ function gpuServer(
         // produces no SDK messages for up to its whole time ceiling.
         watchdog.held(async (args) => {
           try {
-            const result = await tool!.execute(args as JsonValue, {
-              runId: "claude-agent-sdk",
-            });
+            const result = await tool!.execute(args as JsonValue, context);
             return {
               content: [
                 {
@@ -864,8 +1022,8 @@ function gpuServer(
 const WEB_SERVER = "web";
 
 /** Full Claude Code tool names for the in-process web MCP server. */
-function webSdkToolNames(): readonly string[] {
-  return [`mcp__${WEB_SERVER}__web_search`, `mcp__${WEB_SERVER}__web_fetch`];
+function webSdkToolNames(web: WebAccess): readonly string[] {
+  return webToolNames(web).map((name) => `mcp__${WEB_SERVER}__${name}`);
 }
 
 /** True when the task's skill declared the web-search capability. */
@@ -874,13 +1032,73 @@ function taskUsesWeb(task: AgentTask): boolean {
 }
 
 /**
+ * A host tool's JSON Schema as the zod raw shape the SDK's tool() takes.
+ * Covers what the host tools declare — strings (enum, pattern, length),
+ * integers and numbers (bounds), booleans, arrays (items, size), nested
+ * objects — and carries every description over, so the model sees the
+ * same per-parameter guidance on this backend as on every other.
+ */
+function zodShape(schema: unknown): Record<string, z.ZodType> {
+  const node = record(schema);
+  const properties = record(node.properties);
+  const required = new Set(
+    Array.isArray(node.required)
+      ? node.required.filter((name): name is string => typeof name === "string")
+      : [],
+  );
+  const shape: Record<string, z.ZodType> = {};
+  for (const [name, property] of Object.entries(properties)) {
+    const type = zodType(property);
+    shape[name] = required.has(name) ? type : type.optional();
+  }
+  return shape;
+}
+
+function zodType(schema: unknown): z.ZodType {
+  const node = record(schema);
+  const values = Array.isArray(node.enum)
+    ? node.enum.filter((value): value is string => typeof value === "string")
+    : [];
+  let type: z.ZodType;
+  if (values.length > 0) {
+    type = z.enum(values as [string, ...string[]]);
+  } else if (node.type === "string") {
+    let text = z.string();
+    if (typeof node.minLength === "number") text = text.min(node.minLength);
+    if (typeof node.maxLength === "number") text = text.max(node.maxLength);
+    if (typeof node.pattern === "string") text = text.regex(new RegExp(node.pattern));
+    type = text;
+  } else if (node.type === "integer" || node.type === "number") {
+    let number = node.type === "integer" ? z.number().int() : z.number();
+    if (typeof node.minimum === "number") number = number.min(node.minimum);
+    if (typeof node.maximum === "number") number = number.max(node.maximum);
+    type = number;
+  } else if (node.type === "boolean") {
+    type = z.boolean();
+  } else if (node.type === "array") {
+    let list = z.array(zodType(node.items));
+    if (typeof node.minItems === "number") list = list.min(node.minItems);
+    if (typeof node.maxItems === "number") list = list.max(node.maxItems);
+    type = list;
+  } else if (node.type === "object") {
+    type = z.object(zodShape(node));
+  } else {
+    type = z.unknown();
+  }
+  return typeof node.description === "string" ? type.describe(node.description) : type;
+}
+
+/**
  * In-process MCP server exposing the unified host web tools. Claude Code's
- * own WebSearch/WebFetch are permanently disallowed (the web is host-owned),
- * so every search and fetch this backend performs goes through the injected
- * WebAccess — the same manager, the same provider chains, and the same
- * verbatim per-call log as every other backend. A WebAccessError's message
- * is what the model is told (an unconfigured kind, an exhausted chain, a
- * refused fetch) — honest, actionable, and never a crashed task.
+ * own WebSearch/WebFetch stay disallowed unless the deployment handed search
+ * to the agents' own tools (webSearch.mode "agent", where this server is not
+ * wired at all), so every search and fetch this backend performs goes
+ * through the injected WebAccess — the same manager, the same source lists,
+ * and the same per-call log as every other backend. The tools, their
+ * descriptions and their parameters all come from host-tools' webToolSpecs,
+ * never restated here. A WebAccessError's message is what the model is told
+ * (a malformed option, an exhausted source list, a refused fetch) — honest,
+ * actionable, and never a crashed task.
  */
 function webServer(
   web: WebAccess,
@@ -907,47 +1125,16 @@ function webServer(
   return createSdkMcpServer({
     name: WEB_SERVER,
     version: "1.0.0",
-    tools: [
+    tools: webToolSpecs(web).map((spec) =>
       sdkTool(
-        "web_search",
-        WEB_SEARCH_MANIFEST.definition.description ?? "",
-        {
-          query: z.string().min(1),
-          kind: z.enum(["general", "scholarly", "news"]).optional(),
-          max_results: z.number().int().min(1).max(10).optional(),
-          recency: z.enum(["day", "week", "month", "year"]).optional(),
-          domains: z.array(z.string()).max(8).optional(),
-        },
+        spec.name,
+        spec.definition.description ?? "",
+        zodShape(spec.definition.inputSchema),
         watchdog.held(async (args) =>
-          run(async () => {
-            const parsed = parseWebSearchInput(args as JsonValue);
-            if (parsed === undefined) {
-              throw new WebAccessError("query must be a non-empty string.");
-            }
-            return web.search(parsed, attribution);
-          }),
+          run(async () => spec.run(args as unknown as JsonValue, attribution)),
         ),
       ),
-      sdkTool(
-        "web_fetch",
-        WEB_FETCH_MANIFEST.definition.description ?? "",
-        {
-          url: z.string().min(1),
-          max_chars: z.number().int().min(1000).max(48000).optional(),
-        },
-        watchdog.held(async (args) =>
-          run(async () =>
-            web.fetch(
-              {
-                url: String(args.url ?? ""),
-                ...(typeof args.max_chars === "number" ? { maxChars: args.max_chars } : {}),
-              },
-              attribution,
-            ),
-          ),
-        ),
-      ),
-    ],
+    ),
   });
 }
 
@@ -987,6 +1174,11 @@ function assertToken(token: string): void {
   if (token.trim() === "") {
     throw new Error("Claude setup token must not be empty");
   }
+}
+
+/** Recover setup tokens copied from terminal lines or rich-text wrapping. */
+export function normalizeClaudeSetupToken(token: string): string {
+  return token.replace(/\s+/gu, "");
 }
 
 function assertConfig(config: ClaudeAgentExecutorConfig): void {
@@ -1029,7 +1221,7 @@ function sdkEnvironment(
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
     ...supplied,
-    CLAUDE_CODE_OAUTH_TOKEN: token,
+    CLAUDE_CODE_OAUTH_TOKEN: normalizeClaudeSetupToken(token),
     CLAUDE_AGENT_SDK_CLIENT_APP: "brainstorm-agentic/0.1.0",
   };
   // Make authentication unambiguous: this backend must use the setup token,
@@ -1090,7 +1282,7 @@ function sdkSystemPrompt(system: SystemPrompt): string | string[] {
   ];
 }
 
-function allowedTools(task: AgentTask): string[] {
+function allowedTools(task: AgentTask, nativeWeb = false): string[] {
   const tools = new Set<string>();
 
   // If a capability plan is present, use it to determine available tools
@@ -1102,6 +1294,13 @@ function allowedTools(task: AgentTask): string[] {
       const capTools = CAPABILITY_TOOLS[op.capabilityId];
       if (capTools) {
         for (const name of capTools) tools.add(name);
+      }
+      // The SDK's own web tools, only when the deployment chose them
+      // (webSearch.mode "agent"): a plan alone never re-opens them.
+      if (nativeWeb && op.source === "provider" && op.capabilityId === "web-search") {
+        for (const name of op.toolNames) {
+          if (name === "WebSearch" || name === "WebFetch") tools.add(name);
+        }
       }
     }
     // Also add any logical tools from task.tools
@@ -1118,6 +1317,10 @@ function allowedTools(task: AgentTask): string[] {
   // Legacy path: use allowedCapabilities directly
   for (const capability of task.allowedCapabilities ?? []) {
     for (const name of CAPABILITY_TOOLS[capability] ?? []) tools.add(name);
+    if (nativeWeb && capability === "web-search") {
+      tools.add("WebSearch");
+      tools.add("WebFetch");
+    }
   }
   for (const logical of task.tools ?? []) {
     const mapped = LOGICAL_TOOLS[logical];
@@ -1199,6 +1402,29 @@ function toolMessage(name: string, input: unknown): string {
       const url = shortText(args.url);
       return url ? `Fetching a source — ${url}` : "Fetching a source";
     }
+    case `mcp__${WEB_SERVER}__news_search`: {
+      const query = shortText(args.query);
+      return query ? `Searching the news — ${query}` : "Searching the news";
+    }
+    case `mcp__${WEB_SERVER}__paper_search`: {
+      const query = shortText(args.query);
+      return query ? `Searching papers — ${query}` : "Searching papers";
+    }
+    case `mcp__${NOTES_SERVER}__notes_search`: {
+      const mode = shortText(args.mode) ?? "find";
+      const query = shortText(args.query);
+      return query ? `Searching the thinker's notes — ${mode}: ${query}` : `Searching the thinker's notes — ${mode}`;
+    }
+    case `mcp__${FACTS_SERVER}__fact_table`:
+      return describeFactTableCall(args as JsonObject);
+    case `mcp__${WEB_SERVER}__paper_details`: {
+      const count = Array.isArray(args.ids) ? args.ids.length : 0;
+      return count === 1
+        ? "Looking up a paper"
+        : count > 1
+          ? `Looking up ${count} papers`
+          : "Looking up papers";
+    }
     case STRUCTURED_OUTPUT_TOOL:
       return "Submitting the structured output";
     default:
@@ -1218,6 +1444,11 @@ const TOOL_END_LABELS: Readonly<Record<string, string>> = {
   [`mcp__${GPU_SERVER}__gpu_run`]: "GPU job",
   [`mcp__${WEB_SERVER}__web_search`]: "Web search",
   [`mcp__${WEB_SERVER}__web_fetch`]: "Source fetch",
+  [`mcp__${WEB_SERVER}__news_search`]: "News search",
+  [`mcp__${WEB_SERVER}__paper_search`]: "Paper search",
+  [`mcp__${WEB_SERVER}__paper_details`]: "Paper lookup",
+  [`mcp__${NOTES_SERVER}__notes_search`]: "Notes search",
+  [`mcp__${FACTS_SERVER}__fact_table`]: "Fact table",
   [STRUCTURED_OUTPUT_TOOL]: "Structured output",
 };
 
@@ -1856,7 +2087,7 @@ function queryOptions(
   capture: TraceCapture,
   watchdog: SessionWatchdog,
 ): UnknownRecord {
-  const builtinTools = allowedTools(task);
+  const builtinTools = allowedTools(task, config.nativeWeb === true);
   const wantsTaxonomy =
     config.taxonomy !== undefined && taskUsesTaxonomy(task);
   const wantsAttachments =
@@ -1864,15 +2095,19 @@ function queryOptions(
     taskUsesCapability(task, "attachment-access");
   const wantsGpu = config.gpuRun !== undefined && taskUsesGpu(task);
   const wantsWeb = config.web !== undefined && taskUsesWeb(task);
+  const notesScope = config.notes !== undefined ? notesScopeFor(task) : undefined;
+  const factScope = config.facts !== undefined ? factScopeFor(task) : undefined;
   const tools = [
     ...builtinTools,
     ...(capture.stepwise !== undefined
       ? [stepwiseSdkToolName(capture.stepwise.spec)]
       : []),
     ...(wantsTaxonomy ? taxonomySdkToolNames() : []),
+    ...(notesScope !== undefined ? notesSdkToolNames() : []),
+    ...(factScope !== undefined ? factsSdkToolNames() : []),
     ...(wantsAttachments ? attachmentsSdkToolNames() : []),
     ...(wantsGpu ? gpuSdkToolNames() : []),
-    ...(wantsWeb ? webSdkToolNames() : []),
+    ...(wantsWeb ? webSdkToolNames(config.web!) : []),
   ];
   const disallowedTools = KNOWN_BUILTIN_TOOLS.filter(
     (name) => !tools.includes(name),
@@ -1912,10 +2147,18 @@ function queryOptions(
     ...(wantsTaxonomy
       ? { [TAXONOMY_SERVER]: taxonomyServer(config.taxonomy!, watchdog) }
       : {}),
+    ...(notesScope !== undefined
+      ? { [NOTES_SERVER]: notesServer(config.notes!, notesScope, watchdog) }
+      : {}),
+    ...(factScope !== undefined
+      ? { [FACTS_SERVER]: factsServer(config.facts!, factScope, task, context, watchdog) }
+      : {}),
     ...(wantsAttachments
       ? { [ATTACHMENTS_SERVER]: attachmentsServer(config.attachmentRoots!, watchdog) }
       : {}),
-    ...(wantsGpu ? { [GPU_SERVER]: gpuServer(config.gpuRun!, watchdog) } : {}),
+    ...(wantsGpu ? { [GPU_SERVER]: gpuServer(config.gpuRun!, watchdog, {
+      runId: context.runId, taskId: task.taskId, signal: controller.signal,
+    }) } : {}),
     ...(wantsWeb
       ? {
           [WEB_SERVER]: webServer(
@@ -1996,6 +2239,18 @@ function offeredTools(
       input: spec.parts ? ["index", ...STEP_PARTS] : ["index", "text"],
     });
   }
+  if (config.notes !== undefined && notesScopeFor(task) !== undefined) {
+    described.set(`mcp__${NOTES_SERVER}__notes_search`, {
+      description: NOTES_SEARCH_DEFINITION.description,
+      input: Object.keys(NOTES_SEARCH_DEFINITION.inputSchema.properties),
+    });
+  }
+  if (config.facts !== undefined && factScopeFor(task) !== undefined) {
+    described.set(`mcp__${FACTS_SERVER}__fact_table`, {
+      description: FACT_TABLE_DEFINITION.description,
+      input: Object.keys(FACT_TABLE_DEFINITION.inputSchema.properties),
+    });
+  }
   if (config.taxonomy !== undefined && taskUsesTaxonomy(task)) {
     described.set(`mcp__${TAXONOMY_SERVER}__taxonomy_tree`, {
       description: TAXONOMY_TREE_DESCRIPTION,
@@ -2033,14 +2288,12 @@ function offeredTools(
     });
   }
   if (config.web !== undefined && taskUsesWeb(task)) {
-    described.set(`mcp__${WEB_SERVER}__web_search`, {
-      description: WEB_SEARCH_MANIFEST.definition.description ?? "",
-      input: ["query", "kind", "max_results", "recency", "domains"],
-    });
-    described.set(`mcp__${WEB_SERVER}__web_fetch`, {
-      description: WEB_FETCH_MANIFEST.definition.description ?? "",
-      input: ["url", "max_chars"],
-    });
+    for (const spec of webToolSpecs(config.web)) {
+      described.set(`mcp__${WEB_SERVER}__${spec.name}`, {
+        description: spec.definition.description ?? "",
+        input: Object.keys(record(record(spec.definition.inputSchema).properties)),
+      });
+    }
   }
   const names = Array.isArray(options.tools) ? options.tools.map(String) : [];
   return names.map((name): JsonObject => {
@@ -2173,6 +2426,15 @@ async function executeQuery(
   }
 
   const controller = new AbortController();
+  let rejectCancellation!: (error: Error) => void;
+  const cancelled = new Promise<never>((_resolve, reject) => {
+    rejectCancellation = reject;
+  });
+  // SDK abort handling can itself stall while its subprocess starts or exits.
+  // Race cancellation here so the caller's deadline never depends on next().
+  const onQueryAbort = (): void => rejectCancellation(abortError(controller.signal.reason));
+  controller.signal.addEventListener("abort", onQueryAbort, { once: true });
+  void cancelled.catch(() => undefined);
   const onAbort = (): void => controller.abort(context.signal?.reason);
   context.signal?.addEventListener("abort", onAbort, { once: true });
   try {
@@ -2258,7 +2520,7 @@ async function executeQuery(
         // (usually a rejection after the abort below) must not surface as
         // an unhandled rejection.
         void step.then(undefined, () => undefined);
-        const settled = await Promise.race([step, watchdog.expiry]);
+        const settled = await Promise.race([step, watchdog.expiry, cancelled]);
         if (settled.done === true) break;
         watchdog.touch();
         const current = record(settled.value);
@@ -2287,7 +2549,12 @@ async function executeQuery(
         if (current.type === "result") finalResult = current;
       }
     } catch (error) {
-      if (error instanceof SessionStalledError) {
+      if (controller.signal.aborted) {
+        // The abort signal terminates the real SDK subprocess. Also ask custom
+        // streams to stop, without waiting on cleanup from a wedged iterator.
+        try { void stream.interrupt?.().catch(() => undefined); } catch { /* best effort */ }
+        try { void iterator.return?.().catch(() => undefined); } catch { /* best effort */ }
+      } else if (error instanceof SessionStalledError) {
         // Best-effort release of the wedged subprocess before reporting:
         // a hung session may not answer the interrupt, so it is bounded
         // and its own failure is irrelevant next to the stall itself.
@@ -2366,6 +2633,7 @@ async function executeQuery(
     };
   } finally {
     context.signal?.removeEventListener("abort", onAbort);
+    controller.signal.removeEventListener("abort", onQueryAbort);
   }
 }
 
@@ -2373,8 +2641,8 @@ export class ClaudeAgentExecutor implements AgentExecutor {
   private readonly config: ClaudeAgentExecutorConfig;
 
   constructor(config: ClaudeAgentExecutorConfig) {
-    assertConfig(config);
-    this.config = config;
+    this.config = { ...config, token: normalizeClaudeSetupToken(config.token) };
+    assertConfig(this.config);
   }
 
   async execute(
@@ -2687,25 +2955,29 @@ export class ClaudeAgentExecutor implements AgentExecutor {
 export async function validateClaudeSetupToken(
   input: ValidateClaudeSetupTokenInput,
 ): Promise<void> {
-  const controller = new AbortController();
-  const timeout =
-    input.timeoutMs !== undefined
-      ? setTimeout(() => controller.abort("connection validation timed out"), input.timeoutMs)
-      : undefined;
   const executor = new ClaudeAgentExecutor({
-    token: input.token,
+    token: normalizeClaudeSetupToken(input.token),
     ...(input.model ? { model: input.model } : {}),
     ...(input.cwd ? { cwd: input.cwd } : {}),
     ...(input.env ? { env: input.env } : {}),
     ...(input.queryFn ? { queryFn: input.queryFn } : {}),
     maxTurns: 1,
+    maxValidationAttempts: 1,
+    effort: "low",
+    thinking: "disabled",
   });
+  const controller = new AbortController();
+  const timeout =
+    input.timeoutMs !== undefined
+      ? setTimeout(() => controller.abort("connection validation timed out"), input.timeoutMs)
+      : undefined;
   try {
     const result = await executor.execute(
       {
         taskId: "validate-claude-setup-token",
         kind: "connection.validate",
         input: "Reply with OK.",
+        allowedCapabilities: [],
         modelRequest: {
           messages: [
             {
@@ -2716,7 +2988,7 @@ export async function validateClaudeSetupToken(
         },
       },
       {
-        runId: "connection-validation",
+        runId: `connection-validation-${randomUUID()}`,
         nodePath: "connection-validation",
         signal: controller.signal,
       },
@@ -2728,4 +3000,3 @@ export async function validateClaudeSetupToken(
     if (timeout !== undefined) clearTimeout(timeout);
   }
 }
-

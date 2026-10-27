@@ -22,6 +22,8 @@ import {
 } from "@brainstorm-agentic/core";
 
 import { BrainstormRuntimeError } from "./errors.js";
+import { gameChairContextIssues } from "./game-review.js";
+import { committeeContextIssues, factIdsInValue } from "./game-ledger.js";
 
 /**
  * Structural equivalent of the generic agent runtime's ModelRoute. Keeping
@@ -525,6 +527,100 @@ function mergedRevisionIssues(
   });
 }
 
+function isObjectValue(value: unknown): value is JsonObject {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** The deleted ids of the notices a fact-update reconsideration carries (its `factUpdates` binding), in notice order. */
+function noticeDeletedIds(task: AgentTask | undefined): string[] {
+  const input = task?.input;
+  const bindings = isObjectValue(input) ? input.bindings : undefined;
+  const notices = isObjectValue(bindings) ? bindings.factUpdates : undefined;
+  const ids: string[] = [];
+  for (const notice of Array.isArray(notices) ? notices : []) {
+    const deleted = isObjectValue(notice) ? notice.deleted : undefined;
+    if (typeof deleted === "string" && !ids.includes(deleted)) ids.push(deleted);
+  }
+  return ids;
+}
+
+/** A chain reconsideration merged over the idea it revises, or undefined when it cannot be. */
+function mergedChainReconsideration(patch: RedevelopmentPatchParts, base: JsonValue | undefined): JsonValue | undefined {
+  if (!isObjectValue(base) || !Array.isArray(base.cot) || !isObjectValue(base.output)) return undefined;
+  try {
+    const merged = mergeRedevelopmentParts(
+      {
+        output: base.output as Record<string, unknown>,
+        cot: base.cot as unknown as readonly CotStepParts[],
+        ...(typeof base.novelty === "string" ? { novelty: base.novelty } : {}),
+      },
+      patch,
+    );
+    return {
+      cot: merged.steps,
+      output: merged.output,
+      ...(merged.novelty !== undefined ? { novelty: merged.novelty } : {}),
+    } as unknown as JsonValue;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The rules of a fact-update reconsideration its schema cannot judge
+ * (design 5.1, 5.3, 11.12 item 6): a chain revision must apply to the
+ * version it revises (the redevelopment merge's own messages) and leave no
+ * deleted badge cited anywhere in the merged idea; `unchanged` stands only
+ * when the idea cites no deleted badge; a revised comment's verdict must be
+ * one the round allows. Retryable, like mergedRevisionIssues.
+ */
+function reconsiderationIssues(
+  schemaName: string | undefined,
+  value: JsonValue,
+  task: AgentTask | undefined,
+  properties: JsonObject | undefined,
+): string[] {
+  if (schemaName === "commentReconsideration") {
+    const commentSchema = properties?.comment;
+    const commentProperties = isObjectValue(commentSchema) ? commentSchema.properties : undefined;
+    const verdictSchema = isObjectValue(commentProperties) ? commentProperties.verdict : undefined;
+    const allowed = isObjectValue(verdictSchema) && Array.isArray(verdictSchema.enum)
+      ? verdictSchema.enum.filter((entry): entry is string => typeof entry === "string")
+      : [];
+    const comment = isObjectValue(value) ? value.comment : undefined;
+    if (allowed.length > 0 && isObjectValue(comment) &&
+        (typeof comment.verdict !== "string" || !allowed.includes(comment.verdict))) {
+      return [`comment.verdict: must be one of ${allowed.join(", ")} for this round`];
+    }
+    return [];
+  }
+  if (schemaName !== "chainReconsiderationParts" || task === undefined || !isObjectValue(value)) return [];
+  const deleted = noticeDeletedIds(task);
+  const base = task.revisionBase;
+  if (value.decision !== "revised") {
+    const work = isObjectValue(base) ? { cot: base.cot ?? null, output: base.output ?? null, novelty: base.novelty ?? null } : null;
+    const cited = factIdsInValue(work);
+    const still = deleted.filter((id) => cited.includes(id));
+    return still.length > 0
+      ? [`an unchanged decision is not possible: the work still cites ${still.join(", ")}, deleted from the fact table`]
+      : [];
+  }
+  const patch = {
+    steps: Array.isArray(value.steps) ? value.steps : [],
+    ...(value.outputPatch !== undefined ? { outputPatch: value.outputPatch } : {}),
+    ...(value.novelty !== undefined ? { novelty: value.novelty } : {}),
+  } as unknown as RedevelopmentPatchParts;
+  const mergeIssues = mergedRevisionIssues("redevelopmentPatchParts", patch as unknown as JsonValue, task);
+  if (mergeIssues.length > 0) return mergeIssues;
+  const merged = mergedChainReconsideration(patch, base);
+  if (merged === undefined) return [];
+  const cited = factIdsInValue(merged);
+  const still = deleted.filter((id) => cited.includes(id));
+  return still.length > 0
+    ? [`the revision still cites ${still.join(", ")}, deleted from the fact table: rebuild or remove every citation of ${still.length > 1 ? "them" : "it"}`]
+    : [];
+}
+
 export class ContentArtifactOutputValidator {
   validate(value: unknown, schema: unknown, task?: AgentTask): ContentValidationResult {
     const schemaName =
@@ -601,6 +697,14 @@ export class ContentArtifactOutputValidator {
     if (!jsonValue(parsed.data)) {
       return { success: false, issues: ["validated artifact is not JSON-safe"] };
     }
+    if ((schemaName === "gameChairDecision" || schemaName === "gameCommitteeDecision") && task !== undefined) {
+      const input = task.input as JsonObject;
+      const bindings = input.bindings as JsonObject | undefined;
+      const issues = schemaName === "gameCommitteeDecision" ? committeeContextIssues(parsed.data, bindings?.comments)
+        : gameChairContextIssues(parsed.data, bindings?.comments,
+            typeof bindings?.currentStep === "number" ? bindings.currentStep : undefined);
+      if (issues.length > 0) return { success: false, issues };
+    }
     // Shape-valid is not enough: probe/filler submissions satisfy the schema
     // by construction, and once recorded they poison the review as real
     // verdicts. Reject them here so the retry loop demands real content —
@@ -623,6 +727,12 @@ export class ContentArtifactOutputValidator {
     const mergeIssues = mergedRevisionIssues(schemaName, parsed.data, task);
     if (mergeIssues.length > 0) {
       return { success: false, issues: mergeIssues };
+    }
+    // A fact-update reconsideration: the patch must apply and the merged idea
+    // must cite no deleted badge; a comment's verdict must fit the round.
+    const reconsideration = reconsiderationIssues(schemaName, parsed.data, task, properties);
+    if (reconsideration.length > 0) {
+      return { success: false, issues: reconsideration };
     }
     return { success: true, value: parsed.data };
   }

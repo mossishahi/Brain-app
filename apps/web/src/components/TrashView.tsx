@@ -5,6 +5,7 @@ import { errorMessage, getTrashedJobs } from "../api";
 import { jobDot, jobStatusLine } from "../format";
 import { Dot, SkeletonLines } from "./common";
 import { BackIcon } from "./Icons";
+import { historyPage } from "../features/composer/history";
 
 function trashedWhen(at: number): string {
   return new Date(at).toLocaleString([], {
@@ -17,6 +18,8 @@ function trashedWhen(at: number): string {
 
 export function TrashView() {
   const [jobs, setJobs] = useState<readonly JobSummary[] | null>(null);
+  const [page, setPage] = useState(0);
+  const history = historyPage(jobs ?? [], page);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -39,7 +42,7 @@ export function TrashView() {
   return (
     <main className="dash">
       <header className="dash-header">
-        <a href="#/" className="ghost-btn" aria-label="back to all jobs">
+        <a href="#/history" className="ghost-btn" aria-label="back to all jobs">
           <BackIcon />
         </a>
         <h1 className="dash-title">Trash</h1>
@@ -57,7 +60,7 @@ export function TrashView() {
         )
       ) : (
         <ul className="job-list">
-          {jobs.map((job) => (
+          {history.items.map((job) => (
             <li key={job.jobId} className="job-card">
               <a
                 className="job-card-main"
@@ -77,6 +80,11 @@ export function TrashView() {
           ))}
         </ul>
       )}
+      {history.pages > 1 && <nav className="canvas-history-pagination" aria-label="Trash pages">
+        <button className="btn" disabled={history.page === 0} onClick={() => setPage(history.page - 1)}>Previous</button>
+        <span>{history.start}–{history.end} of {jobs?.length.toLocaleString()}</span>
+        <button className="btn" disabled={history.page >= history.pages - 1} onClick={() => setPage(history.page + 1)}>Next</button>
+      </nav>}
     </main>
   );
 }

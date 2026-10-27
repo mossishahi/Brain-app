@@ -13,7 +13,7 @@ const source = (relative: string): string =>
  */
 const RUN_ROOTS = [
   { file: "components/Dashboard.tsx", className: "dash", element: "div" },
-  { file: "components/Landing.tsx", className: "job-card", element: "li" },
+  { file: "features/library/LibraryList.tsx", className: "library-row", element: "li" },
 ] as const;
 
 for (const root of RUN_ROOTS) {

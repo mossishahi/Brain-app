@@ -132,14 +132,16 @@ const BASE_CAPABILITIES: ModelCapabilities = {
  * per-request use; deployments pin newer dated versions via
  * config.nativeTools.
  *
- * `web_search` and `web_fetch` are deliberately ABSENT: the web is
- * host-owned (see core's adapter registry), so no plan may put Anthropic's
- * server-side search on the wire — a request that still names one of those
- * keys fails loudly through the existing unknown-native-key path instead of
- * quietly re-opening the provider's black-box search.
+ * `web_search` is reachable ONLY when the deployment handed web search to the
+ * agents' own tools (webSearch.mode "agent"; see core's adapter registry):
+ * otherwise no plan names the key, because the web is host-owned. `web_fetch`
+ * is deliberately ABSENT — in that mode fetching stays on the host's plain
+ * web_fetch, and a request that still names the key fails loudly through the
+ * existing unknown-native-key path.
  */
 const DEFAULT_NATIVE_TOOLS: Readonly<Record<string, WireRecord>> = {
   code_execution: { type: "code_execution_20250825", name: "code_execution" },
+  web_search: { type: "web_search_20250305", name: "web_search", max_uses: 5 },
 };
 
 /**

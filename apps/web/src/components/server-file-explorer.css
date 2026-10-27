@@ -1,0 +1,158 @@
+/* Load with the file explorer itself, including when its caller is lazy loaded. */
+.ant-modal.server-directory-modal {
+  --server-picker-top: clamp(12px, 5dvh, 64px);
+  top: var(--server-picker-top);
+  max-width: calc(100vw - 24px);
+  margin-inline: auto;
+  padding-bottom: 0;
+}
+
+.ant-modal.server-directory-modal .ant-modal-container {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  max-height: calc(100dvh - var(--server-picker-top) - 12px);
+  padding: 14px;
+  overflow: hidden;
+  border: 0;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--ui-float-shadow);
+}
+
+.ant-modal.server-directory-modal .ant-modal-header,
+.ant-modal.server-directory-modal .ant-modal-footer {
+  flex: none;
+}
+
+.ant-modal.server-directory-modal .ant-modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.ant-modal.server-directory-modal .ant-modal-body > * {
+  flex-shrink: 0;
+}
+
+.ant-modal.server-directory-modal .ant-modal-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.ant-modal.server-directory-modal .ant-modal-footer > * {
+  margin-inline-start: 0;
+}
+
+.ant-modal.server-directory-modal .ant-modal-title {
+  padding-right: 24px;
+}
+
+/* The picker uses Ant controls, with the same filled surfaces as the canvas.
+   Keep these rules scoped so loading the picker cannot restyle another view. */
+.server-directory-modal .ant-modal-header,
+.server-directory-modal .ant-modal-footer,
+.server-directory-modal .ant-modal-title {
+  border: 0;
+  background: transparent;
+  color: var(--text);
+}
+
+.server-directory-modal .ant-input,
+.server-directory-modal .ant-input-affix-wrapper,
+.server-directory-modal .ant-select-selector,
+.server-directory-modal .ant-select-outlined,
+.server-directory-modal .ant-btn-default,
+.server-directory-modal .ant-tree-checkbox-inner,
+.server-directory-modal .ant-checkbox-inner,
+.server-directory-modal .ant-typography code {
+  border: 0;
+  outline: none;
+  background-color: var(--ui-field-bg);
+  color: var(--text);
+  box-shadow: none;
+}
+
+.server-directory-modal .ant-input-affix-wrapper > .ant-input {
+  background: transparent;
+}
+
+.server-directory-modal .ant-input:focus,
+.server-directory-modal .ant-input-affix-wrapper:focus-within,
+.server-directory-modal .ant-select-focused .ant-select-selector,
+.server-directory-modal .ant-select-focused.ant-select-outlined {
+  outline: none;
+  background-color: var(--ui-focus-fill);
+  color: var(--ui-focus-text);
+  box-shadow: none;
+}
+
+.server-directory-modal .ant-input-affix-wrapper:focus-within > .ant-input {
+  background: transparent;
+}
+
+.server-directory-modal .ant-btn-default:not(:disabled):hover,
+.server-directory-modal .ant-btn:focus-visible,
+.server-directory-modal .ant-modal-close:focus-visible,
+.server-directory-modal .ant-tree-node-content-wrapper:focus-visible,
+.server-directory-modal .ant-tree-node-content-wrapper:has(:focus-visible),
+.server-directory-modal .ant-tree-switcher:focus-visible {
+  outline: none;
+  background-color: var(--ui-focus-fill);
+  color: var(--ui-focus-text);
+  box-shadow: none;
+}
+
+.server-directory-modal .ant-checkbox-input:focus-visible + .ant-checkbox-inner,
+.server-directory-modal .ant-tree-checkbox:focus-visible .ant-tree-checkbox-inner {
+  outline: none;
+  background-color: var(--ui-focus-fill);
+  box-shadow: none;
+}
+
+.server-directory-modal .ant-checkbox-wrapper:has(.ant-checkbox-input:focus-visible),
+.server-directory-modal .ant-tree .ant-tree-treenode-active .ant-tree-node-content-wrapper {
+  outline: none;
+  background: var(--ui-focus-fill);
+  color: var(--ui-focus-text);
+  box-shadow: none;
+}
+
+.server-directory-modal .ant-checkbox-checked .ant-checkbox-inner,
+.server-directory-modal .ant-tree-checkbox-checked .ant-tree-checkbox-inner {
+  background: var(--accent);
+}
+
+/* The tick is an icon drawn with two edges, not a control outline. */
+.server-directory-modal .ant-checkbox-checked .ant-checkbox-inner::after,
+.server-directory-modal .ant-tree-checkbox-checked .ant-tree-checkbox-inner::after {
+  border-width: 0 2px 2px 0;
+}
+
+.server-directory-modal .ant-checkbox-disabled .ant-checkbox-inner,
+.server-directory-modal .ant-tree-checkbox-disabled .ant-tree-checkbox-inner,
+.server-directory-modal .ant-btn:disabled {
+  background: var(--ui-control-fill);
+  color: var(--text-dim);
+  opacity: .5;
+}
+
+.server-directory-modal .ant-alert {
+  border: 0;
+  background: color-mix(in srgb, var(--bad) 10%, var(--surface));
+}
+
+.server-directory-modal .ant-tree {
+  background: transparent;
+  color: var(--text);
+}
+
+.server-directory-modal .ant-tree .ant-tree-node-content-wrapper:hover,
+.server-directory-modal .ant-tree .ant-tree-node-selected {
+  background: var(--ui-control-fill);
+  color: var(--text);
+}

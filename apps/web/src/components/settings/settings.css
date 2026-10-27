@@ -1,0 +1,115 @@
+/* Settings owns its layout and fields. No selector escapes this dialog. */
+.settings-backdrop { position: fixed; inset: 0; z-index: 60; background: #171b283b; backdrop-filter: blur(4px); transition: opacity 160ms ease; }
+.settings-dialog { position: fixed; z-index: 61; left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(1120px, calc(100vw - 48px)); height: min(620px, calc(100dvh - 64px)); max-height: calc(100dvh - 24px); display: flex; flex-direction: column; min-width: 0; overflow: hidden; border: 0; border-radius: var(--ui-radius-xl); background: var(--surface); color: var(--text); box-shadow: var(--ui-float-shadow); transition: opacity 160ms ease, scale 160ms ease; outline: none; }
+.settings-dialog *, .settings-dialog *::before, .settings-dialog *::after { box-sizing: border-box; }
+.settings-dialog[data-starting-style], .settings-dialog[data-ending-style] { opacity: 0; scale: .985; }
+.settings-backdrop[data-starting-style], .settings-backdrop[data-ending-style] { opacity: 0; }
+.settings-header { display: flex; flex: none; align-items: center; justify-content: space-between; gap: var(--ui-space-6); padding: var(--ui-space-5) var(--ui-space-6); border-bottom: 0; }
+.settings-header h2 { margin: 0 0 var(--ui-space-1); font-size: 1.25rem; line-height: 1.4; font-weight: 550; letter-spacing: -.4px; }
+.settings-header p { margin: 0; color: var(--muted); font-size: var(--ui-font-control); line-height: 20px; }
+.settings-close { display: grid; place-items: center; width: var(--ui-control-height); height: var(--ui-control-height); flex: none; padding: var(--ui-space-2); border: none; border-radius: var(--ui-radius-md); background: transparent; color: var(--muted); cursor: pointer; }
+.settings-close:hover { background: var(--ui-control-fill); color: var(--text); }
+.settings-close svg { width: var(--ui-icon-md); height: var(--ui-icon-md); }
+.settings-layout { display: grid; grid-template-columns: 232px minmax(0, 1fr); min-height: 0; flex: 1; }
+.settings-navigation { display: flex; flex-direction: column; gap: var(--ui-space-1); padding: var(--ui-space-4) var(--ui-space-3); border-right: 0; overflow-y: auto; overscroll-behavior: contain; }
+.settings-category { display: flex; align-items: center; gap: var(--ui-space-3); border: 0; padding: var(--ui-space-2) var(--ui-space-3); min-height: var(--ui-nav-height); width: 100%; border-radius: var(--ui-radius-md); text-align: left; background: transparent; color: var(--muted); font: inherit; font-size: var(--ui-font-control); line-height: 20px; cursor: pointer; }
+.settings-category > svg { flex: none; width: var(--ui-icon-md); height: var(--ui-icon-md); }
+.settings-category > span:first-of-type { flex: 1; }
+.settings-category:hover { color: var(--text); background: var(--ui-control-fill); }
+.settings-category[aria-current] { background: var(--accent-soft); color: var(--accent); }
+.settings-category-error { color: #b74d4d; font-weight: 700; }
+.settings-content { min-width: 0; overflow-y: auto; overflow-x: hidden; padding: var(--ui-space-6) var(--ui-space-8); scrollbar-gutter: stable; overscroll-behavior: contain; scroll-padding-block: var(--ui-space-4); }
+.settings-category-heading { margin-bottom: var(--ui-space-6); }
+.settings-category-heading h2 { margin: 0 0 var(--ui-space-2); font-size: 1.25rem; line-height: 1.4; font-weight: 500; letter-spacing: -.4px; }
+.settings-category-heading p { margin: 0; color: var(--muted); font-size: var(--ui-font-control); line-height: 20px; }
+.settings-section + .settings-section { border-top: 0; margin-top: var(--ui-space-6); padding-top: var(--ui-space-6); }
+.settings-section-heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--ui-space-2) var(--ui-space-4); margin-bottom: var(--ui-space-4); }
+.settings-section-heading h3 { margin: 0; font-size: 1rem; font-weight: 550; line-height: 1.5; }
+.settings-section-summary { color: var(--muted); font-size: var(--ui-font-caption); line-height: 20px; }
+.settings-section-content { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: var(--ui-space-4) var(--ui-space-6); }
+.settings-section-content > :not(.field), .settings-section-content > .field:has(textarea, .field-with-action) { grid-column: 1 / -1; }
+.settings-section-content .field { display: flex; flex-direction: column; min-width: 0; gap: var(--ui-space-2); margin: 0; }
+.settings-dialog .field-label { display: block; margin: 0; font-size: var(--ui-font-caption); line-height: 20px; color: var(--text); font-weight: 500; }
+.settings-dialog .field-note { display: block; margin: 0; color: var(--muted); font-size: var(--ui-font-caption); line-height: 20px; overflow-wrap: anywhere; }
+.settings-dialog .field-note code { overflow-wrap: anywhere; font-size: .92em; }
+.settings-dialog input:not([type=radio]):not([type=checkbox]), .settings-dialog select, .settings-dialog textarea { width: 100%; min-width: 0; min-height: var(--ui-control-height); padding: calc(var(--ui-space-1) + 1px) calc(var(--ui-space-3) + 1px); border: 0; border-radius: var(--ui-radius-md); background: var(--ui-field-bg); color: var(--text); font: inherit; font-size: var(--ui-font-control); line-height: 20px; box-shadow: none; }
+.settings-dialog select { text-overflow: ellipsis; }
+.settings-dialog textarea { resize: vertical; min-height: 100px; max-height: 300px; padding-block: var(--ui-space-2); }
+.settings-dialog textarea.mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+.settings-dialog input::placeholder, .settings-dialog textarea::placeholder { color: var(--muted); opacity: .8; }
+.settings-dialog .field-with-action { display: flex; gap: var(--ui-space-2); align-items: start; min-width: 0; }
+.settings-dialog .field-with-action > input { flex: 1; width: 0; }
+.settings-dialog .credential-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--ui-space-2); }
+.settings-dialog .field-grid-two { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--ui-space-4) var(--ui-space-6); }
+.settings-dialog .radio-row { display: flex; align-items: flex-start; gap: var(--ui-space-2); min-height: var(--ui-control-height); padding-block: var(--ui-space-1); margin: 0; color: var(--text); font-size: var(--ui-font-control); line-height: 24px; cursor: pointer; }
+.settings-dialog :is(input[type=checkbox], input[type=radio]) { appearance: none; border: 0; border-radius: 50%; background: var(--ui-control-fill); width: var(--ui-icon-md); height: var(--ui-icon-md); flex: none; margin: var(--ui-space-1) 0 0; }
+.settings-dialog :is(input[type=checkbox], input[type=radio]):checked { background: var(--accent); }
+.settings-subheading { margin: var(--ui-space-1) 0 0; font-size: var(--ui-font-control); line-height: 20px; font-weight: 550; }
+.settings-save-status { display: inline-flex; align-items: center; gap: var(--ui-space-2); color: var(--muted); font-size: var(--ui-font-xs); line-height: 16px; overflow-wrap: anywhere; }
+.settings-save-error { color: #b74d4d; flex-basis: 100%; }
+.settings-save-ok { color: var(--accent); }
+.settings-dialog .success-text { color: var(--accent); margin: 0; font-size: var(--ui-font-caption); line-height: 20px; }
+.settings-dialog .error-text { color: #b74d4d; font-size: var(--ui-font-caption); line-height: 20px; }
+.settings-dialog .inline-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--ui-space-3); }
+.settings-dialog .btn { display: inline-flex; align-items: center; justify-content: center; gap: var(--ui-space-2); border: 0; border-radius: var(--ui-radius-md); background: var(--ui-control-fill); color: var(--text); padding: calc(var(--ui-space-1) + 1px) calc(var(--ui-space-3) + 1px); min-height: var(--ui-control-height); font: inherit; font-size: var(--ui-font-control); line-height: 20px; cursor: pointer; white-space: normal; }
+.settings-dialog .btn svg { width: var(--ui-icon-md); height: var(--ui-icon-md); flex: none; }
+.settings-dialog .btn:hover { background: var(--canvas-soft); }
+.settings-dialog .btn-primary { background: var(--text); color: var(--surface); }
+.settings-dialog .btn-primary:hover { background: var(--accent); border: 0; }
+.settings-dialog .btn:disabled { opacity: .5; cursor: wait; }
+.settings-dialog .registry-info { display: grid; gap: var(--ui-space-4); }
+.settings-dialog .registry-info-row { display: grid; grid-template-columns: 128px minmax(0, 1fr); gap: var(--ui-space-4); font-size: var(--ui-font-caption); line-height: 20px; }
+.settings-dialog .registry-info-label { color: var(--muted); }
+.settings-dialog .registry-info-value { overflow-wrap: anywhere; }
+.settings-footer { flex: none; display: flex; align-items: center; justify-content: space-between; gap: var(--ui-space-4); padding: var(--ui-space-3) var(--ui-space-6); border-top: 0; color: var(--muted); font-size: var(--ui-font-xs); line-height: 16px; }
+.settings-close-warning { width: 100%; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--ui-space-2) var(--ui-space-4); }
+.settings-close-warning p { flex: 1; min-width: min(260px, 100%); margin: 0; color: var(--text); }
+.settings-close-warning > div { display: flex; flex-wrap: wrap; gap: var(--ui-space-2); }
+.settings-background-choices { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--ui-space-2); padding: 0; margin: 0; border: 0; min-width: 0; }
+.settings-background-choices legend { font-size: var(--ui-font-caption); line-height: 20px; font-weight: 500; padding: 0 0 var(--ui-space-2); }
+.settings-background-option { display: flex; align-items: start; gap: var(--ui-space-2); min-width: 0; min-height: var(--ui-control-height); padding: calc(var(--ui-space-3) + 1px); border: 0; border-radius: var(--ui-radius-lg); background: var(--ui-field-bg); cursor: pointer; }
+.settings-background-option:has(input:checked) { background: var(--accent-soft); border: 0; }
+.settings-background-option strong { display: block; font-size: var(--ui-font-control); line-height: 24px; font-weight: 500; }
+.settings-background-option small { display: block; margin-top: var(--ui-space-1); font-size: var(--ui-font-xs); line-height: 16px; color: var(--muted); }
+@media (max-width: 760px) {
+  .settings-dialog { width: calc(100vw - 24px); height: min(700px, calc(100dvh - 24px)); }
+  .settings-header { padding: var(--ui-space-4); }
+  .settings-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .settings-navigation { flex-direction: row; padding: var(--ui-space-2) var(--ui-space-3); border-right: 0; border-bottom: 0; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; }
+  .settings-category { width: auto; flex: none; white-space: nowrap; gap: var(--ui-space-2); }
+  .settings-content { padding: var(--ui-space-5) var(--ui-space-4); }
+  .settings-footer { padding: var(--ui-space-3) var(--ui-space-4); }
+  .settings-dialog input:not([type=radio]):not([type=checkbox]), .settings-dialog select, .settings-dialog textarea { font-size: var(--ui-font-input-touch); }
+}
+@media (max-width: 500px) {
+  .settings-section-content, .settings-dialog .field-grid-two, .settings-background-choices { grid-template-columns: minmax(0, 1fr); }
+  .settings-section-content { gap: var(--ui-space-4); }
+  .settings-dialog .registry-info-row { grid-template-columns: minmax(0, 1fr); gap: var(--ui-space-1); }
+  .settings-close-warning > div { width: 100%; }
+  .settings-close-warning .btn { flex: 1; }
+}
+@media (max-height: 520px) and (min-width: 761px) {
+  .settings-dialog { height: calc(100dvh - 24px); }
+  .settings-header { padding-block: var(--ui-space-3); }
+  .settings-navigation { padding-block: var(--ui-space-2); }
+}
+@media (pointer: coarse) {
+  .settings-dialog .radio-row { padding-block: var(--ui-space-2); }
+  .settings-dialog input:not([type=radio]):not([type=checkbox]), .settings-dialog select, .settings-dialog textarea { font-size: var(--ui-font-input-touch); }
+}
+@media (prefers-reduced-motion: reduce) { .settings-dialog, .settings-backdrop { transition: none; } }
+
+/* Filled states retain a visible keyboard target without drawing a ring. */
+.settings-dialog :is(button, a, input, select, textarea):focus-visible,
+.settings-dialog input:not([type=radio]):not([type=checkbox]):focus-visible,
+.settings-background-option:has(input:focus-visible), .settings-dialog .radio-row:has(input:focus-visible) { outline: none; box-shadow: none; background: var(--ui-focus-fill); color: var(--ui-focus-text); }
+.settings-background-option:has(input:focus-visible) small { color: inherit; }
+@media (forced-colors: active) {
+  .settings-dialog :is(input[type=checkbox], input[type=radio]) { forced-color-adjust: none; background: GrayText; }
+  .settings-dialog :is(input[type=checkbox], input[type=radio]):checked { background: Highlight; }
+  .settings-dialog :is(button, a, input, select, textarea):focus-visible,
+  .settings-dialog input:not([type=radio]):not([type=checkbox]):focus-visible,
+  .settings-background-option:has(input:focus-visible), .settings-dialog .radio-row:has(input:focus-visible) { forced-color-adjust: none; background: Highlight; color: HighlightText; }
+  .settings-dialog :is(button, a):focus-visible :is(small, .settings-toggle-description), .settings-background-option:has(input:focus-visible) small { color: inherit; }
+  .settings-dialog .settings-background-option:has(input:focus-visible) input { background: HighlightText; }
+}

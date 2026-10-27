@@ -12,10 +12,12 @@ import {
   panelGateDecision,
   panelGateRequest,
 } from "@brainstorm-agentic/protocol";
-import { errorMessage } from "../../api";
+import { errorMessage, getPanelEvidence } from "../../api";
 import { formatClock } from "../../format";
 import { SeatCard } from "../common";
 import { useRunAttended } from "../run-liveness";
+import { CoverageView } from "./CoverageView";
+import type { PanelEvidenceView } from "./coverage-model";
 
 /**
  * The auto-approve countdown: a thin warn-colored bar filling toward the
@@ -179,11 +181,14 @@ function CustomSeatBuilder({
 }
 
 export function GateCard({
+  jobId,
   pendingGate,
   fallbackMembers,
   onAnswer,
   onHold,
 }: {
+  /** Enables the coverage view (runs with a panelEvidence artifact only). */
+  jobId?: string;
   pendingGate?: PendingGateView;
   fallbackMembers?: readonly PanelMemberView[];
   onAnswer: (req: GateAnswerRequest) => Promise<void>;
@@ -200,6 +205,25 @@ export function GateCard({
   const [phase, setPhase] = useState<"idle" | "busy" | "resuming">("idle");
   const [error, setError] = useState<string | null>(null);
   const holdRequested = useRef(false);
+  // The coverage view (contract K): only runs whose bundle composes the panel
+  // from papers carry a panelEvidence artifact; for every other run the
+  // request answers 404 and the card renders exactly as before.
+  const [evidence, setEvidence] = useState<PanelEvidenceView | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setEvidence(null);
+    if (!jobId || !gateKey) return;
+    getPanelEvidence(jobId).then(
+      (view) => {
+        if (!cancelled) setEvidence(view);
+      },
+      () => undefined,
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [jobId, gateKey]);
 
   useEffect(() => {
     setChecked(new Set(idsKey ? idsKey.split("|") : []));
@@ -313,6 +337,16 @@ export function GateCard({
         </div>
       ) : (
         <p className="dim small">panel details unavailable</p>
+      )}
+      {evidence && members.length > 0 && (
+        <CoverageView
+          view={evidence}
+          members={members}
+          checked={checked}
+          added={addedSeats}
+          canAdd={phase === "idle" && !full}
+          onAddSeat={(seat) => setAddedSeats((current) => [...current, seat])}
+        />
       )}
       {phase === "resuming" ? (
         <p className="dim small">resuming…</p>

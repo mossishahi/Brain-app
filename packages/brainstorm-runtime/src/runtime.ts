@@ -7,6 +7,7 @@ import {
   InMemoryCheckpointStore,
   WorkflowRunner,
   createBuiltinExecutorRegistry,
+  type ActivityNode,
   type AgentExecutor,
   type ArtifactStore,
   type CheckpointStore,
@@ -20,6 +21,7 @@ import {
   type RunResult,
   type ScopeReader,
   WindDownSignal,
+  WorkflowCancelledError,
   type LivePreviewSink,
 } from "@brainstorm-agentic/core";
 
@@ -31,9 +33,12 @@ import {
 } from "./compiler.js";
 import type { HumanGateMode } from "./gates.js";
 import { MigratingCheckpointStore } from "./journal-migrate.js";
+import type { ReadGameFacts, ReadGameEvidence } from "./game-ledger.js";
 import type { BrainstormRouteResolver, CapabilityToolResolver } from "./routes.js";
 
 export interface BrainstormRuntimeOptions {
+  readonly readGameFacts?: ReadGameFacts;
+  readonly readGameEvidence?: ReadGameEvidence;
   readonly agentExecutor: AgentExecutor;
   /** Host-fetched, hash-verified, and validated registry bundle. */
   readonly bundle: ContentBundle;
@@ -88,6 +93,11 @@ export interface BrainstormRuntimeOptions {
    * with nothing in flight.
    */
   readonly windDown?: { readonly at: number; readonly reason: string };
+  /**
+   * The run's fact-table deletion epoch (fact updates, design 6.6), forwarded
+   * to CompileContentWorkflowOptions.factEpoch (D17).
+   */
+  readonly factEpoch?: () => number | Promise<number>;
 }
 
 export interface StartBrainstormOptions {
@@ -124,11 +134,27 @@ export interface ResumeBrainstormOptions {
  */
 function guardedExecutors(options: {
   readonly isAgentDismissed?: ((nodeId: string, scope: ScopeReader) => boolean) | undefined;
+  readonly canReplayDismissedAgent?: ((nodeId: string, scope: ScopeReader) => boolean) | undefined;
+  readonly game?: Pick<CompiledContentWorkflow, "gameReviewLedger" | "isGameLedgerActivity" | "isGameCriticExcluded">;
   readonly windDown?: { readonly at: number; readonly reason: string; readonly now: () => number };
 }): NodeExecutorRegistry | undefined {
   const { isAgentDismissed, windDown } = options;
-  if (isAgentDismissed === undefined && windDown === undefined) return undefined;
+  if (isAgentDismissed === undefined && windDown === undefined && options.game === undefined) return undefined;
   const executors = createBuiltinExecutorRegistry();
+  if (options.game !== undefined) {
+    const game = options.game;
+    const runActivity = executors.get("activity");
+    executors.register("activity", async (node, context) => {
+      if (node.kind !== "activity" || !game.isGameLedgerActivity((node as ActivityNode).activity)) return runActivity(node, context);
+      return game.gameReviewLedger.serialize(context.runId, async () => {
+        const value = await runActivity(node, context);
+        // effect() returns only after its checkpoint save. Other dispatches
+        // and settlements cannot observe an unrecorded balance change.
+        game.gameReviewLedger.commit(context.runId, value);
+        return value;
+      });
+    }, { override: true });
+  }
   const runAgent = executors.get("agent");
   executors.register(
     "agent",
@@ -139,6 +165,16 @@ function guardedExecutors(options: {
         id !== undefined &&
         isAgentDismissed(id, context.scope)
       ) {
+        // A completed game report remains evidence for its original round.
+        // Calling the builtin with a recorded result replays only that effect;
+        // it cannot build a task or purchase another model call.
+        if (options.canReplayDismissedAgent?.(id, context.scope) === true && context.lookupEffect("result").hit) {
+          return runAgent(node, context);
+        }
+        return undefined;
+      }
+      if (id !== undefined && options.game?.isGameCriticExcluded(id, context.scope, context.runId) === true) {
+        if (context.lookupEffect("result").hit) return runAgent(node, context);
         return undefined;
       }
       // Checked HERE, not once per run: a run that has been going for hours
@@ -194,6 +230,8 @@ export class BrainstormRuntime {
   constructor(options: BrainstormRuntimeOptions) {
     this.compiled = compileContentWorkflow({
       bundle: options.bundle,
+      readGameFacts: options.readGameFacts,
+      readGameEvidence: options.readGameEvidence,
       workflow: options.workflow,
       routeResolver: options.routeResolver,
       capabilityTools: options.capabilityTools,
@@ -212,6 +250,7 @@ export class BrainstormRuntime {
       ...(options.interdisciplinarySeat !== undefined
         ? { interdisciplinarySeat: options.interdisciplinarySeat }
         : {}),
+      ...(options.factEpoch !== undefined ? { factEpoch: options.factEpoch } : {}),
     });
     const checkpoints = options.checkpoints ?? new InMemoryCheckpointStore();
     // Loads migrate pre-fold (format-1) journals forward against this run's
@@ -224,6 +263,8 @@ export class BrainstormRuntime {
     this.artifacts = options.artifacts ?? new InMemoryArtifactStore();
     const executors = guardedExecutors({
       isAgentDismissed: this.compiled.isAgentDismissed,
+      canReplayDismissedAgent: this.compiled.canReplayDismissedAgent,
+      game: this.compiled,
       ...(options.windDown !== undefined
         ? {
             windDown: {
@@ -254,20 +295,57 @@ export class BrainstormRuntime {
   }
 
   run(options: StartBrainstormOptions): Promise<RunResult> {
-    return this.runner.run(this.compiled.definition, {
-      runId: options.runId,
-      input: this.compiled.createInput(options.submission, options.params),
-      signal: options.signal,
-      onEvent: options.onEvent,
-    });
+    return this.withFactUpdateRun(options.signal, () =>
+      this.runner.run(this.compiled.definition, {
+        runId: options.runId,
+        input: this.compiled.createInput(options.submission, options.params),
+        signal: options.signal,
+        onEvent: options.onEvent,
+      }),
+    );
   }
 
-  resume(runId: string, options: ResumeBrainstormOptions = {}): Promise<RunResult> {
-    return this.runner.resume(this.compiled.definition, runId, {
-      responses: options.responses,
-      signal: options.signal,
-      onEvent: options.onEvent,
-    });
+  async resume(runId: string, options: ResumeBrainstormOptions = {}): Promise<RunResult> {
+    const checkpoint = await this.checkpoints.load(runId);
+    this.compiled.gameReviewLedger.hydrate(runId, checkpoint?.journal ?? []);
+    return this.withFactUpdateRun(options.signal, () =>
+      this.runner.resume(this.compiled.definition, runId, {
+        responses: options.responses,
+        signal: options.signal,
+        onEvent: options.onEvent,
+      }),
+    );
+  }
+
+  /**
+   * One run or resume with the fact-update spawner's reconsideration tasks
+   * bound to it (decision D16): they abort when the caller cancels, and when
+   * the invocation ends failed or cancelled. A resume runs an aborted task
+   * again at its next merge point, as it does a failed one (D10). Without
+   * fact updates the invocation runs unchanged.
+   */
+  private async withFactUpdateRun(signal: AbortSignal | undefined, invoke: () => Promise<RunResult>): Promise<RunResult> {
+    const bind = this.compiled.bindFactUpdateRun;
+    if (bind === undefined) return invoke();
+    const invocation = new AbortController();
+    const cancel = (): void => invocation.abort(signal?.reason);
+    if (signal?.aborted === true) cancel();
+    else signal?.addEventListener("abort", cancel, { once: true });
+    bind(invocation.signal);
+    try {
+      const result = await invoke();
+      if (result.status === "failed") {
+        invocation.abort(Object.assign(new Error(result.error.message), { name: result.error.name }));
+      } else if (result.status === "cancelled") {
+        invocation.abort(new WorkflowCancelledError());
+      }
+      return result;
+    } catch (error) {
+      invocation.abort(error);
+      throw error;
+    } finally {
+      signal?.removeEventListener("abort", cancel);
+    }
   }
 }
 

@@ -7,9 +7,11 @@ import type {
   CapabilityCatalog,
   ConditionExpr,
   DepartmentsCatalog,
+  FactTableCatalog,
   LoadedInputTypes,
   ModelRoutes,
   Skill,
+  TaxonomyTexts,
   VerdictsCatalog,
   WorkflowDefinition,
   WorkflowNode,
@@ -100,6 +102,18 @@ export interface ContentBundle {
     departments: DepartmentsCatalog;
   };
   skills: Record<string, Skill>;
+  /**
+   * The optional catalog/taxonomy-texts.json control: the text of every
+   * taxonomy topic as the panel-composition encoders embed it. Absent in
+   * bundles that predate the paper-based panel stage.
+   */
+  taxonomyTexts?: TaxonomyTexts;
+  /**
+   * The optional catalog/fact-table.json control: the verifier role behind
+   * the run's fact table, the definitions rendered into its instructions,
+   * and the table's limits. Absent in bundles that predate the fact table.
+   */
+  readonly factTable?: FactTableCatalog;
 }
 
 export type IssueCode =
@@ -141,7 +155,9 @@ export type IssueCode =
   | "INPUT_TYPES_MIXED_FORMAT"
   | "OUTLINE_SHAPE_MISMATCH"
   | "OUTLINE_SECTION_STUB"
-  | "SHAPE_NOVELTY_CONTRADICTION";
+  | "SHAPE_NOVELTY_CONTRADICTION"
+  | "MISSING_CONTROL"
+  | "FACT_VERIFIER_RECURSION";
 
 export interface ValidationIssue {
   code: IssueCode;
@@ -390,6 +406,131 @@ function validateInputTypes(inputTypes: ContentBundle["catalogs"]["inputTypes"],
   }
 }
 
+/** The capability a skill declares to consult the run's fact table. */
+const FACT_TABLE_CAPABILITY = "fact-table";
+
+/** The vars the runtime binds into the fact table's verifier, exactly. */
+const FACT_VERIFIER_VARS: readonly string[] = [
+  "input",
+  "files",
+  "request",
+  "related",
+  "caseCatalog",
+  "methodCatalog",
+  "resolutionCatalog",
+];
+
+/** The vars the runtime binds into each fact-update reconsideration role, exactly. */
+const FACT_RECONSIDERATION_VARS: Readonly<Record<"chain" | "gameReport" | "comment", readonly string[]>> = {
+  chain: ["input", "files", "department", "umbrella", "subfields", "board", "chain", "previousOutput", "factUpdates", "totalSteps", "type", "shape", "shapeGuide"],
+  gameReport: ["input", "files", "department", "umbrella", "subfields", "shape", "chain", "currentStep", "type", "report", "factUpdates"],
+  comment: ["input", "files", "department", "umbrella", "subfields", "shape", "chain", "currentStep", "type", "comment", "factUpdates", "verdictOptions", "verdictCatalog"],
+};
+
+/**
+ * Consistency rules for the optional catalog/fact-table.json control.
+ *
+ * With the control present, its verifier must be a role the runtime can run
+ * on a submission: a role skill on a defined route whose output is the
+ * control's (factVerdict) and whose vars are exactly the ones the runtime
+ * binds — and one that does not declare the fact-table capability, itself or
+ * through a technique, because the verifier never reaches the table it
+ * serves. A pinned run loads roles lazily: a verifier the manifest lists but
+ * has not loaded yet is checked when its task is first built.
+ *
+ * Without the control, no skill may declare the fact-table capability:
+ * nothing would answer its submissions.
+ */
+function validateFactTable(
+  bundle: ContentBundle,
+  routeNames: ReadonlySet<string>,
+  availableRoleNames: ReadonlySet<string> | undefined,
+  issues: ValidationIssue[],
+): void {
+  const control = bundle.factTable;
+  if (control === undefined) {
+    for (const skill of Object.values(bundle.skills)) {
+      if (skill.meta.capabilities.includes(FACT_TABLE_CAPABILITY)) {
+        issues.push({
+          code: "MISSING_CONTROL",
+          path: `skill ${skill.meta.name}`,
+          message: `declares the "${FACT_TABLE_CAPABILITY}" capability, but the bundle carries no catalog/fact-table.json control to answer its submissions`,
+        });
+      }
+    }
+    return;
+  }
+  const roles: { label: string; declaration: { skill: string; route: string; output: string }; vars: readonly string[]; reconsideration?: string }[] = [
+    { label: "verifier", declaration: control.verifier, vars: FACT_VERIFIER_VARS },
+    ...(control.consultation !== undefined ? [{ label: "consultation", declaration: control.consultation, vars: ["input", "files", "request", "entries"] }] : []),
+    // The fact-update reconsideration roles: checked like the verifier, except
+    // that they may consult the table (they revise work that cites it).
+    ...(control.reconsideration !== undefined
+      ? (["chain", "gameReport", "comment"] as const).map((key) => ({
+          label: `reconsideration.${key}`, declaration: control.reconsideration![key], vars: FACT_RECONSIDERATION_VARS[key], reconsideration: key,
+        }))
+      : []),
+  ];
+  for (const { label, declaration, vars, reconsideration } of roles) {
+    const at = `catalog fact-table > ${label}`;
+    const { skill: name, route, output } = declaration;
+    if (!routeNames.has(route)) {
+      issues.push({ code: "MISSING_ROUTE", path: at, message: `route "${route}" is not defined in routes` });
+    }
+    const role = bundle.skills[name];
+    if (!role) {
+      if (!availableRoleNames?.has(name)) {
+        issues.push({ code: "MISSING_SKILL", path: at, message: `skill "${name}" does not exist` });
+      }
+      continue;
+    }
+    if (role.meta.kind !== "role") {
+      issues.push({
+        code: "WRONG_SKILL_KIND",
+        path: at,
+        message: reconsideration !== undefined
+          ? `skill "${name}" is a ${role.meta.kind} skill; a reconsideration role must be a role skill`
+          : `skill "${name}" is a ${role.meta.kind} skill; the verifier must be a role skill`,
+      });
+      continue;
+    }
+    if (role.meta.output !== output) {
+      issues.push({
+        code: "SKILL_OUTPUT_MISMATCH",
+        path: at,
+        message: reconsideration !== undefined
+          ? `the ${reconsideration} reconsideration role returns "${output}" but skill "${name}" declares output "${role.meta.output}"`
+          : `the verifier rules in "${output}" but skill "${name}" declares output "${role.meta.output}"`,
+      });
+    }
+    const declared = [
+      ...role.meta.capabilities,
+      ...role.meta.techniques.flatMap((technique) => bundle.skills[technique]?.meta.capabilities ?? []),
+    ];
+    if (reconsideration === undefined && declared.includes(FACT_TABLE_CAPABILITY)) {
+      issues.push({
+        code: "FACT_VERIFIER_RECURSION",
+        path: at,
+        message: `skill "${name}" declares the "${FACT_TABLE_CAPABILITY}" capability, itself or through a technique; the verifier never reaches the table it serves`,
+      });
+    }
+    for (const v of role.meta.vars) {
+      if (!vars.includes(v)) {
+        issues.push({ code: "UNBOUND_VAR", path: at, message: `skill var "${v}" is not bound by the fact table` });
+      }
+    }
+    for (const v of vars) {
+      if (!role.meta.vars.includes(v)) {
+        issues.push({
+          code: "UNKNOWN_BINDING",
+          path: at,
+          message: `the fact table binds "${v}", which skill "${name}" does not declare`,
+        });
+      }
+    }
+  }
+}
+
 export function validateBundle(
   bundle: ContentBundle,
   options: ValidateBundleOptions = {},
@@ -420,11 +561,13 @@ export function validateBundle(
         message: "workflow activities must be registered as deterministic",
       });
     }
+    // A declared bound must be well-formed; a handler whose output carries no
+    // input-sized collection (a retrieval or evidence record) declares none.
     if (
-      !handler.bounds ||
-      typeof handler.bounds.outputField !== "string" ||
-      typeof handler.bounds.maxItemsFromInput !== "string" ||
-      handler.inputs[handler.bounds.maxItemsFromInput]?.kind !== "positiveInteger"
+      handler.bounds !== undefined &&
+      (typeof handler.bounds.outputField !== "string" ||
+        typeof handler.bounds.maxItemsFromInput !== "string" ||
+        handler.inputs[handler.bounds.maxItemsFromInput]?.kind !== "positiveInteger")
     ) {
       issues.push({
         code: "UNBOUNDED_ACTIVITY",
@@ -440,7 +583,7 @@ export function validateBundle(
       });
     }
     for (const [name, input] of Object.entries(handler.inputs)) {
-      if (input.kind === "artifact" && !schemaNames.has(input.schema)) {
+      if ((input.kind === "artifact" || input.kind === "artifactCollection") && !schemaNames.has(input.schema)) {
         issues.push({
           code: "MISSING_SCHEMA",
           path: `${at} > input ${name}`,
@@ -530,6 +673,9 @@ export function validateBundle(
       }
     }
   }
+
+  // -- fact table (optional control) ----------------------------------------
+  validateFactTable(bundle, routeNames, options.availableRoleNames, issues);
 
   // -- workflows ------------------------------------------------------------
   for (const workflow of Object.values(bundle.workflows)) {
@@ -777,15 +923,23 @@ function validateWorkflow(
             message: `node expects schema "${node.output.schema}" but skill "${node.skill}" declares output "${skill.meta.output}"`,
           });
         }
-        // Bindings must cover the skill's declared vars exactly.
+        // Only these schema-specific payloads may come from the host: critic
+        // history must be private, and committee facts must be read live. A
+        // workflow cannot replace either one with an arbitrary state reference.
+        const hostVars = new Set(node.output.schema === "gameCritique" ? ["criticState"]
+          : node.output.schema === "gameCommitteeDecision" ? ["verifiedFacts"] : []);
         const bound = new Set(Object.keys(node.bind ?? {}));
         for (const v of skill.meta.vars) {
-          if (!bound.has(v)) {
+          if (hostVars.has(v) && !skill.meta.payload.includes(v)) {
+            issues.push({ code: "UNBOUND_VAR", path: at, message: `host var "${v}" must be declared as task payload` });
+          } else if (!bound.has(v) && !hostVars.has(v)) {
             issues.push({ code: "UNBOUND_VAR", path: at, message: `skill var "${v}" is not bound by this node` });
           }
         }
         for (const b of bound) {
-          if (!skill.meta.vars.includes(b)) {
+          if (hostVars.has(b)) {
+            issues.push({ code: "UNKNOWN_BINDING", path: at, message: `host payload "${b}" cannot be supplied by workflow.bind` });
+          } else if (!skill.meta.vars.includes(b)) {
             issues.push({
               code: "UNKNOWN_BINDING",
               path: at,
@@ -842,6 +996,36 @@ function validateWorkflow(
                 code: "ACTIVITY_INPUT_TYPE_MISMATCH",
                 path: at,
                 message: `input "${name}" requires artifact schema "${input.schema}", but "${sourceRoot}" does not produce it`,
+              });
+            }
+          } else if (input.kind === "artifactCollection") {
+            // The binding names the map, while a forEach producer writes one
+            // entry. Match that exact parent shape, not merely its state root.
+            const itemShape = typeof binding === "string"
+              ? outputKeyShape(`${binding}[*]`)
+              : undefined;
+            if (itemShape === undefined || !producedAt.get(itemShape)?.has(input.schema)) {
+              issues.push({
+                code: "ACTIVITY_INPUT_TYPE_MISMATCH",
+                path: at,
+                message: `input "${name}" requires a keyed collection of "${input.schema}" artifacts`,
+              });
+            }
+          } else if (input.kind === "params") {
+            if (binding !== "params") {
+              issues.push({
+                code: "ACTIVITY_INPUT_TYPE_MISMATCH",
+                path: at,
+                message: `input "${name}" must bind the whole workflow params object as "params"`,
+              });
+            }
+          } else if (input.kind === "param") {
+            const match = typeof binding === "string" ? /^params\.([A-Za-z_][A-Za-z0-9_]*)$/.exec(binding) : null;
+            if (!match || workflow.params[match[1]!] === undefined) {
+              issues.push({
+                code: "ACTIVITY_INPUT_TYPE_MISMATCH",
+                path: at,
+                message: `input "${name}" must bind directly to a declared workflow param as params.<name>`,
               });
             }
           } else {
@@ -984,6 +1168,8 @@ function checkRef(ref: string, scope: Set<string>, inRepeatUntil: boolean, ctx: 
 
   if (root === SESSION_ROOT) return;
   if (root === "params") {
+    // The bare root is the whole params object (an activity's "params" input).
+    if (segments.length === 1 && ref === "params") return;
     if (segments.length < 2 || !ctx.paramNames.has(segments[1]!)) {
       ctx.issues.push({
         code: "UNKNOWN_PARAM",

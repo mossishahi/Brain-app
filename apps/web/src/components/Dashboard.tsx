@@ -15,6 +15,7 @@ import type {
 } from "@brainstorm-agentic/protocol";
 import {
   answerGate,
+  answerNeedsGate,
   cacheJobDetail,
   cachedJobDetail,
   cancelJob,
@@ -63,6 +64,8 @@ import {
 import { DecomposeBody } from "./panels/DecomposePanel";
 import { SelectPanelBody } from "./panels/SelectPanelPanel";
 import { GateCard, GateDecided } from "./panels/ConfirmPanelPanel";
+import { NeedsGateCard } from "./panels/NeedsGateCard";
+import type { NeedsGateAnswer } from "./panels/needs-model";
 import {
   DECOMPOSE_ROLES,
   PROCESS_INPUT_ROLES,
@@ -72,11 +75,12 @@ import {
   seatlessLiveByRole,
   type LiveThread,
 } from "./live-threads";
-import { FirstPassBody } from "./panels/FirstPassPanel";
+import { FirstPassStagePanels } from "./panels/FirstPassPanel";
 import { ReviewStagePanels } from "./panels/ReviewPanel";
 import { BridgeAuditBody } from "./panels/BridgeAuditPanel";
 import { ProposalActions, ProposalBody } from "./panels/ProposalPanel";
 import { DoneBody } from "./panels/DonePanel";
+import { FactTablePanel } from "./panels/FactTablePanel";
 import { ToolUsagePanel } from "./panels/ToolUsagePanel";
 
 function stageOf<K extends StageId>(
@@ -101,8 +105,21 @@ function useNow(enabled: boolean): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!enabled) return;
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
+    let timer: number | undefined;
+    const visibility = () => {
+      if (timer !== undefined) window.clearInterval(timer);
+      timer = undefined;
+      if (!document.hidden) {
+        setNow(Date.now());
+        timer = window.setInterval(() => setNow(Date.now()), 1000);
+      }
+    };
+    visibility();
+    document.addEventListener("visibilitychange", visibility);
+    return () => {
+      if (timer !== undefined) window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", visibility);
+    };
   }, [enabled]);
   return now;
 }
@@ -335,10 +352,14 @@ function useRunControl(job: JobDetail | null, jobId: string) {
 export function Dashboard({
   jobId,
   initialStage,
+  onNavigateStage,
+  onGoHome,
 }: {
   jobId: string;
   /** Deep-linked stage page (#/jobs/<id>/stage/<stageId>), when given. */
   initialStage?: string;
+  onNavigateStage: (stage: StageId) => void;
+  onGoHome: () => void;
 }) {
   // Start from the cached/prefetched snapshot so navigation paints instantly.
   const [job, setJob] = useState<JobDetail | null>(
@@ -351,6 +372,9 @@ export function Dashboard({
       ? (initialStage as StageId)
       : null,
   );
+  useEffect(() => {
+    setPinned(initialStage !== undefined && (STAGE_IDS as readonly string[]).includes(initialStage) ? initialStage as StageId : null);
+  }, [initialStage]);
   // Stages fold by id; the set starts empty so every panel opens expanded.
   const [collapsed, setCollapsed] = useState<ReadonlySet<StageId>>(() => new Set());
   const [confirmCancelResume, setConfirmCancelResume] = useState(false);
@@ -387,7 +411,7 @@ export function Dashboard({
   const [live, setLive] = useState<ReadonlyMap<string, LiveThread>>(new Map());
   const connected = useServerEvents(jobStreamUrl(jobId), (ev) => {
     if (ev.type === "job" && ev.job.jobId === jobId) {
-      setJob(ev.job);
+      setJob((previous) => previous && previous.updatedAt > ev.job.updatedAt ? previous : ev.job);
       cacheJobDetail(ev.job);
       setLoadError(null);
     }
@@ -442,10 +466,7 @@ export function Dashboard({
 
   const activeStage: StageId = job ? pickDefaultStage(job) : "process-input";
   const selected: StageId = pinned ?? activeStage;
-  const jobLoaded = job !== null;
-  const terminal =
-    job?.status === "completed" || job?.status === "failed" || job?.status === "cancelled";
-  const now = useNow(jobLoaded && !terminal);
+  const now = useNow(job !== null && (runIsLive(job.status) || (job.status === "credit-blocked" && job.creditBlock?.retryAt !== undefined)));
 
   // Stages render as side-by-side PAGES; the pipeline graph above is the
   // navigation spine (auto-following the active stage until the user pins
@@ -455,6 +476,8 @@ export function Dashboard({
   // backward turn, and changing an animation class on a mounted element
   // restarts the animation — the page visibly loaded twice.
   const selectedIndex = Math.max(0, STAGE_IDS.indexOf(selected));
+  const previousStage = STAGE_IDS[selectedIndex - 1];
+  const backLabel = previousStage ? `Back to ${STAGE_TITLES[previousStage]}` : "Back to home";
   const transitionRef = useRef<{
     index: number;
     direction: "forward" | "backward";
@@ -479,6 +502,8 @@ export function Dashboard({
 
   const onSelectStage = useCallback((id: StageId) => {
     setPinned(id);
+    // Keep the displayed stage addressable on refresh and browser navigation.
+    onNavigateStage(id);
     // Selecting a node in the pipeline graph turns its page — and lands it
     // unfolded, whatever its previous fold state was.
     setCollapsed((prev) => {
@@ -487,11 +512,19 @@ export function Dashboard({
       next.delete(id);
       return next;
     });
-  }, []);
+  }, [onNavigateStage]);
 
   const onGateAnswer = useCallback(
     async (req: GateAnswerRequest) => {
       const detail = await answerGate(jobId, req);
+      setJob(detail);
+    },
+    [jobId],
+  );
+
+  const onNeedsAnswer = useCallback(
+    async (req: NeedsGateAnswer) => {
+      const detail = await answerNeedsGate(jobId, req);
       setJob(detail);
     },
     [jobId],
@@ -569,7 +602,7 @@ export function Dashboard({
         <div className={NO_RUN_PAGE}>
           <div className="page-error">
             <p>Could not load this job: {loadError}</p>
-            <a href="#/">← back to all jobs</a>
+            <a href="#/history">Open research history</a>
           </div>
         </div>
       );
@@ -579,8 +612,10 @@ export function Dashboard({
 
   const stageMap = new Map<StageId, StageView>(job.stages.map((s) => [s.id, s]));
   const reviewStage = stageOf(job, "review-members");
+  const firstPassStage = stageOf(job, "first-pass");
   const confirmStage = stageOf(job, "confirm-panel");
   const selectStage = stageOf(job, "select-panel");
+  const plannedStepCount = stageOf(job, "process-input")?.output?.cotSteps;
   const proposalStage = stageOf(job, "synthesize-proposal");
   const removedIds: ReadonlySet<string> = new Set(confirmStage?.gate.removedMemberIds ?? []);
   const anyStageFailed = job.stages.some((s) => s.status === "failed");
@@ -613,6 +648,16 @@ export function Dashboard({
               <ClassificationGateCard
                 pendingGate={job.pendingGate}
                 onAnswer={onGateAnswer}
+                onHold={onGateHold}
+              />
+            )}
+            {/* The optional needs confirmation (askUserToConfirmNeeds) is
+                reached right after the classification, on this stage too. */}
+            {job.pendingGate?.gateKey === "confirm-needs" && (
+              <NeedsGateCard
+                jobId={jobId}
+                pendingGate={job.pendingGate}
+                onAnswer={onNeedsAnswer}
                 onHold={onGateHold}
               />
             )}
@@ -662,6 +707,7 @@ export function Dashboard({
         if (stage.gate.state === "pending") {
           return (
             <GateCard
+              jobId={jobId}
               pendingGate={job.pendingGate}
               fallbackMembers={selectStage?.panel}
               onAnswer={onGateAnswer}
@@ -671,15 +717,10 @@ export function Dashboard({
         }
         return <GateDecided gate={stage.gate} panel={selectStage?.panel} />;
       }
-      case "first-pass": {
-        const stage = stageOf(job, id);
-        return stage && stage.members.length > 0 ? (
-          <FirstPassBody members={stage.members} live={liveByThinker} jobId={jobId} />
-        ) : null;
-      }
+      case "first-pass":
       case "review-members":
-        // The review stage renders as two detached panels through
-        // ReviewStagePanels in the pager below, not through this body switch.
+        // Committee stages compose the standalone table beside their output
+        // frame in the pager below, rather than nesting it inside this body.
         return null;
       case "bridge-audit": {
         const stage = stageOf(job, id);
@@ -717,9 +758,17 @@ export function Dashboard({
         />
       )}
       <header className="dash-header">
-        <a href="#/" className="ghost-btn" aria-label="back to all jobs">
+        <button
+          type="button"
+          className="ghost-btn"
+          data-dashboard-back
+          data-library-navigation
+          aria-label={backLabel}
+          title={backLabel}
+          onClick={() => previousStage ? onSelectStage(previousStage) : onGoHome()}
+        >
           <BackIcon />
-        </a>
+        </button>
         {/* The name follows the run: the worked-out title once processing is
             done, the submitted text before that — which stays on hover. */}
         <h1 className="dash-title" title={job.topic}>
@@ -981,17 +1030,25 @@ export function Dashboard({
               key={selected}
               className={`stage-page stage-page-${slideDirection}`}
             >
-              {selected === "review-members" && reviewStage && reviewStage.members.length > 0 ? (
-                // The review stage splits into two detached panels (grid +
-                // walk inspector) with the page background visible between
-                // them; the first-pass stage seeds the inspector's change
-                // tracking so every diff reaches back to the original chain.
+              {selected === "first-pass" && firstPassStage && firstPassStage.members.length > 0 ? (
+                <FirstPassStagePanels
+                  jobId={jobId}
+                  members={firstPassStage.members}
+                  live={liveByThinker}
+                  plannedStepCount={plannedStepCount}
+                  expanded={firstPassStage.status !== "pending" && !collapsed.has(selected)}
+                  frame={frame}
+                />
+              ) : selected === "review-members" && reviewStage && reviewStage.members.length > 0 ? (
+                // The table and review details are sibling cards. The first
+                // pass seeds the inspector's original chain for every diff.
                 <ReviewStagePanels
                   jobId={job.jobId}
                   stage={reviewStage}
                   live={liveByReviewedSeat}
-                  firstPass={stageOf(job, "first-pass")}
-                  expanded={!collapsed.has(selected)}
+                  firstPass={firstPassStage}
+                  plannedStepCount={plannedStepCount}
+                  expanded={reviewStage.status !== "pending" && !collapsed.has(selected)}
                   frame={frame}
                   topic={job.topic}
                   {...(dismissable ? { onDismiss: onDismissMember } : {})}
@@ -1007,6 +1064,9 @@ export function Dashboard({
                 the receipt in that body would hide it from exactly the runs whose
                 agents are most likely to have been missing something.
               */}
+              {selected === "done" && (
+                <FactTablePanel key={jobId} table={stageOf(job, "done")?.factTable} />
+              )}
               {selected === "done" && (
                 <ToolUsagePanel
                   jobId={jobId}

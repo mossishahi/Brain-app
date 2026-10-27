@@ -38,20 +38,43 @@ interface ParsedRecord {
   readonly taskId?: unknown;
   readonly agentId?: unknown;
   readonly nodePath?: unknown;
+  readonly route?: unknown;
+  readonly redacted?: unknown;
+  readonly costUsd?: unknown;
 }
+
+/** Every tool the web layer logs (web_check: the launch availability check). */
+const LOGGED_TOOLS = [
+  "web_search",
+  "news_search",
+  "paper_search",
+  "paper_details",
+  "web_fetch",
+  "web_check",
+] as const;
+export type SearchLogTool = (typeof LOGGED_TOOLS)[number];
 
 /** One row of the unified search table. */
 export interface SearchTableRow {
   readonly id: string;
   readonly at: number;
-  readonly tool: "web_search" | "web_fetch";
+  readonly tool: SearchLogTool;
   readonly outcome: "ok" | "cached" | "coalesced" | "error";
-  /** The query searched, or the URL fetched — the call's subject. */
+  /** The query searched, the identifiers looked up, or the URL fetched. */
   readonly subject: string;
   readonly kind?: string;
   readonly provider?: string;
-  /** Result count (search) or delivered characters (fetch). */
+  /**
+   * Results (searches), papers (paper tools), delivered characters (fetch),
+   * or sources checked (web_check).
+   */
   readonly resultCount?: number;
+  /** The coordinator's route: web, news, paper-lookup, paper-topic, paper-details. */
+  readonly route?: string;
+  /** Metered cost in USD (the paid fallback only). */
+  readonly costUsd?: number;
+  /** The provider's terms forbid keeping results: only URL hashes were logged. */
+  readonly redacted?: boolean;
   readonly elapsedMs: number;
   readonly error?: string;
   /**
@@ -95,6 +118,37 @@ export function readSearchLogText(sessionDir: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** The call's subject: what was searched, looked up, or fetched. */
+function subjectOf(tool: SearchLogTool, request: { readonly [key: string]: unknown }): string {
+  if (tool === "web_fetch") return str(request.url) ?? "";
+  if (tool === "web_check") return "launch check";
+  if (tool === "paper_details") {
+    return Array.isArray(request.ids)
+      ? request.ids.filter((id): id is string => typeof id === "string").join(", ")
+      : "";
+  }
+  if (tool === "paper_search" && str(request.query) === undefined) {
+    const native = request.native;
+    return typeof native === "object" && native !== null
+      ? (str((native as { query?: unknown }).query) ?? "")
+      : "";
+  }
+  return str(request.query) ?? "";
+}
+
+/** How much the call delivered, per tool (see SearchTableRow.resultCount). */
+function countOf(tool: SearchLogTool, response: unknown): number | undefined {
+  if (typeof response !== "object" || response === null) return undefined;
+  if (Array.isArray(response)) return tool === "web_check" ? response.length : undefined;
+  const record = response as { readonly [key: string]: unknown };
+  if (tool === "web_fetch") return typeof record.text === "string" ? record.text.length : undefined;
+  if (tool === "paper_search" || tool === "paper_details") {
+    return Array.isArray(record.papers) ? record.papers.length : undefined;
+  }
+  if (Array.isArray(record.results)) return record.results.length;
+  return typeof record.resultCount === "number" ? record.resultCount : undefined;
 }
 
 /** The named failures one record carries, as "who: why" strings. */
@@ -144,24 +198,16 @@ export function readSearchTable(sessionDir: string): SearchTable {
     const outcome = parsed.outcome;
     if (
       id === undefined ||
-      (tool !== "web_search" && tool !== "web_fetch") ||
+      typeof tool !== "string" ||
+      !(LOGGED_TOOLS as readonly string[]).includes(tool) ||
       (outcome !== "ok" && outcome !== "cached" && outcome !== "coalesced" && outcome !== "error")
     ) {
       continue;
     }
+    const loggedTool = tool as SearchLogTool;
     const request = parsed.request ?? {};
-    const subject =
-      tool === "web_search" ? (str(request.query) ?? "") : (str(request.url) ?? "");
-    const response = parsed.response;
-    let resultCount: number | undefined;
-    if (tool === "web_search" && typeof response === "object" && response !== null) {
-      const results = (response as { results?: unknown }).results;
-      if (Array.isArray(results)) resultCount = results.length;
-    }
-    if (tool === "web_fetch" && typeof response === "object" && response !== null) {
-      const text = (response as { text?: unknown }).text;
-      if (typeof text === "string") resultCount = text.length;
-    }
+    const subject = subjectOf(loggedTool, request);
+    const resultCount = countOf(loggedTool, parsed.response);
     const failures = failuresOf(parsed);
     for (const cause of failures) countFailure(cause);
     const error = str(parsed.error);
@@ -171,7 +217,7 @@ export function readSearchTable(sessionDir: string): SearchTable {
     entries.push({
       id,
       at: typeof parsed.at === "number" ? parsed.at : 0,
-      tool,
+      tool: loggedTool,
       outcome,
       subject,
       ...(str(request.kind) !== undefined ? { kind: str(request.kind) } : {}),
@@ -184,6 +230,9 @@ export function readSearchTable(sessionDir: string): SearchTable {
       ...(str(parsed.taskId) !== undefined ? { taskId: str(parsed.taskId) } : {}),
       ...(str(parsed.agentId) !== undefined ? { agentId: str(parsed.agentId) } : {}),
       ...(str(parsed.nodePath) !== undefined ? { nodePath: str(parsed.nodePath) } : {}),
+      ...(str(parsed.route) !== undefined ? { route: str(parsed.route) } : {}),
+      ...(typeof parsed.costUsd === "number" ? { costUsd: parsed.costUsd } : {}),
+      ...(parsed.redacted === true ? { redacted: true } : {}),
     });
   }
   const failureSummary = [...failureCounts.entries()]
@@ -215,6 +264,8 @@ export function searchTableCsv(table: SearchTable): string {
     "cache_key",
     "error",
     "failures",
+    "route",
+    "cost_usd",
   ].join(",");
   const rows = table.entries.map((row) =>
     [
@@ -232,6 +283,8 @@ export function searchTableCsv(table: SearchTable): string {
       csvCell(row.cacheKey),
       csvCell(row.error),
       csvCell(row.failures),
+      csvCell(row.route),
+      csvCell(row.costUsd),
     ].join(","),
   );
   return [header, ...rows].join("\r\n") + "\r\n";

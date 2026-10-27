@@ -1,0 +1,30 @@
+.quick-editor-positioner { z-index: 80; max-width: calc(100vw - 24px); outline: none; }
+.quick-editor { width: min(380px, calc(100vw - 24px)); max-height: min(680px, var(--available-height, calc(100dvh - 24px))); overflow: auto; overscroll-behavior: contain; box-sizing: border-box; padding: calc(var(--ui-space-4) + 1px); background: var(--surface); color: var(--text); border: 0; border-radius: var(--ui-radius-lg); box-shadow: var(--ui-float-shadow); outline: none; font-size: var(--ui-font-control); }
+.quick-editor header { display: flex; align-items: center; gap: 12px; }
+.quick-editor header h2 { margin: 0; font-size: 15px; font-weight: 550; flex: 1; }
+.quick-editor header button { display: grid; place-items: center; padding: 0; width: var(--ui-compact-target); min-height: var(--ui-compact-target); border: 0; background: transparent; color: var(--text-dim); }
+.quick-editor header svg { width: var(--ui-icon-md); height: var(--ui-icon-md); }
+.quick-editor > p { color: var(--text-dim); font-size: var(--ui-font-caption); line-height: 1.6; margin: 8px 0 16px; }
+.quick-editor-body { display: flex; flex-direction: column; gap: 14px; }
+.quick-editor-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.quick-editor-field label { font-weight: 500; }
+.quick-editor-field input,.quick-editor-field select { width: 100%; box-sizing: border-box; min-height: var(--ui-control-height); border: 0; border-radius: var(--ui-radius-sm); color: var(--text); background: var(--ui-field-bg); padding: 7px 9px; font: inherit; }
+.quick-editor-field small { color: var(--text-dim); font-size: var(--ui-font-xs); line-height: 1.6; }
+.quick-editor footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.quick-editor button { cursor: pointer; border-radius: var(--ui-radius-sm); }
+.quick-editor footer button { font: inherit; color: var(--text); background: var(--ui-control-fill); border: 0; min-height: var(--ui-control-height); padding: 5px 13px; }
+.quick-editor footer .quick-editor-apply { background: var(--canvas-soft); color: var(--accent); border: 0; }
+.quick-editor button:disabled { opacity: .55; cursor: default; }
+.quick-editor-error { color: var(--bad, #c04d59); margin: 0; line-height: 1.5; }
+.quick-editor-details { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px 16px; margin: 0; line-height: 1.5; }
+.quick-editor-details dt { color: var(--text-dim); }.quick-editor-details dd { margin: 0; overflow-wrap: anywhere; }
+.quick-editor pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.6; }
+.quick-editor summary { cursor: pointer; color: var(--accent); }
+.quick-editor :is(button, input, select, summary):focus-visible { outline: none; box-shadow: none; background: var(--ui-focus-fill); color: var(--ui-focus-text); }
+.quick-editor :is(button, summary):hover { background: var(--ui-control-fill); }
+.quick-editor :is(button, summary):hover:focus-visible { background: var(--ui-focus-fill); }
+@media (pointer: coarse), (max-width: 640px) { .quick-editor-field input,.quick-editor-field select { font-size: var(--ui-font-input-touch); } }
+
+@media (forced-colors: active) {
+  .quick-editor :is(button, input, select, summary):focus-visible { forced-color-adjust: none; background: Highlight; color: HighlightText; }
+}

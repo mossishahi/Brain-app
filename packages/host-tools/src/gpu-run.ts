@@ -5,9 +5,9 @@
  * (partition, GPU count, environment setup) with an {{AGENT_COMMAND}} tag
  * where the agent's script belongs. This tool splices the agent's script in
  * VERBATIM, submits the rendered script with a host-enforced wall-clock
- * ceiling, waits for the job to finish, and returns the job's complete
- * stdout/stderr log exactly as the script printed it — the agent owns the
- * structure of its own output.
+ * ceiling, waits for the job to finish, and returns a bounded stdout/stderr
+ * tail. Each task has a durable submission budget; unresolved jobs block
+ * replacement submissions, including after a worker restart.
  *
  * The failure contract is deliberate and explicit: a failed job comes back
  * as a BUG REPORT addressed to the submitting agent — the diagnostic log,
@@ -17,13 +17,20 @@
  */
 import {
   existsSync,
+  closeSync,
   mkdirSync,
-  readdirSync,
+  mkdtempSync,
+  openSync,
+  readSync,
   readFileSync,
+  readdirSync,
+  rmdirSync,
   statSync,
+  renameSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
 
 import type {
   HostToolManifest,
@@ -50,7 +57,7 @@ const SCHEDULER_COMMAND_TIMEOUT_MS = 30_000;
 /** Default allowance for the job to WAIT in the queue before it runs. */
 const DEFAULT_MAX_QUEUE_WAIT_MS = 15 * 60_000;
 
-/** Grace between "job left the queue" and judging its final state. */
+/** Local-filesystem grace after queue exit; never delays the first accounting query. */
 const DEFAULT_QUEUE_GONE_GRACE_MS = 15_000;
 
 /**
@@ -73,6 +80,7 @@ const DEFAULT_RUNNING_SCHEDULER_POLL_MS = 300_000;
 
 /** Job states that mean the probe is still on its way through the queue. */
 const LIVE_STATES = /^(PENDING|CONFIGURING|RUNNING|COMPLETING|SUSPENDED|RESIZING)/i;
+const TERMINAL_STATES = /^(BOOT_FAIL|CANCELLED|COMPLETED|DEADLINE|FAILED|NODE_FAIL|OUT_OF_MEMORY|PREEMPTED|REVOKED|SPECIAL_EXIT|TIMEOUT)(?:\+|$)/i;
 
 export type RunSchedulerCommand = (
   command: string,
@@ -85,6 +93,8 @@ export interface GpuRunConfig {
   readonly template: string;
   /** Deployment ceiling for one job's wall-clock runtime, in minutes. */
   readonly timeLimitMinutes: number;
+  /** Durable submission ceiling per run/task. Defaults to two attempts. */
+  readonly maxSubmissionsPerTask?: number;
   /** Directory job scripts, logs, and script-written files live under. */
   readonly jobsRoot: string;
   /** Environment for scheduler commands (scrubbed before use). */
@@ -104,6 +114,11 @@ export interface GpuRunConfig {
   /** Test seams: clock and sleep. */
   readonly now?: () => number;
   readonly sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  /** Observational hooks for setup/probe progress; never authorize execution. */
+  readonly onSubmitted?: (job: { jobId: string; cluster?: string; jobDir: string }) => void;
+  readonly onState?: (job: { jobId: string; state: string; detail?: string }) => void;
+  /** sbatch may have accepted a job before its reply was lost; blocks retries. */
+  readonly onSubmissionUnknown?: (job: { submissionToken: string; jobDir: string; jobId?: string; cluster?: string }) => void;
 }
 
 /**
@@ -114,7 +129,8 @@ export interface GpuRunConfig {
  * a "CLUSTER: X" banner line that state parsers must ignore.
  */
 export function slurmClusterFrom(sbatchStdout: string): string | undefined {
-  return /Submitted batch job\s+\S+\s+on cluster\s+(\S+)/.exec(sbatchStdout)?.[1];
+  return /Submitted batch job\s+\S+\s+on cluster\s+(\S+)/.exec(sbatchStdout)?.[1]
+    ?? /^\d+;([A-Za-z0-9_.-]+)$/m.exec(sbatchStdout.trim())?.[1];
 }
 
 /** Drops "CLUSTER: X" banner lines from squeue/sacct output. */
@@ -128,6 +144,14 @@ export function stripSlurmClusterBanners(output: string): string {
 /** The -M argument list for a captured cluster (empty when single-cluster). */
 export function slurmClusterArgs(cluster: string | undefined): readonly string[] {
   return cluster === undefined ? [] : ["-M", cluster];
+}
+
+/** Exact ownership match for squeue -h -u USER -o %i|%k reconciliation. */
+export function gpuSubmissionJobIds(output: string, submissionToken: string): readonly string[] {
+  return [...new Set(stripSlurmClusterBanners(output).split("\n").flatMap((line) => {
+    const [id = "", comment = ""] = line.trim().split("|");
+    return /^\d+$/.test(id.trim()) && comment.trim() === submissionToken ? [id.trim()] : [];
+  }))];
 }
 
 /** Splices the agent's script into the user's template, verbatim. */
@@ -149,11 +173,11 @@ export function renderGpuTemplate(template: string, script: string): string {
 function bugReport(jobId: string, state: string): string {
   return (
     `GPU job ${jobId} ended in state ${state}. This result is a bug report addressed to ` +
-    "you, the submitter: the log above is the complete diagnostic. Debug your script from " +
-    "it, fix the bug, and RESUBMIT the corrected script with another gpu_run call — " +
-    "resubmitting is safe and expected while you resolve the bug (each submission gets a " +
-    "fresh job directory). If the log shows a scheduler or partition problem rather than " +
-    "a bug in your script, report that in your output instead of retrying blindly."
+    "you, the submitter: the log above is a bounded diagnostic tail. If it demonstrates " +
+    "a script bug, correct it before considering another submission within the task's " +
+    "remaining budget (two attempts by default). A scheduler or partition problem " +
+    "requires deployment recovery; report it rather than retrying blindly. Never " +
+    "resubmit while an earlier job has an unresolved state."
   );
 }
 
@@ -186,23 +210,92 @@ function refusal(message: string): ToolResult {
   return { output: message, isError: true };
 }
 
+interface JobReservation {
+  readonly jobDir: string;
+  readonly submissionToken: string;
+  readonly record: Record<string, unknown>;
+}
+
+/**
+ * Reserve the attempt durably before the first asynchronous operation. The
+ * exclusive directory also serializes separate workers on shared storage.
+ * A crash while reserving leaves a lock for explicit inspection, never a
+ * silent budget reset or a replacement allocation.
+ */
+function reserveJob(config: GpuRunConfig, runId: string, taskId: string | undefined, script: string, createdAt: number): JobReservation | ToolResult {
+  mkdirSync(config.jobsRoot, { recursive: true });
+  let lock: string | undefined;
+  if (taskId !== undefined) {
+    const root = join(config.jobsRoot, ".task-locks");
+    mkdirSync(root, { recursive: true });
+    const key = createHash("sha256").update(JSON.stringify([runId, taskId])).digest("hex");
+    const path = join(root, key);
+    try { mkdirSync(path); lock = path; }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      return { isError: true, output: { failure: "task-reservation-busy", runId, taskId, lockPath: path,
+        message: "Another worker is reserving a GPU attempt for this task, or a reservation was interrupted. Inspect its lock and existing job records before retrying; no new job was submitted." } };
+    }
+  }
+  try {
+    if (taskId !== undefined) {
+      const records: Array<{ path: string; value: Record<string, unknown> }> = [];
+      for (const name of readdirSync(config.jobsRoot).filter((entry) => entry.startsWith("job-"))) {
+        const path = join(config.jobsRoot, name, "job-state.json");
+        try {
+          const value = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+          if (value.runId === runId && value.taskId === taskId) records.push({ path, value });
+        } catch {
+          return { isError: true, output: { failure: "job-record-unreadable", recordPath: path,
+            message: "A previous GPU job record cannot be read. Inspect it before submitting another job; its ownership and completion cannot be verified." } };
+        }
+      }
+      const unresolved = records.find(({ value }) => typeof value.state !== "string"
+        || (!TERMINAL_STATES.test(value.state) && !["SUBMISSION_FAILED", "SUBMISSION_CANCELLED"].includes(value.state)));
+      if (unresolved) return { isError: true, output: { failure: "existing-job", runId, taskId,
+        recordPath: unresolved.path, state: String(unresolved.value.state ?? "UNKNOWN"),
+        ...(typeof unresolved.value.jobId === "string" ? { jobId: unresolved.value.jobId } : {}),
+        ...(typeof unresolved.value.cluster === "string" ? { cluster: unresolved.value.cluster } : {}),
+        ...(typeof unresolved.value.submissionToken === "string" ? { submissionToken: unresolved.value.submissionToken } : {}),
+        message: "This task already owns a GPU job whose completion is unresolved. Inspect and reconcile that job; no replacement was submitted and the existing job was not cancelled." } };
+      const limit = config.maxSubmissionsPerTask ?? 2;
+      if (records.length >= limit) return { isError: true, output: { failure: "submission-budget", runId, taskId,
+        submissions: records.length, limit,
+        message: `This task has used its ${limit}-submission GPU budget. Report the diagnostics; further submissions require an explicit host configuration change.` } };
+    }
+    const jobDir = mkdtempSync(join(config.jobsRoot, `job-${createdAt}-`));
+    const submissionToken = `brain-gpu:${randomUUID()}`;
+    const record = { version: 1, runId, ...(taskId !== undefined ? { taskId } : {}), createdAt, updatedAt: createdAt, submissionToken, state: "SUBMITTING" };
+    writeFileSync(join(jobDir, "job.sh"), script, { encoding: "utf8", mode: 0o755 });
+    writeFileSync(join(jobDir, "job-state.json"), JSON.stringify(record, null, 2), { mode: 0o600, flag: "wx" });
+    return { jobDir, submissionToken, record };
+  } finally { if (lock) rmdirSync(lock); }
+}
+
 /** Tail-biased log read: results print last, so the end survives the cap. */
 function readJobLog(path: string): { log: string; truncated: boolean } {
-  let text: string;
+  let fd: number | undefined;
   try {
-    text = readFileSync(path, "utf8");
+    const size = statSync(path).size;
+    const bytes = Math.min(size, MAX_LOG_CHARS * 4);
+    const buffer = Buffer.alloc(bytes);
+    fd = openSync(path, "r");
+    readSync(fd, buffer, 0, bytes, Math.max(0, size - bytes));
+    const text = buffer.toString("utf8");
+    const truncated = size > bytes || text.length > MAX_LOG_CHARS;
+    return { log: truncated ? `…${text.slice(-MAX_LOG_CHARS)}` : text, truncated };
   } catch {
     return { log: "", truncated: false };
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
-  if (text.length <= MAX_LOG_CHARS) return { log: text, truncated: false };
-  return { log: `…${text.slice(-MAX_LOG_CHARS)}`, truncated: true };
 }
 
 /** Files the agent's script left in the job directory (its own artifacts). */
 function jobArtifacts(jobDir: string): readonly { name: string; bytes: number }[] {
   try {
     return readdirSync(jobDir)
-      .filter((name) => name !== "job.sh" && name !== "job.log")
+      .filter((name) => !["job.sh", "job.log", "job-state.json", "job-state.json.tmp"].includes(name))
       .map((name) => {
         try {
           const stats = statSync(join(jobDir, name));
@@ -230,12 +323,13 @@ export const GPU_RUN_MANIFEST: HostToolManifest = {
       "to finish. YOUR SCRIPT RUNS VERBATIM: it is spliced unchanged into the deployment " +
       "owner's GPU submission template (partition, GPU count, environment setup come from " +
       "that template) and runs under a wall-clock ceiling. The response returns the job's " +
-      "complete stdout/stderr log EXACTLY as your script printed it — print your results " +
-      "in the structure you want them returned, and print everything you need: files your " +
-      "script writes are listed by name but their content is not returned. If the job " +
-      "fails, the response is a bug report addressed to you, the submitter: debug from " +
-      "the log, fix your script, and resubmit with another call — resubmitting is safe " +
-      "while you resolve the bug.",
+      "stdout/stderr tail, limited to 48000 characters; print final results and useful " +
+      "diagnostics near the end. Files your script writes are listed by name but their " +
+      "content is not returned. Each task has two submission attempts by default, " +
+      "persisted across retries and restarts. Diagnose a confirmed script failure before " +
+      "considering a corrected submission within that budget. An unresolved job blocks " +
+      "replacement submissions. Scheduler errors and ambiguous submissions require " +
+      "reconciliation, not blind resubmission.",
     inputSchema: {
       type: "object",
       properties: {
@@ -267,6 +361,9 @@ export const GPU_RUN_MANIFESTS: readonly HostToolManifest[] = [GPU_RUN_MANIFEST]
 export const GPU_RUN_TOOL_NAMES: readonly string[] = [GPU_RUN_MANIFEST.toolId];
 
 export function gpuRunTools(config: GpuRunConfig): readonly Tool[] {
+  if (config.maxSubmissionsPerTask !== undefined && (!Number.isInteger(config.maxSubmissionsPerTask) || config.maxSubmissionsPerTask < 1)) {
+    throw new Error("maxSubmissionsPerTask must be a positive integer");
+  }
   const env = scrubbedEnvironment(config.env ?? process.env);
   const run: RunSchedulerCommand =
     config.runCommand ??
@@ -280,7 +377,6 @@ export function gpuRunTools(config: GpuRunConfig): readonly Tool[] {
     config.runningPollIntervalMs ?? DEFAULT_RUNNING_SCHEDULER_POLL_MS;
   const queueGoneGraceMs = config.queueGoneGraceMs ?? DEFAULT_QUEUE_GONE_GRACE_MS;
   const maxQueueWaitMs = config.maxQueueWaitMs ?? DEFAULT_MAX_QUEUE_WAIT_MS;
-  let jobSeq = 0;
 
   const tool: Tool = {
     definition: GPU_RUN_MANIFEST.definition,
@@ -313,28 +409,52 @@ export function gpuRunTools(config: GpuRunConfig): readonly Tool[] {
         return refusal(error instanceof Error ? error.message : String(error));
       }
 
-      jobSeq += 1;
-      const jobDir = join(config.jobsRoot, `job-${now()}-${jobSeq}`);
-      mkdirSync(jobDir, { recursive: true });
+      const signal = context.signal;
+      if (signal?.aborted) throw abortError();
+      const reserved = reserveJob(config, context.runId, context.taskId, script, now());
+      if (!("jobDir" in reserved)) return reserved;
+      const { jobDir, submissionToken, record } = reserved;
       const scriptPath = join(jobDir, "job.sh");
       const logPath = join(jobDir, "job.log");
-      writeFileSync(scriptPath, script, { encoding: "utf8", mode: 0o755 });
-
-      const signal = context.signal;
+      const save = (state: string, fields: Record<string, unknown> = {}): void => {
+        Object.assign(record, fields, { state, updatedAt: now() });
+        writeFileSync(join(jobDir, "job-state.json.tmp"), JSON.stringify(record, null, 2), { mode: 0o600 });
+        renameSync(join(jobDir, "job-state.json.tmp"), join(jobDir, "job-state.json"));
+        if (typeof record.jobId === "string") {
+          try { config.onState?.({ jobId: record.jobId, state,
+            ...(typeof fields.detail === "string" ? { detail: fields.detail } : {}) }); } catch { /* observer */ }
+        }
+      };
+      const unknownSubmission = (detail: string, jobId?: string, cluster?: string): ToolResult => {
+        save("SUBMISSION_UNKNOWN", { detail, ...(jobId ? { jobId } : {}), ...(cluster ? { cluster } : {}) });
+        try { config.onSubmissionUnknown?.({ submissionToken, jobDir, ...(jobId ? { jobId } : {}), ...(cluster ? { cluster } : {}) }); } catch { /* observer */ }
+        return { isError: true, output: { failure: "submission-unknown", state: "SUBMISSION_UNKNOWN", cleanupRequired: true,
+          submissionToken, jobDir, ...(jobId ? { jobId } : {}), ...(cluster ? { cluster } : {}), detail,
+          message: "The submission response was lost or unrecognized. A job may exist; do not retry until the exact submission comment has been reconciled with SLURM." } };
+      };
       let submitted: ExecutionResult;
+      if (signal?.aborted) { save("SUBMISSION_CANCELLED"); throw abortError(); }
       try {
         submitted = await run(
           "sbatch",
           [
+            "--parsable",
+            `--comment=${submissionToken}`,
             `--job-name=${jobName}`,
             `--time=${minutes}`,
             `--output=${logPath}`,
+            `--error=${logPath}`,
+            `--chdir=${jobDir}`,
             "--mail-type=NONE",
             scriptPath,
           ],
           { cwd: jobDir, timeoutMs: SCHEDULER_COMMAND_TIMEOUT_MS, signal },
         );
       } catch (error) {
+        if (signal?.aborted || !["ENOENT", "EACCES"].includes((error as NodeJS.ErrnoException)?.code ?? "")) {
+          return unknownSubmission(error instanceof Error ? error.message : String(error));
+        }
+        save("SUBMISSION_FAILED", { detail: error instanceof Error ? error.message : String(error) });
         // Spawn-level failure: sbatch is not on this node's PATH. A
         // deployment problem, never the script's bug — say so.
         return {
@@ -349,8 +469,15 @@ export function gpuRunTools(config: GpuRunConfig): readonly Tool[] {
           isError: true,
         };
       }
-      const match = /Submitted batch job\s+(\S+)/.exec(submitted.stdout);
+      const match = /^(\d+)(?:;[A-Za-z0-9_.-]+)?$/m.exec(submitted.stdout.trim())
+        ?? /Submitted batch job\s+(\d+)\b/.exec(submitted.stdout);
       if (submitted.exitCode !== 0 || !match) {
+        if (submitted.timedOut || signal?.aborted || submitted.exitCode === 128 || submitted.exitCode === 0 || match) {
+          return unknownSubmission([submitted.stdout, submitted.stderr].filter(Boolean).join("\n"), match?.[1], slurmClusterFrom(submitted.stdout));
+        }
+        save("SUBMISSION_FAILED", {
+          detail: [submitted.stdout, submitted.stderr].filter(Boolean).join("\n"),
+        });
         return {
           output: {
             failure: "submission",
@@ -371,44 +498,108 @@ export function gpuRunTools(config: GpuRunConfig): readonly Tool[] {
       // commands need it or the job is invisible to them.
       const cluster = slurmClusterFrom(submitted.stdout);
       const clusterArgs = slurmClusterArgs(cluster);
+      try { save("SUBMITTED", { jobId, ...(cluster ? { cluster } : {}) }); }
+      catch (error) {
+        // Ownership must become durable before a worker is allowed to wait.
+        await run("scancel", [...clusterArgs, jobId], { cwd: jobDir, timeoutMs: SCHEDULER_COMMAND_TIMEOUT_MS }).catch(() => undefined);
+        throw error;
+      }
+      try { config.onSubmitted?.({ jobId, ...(cluster ? { cluster } : {}), jobDir }); } catch { /* observer */ }
 
-      const deadline = now() + maxQueueWaitMs + minutes * 60_000 + 60_000;
+      const queueDeadline = now() + maxQueueWaitMs;
       const startedAt = now();
+      let runningAt: number | undefined;
       let goneSince: number | undefined;
+      let terminalConfirmed = false;
+      let cancelled = false;
+      let schedulerErrors = 0;
+      let confirmedAccounting: { state: string; exitCode?: string } | undefined;
+      const modernSubmission = /^\d+(?:;[A-Za-z0-9_.-]+)?$/m.test(submitted.stdout.trim());
+      const readAccounting = async (): Promise<{ state: string; exitCode?: string } | undefined> => {
+        const result = await run("sacct", ["-n", "-P", "-X", "-j", jobId, "--format=JobIDRaw,State,ExitCode", ...clusterArgs], {
+          cwd: jobDir, timeoutMs: SCHEDULER_COMMAND_TIMEOUT_MS, ...(signal ? { signal } : {}),
+        }).catch(() => undefined);
+        if (!result || result.exitCode !== 0) return undefined;
+        const lines = stripSlurmClusterBanners(result.stdout).trim().split("\n");
+        const row = lines.map((line) => line.trim().split("|")).find((values) => values[0] === jobId);
+        if (row) {
+          if (!/^\d+:\d+$/.test(row[2]?.trim() ?? "")) return undefined;
+          return { state: row[1]?.trim().split(/\s/)[0] || "UNKNOWN", exitCode: row[2]!.trim() };
+        }
+        // Older scheduler wrappers may ignore --format; accept only a state token.
+        const state = lines[0]?.trim().split(/\s/)[0];
+        return !modernSubmission && state && /^[A-Z_]+\+?$/.test(state) ? { state } : undefined;
+      };
+      const cancel = async (reason: string): Promise<void> => {
+        if (cancelled || terminalConfirmed) return;
+        cancelled = true;
+        try {
+          const result = await run("scancel", [...clusterArgs, jobId], {
+            cwd: jobDir, timeoutMs: SCHEDULER_COMMAND_TIMEOUT_MS,
+          });
+          save(result.exitCode === 0 ? "CANCEL_REQUESTED" : "CANCEL_FAILED", {
+            reason, cancellationAccepted: result.exitCode === 0,
+            ...(result.exitCode !== 0 ? { detail: result.stderr || result.stdout } : {}),
+          });
+        } catch (error) {
+          save("CANCEL_FAILED", { reason, cancellationAccepted: false,
+            detail: error instanceof Error ? error.message : String(error) });
+        }
+      };
       // The scheduler runs on its own, much slower clock than the loop
       // tick: the tick stays responsive to aborts and the deadline, while
       // squeue fires only when its phase cadence elapses (queued vs
       // running, running detected by the log file's existence).
       let lastSchedulerPollAt = Number.NEGATIVE_INFINITY;
+      try {
       for (;;) {
         if (signal?.aborted) {
-          await run("scancel", [...clusterArgs, jobId], {
-            cwd: jobDir,
-            timeoutMs: SCHEDULER_COMMAND_TIMEOUT_MS,
-          }).catch(() => undefined);
           throw abortError();
         }
+        if (runningAt === undefined && existsSync(logPath)) {
+          runningAt = now();
+          if (["SUBMITTED", "PENDING", "CONFIGURING"].includes(String(record.state))) {
+            save("EXECUTION_OBSERVED", { detail: "The job log appeared; awaiting the next scheduler status update." });
+          }
+        }
+        if (goneSince !== undefined) {
+          // A terminal accounting record is authoritative; only shared-file
+          // visibility may still need a short local wait. Do not pay another
+          // scheduler polling interval for this grace period.
+          const logVisible = readJobLog(logPath).log.length > 0;
+          if ((confirmedAccounting && logVisible) || now() - goneSince >= queueGoneGraceMs) break;
+          await sleep(pollIntervalMs, signal);
+          continue;
+        }
+        const deadline = runningAt === undefined ? queueDeadline : runningAt + minutes * 60_000 + 60_000;
         if (now() > deadline) {
-          await run("scancel", [...clusterArgs, jobId], {
-            cwd: jobDir,
-            timeoutMs: SCHEDULER_COMMAND_TIMEOUT_MS,
-          }).catch(() => undefined);
+          // A short job can finish between slow scheduler polls. Reconcile
+          // once before enforcing the local deadline so stale monitoring
+          // cannot turn an already completed job into a false timeout.
+          const accounting = await readAccounting();
+          if (accounting && TERMINAL_STATES.test(accounting.state)) {
+            confirmedAccounting = accounting;
+            terminalConfirmed = true;
+            goneSince = now();
+            save("FINALIZING", { detail: `Accounting reports ${accounting.state}; collecting the job log.` });
+            continue;
+          }
+          await cancel(runningAt === undefined ? "queue deadline" : "runtime deadline");
           const { log, truncated } = readJobLog(logPath);
           return {
             output: {
               jobId,
               state: "DEADLINE",
+              cancellationAccepted: record.cancellationAccepted === true,
+              cleanupRequired: record.cancellationAccepted !== true,
               log,
               truncated,
               files: jobArtifacts(jobDir) as unknown as JsonValue,
               bugReport:
-                `GPU job ${jobId} exceeded its window (queue wait allowance plus the ` +
-                `${minutes}-minute runtime ceiling) and was cancelled. If the log shows your ` +
-                "script was still working, it overran its time limit — a bug to fix: make it " +
-                "faster, checkpoint earlier, or request a higher time_limit_minutes (the " +
-                "deployment ceiling still applies) and RESUBMIT with another gpu_run call. " +
-                "If the job never started, the queue was congested — report that in your " +
-                "output rather than retrying immediately.",
+                `GPU job ${jobId} exceeded its window (${runningAt === undefined ? "queue wait" : `${minutes}-minute runtime ceiling`}). ` +
+                (record.cancellationAccepted === true
+                  ? "The scheduler accepted a cancellation request. Inspect the log and confirm the job stopped before considering a corrected submission."
+                  : "Cancellation failed; the job may still be active. Do not resubmit until its state is checked and cleanup completed."),
             },
             isError: true,
           };
@@ -422,7 +613,7 @@ export function gpuRunTools(config: GpuRunConfig): readonly Tool[] {
             : queuedPollIntervalMs;
         if (now() - lastSchedulerPollAt >= schedulerCadence) {
           lastSchedulerPollAt = now();
-          const queueState = await run(
+          const queueResult = await run(
             "squeue",
             ["-h", "-j", jobId, "-o", "%T", ...clusterArgs],
             {
@@ -430,42 +621,66 @@ export function gpuRunTools(config: GpuRunConfig): readonly Tool[] {
               timeoutMs: SCHEDULER_COMMAND_TIMEOUT_MS,
               ...(signal ? { signal } : {}),
             },
-          )
-            .then((result) => stripSlurmClusterBanners(result.stdout).trim() || undefined)
-            .catch(() => undefined);
+          ).catch((error: unknown) => ({ exitCode: 1, stdout: "", stderr: String(error) }));
+          if (queueResult.exitCode !== 0) {
+            // Some SLURM versions return an error once the job leaves squeue.
+            // Only a terminal allocation record, never that error, proves exit.
+            const accounting = await readAccounting();
+            if (accounting && TERMINAL_STATES.test(accounting.state)) {
+              confirmedAccounting = accounting;
+              terminalConfirmed = true;
+              goneSince = now();
+              save("FINALIZING", { detail: `Accounting reports ${accounting.state}; collecting the job log.` });
+              continue;
+            }
+            schedulerErrors += 1;
+            save("MONITORING_ERROR", { detail: queueResult.stderr || queueResult.stdout });
+            if (schedulerErrors >= 3) throw new Error(`SLURM monitoring failed three times: ${queueResult.stderr}`);
+            await sleep(pollIntervalMs, signal);
+            continue;
+          }
+          schedulerErrors = 0;
+          const queueState = stripSlurmClusterBanners(queueResult.stdout).trim() || undefined;
           if (queueState && LIVE_STATES.test(queueState)) {
+            if (/^(RUNNING|COMPLETING|SUSPENDED|RESIZING)/i.test(queueState)) runningAt ??= now();
+            if (record.state !== queueState) save(queueState);
             goneSince = undefined;
           } else {
-            // Left the queue (or squeue is unusable): give the shared
-            // filesystem a grace period to surface the log, then judge.
-            goneSince ??= now();
-            if (now() - goneSince > queueGoneGraceMs) break;
+            goneSince = now();
+            save("FINALIZING", { detail: "The job is no longer listed in the queue; checking accounting and collecting its log." });
+            // A successful empty squeue response warrants accounting NOW.
+            // The old path waited another full scheduler interval here,
+            // leaving a three-second probe displayed as pending for minutes.
+            const accounting = await readAccounting();
+            if (accounting && TERMINAL_STATES.test(accounting.state)) {
+              confirmedAccounting = accounting;
+              terminalConfirmed = true;
+            }
+            continue;
           }
         }
         await sleep(pollIntervalMs, signal);
       }
 
-      const finalState = await run(
-        "sacct",
-        ["-n", "-j", jobId, "--format=State", ...clusterArgs],
-        {
-          cwd: jobDir,
-          timeoutMs: SCHEDULER_COMMAND_TIMEOUT_MS,
-        },
-      )
-        .then(
-          (result) =>
-            stripSlurmClusterBanners(result.stdout).trim().split(/\s+/)[0] ?? "",
-        )
-        .catch(() => "");
-      const state = finalState || "UNKNOWN";
+      let state = confirmedAccounting?.state ?? "UNKNOWN";
+      let exitCode = confirmedAccounting?.exitCode;
+      for (let attempt = 0; attempt < 3 && confirmedAccounting === undefined; attempt += 1) {
+      if (signal?.aborted) throw abortError();
+      const accounting = await readAccounting();
+      if (accounting) { state = accounting.state; exitCode = accounting.exitCode; }
+      if (TERMINAL_STATES.test(state)) break;
+      if (attempt < 2) await sleep(queuedPollIntervalMs, signal);
+      }
+      terminalConfirmed = TERMINAL_STATES.test(state);
+      if (!terminalConfirmed) await cancel("accounting could not confirm completion");
+      else save(state, { ...(exitCode ? { exitCode } : {}) });
       const { log, truncated } = readJobLog(logPath);
       const durationMs = now() - startedAt;
       const files = jobArtifacts(jobDir) as unknown as JsonValue;
 
-      if (/^COMPLETED/i.test(state)) {
+      if (/^COMPLETED/i.test(state) && (exitCode === undefined || exitCode === "0:0")) {
         return {
-          output: { jobId, state: "COMPLETED", log, truncated, files, durationMs },
+          output: { jobId, state: "COMPLETED", log, truncated, files, durationMs, ...(exitCode ? { exitCode } : {}) },
         };
       }
       return {
@@ -476,10 +691,26 @@ export function gpuRunTools(config: GpuRunConfig): readonly Tool[] {
           truncated,
           files,
           durationMs,
-          bugReport: bugReport(jobId, state),
+          ...(cancelled ? { cancellationAccepted: record.cancellationAccepted === true, cleanupRequired: record.cancellationAccepted !== true } : {}),
+          ...(exitCode ? { exitCode } : {}),
+          bugReport: terminalConfirmed ? bugReport(jobId, state)
+            : `The scheduler has not confirmed that GPU job ${jobId} stopped. ` +
+              (record.cancellationAccepted === true ? "It accepted a cancellation request. " : "Cancellation failed. ") +
+              "Check its state before considering another submission; this is a monitoring problem, not evidence of a script bug.",
         },
         isError: true,
       };
+      } catch (error) {
+        await cancel(signal?.aborted ? "caller aborted" : "monitoring failed");
+        if (signal?.aborted || (error instanceof Error && error.name === "AbortError")) throw abortError();
+        const { log, truncated } = readJobLog(logPath);
+        return { isError: true, output: { jobId, state: "MONITORING_ERROR", log, truncated,
+          cancellationAccepted: record.cancellationAccepted === true, cleanupRequired: record.cancellationAccepted !== true,
+          detail: error instanceof Error ? error.message : String(error),
+          message: record.cancellationAccepted === true
+            ? "The scheduler could not be monitored. The scheduler accepted a cancellation request; inspect job-state.json before submitting another job."
+            : "The scheduler could not be monitored and cancellation failed. The job may still be active; resolve it before submitting another job." } };
+      }
     },
   };
   return [tool];

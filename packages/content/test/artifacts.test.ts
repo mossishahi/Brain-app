@@ -23,6 +23,11 @@ import {
   RedevelopmentMergeError,
   redevelopmentSchema,
   usefulFilesSchema,
+  chainReconsiderationPartsSchema,
+  commentReconsiderationSchema,
+  factUpdateMergeSchema,
+  gameReportReconsiderationSchema,
+  gameSettlementV3Schema,
 } from "../src/index.js";
 
 const para = (n: number, text = "Lorem ipsum dolor sit amet.") =>
@@ -1251,4 +1256,151 @@ test("the legacy names keep their exact meaning beside the new ones", () => {
     false,
     "the legacy issue never gained the part locator",
   );
+});
+
+// ---------------------------------------------------------------------------
+// fact updates (spec/fact-updates.md 11.10, section 10 test 38)
+// ---------------------------------------------------------------------------
+
+type Parsed<T> =
+  | { readonly success: true; readonly data: T }
+  | { readonly success: false; readonly error: { readonly issues: readonly { readonly message: string }[] } };
+
+/** The issue messages of a parse, empty when it succeeded. */
+function messagesOf<T>(parsed: Parsed<T>): string[] {
+  return parsed.success ? [] : parsed.error.issues.map((issue) => issue.message);
+}
+
+test("chainReconsiderationParts: revised rewrites something, unchanged rewrites nothing", () => {
+  const revised = { decision: "revised", reason: para(1), steps: [{ index: 2, ...stepParts("Two") }] };
+  assert.ok(chainReconsiderationPartsSchema.safeParse(revised).success);
+  assert.ok(chainReconsiderationPartsSchema.safeParse({ decision: "revised", reason: para(1), steps: [], novelty: para(1) }).success);
+  assert.ok(chainReconsiderationPartsSchema.safeParse({
+    decision: "revised", reason: para(1), steps: [], outputPatch: { paper: { method: section(3) } },
+  }).success);
+  assert.ok(chainReconsiderationPartsSchema.safeParse({ decision: "unchanged", reason: para(1), steps: [] }).success);
+  const unchanged = "an unchanged decision carries no steps, outputPatch or novelty";
+  assert.deepEqual(messagesOf(chainReconsiderationPartsSchema.safeParse({ ...revised, decision: "unchanged" })), [unchanged]);
+  assert.deepEqual(
+    messagesOf(chainReconsiderationPartsSchema.safeParse({ decision: "unchanged", reason: para(1), steps: [], novelty: para(1) })),
+    [unchanged],
+  );
+  assert.deepEqual(
+    messagesOf(chainReconsiderationPartsSchema.safeParse({ decision: "revised", reason: para(1), steps: [] })),
+    ["a revised decision carries at least one step, an outputPatch or a novelty"],
+  );
+  assert.equal(chainReconsiderationPartsSchema.safeParse({
+    ...revised, steps: [{ index: 3, ...stepParts("Three") }, { index: 2, ...stepParts("Two") }],
+  }).success, false, "steps are listed in chain order");
+  assert.equal(chainReconsiderationPartsSchema.safeParse({ ...revised, steps: [{ index: 10, ...stepParts("Ten") }] }).success, false);
+  assert.equal(chainReconsiderationPartsSchema.safeParse({ ...revised, steps: [{ index: 2, text: para(1) }] }).success, false,
+    "a reconsidered step is a four-part step");
+  assert.equal(chainReconsiderationPartsSchema.safeParse({ ...revised, reason: para(2) }).success, false);
+  assert.equal(chainReconsiderationPartsSchema.safeParse({ ...revised, decision: "withdrawn" }).success, false,
+    "a chain cannot be withdrawn");
+  assert.equal(chainReconsiderationPartsSchema.safeParse({ ...revised, output: validDevelopedOutput }).success, false);
+});
+
+test("gameReportReconsideration and commentReconsideration carry the revision exactly when revised", () => {
+  const report = { q: 0.4, justification: "The step divides by x without the stated condition x != 0." };
+  assert.ok(gameReportReconsiderationSchema.safeParse({ decision: "revised", reason: "F:7 was deleted.", report }).success);
+  for (const decision of ["withdrawn", "unchanged"] as const) {
+    assert.ok(gameReportReconsiderationSchema.safeParse({ decision, reason: "F:7 was deleted." }).success);
+    assert.deepEqual(
+      messagesOf(gameReportReconsiderationSchema.safeParse({ decision, reason: "F:7 was deleted.", report })),
+      ["a report is returned exactly when the decision is revised"],
+    );
+  }
+  assert.deepEqual(
+    messagesOf(gameReportReconsiderationSchema.safeParse({ decision: "revised", reason: "F:7 was deleted." })),
+    ["a report is returned exactly when the decision is revised"],
+  );
+  assert.equal(gameReportReconsiderationSchema.safeParse({ decision: "revised", reason: "", report }).success, false);
+  assert.equal(gameReportReconsiderationSchema.safeParse({ decision: "revised", reason: "F:7 was deleted.", report: { ...report, q: 2 } }).success, false);
+
+  const comment = { verdict: "Pass", reason: "Nothing to fault.", flaws: [], suggestion: "", evidence: noEvidence };
+  assert.ok(commentReconsiderationSchema.safeParse({ decision: "revised", reason: "F:7 was deleted.", comment }).success);
+  for (const decision of ["withdrawn", "unchanged"] as const) {
+    assert.ok(commentReconsiderationSchema.safeParse({ decision, reason: "F:7 was deleted." }).success);
+    assert.deepEqual(
+      messagesOf(commentReconsiderationSchema.safeParse({ decision, reason: "F:7 was deleted.", comment })),
+      ["a comment is returned exactly when the decision is revised"],
+    );
+  }
+  assert.equal(commentReconsiderationSchema.safeParse({
+    decision: "revised", reason: "F:7 was deleted.", comment: { ...comment, verdict: "Interrupt" },
+  }).success, false, "the revised comment keeps the comment's own evidence contract");
+});
+
+test("factUpdateMerge: merged and discarded entries in notice order, reassess on late merges only", () => {
+  const merged = {
+    key: "game-report:member-1:3:1:member-4",
+    taskId: "fact-update:game-report:member-1:3:1:member-4:1",
+    notices: ["N:3"],
+    output: { decision: "withdrawn", reason: "F:7 was deleted." },
+    epoch: 3,
+  };
+  const discarded = { key: "chain:member-2", taskId: "fact-update:chain:member-2:1", notices: ["N:3"], reason: "superseded" };
+  assert.ok(factUpdateMergeSchema.safeParse({ merged: [], discarded: [] }).success);
+  assert.ok(factUpdateMergeSchema.safeParse({ merged: [merged], discarded: [discarded], reassess: true }).success);
+  assert.ok(factUpdateMergeSchema.safeParse({ merged: [], discarded: [], reassess: false }).success);
+  for (const reason of ["superseded", "report-changed", "seat-dismissed"]) {
+    assert.ok(factUpdateMergeSchema.safeParse({ merged: [], discarded: [{ ...discarded, reason }] }).success);
+  }
+  assert.equal(factUpdateMergeSchema.safeParse({ merged: [], discarded: [{ ...discarded, reason: "stale" }] }).success, false);
+  assert.equal(factUpdateMergeSchema.safeParse({ merged: [{ ...merged, notices: [] }], discarded: [] }).success, false);
+  assert.equal(factUpdateMergeSchema.safeParse({ merged: [{ ...merged, epoch: -1 }], discarded: [] }).success, false);
+  assert.equal(factUpdateMergeSchema.safeParse({ merged: [], discarded: [], reassess: "yes" }).success, false);
+  assert.equal(factUpdateMergeSchema.safeParse({ merged: [], discarded: [], extra: true }).success, false);
+});
+
+/**
+ * A committee-mean v3 settlement (the arithmetic of game-review.test.ts):
+ * a and b admitted, y = 0; c rejected and fined for citing F:7, deleted from
+ * the fact table before its report was requested.
+ */
+function deletedBadgeSettlement() {
+  const base = { a: 25 - 100 * 0.95 ** 2, b: 25 };
+  const score = { a: 2 * base.a - base.b, b: 2 * base.b - base.a };
+  return {
+    ruleVersion: "brier-peer/v3", version: "chain-version", settlementId: "settlement-1", ledgerSequence: 1,
+    criticIds: ["a", "b", "c"], initialPoints: 100, decisionRule: "committee-mean", leaveOneOut: false,
+    inventedBadgePenalty: true, deletedBadgePenalty: true,
+    meanQ: 0.475, threshold: 0.5, y: 0, status: "settled", admittedCount: 2,
+    rows: [
+      { criticId: "a", q: 0.95, admissible: true, reason: "The argument holds.", label: "decisive", scoringLabel: 0, brierLoss: 0.95 ** 2, baseScore: base.a, peerMeanBaseScore: base.b, score: score.a, balanceBefore: 100, balanceAfter: 100 + score.a, excluded: 100 + score.a < 0 },
+      { criticId: "b", q: 0, admissible: true, reason: "The argument holds but changes nothing.", label: "not-decisive", scoringLabel: 0, brierLoss: 0, baseScore: base.b, peerMeanBaseScore: base.a, score: score.b, balanceBefore: 100, balanceAfter: 100 + score.b, excluded: false },
+      { criticId: "c", q: 0.9, admissible: false, reason: "The report cites F:7, deleted from the fact table before it was requested.", label: null, scoringLabel: null, brierLoss: null, baseScore: null, peerMeanBaseScore: null, score: -175, balanceBefore: 100, balanceAfter: -75, excluded: true, penalty: "deleted-badge", deletedBadges: ["F:7"] },
+    ],
+    repairArguments: [],
+    decision: { verdict: "Pass", reason: "Pass: no admitted argument reaches the threshold.", suggestion: "", evidence: noEvidence, issues: [] },
+  };
+}
+
+test("v3 deleted-badge rows: the floor row with its deleted badges, only in a settlement that fines them", () => {
+  const settlement = deletedBadgeSettlement();
+  const [a, b, c] = settlement.rows as unknown as [Record<string, unknown>, Record<string, unknown>, Record<string, unknown>];
+  const withRows = (rows: readonly Record<string, unknown>[], fields: Record<string, unknown> = {}) => ({ ...settlement, ...fields, rows });
+  assert.deepEqual(messagesOf(gameSettlementV3Schema.safeParse(settlement)), []);
+  assert.ok(messagesOf(gameSettlementV3Schema.safeParse(withRows([a, b, { ...c, penalty: "invented-badge", inventedBadges: ["F:99"] }]))).length === 0,
+    "a report fined for both offences is an invented-badge row that also lists its deleted badges");
+
+  const { deletedBadges: _ids, ...withoutIds } = c;
+  assert.ok(messagesOf(gameSettlementV3Schema.safeParse(withRows([a, b, withoutIds])))
+    .includes("a deleted-badge penalty records its deleted badges"));
+  assert.ok(messagesOf(gameSettlementV3Schema.safeParse(withRows([a, { ...b, deletedBadges: ["F:7"] }, c])))
+    .includes("deleted badges are recorded only on a penalty row"));
+  assert.ok(messagesOf(gameSettlementV3Schema.safeParse(withRows([a, b, { ...c, deletedBadges: ["F:9", "F:10"] }])))
+    .includes("deleted badges are unique and string-sorted"));
+  assert.ok(messagesOf(gameSettlementV3Schema.safeParse(withRows([a, b, { ...c, deletedBadges: ["F:7", "F:7"] }])))
+    .includes("deleted badges are unique and string-sorted"));
+  const { deletedBadgePenalty: _gate, ...ungated } = settlement;
+  assert.ok(messagesOf(gameSettlementV3Schema.safeParse(ungated))
+    .includes("a deleted-badge penalty requires a settlement that enables it"));
+  assert.ok(messagesOf(gameSettlementV3Schema.safeParse(withRows([a, b, { ...c, label: "decisive" }])))
+    .includes("a deleted-badge penalty row is a rejected report without labels or base scores"));
+  assert.ok(messagesOf(gameSettlementV3Schema.safeParse(withRows([a, b, { ...c, score: -150, balanceAfter: -50 }])))
+    .includes("a deleted-badge penalty records exactly GAME_SCORE_FLOOR"));
+  assert.equal(gameSettlementV3Schema.safeParse(withRows([a, b, { ...c, penalty: "stale-badge" }])).success, false);
+  assert.equal(gameSettlementV3Schema.safeParse(withRows([a, b, { ...c, deletedBadges: ["7"] }])).success, false);
 });

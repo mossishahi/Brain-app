@@ -1,0 +1,70 @@
+/* Canvas shell tokens adapt the existing research panels without duplicating them. */
+:root,:root[data-theme="light"] {
+  --bg: #f9f9fb; --surface: #fff; --text: #292c33; --text-dim: #767b88;
+  --accent: #4d64b8; --border: #e6e7ec; --radius: 14px; --app-header-h: 64px;
+  --canvas-rail-width: 72px; --canvas-soft: #eef0fb;
+  --muted: var(--text-dim); --line: var(--border); --accent-soft: var(--canvas-soft); --surface-raised: var(--surface);
+  /* Surfaces and focus are distinguished by fill and elevation, without strokes. */
+  --ui-field-bg: #f1f3f7; --ui-control-fill: #e9edf4;
+  --ui-focus-fill: #dce4fb; --ui-focus-text: #233d83;
+  --ui-float-shadow: 0 12px 40px #1726441c, 0 3px 12px #1726440a;
+}
+:root[data-theme="dark"] {
+  --bg: #12151e; --surface: #1d2230; --text: #e9eaf2; --text-dim: #a4abbd;
+  --accent: #a2b4ff; --border: #333b4f; --canvas-soft: #2c3550;
+  --ui-field-bg: #252d40; --ui-control-fill: #30394e;
+  --ui-focus-fill: #3b4b76; --ui-focus-text: #f1f4ff;
+  --ui-float-shadow: 0 16px 44px #03071266, 0 4px 16px #03071233;
+}
+body { background: var(--bg); }
+button,input,textarea,select,a { -webkit-tap-highlight-color: transparent; }
+:focus-visible { outline: none; }
+:where(button, a, input, textarea, select, [role="button"], [tabindex="0"]):focus-visible { background-color: var(--ui-focus-fill); color: var(--ui-focus-text); }
+[hidden] { display: none !important; }
+.canvas-shell { position: relative; z-index: 1; min-height: 100dvh; }
+.canvas-skip { position: fixed; top: -100px; left: 85px; z-index: 100; padding: 12px 20px; background: var(--surface); border-radius: 12px; }
+.canvas-skip:focus { top: 12px; background: var(--ui-focus-fill); color: var(--ui-focus-text); }
+.canvas-rail { position: fixed; inset: 0 auto 0 0; width: var(--canvas-rail-width); display: flex; align-items: center; flex-direction: column; padding: calc((var(--app-header-h) - var(--ui-rail-target)) / 2) var(--ui-space-3) var(--ui-space-4); gap: var(--ui-space-5); z-index: 20; }
+.canvas-brand { color: var(--accent); display: grid; place-items: center; width: var(--ui-rail-target); height: var(--ui-rail-target); border-radius: var(--ui-radius-lg); font-size: 20px; font-weight: 500; letter-spacing: -.6px; text-decoration: none; }
+.canvas-rail-primary,.canvas-rail-bottom { display: flex; flex-direction: column; align-items: center; gap: var(--ui-space-2); }
+.canvas-rail-bottom { margin-top: auto; }
+.canvas-rail-button { position: relative; display: flex; align-items: center; justify-content: center; width: var(--ui-rail-target); height: var(--ui-rail-target); padding: 0; border: 0; border-radius: var(--ui-radius-lg); background: transparent; color: var(--text-dim); text-decoration: none; cursor: pointer; transition: color .15s,background .15s; flex-shrink: 0; }
+.canvas-rail-button:hover,.canvas-rail-button[data-popup-open],.canvas-rail-button.is-active { background: var(--canvas-soft); color: var(--accent); }
+.canvas-rail-button:focus-visible,.canvas-brand:focus-visible { background: var(--ui-focus-fill); color: var(--ui-focus-text); }
+.canvas-rail-button svg { width: var(--ui-icon-lg); height: var(--ui-icon-lg); stroke-width: var(--ui-icon-stroke); }
+.canvas-rail-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.canvas-rail-monogram { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; color: var(--accent); background: var(--canvas-soft); font-size: var(--ui-font-body); font-weight: 600; }
+.canvas-content { margin-left: var(--canvas-rail-width); min-width: 0; outline: none; }
+.canvas-topbar { height: var(--app-header-h); display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 0 clamp(18px,3vw,52px); }
+.canvas-home-link { display: inline-flex; align-items: baseline; min-width: 0; font-size: 20px; letter-spacing: -.6px; color: var(--text); text-decoration: none; font-weight: 500; border-radius: var(--ui-radius-sm); }
+.canvas-tagline { margin-left: var(--ui-space-4); font-size: var(--ui-font-caption); letter-spacing: .1px; color: var(--text-dim); font-weight: 400; }
+.canvas-back { color: var(--text-dim); font-size: 13px; text-decoration: none; flex: none; }
+.canvas-back:hover { color: var(--accent); }
+.canvas-content .dash { width: min(1560px,100%); max-width: 1560px; margin: 0 auto; padding: 24px clamp(16px,3vw,48px) 60px; }
+.canvas-content .dash-header { flex-wrap: wrap; min-width: 0; }
+.canvas-content .dash-title { overflow-wrap: anywhere; }
+.canvas-loading,.canvas-view-error { margin: 10vh auto; padding: 24px; max-width: 600px; color: var(--text-dim); }
+.canvas-loading { display: flex; align-items: center; justify-content: center; gap: 12px; }
+.canvas-loading span { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+.canvas-view-error h2 { color: var(--text); }
+@media (max-width: 640px) {
+  :root,:root[data-theme="light"],:root[data-theme="dark"] { --canvas-rail-width: 0px; }
+  .canvas-rail { inset: auto 0 0; height: calc(64px + env(safe-area-inset-bottom)); width: 100%; padding: 8px 16px calc(8px + env(safe-area-inset-bottom)); flex-direction: row; gap: 0; justify-content: center; background: var(--surface); box-shadow: 0 -8px 28px #080d1e0d; }
+  .canvas-brand,.canvas-rail-monogram { display: none; }
+  .canvas-rail-primary { flex-direction: row; gap: clamp(16px,7vw,46px); }
+  .canvas-rail-bottom { margin: 0 0 0 clamp(16px,7vw,46px); }
+  .canvas-rail-button { width: var(--ui-touch-target); height: var(--ui-touch-target); }
+  .canvas-content { padding-bottom: calc(72px + env(safe-area-inset-bottom)); }
+  .canvas-topbar { height: 64px; padding: 0 22px; }
+  .canvas-tagline { display: none; }
+  .canvas-content .dash { padding: 12px 12px 32px; }
+  .canvas-skip { left: 12px; }
+}
+@media (prefers-reduced-motion: reduce) { .canvas-shell * { animation-duration: .01ms !important; transition-duration: .01ms !important; } }
+@media (forced-colors: active) {
+  :root, :root[data-theme="light"], :root[data-theme="dark"] { --ui-field-bg: ButtonFace; --ui-control-fill: ButtonFace; --ui-focus-fill: Highlight; --ui-focus-text: HighlightText; }
+  :is(button, a, input, textarea, select, [role="button"], [tabindex="0"]):focus-visible { forced-color-adjust: none; }
+}
+
+/* The old landing reserved a full viewport below its header. The shell owns height now. */
+.canvas-content .canvas-landing.landing { min-height: 0; }

@@ -4,11 +4,13 @@
  * submission-type chip shows the catalog label the run was classified as,
  * followed by the shared Chain / Novelty / Papers tabs where applicable.
  */
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { diffInline, outputSections } from "@brainstorm-agentic/protocol";
 import type { InlineDiffSegment } from "@brainstorm-agentic/protocol";
 import { EditIcon } from "../Icons";
+import { CommitteeTable } from "../committee/CommitteeTable";
+import { prefersReducedMotion } from "../../format";
 import type {
   AssessFeasibilityOutputView,
   BrainIdeaView,
@@ -810,27 +812,64 @@ function MemberCard({
   );
 }
 
-export function FirstPassBody({
+/** The committee table and the first-pass output frame are sibling cards. */
+export function FirstPassStagePanels({
   members,
   live,
   jobId,
+  plannedStepCount,
+  frame,
+  expanded,
 }: {
   members: readonly FirstPassMemberView[];
   /** Live text per seat id, for the seats still thinking. */
   live?: ReadonlyMap<string, string>;
   /** The run the cards belong to; addresses each card's thoughts handle. */
   jobId: string;
+  /** The classifier's chain length, available before the first drafts land. */
+  plannedStepCount?: number;
+  /** Supplies the stage's header, activity, errors, and fold control. */
+  frame: (contents: ReactNode) => ReactNode;
+  /** The table follows the same fold state as its first-pass outputs. */
+  expanded: boolean;
 }) {
+  const [selectedMemberId, setSelectedMemberId] = useState<string>();
+  const memberRefs = useRef(new Map<string, HTMLDivElement>());
   return (
-    <div className="member-grid">
-      {members.map((m) => (
-        <MemberCard
-          key={m.memberId}
-          member={m}
-          jobId={jobId}
-          {...(live?.get(m.memberId) !== undefined ? { live: live.get(m.memberId)! } : {})}
+    <div className="review-split">
+      {expanded && (
+        <CommitteeTable
+          firstPass={members}
+          plannedStepCount={plannedStepCount}
+          selectedMemberId={selectedMemberId}
+          onSelectMember={(memberId) => {
+            setSelectedMemberId(memberId);
+            memberRefs.current.get(memberId)?.scrollIntoView({
+              behavior: prefersReducedMotion() ? "auto" : "smooth",
+              block: "nearest",
+            });
+          }}
         />
-      ))}
+      )}
+      {frame(
+        <div className="member-grid">
+          {members.map((m) => (
+            <div
+              key={m.memberId}
+              ref={(element) => {
+                if (element) memberRefs.current.set(m.memberId, element);
+                else memberRefs.current.delete(m.memberId);
+              }}
+            >
+              <MemberCard
+                member={m}
+                jobId={jobId}
+                {...(live?.get(m.memberId) !== undefined ? { live: live.get(m.memberId)! } : {})}
+              />
+            </div>
+          ))}
+        </div>,
+      )}
     </div>
   );
 }

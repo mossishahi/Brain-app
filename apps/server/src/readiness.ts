@@ -29,11 +29,12 @@ import {
 } from "@brainstorm-agentic/core";
 import {
   ATTACHMENT_MANIFESTS,
+  FACT_MANIFESTS,
+  NOTES_MANIFESTS,
   TAXONOMY_MANIFESTS,
   WEB_SEARCH_MANIFESTS,
   prepareCodeWorkspace,
   slurmClusterArgs,
-  slurmClusterFrom,
   stripSlurmClusterBanners,
 } from "@brainstorm-agentic/host-tools";
 import {
@@ -47,8 +48,15 @@ import {
 
 import { renderSlurmTemplate, shellQuote } from "./command.js";
 import { atomicWriteJson, readJsonFile } from "./files.js";
-import { searxngLocalUrl } from "./searxng-launcher.js";
+import { slurmSubmissionDiagnostic, slurmSubmissionReceipt } from "./slurm-submission.js";
+import { searxngDir, searxngLocalUrl } from "./searxng-launcher.js";
+import {
+  localWebSearchIssue,
+  localWebSearchUnavailable,
+  paidWebSearchFallbackAvailable,
+} from "./settings.js";
 import type { ContentRegistryRuntimeStatus } from "./model.js";
+import { BUILTIN_ENCODER_ID, LOCAL_ENCODER_IDS } from "./panel-composition.js";
 import type {
   AnthropicConnectionValidator,
   ClaudeAgentConnectionValidator,
@@ -64,6 +72,77 @@ export const READINESS_CHECK_LABELS: Readonly<Record<ReadinessCheckId, string>> 
   code: "Code workspace",
   slurm: "SLURM scheduler",
 };
+
+const LOCAL_SEARCH_ADVICE =
+  "Wait for local SearXNG to become ready; if it failed, inspect the SearXNG server log and retry the service.";
+
+/** One text encoder's availability on this host (spec v2 Section 9; contract G). */
+export interface EncoderAvailability {
+  readonly id: string;
+  readonly available: boolean;
+  readonly detail: string;
+}
+
+/** Response of GET /api/readiness/encoders. */
+export interface EncoderReadiness {
+  /** BRAINSTORM_AGENTIC_ENCODER_DIR as this server sees it. */
+  readonly modelDir?: string;
+  /** The encoder new runs ask for: the panel-composition override, else the spec default. */
+  readonly selected: string;
+  readonly selectedAvailable: boolean;
+  /** What a run uses (and records) when the selected encoder is unavailable. */
+  readonly fallback: string;
+  readonly encoders: readonly EncoderAvailability[];
+}
+
+/** The files a local encoder export needs (contract G); specter2 adds query.onnx. */
+const ENCODER_MODEL_FILES = ["doc.onnx", "tokenizer.json", "tokenizer_config.json", "manifest.json"];
+
+/**
+ * Which encoders a run could use: the local ONNX exports present under
+ * BRAINSTORM_AGENTIC_ENCODER_DIR, the built-in hash-ngram fallback, and
+ * openrouter:<model> when an OpenRouter key is configured. Informational: an
+ * unavailable encoder never holds submissions, because a run falls back to
+ * hash-ngram-v1 and records it.
+ */
+export function encoderReadiness(input: {
+  readonly env: NodeJS.ProcessEnv;
+  readonly openRouterKeyConfigured: boolean;
+  readonly selected?: string;
+}): EncoderReadiness {
+  const raw = input.env.BRAINSTORM_AGENTIC_ENCODER_DIR?.trim();
+  const modelDir = raw !== undefined && raw !== "" ? raw : undefined;
+  const encoders: EncoderAvailability[] = LOCAL_ENCODER_IDS.map((id): EncoderAvailability => {
+    if (modelDir === undefined) {
+      return { id, available: false, detail: "BRAINSTORM_AGENTIC_ENCODER_DIR is not set" };
+    }
+    const files = [...ENCODER_MODEL_FILES, ...(id === "specter2" ? ["query.onnx"] : [])];
+    const missing = files.filter((file) => !existsSync(join(modelDir, id, file)));
+    return missing.length === 0
+      ? { id, available: true, detail: join(modelDir, id) }
+      : { id, available: false, detail: `missing ${missing.join(", ")} under ${join(modelDir, id)}` };
+  });
+  encoders.push({
+    id: BUILTIN_ENCODER_ID,
+    available: true,
+    detail: "built-in dependency-free fallback",
+  });
+  const selected = input.selected ?? "specter2";
+  encoders.push({
+    id: selected.startsWith("openrouter:") ? selected : "openrouter:<model>",
+    available: input.openRouterKeyConfigured,
+    detail: input.openRouterKeyConfigured
+      ? "OpenRouter embeddings API (key configured)"
+      : "needs the OpenRouter API key (Recovery settings)",
+  });
+  return {
+    ...(modelDir !== undefined ? { modelDir } : {}),
+    selected,
+    selectedAvailable: encoders.find((encoder) => encoder.id === selected)?.available ?? false,
+    fallback: BUILTIN_ENCODER_ID,
+    encoders,
+  };
+}
 
 /** Whether a check matters under the current settings (hidden otherwise). */
 export function readinessCheckRequired(
@@ -106,6 +185,7 @@ export interface ReadinessProbeContext {
   readonly settings: ServerSettings;
   readonly env: NodeJS.ProcessEnv;
   readonly workspace: string;
+  readonly searxngInstanceId?: string;
   readonly signal: AbortSignal;
   readonly credentials: {
     readonly anthropicApiKey?: string;
@@ -329,6 +409,11 @@ export function defaultReadinessProbes(
     },
 
     capabilities: async (context) => {
+      const localSearchFailure = localWebSearchUnavailable(
+        context.workspace,
+        context.settings,
+        context.searxngInstanceId,
+      );
       // The toolless-placer guard, deployment-level: run the SAME capability
       // broker a task's compiler runs, with the SAME inputs the worker wires
       // (provider-native offers per backend, host-tool manifests, the
@@ -343,13 +428,20 @@ export function defaultReadinessProbes(
       // roots PRESENT because that is the question a deployment check answers:
       // if a submission carries files, can the panel read them? A submission
       // with nothing attached has no attachment access and needs none.
+      // Search handed to the agents' own tools (webSearch.mode "agent"): the
+      // backends' native web tools become provider offers, exactly as the
+      // worker wires them.
+      const agentWeb = context.settings.webSearch?.mode === "agent" && provider !== "offline";
       const providerOffers = nativeOffersFor(provider, {
         attachmentRootsPresent: true,
+        ...(agentWeb ? { nativeWeb: true } : {}),
       });
       const hostTools = [
         ...ATTACHMENT_MANIFESTS,
         ...TAXONOMY_MANIFESTS,
         ...WEB_SEARCH_MANIFESTS,
+        ...NOTES_MANIFESTS,
+        ...FACT_MANIFESTS,
       ];
       const enabledHostToolIds = new Set<string>(
         context.settings.hostTools?.enabledToolIds ??
@@ -359,6 +451,16 @@ export function defaultReadinessProbes(
       // resource, force-enabled whenever a taxonomy is wired — and every
       // real run wires one (the registry's live store, or the bundle seed).
       for (const manifest of TAXONOMY_MANIFESTS) {
+        enabledHostToolIds.add(manifest.toolId);
+      }
+      // And for the thinker notes: the run's own artifacts back them, so the
+      // worker always wires and enables the notes tool.
+      for (const manifest of NOTES_MANIFESTS) {
+        enabledHostToolIds.add(manifest.toolId);
+      }
+      // And for the fact table: the run's session directory backs it, so the
+      // worker always wires and enables it for a bundle that declares one.
+      for (const manifest of FACT_MANIFESTS) {
         enabledHostToolIds.add(manifest.toolId);
       }
       // Same mirror for the host-owned web layer: a run builds a manager
@@ -379,14 +481,22 @@ export function defaultReadinessProbes(
                   ? // The app-launched instance counts only while its state
                     // file says it is actually running — a selected-but-dead
                     // launcher must not promise a search no run can make.
-                    searxngLocalUrl(context.workspace) !== undefined
+                    localSearchFailure === undefined &&
+                    searxngLocalUrl(context.workspace, context.searxngInstanceId) !== undefined
                   : false;
+        // The paid fallback backs general search on its own (its key set).
+        const fallbackBacked = paidWebSearchFallbackAvailable(context.workspace, context.settings);
         const webBacked =
-          provider !== "offline" && (web?.scholarly !== false || generalBacked);
+          provider !== "offline" &&
+          !agentWeb &&
+          (web?.scholarly !== false || generalBacked || fallbackBacked);
         for (const manifest of WEB_SEARCH_MANIFESTS) {
           if (webBacked) enabledHostToolIds.add(manifest.toolId);
           else enabledHostToolIds.delete(manifest.toolId);
         }
+        // Agent mode keeps the host's plain web_fetch where the backend has
+        // no fetch of its own (the Messages path), as the worker does.
+        if (agentWeb) enabledHostToolIds.add("web_fetch");
       }
       const coreCapabilities: CapabilityDeclaration[] = [
         { capabilityId: "web-search", operations: ["web.search", "web.fetch"], whenUnavailable: "" },
@@ -399,6 +509,12 @@ export function defaultReadinessProbes(
         {
           capabilityId: "taxonomy-access",
           operations: ["taxonomy.tree", "taxonomy.resolve"],
+          whenUnavailable: "",
+        },
+        { capabilityId: "notes-access", operations: ["notes.search"], whenUnavailable: "" },
+        {
+          capabilityId: "fact-table",
+          operations: ["fact.lookup", "fact.status", "fact.submit"],
           whenUnavailable: "",
         },
       ];
@@ -417,12 +533,17 @@ export function defaultReadinessProbes(
       const unsatisfied = coreCapabilities
         .map((capability) => capability.capabilityId)
         .filter((id) => byCapability.get(id)?.has("unavailable") ?? true);
+      if (localSearchFailure && !unsatisfied.includes("web-search")) {
+        unsatisfied.push("web-search");
+      }
       const detail = plan.operations
         .map((operation) => `${operation.capabilityId} / ${operation.operationId} -> ${operation.source}`)
+        .concat(localSearchFailure ? [localSearchFailure.detail] : [])
         .join("\n");
       if (unsatisfied.length > 0) {
         throw new ReadinessProbeError(
-          `${unsatisfied.join(", ")} cannot be satisfied on this deployment — agents that ` +
+          (localSearchFailure ? `${localSearchFailure.message}. ` : "") +
+            `${unsatisfied.join(", ")} cannot be satisfied on this deployment — agents that ` +
             "depend on it would run degraded (or fail, where the skill marks it required). " +
             "Re-enable the backing host tools in Settings, or switch to a backend that " +
             "provides the capability natively.",
@@ -448,6 +569,8 @@ export function defaultReadinessProbes(
           return `${capability.capabilityId}: ${source}${scope}`;
         })
         .join(" · ");
+      // report() adds the current service warning separately, so a later
+      // service failure/recovery never leaves a stale fallback notice here.
       return { message: summary, detail };
     },
 
@@ -568,6 +691,7 @@ export function defaultReadinessProbes(
       const submitted = await runCommand(
         "sbatch",
         [
+          "--parsable",
           "--job-name=brain-readiness",
           "--time=00:03:00",
           `--output=${log}`,
@@ -581,17 +705,17 @@ export function defaultReadinessProbes(
           error.detail ?? error.message,
         );
       });
-      const match = /Submitted batch job\s+(\S+)/.exec(submitted.stdout);
-      if (!match) {
+      const receipt = slurmSubmissionReceipt(submitted.stdout, submitted.stderr);
+      if (!receipt) {
         throw new ReadinessProbeError(
-          "sbatch returned an unrecognized response",
-          submitted.stdout.trim(),
+          "sbatch did not return a probe job ID",
+          `${slurmSubmissionDiagnostic(submitted.stdout, submitted.stderr)}. A job may have been accepted; check the scheduler before retrying.`,
         );
       }
-      const jobId = match[1]!;
+      const jobId = receipt.jobId;
       // Multi-cluster sites (LRZ) report the landing cluster; polls and
       // cancels need -M for the probe job to be visible to them at all.
-      const clusterArgs = slurmClusterArgs(slurmClusterFrom(submitted.stdout));
+      const clusterArgs = slurmClusterArgs(receipt.cluster);
       context.onProgress(`probe job ${jobId} submitted; waiting for the scheduler…`);
 
       const deadline = Date.now() + (options.slurmProbeTimeoutMs ?? 240_000);
@@ -763,7 +887,12 @@ export class ReadinessService {
     this.probes = { ...options.probes, ...(options.probeOverrides ?? {}) };
     this.env = options.env ?? process.env;
     this.now = options.now ?? (() => Date.now());
-    this.persistPath = join(options.workspace, "readiness.json");
+    this.persistPath = join(
+      options.settings.searxngInstanceId === undefined
+        ? options.workspace
+        : searxngDir(options.workspace, options.settings.searxngInstanceId),
+      "readiness.json",
+    );
     for (const id of RUNNABLE_CHECK_IDS) this.checks.set(id, { state: "unknown" });
     this.load();
   }
@@ -837,6 +966,41 @@ export class ReadinessService {
         };
       }
       const check = this.checks.get(id)!;
+      // Search scope follows the live local service between probe ticks.
+      // A failed optional provider is visible but does not erase the host
+      // paper tools or opted-in paid fallback that still back web.search.
+      const localSearchIssue = id === "capabilities"
+        ? localWebSearchIssue(this.options.workspace, settings, this.options.settings.searxngInstanceId)
+        : undefined;
+      if (localSearchIssue?.blocking) {
+        const currentLocalProbe = check.state === "failed" &&
+          check.detail?.includes(localSearchIssue.detail) === true;
+        return {
+          id,
+          label,
+          required: true,
+          state: "failed",
+          message: localSearchIssue.message,
+          detail: currentLocalProbe ? check.detail! : [
+            ...(check.state === "failed" && check.detail ? [check.detail] : []),
+            localSearchIssue.detail,
+          ].join("\n"),
+          advice: currentLocalProbe ? (check.advice ?? LOCAL_SEARCH_ADVICE) : LOCAL_SEARCH_ADVICE,
+          ...(currentLocalProbe && check.advising ? { advising: true } : {}),
+        };
+      }
+      if (localSearchIssue && check.state === "ok") {
+        return {
+          id,
+          label,
+          required: true,
+          state: "ok",
+          message: localSearchIssue.message,
+          detail: [check.detail, localSearchIssue.detail].filter(Boolean).join("\n"),
+          ...(check.startedAt !== undefined ? { startedAt: check.startedAt } : {}),
+          ...(check.finishedAt !== undefined ? { finishedAt: check.finishedAt } : {}),
+        };
+      }
       return {
         id,
         label,
@@ -928,6 +1092,9 @@ export class ReadinessService {
         settings,
         env: this.env,
         workspace: this.options.workspace,
+        ...(this.options.settings.searxngInstanceId !== undefined
+          ? { searxngInstanceId: this.options.settings.searxngInstanceId }
+          : {}),
         signal: this.controller.signal,
         credentials: {
           ...(this.options.settings.getAnthropicApiKey() !== undefined
@@ -981,6 +1148,17 @@ export class ReadinessService {
     const check = this.checks.get(id as RunnableReadinessCheckId);
     if (!check || check.state !== "failed") return;
     if (check.advice !== undefined && !options.force) return;
+    if (
+      id === "capabilities" &&
+      !options.force &&
+      localWebSearchUnavailable(this.options.workspace, settings, this.options.settings.searxngInstanceId)
+    ) {
+      // Starting or restarting a known local service needs no model call.
+      // A user-requested diagnosis may still use the advisor below.
+      check.advice = LOCAL_SEARCH_ADVICE;
+      this.emit();
+      return;
+    }
     const llmUsable =
       id !== "llm" &&
       settings.llm.provider !== "offline" &&

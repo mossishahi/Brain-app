@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { GpuRunConfig } from "@brainstorm-agentic/host-tools";
 
 import type {
   AgentProgress,
@@ -185,6 +189,49 @@ function finished(result?: string): CursorSdkRunResult {
 }
 
 /* ------------------------------------------------------------------ tests */
+
+test("GPU custom tools preserve task ownership, the durable budget and caller cancellation", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cursor-gpu-context-"));
+  try {
+    const commands: string[] = [];
+    let clock = 0;
+    const ok = (stdout = "") => ({ stdout, stderr: "", exitCode: 0, durationMs: 1, timedOut: false, truncated: false });
+    const gpuRun: GpuRunConfig = {
+      template: "#!/bin/bash\n{{AGENT_COMMAND}}\n", timeLimitMinutes: 1, jobsRoot: root,
+      pollIntervalMs: 1, queuedPollIntervalMs: 0, runningPollIntervalMs: 0, queueGoneGraceMs: 0,
+      now: () => ++clock, sleep: async () => {},
+      runCommand: async (command) => {
+        commands.push(command);
+        return ok(command === "sbatch" ? "123\n" : command === "sacct" ? "123|COMPLETED|0:0\n" : "");
+      },
+    };
+    const task: AgentTask = { ...structuredTask, taskId: "gpu-owner", allowedCapabilities: ["gpu-execution"] };
+    const factory = () => fakeFactory([{ callTools: async (tools) => {
+      for (let i = 0; i < 3; i += 1) await tools.gpu_run!.execute({ script: "true" }, {});
+      await tools.submit_result!.execute({ answer: "ok" }, {});
+    }, result: finished("") }], newState());
+    await new CursorAgentExecutor({ apiKey: "test-key", listModels: async () => CATALOG, gpuRun, agentFactory: factory() }).execute(task, { runId: "actual-run", nodePath: "root/brain" });
+    assert.equal(commands.filter((command) => command === "sbatch").length, 2);
+    const records = readdirSync(root).filter((name) => name.startsWith("job-")).map((name) => JSON.parse(readFileSync(join(root, name, "job-state.json"), "utf8")));
+    assert.ok(records.every((record) => record.runId === "actual-run" && record.taskId === "gpu-owner"));
+
+    const controller = new AbortController();
+    let passedSignal: AbortSignal | undefined;
+    const aborting: GpuRunConfig = { ...gpuRun,
+      sleep: async () => { controller.abort(); const error = new Error("abort while queued"); error.name = "AbortError"; throw error; },
+      runCommand: async (command, _args, options) => {
+        commands.push(command);
+        if (command === "sbatch") passedSignal = options.signal;
+        return ok(command === "sbatch" ? "124\n" : command === "squeue" ? "RUNNING\n" : "");
+      },
+    };
+    await assert.rejects(new CursorAgentExecutor({ apiKey: "test-key", listModels: async () => CATALOG, gpuRun: aborting, agentFactory: factory() }).execute(
+      { ...task, taskId: "cancel-owner" }, { runId: "actual-run", nodePath: "root/brain", signal: controller.signal },
+    ), { name: "AbortError" });
+    assert.equal(passedSignal, controller.signal);
+    assert.ok(commands.includes("scancel"));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 test("structured output rides the submit_result tool; cache-inclusive usage is normalized", async () => {
   const state = newState();

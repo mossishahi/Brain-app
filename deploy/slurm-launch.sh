@@ -1,9 +1,12 @@
 #!/bin/bash
 # The Brainstorm server as a SLURM job — the canonical launch wrapper.
 #
-# Submit from the repository root: `sbatch deploy/slurm-launch.sh`
-# (or export BRAIN_APP_DIR to point elsewhere). Copy the #SBATCH lines you
-# need to adjust into your own copy; partition/qos/mail are site-specific.
+# Submit from the repository root: `sbatch deploy/slurm-launch.sh`, or pass
+# the script's full path. The app root is resolved independently of the submit
+# directory (BRAIN_APP_DIR overrides it). Relative log paths belong to the job's
+# working directory; its logs/ directory must exist before submission.
+# Copy the #SBATCH lines you need to adjust into your own copy;
+# partition/qos/mail are site-specific.
 #
 # What this wrapper owns — and why it must, under SLURM:
 # - RELEASE CHANNEL: on every (re)start it checks out the newest app/v* tag
@@ -61,7 +64,46 @@ set -uo pipefail  # deliberately no -e: the relaunch loop must survive failures
 
 NODE_VERSION="v24.19.0"
 NODE_DIR="$HOME/opt/node-$NODE_VERSION-linux-x64"
-APP="${BRAIN_APP_DIR:-${SLURM_SUBMIT_DIR:-$PWD}}"
+
+# SLURM executes a spool copy, so dirname "$0" does not locate the checkout.
+# Its original Command names the submitted script; when that metadata is not
+# available, a submission from the app root or any of its subdirectories still
+# works. Resolve before bootstrap changes directory or downloads anything.
+brain_find_app_root() {
+  local dir
+  dir=$(cd -- "$1" 2>/dev/null && pwd -P) || return 1
+  while true; do
+    if [ -f "$dir/package.json" ] && [ -f "$dir/apps/server/package.json" ] \
+      && [ -f "$dir/deploy/slurm-renew.sh" ]; then
+      printf '%s\n' "$dir"
+      return 0
+    fi
+    [ "$dir" != / ] || return 1
+    dir=$(dirname -- "$dir")
+  done
+}
+
+if [ -n "${BRAIN_APP_DIR:-}" ]; then
+  APP=$(brain_find_app_root "$BRAIN_APP_DIR") || {
+    echo "[wrapper] BRAIN_APP_DIR does not identify a Brain-app checkout: $BRAIN_APP_DIR" >&2
+    exit 1
+  }
+else
+  launch_script="${BASH_SOURCE[0]}"
+  if [ -n "${SLURM_JOB_ID:-}" ] && command -v scontrol >/dev/null 2>&1; then
+    submitted_script=$(scontrol show job "$SLURM_JOB_ID" 2>/dev/null |
+      sed -n 's/^[[:space:]]*Command=//p' | head -1)
+    [ -z "$submitted_script" ] || launch_script="$submitted_script"
+  fi
+  APP=$(brain_find_app_root "$(dirname -- "$launch_script")") \
+    || APP=$(brain_find_app_root "${SLURM_SUBMIT_DIR:-$PWD}") || {
+      echo "[wrapper] cannot locate Brain-app; submit from its repository root or export BRAIN_APP_DIR=/path/to/Brain-app" >&2
+      exit 1
+    }
+fi
+# Keep the resolved checkout through wrapper re-exec and successor submissions.
+export BRAIN_APP_DIR="$APP"
+
 PORT="${BRAIN_PORT:-8787}"
 # Extra PATH entries (e.g. the python env backing the code-execution
 # capability); colon-separated, optional.
@@ -74,6 +116,7 @@ if [ ! -x "$NODE_DIR/bin/node" ]; then
 fi
 export PATH="$NODE_DIR/bin${EXTRA_PATH:+:$EXTRA_PATH}:$PATH"
 cd "$APP" || { echo "[wrapper] no app at $APP"; exit 1; }
+echo "[wrapper] app: $APP"
 # Keep the log directory bounded; the active job's own log is always newer.
 mkdir -p logs && find logs -name 'slurm_brain_*.log' -mtime +30 -delete 2>/dev/null
 
@@ -108,7 +151,10 @@ build_if_needed() {
 }
 
 # shellcheck source=deploy/slurm-renew.sh
-. "$(dirname "$0")/slurm-renew.sh" 2>/dev/null || . "$APP/deploy/slurm-renew.sh"
+. "$APP/deploy/slurm-renew.sh" || {
+  echo "[wrapper] cannot load $APP/deploy/slurm-renew.sh" >&2
+  exit 1
+}
 
 # How long before the walltime the successor is queued. Generous on purpose: the
 # successor only has to be PENDING by the handover, and queue latency on a busy

@@ -37,6 +37,21 @@ async function artifactOf(task: AgentTask): Promise<JsonObject> {
   return result.output as JsonObject;
 }
 
+test("mediated offline review uses explicit fixture reasoning without inventing badges or approvals", async () => {
+  const executor = new OfflineBrainstormExecutor({ factAccessMode: "supreme-mediated/v1" });
+  const critique = await executor.execute(taskFor("commentor", "gameCritique", {}));
+  assert.ok(critique.status === "ok");
+  const report = artifactSchemas.gameCritique.parse(critique.output);
+  assert.equal(report.q, 0);
+  assert.doesNotMatch(report.justification, /\[F:/);
+  assert.match(report.justification, /fixture/);
+  const chair = await executor.execute(taskFor("committee-chair", "gameCommitteeDecision", { comments: { critic: report } }));
+  assert.ok(chair.status === "ok");
+  const decision = artifactSchemas.gameCommitteeDecision.parse(chair.output);
+  assert.equal(decision.reports.critic?.admissible, true);
+  assert.deepEqual(decision.reports.critic?.factChecks, []);
+});
+
 /** The requested-output ask every offline run carries, echoed by the members. */
 const brainBindings: JsonObject = {
   input: {

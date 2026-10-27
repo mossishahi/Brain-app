@@ -10,17 +10,18 @@
  * offline provider is offered as an explicit way out. The runner choice is
  * persisted on every path — connect and offline alike.
  */
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import {
   DEFAULT_MODEL_CATALOG,
   type ServerSettings,
   type ServerSettingsUpdate,
 } from "@brainstorm-agentic/protocol";
 import { errorMessage, putSettings } from "../api";
+import { hostStorageKey } from "../desktop/context";
 
 type Provider = "claude-agent" | "anthropic" | "cursor-agent";
 
-const DISMISS_KEY = "brain-onboarding-dismissed";
+const DISMISS_KEY = hostStorageKey("brain-onboarding-dismissed");
 
 export function onboardingNeeded(settings: ServerSettings | null): boolean {
   if (!settings) return false;
@@ -67,12 +68,25 @@ export function ProviderOnboarding({
         : "claude-agent",
   );
   const [runner, setRunner] = useState<"slurm" | "local">(settings.runner);
-  const [secret, setSecret] = useState("");
+  const [secrets, setSecrets] = useState<Partial<Record<Provider, string>>>({});
+  const secret = secrets[provider] ?? "";
   const [model, setModel] = useState(
     settings.llm.provider === "anthropic" ? (settings.llm.model ?? "") : "",
   );
   const [saving, setSaving] = useState<"connect" | "offline" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const verificationContext = useRef(0);
+  const verificationAttempt = useRef<number | null>(null);
+  const clearFeedback = () => {
+    verificationContext.current += 1;
+    setError(null);
+    setSaving(null);
+  };
+  const selectProvider = (next: Provider) => {
+    if (provider === next) return;
+    clearFeedback();
+    setProvider(next);
+  };
 
   const anthropicModels = useMemo(
     () => DEFAULT_MODEL_CATALOG.anthropic ?? [],
@@ -102,8 +116,10 @@ export function ProviderOnboarding({
   });
 
   const connect = async (): Promise<void> => {
+    if (verificationAttempt.current === verificationContext.current) return;
     setError(null);
-    if (secret.trim() === "") {
+    const credential = provider === "claude-agent" ? secret.replace(/\s+/g, "") : secret.trim();
+    if (credential === "") {
       setError(
         provider === "claude-agent"
           ? "Paste the token printed by `claude setup-token` first."
@@ -117,6 +133,8 @@ export function ProviderOnboarding({
       setError("Choose the Anthropic model to use.");
       return;
     }
+    const context = verificationContext.current;
+    verificationAttempt.current = context;
     setSaving("connect");
     try {
       const updated = await putSettings({
@@ -126,7 +144,7 @@ export function ProviderOnboarding({
             ? {
                 provider: "anthropic",
                 model: model.trim(),
-                apiKey: secret.trim(),
+                apiKey: credential,
                 ...(settings.llm.modelsByRoute
                   ? { modelsByRoute: settings.llm.modelsByRoute }
                   : {}),
@@ -134,7 +152,7 @@ export function ProviderOnboarding({
             : provider === "cursor-agent"
               ? {
                   provider: "cursor-agent",
-                  cursorApiKey: secret.trim(),
+                  cursorApiKey: credential,
                   // The agent-SDK execution settings are shared verbatim
                   // between the Claude and Cursor backends.
                   ...(settings.llm.agentSdk
@@ -146,7 +164,7 @@ export function ProviderOnboarding({
                 }
               : {
                   provider: "claude-agent",
-                  setupToken: secret.trim(),
+                  setupToken: credential,
                   ...(settings.llm.agentSdk
                     ? { agentSdk: settings.llm.agentSdk }
                     : {}),
@@ -155,15 +173,19 @@ export function ProviderOnboarding({
                     : {}),
                 },
       });
-      onSaved(updated);
+      if (verificationContext.current === context) onSaved(updated);
     } catch (cause) {
-      setError(errorMessage(cause));
+      if (verificationContext.current === context) setError(errorMessage(cause));
     } finally {
-      setSaving(null);
+      if (verificationAttempt.current === context) verificationAttempt.current = null;
+      if (verificationContext.current === context) setSaving(null);
     }
   };
 
   const useOffline = async (): Promise<void> => {
+    if (verificationAttempt.current === verificationContext.current) return;
+    const context = verificationContext.current;
+    verificationAttempt.current = context;
     setError(null);
     setSaving("offline");
     try {
@@ -171,11 +193,12 @@ export function ProviderOnboarding({
         ...baseUpdate(),
         llm: { provider: "offline" },
       });
-      onSaved(updated);
+      if (verificationContext.current === context) onSaved(updated);
     } catch (cause) {
-      setError(errorMessage(cause));
+      if (verificationContext.current === context) setError(errorMessage(cause));
     } finally {
-      setSaving(null);
+      if (verificationAttempt.current === context) verificationAttempt.current = null;
+      if (verificationContext.current === context) setSaving(null);
     }
   };
 
@@ -239,8 +262,7 @@ export function ProviderOnboarding({
             aria-checked={provider === "claude-agent"}
             className={`onboard-provider${provider === "claude-agent" ? " selected" : ""}`}
             onClick={() => {
-              setProvider("claude-agent");
-              setError(null);
+              selectProvider("claude-agent");
             }}
           >
             <span className="onboard-provider-name">Claude setup token</span>
@@ -252,8 +274,7 @@ export function ProviderOnboarding({
             aria-checked={provider === "anthropic"}
             className={`onboard-provider${provider === "anthropic" ? " selected" : ""}`}
             onClick={() => {
-              setProvider("anthropic");
-              setError(null);
+              selectProvider("anthropic");
             }}
           >
             <span className="onboard-provider-name">Anthropic API key</span>
@@ -265,8 +286,7 @@ export function ProviderOnboarding({
             aria-checked={provider === "cursor-agent"}
             className={`onboard-provider${provider === "cursor-agent" ? " selected" : ""}`}
             onClick={() => {
-              setProvider("cursor-agent");
-              setError(null);
+              selectProvider("cursor-agent");
             }}
           >
             <span className="onboard-provider-name">Cursor API key</span>
@@ -289,7 +309,7 @@ export function ProviderOnboarding({
                   : "sk-ant-…"
             }
             autoFocus
-            onChange={(event) => setSecret(event.target.value)}
+            onChange={(event) => { setSecrets(current => ({ ...current, [provider]: event.target.value })); clearFeedback(); }}
             onKeyDown={(event) => {
               if (event.key === "Enter") void connect();
             }}
@@ -303,7 +323,7 @@ export function ProviderOnboarding({
               value={model}
               list="onboard-anthropic-models"
               placeholder="claude-sonnet-5"
-              onChange={(event) => setModel(event.target.value)}
+              onChange={(event) => { setModel(event.target.value); clearFeedback(); }}
             />
             <datalist id="onboard-anthropic-models">
               {anthropicModels.map((option) => (

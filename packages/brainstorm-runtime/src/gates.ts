@@ -1,4 +1,4 @@
-import type { HumanGateNode as ContentHumanGateNode } from "@brainstorm-agentic/content";
+import { embeddingInputSchema, type HumanGateNode as ContentHumanGateNode } from "@brainstorm-agentic/content";
 import type { JsonObject, JsonValue, ScopeReader } from "@brainstorm-agentic/core";
 
 import { type ReferenceRoots, resolveDataReference, writeDataReference } from "./data-ref.js";
@@ -32,6 +32,13 @@ export interface HumanGateDecision {
    * empty list clears them.
    */
   readonly requestedOutputs?: readonly JsonValue[];
+  /**
+   * For a needs-editing action (editRule "needs"): the edited embedding
+   * input. It may only drop facets, aliases or equivalent problems and change
+   * relevance/confidence values within [0, 1]; every remaining text stays
+   * exactly as the classifier wrote it, and at least 3 facets remain.
+   */
+  readonly embeddingInput?: JsonValue;
 }
 
 /** Gate-time panel bounds (mirrors the protocol's PANEL_EDIT_LIMITS). */
@@ -105,6 +112,124 @@ export function autoApproveDecision(node: ContentHumanGateNode): HumanGateDecisi
   const approve = node.gate.actions.find((action) => action.id === "approve") ?? node.gate.actions[0];
   if (!approve) throw new BrainstormRuntimeError(`human gate "${node.id}" has no action`, "INVALID_GATE");
   return { action: approve.id };
+}
+
+/** Minimum facets an edited embedding input keeps (the schema's floor). */
+const MIN_FACETS = 3;
+
+function needsEditError(nodeId: string, message: string): BrainstormRuntimeError {
+  return new BrainstormRuntimeError(`human gate "${nodeId}": ${message}`, "INVALID_GATE_DECISION");
+}
+
+function sameJson(left: JsonValue | undefined, right: JsonValue | undefined): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function unitInterval(value: JsonValue | undefined): boolean {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
+}
+
+/**
+ * Checks an edited embedding input against the current one under editRule
+ * "needs": facets, aliases and equivalent problems may only be removed
+ * (order kept), relevance and confidence may change within [0, 1], and no
+ * text may be added or rewritten; at least 3 facets remain. Returns the
+ * edited input.
+ */
+export function applyNeedsEdit(current: JsonObject, proposed: JsonValue, nodeId: string): JsonObject {
+  const edited = object(proposed, "edited embedding input");
+  for (const key of Object.keys(edited)) {
+    if (!Object.prototype.hasOwnProperty.call(current, key)) {
+      throw needsEditError(nodeId, `the needs edit may not add "${key}"`);
+    }
+  }
+  for (const key of Object.keys(current)) {
+    if (key === "facets" || key === "equivalentProblems") continue;
+    if (!sameJson(current[key], edited[key])) {
+      throw needsEditError(nodeId, `the needs edit may not change "${key}"`);
+    }
+  }
+  const currentFacets = Array.isArray(current.facets) ? current.facets.map((entry) => object(entry, "facet")) : [];
+  const editedFacets = Array.isArray(edited.facets) ? edited.facets : undefined;
+  if (editedFacets === undefined) throw needsEditError(nodeId, "the needs edit must keep a facets list");
+  if (editedFacets.length < MIN_FACETS) {
+    throw needsEditError(nodeId, `at least ${MIN_FACETS} facets must remain`);
+  }
+  let cursor = 0;
+  for (const raw of editedFacets) {
+    const facet = object(raw, "edited facet");
+    let match = -1;
+    for (let index = cursor; index < currentFacets.length; index += 1) {
+      if (currentFacets[index]!.name === facet.name) {
+        match = index;
+        break;
+      }
+    }
+    if (match < 0) {
+      throw needsEditError(nodeId, `facet "${String(facet.name)}" is not one of the classifier's facets (or is out of order)`);
+    }
+    const original = currentFacets[match]!;
+    cursor = match + 1;
+    for (const key of Object.keys(facet)) {
+      if (!Object.prototype.hasOwnProperty.call(original, key)) {
+        throw needsEditError(nodeId, `facet "${String(facet.name)}" may not gain "${key}"`);
+      }
+    }
+    for (const key of Object.keys(original)) {
+      if (key === "relevance" || key === "aliases") continue;
+      if (!sameJson(original[key], facet[key])) {
+        throw needsEditError(nodeId, `facet "${String(facet.name)}" may not change "${key}"`);
+      }
+    }
+    if (!unitInterval(facet.relevance)) {
+      throw needsEditError(nodeId, `facet "${String(facet.name)}" needs a relevance within [0, 1]`);
+    }
+    if (facet.aliases !== undefined) {
+      const kept = Array.isArray(facet.aliases) ? facet.aliases : undefined;
+      const known = Array.isArray(original.aliases) ? original.aliases : [];
+      if (kept === undefined) throw needsEditError(nodeId, `facet "${String(facet.name)}" aliases must be a list`);
+      let at = 0;
+      for (const alias of kept) {
+        while (at < known.length && known[at] !== alias) at += 1;
+        if (at >= known.length) {
+          throw needsEditError(nodeId, `facet "${String(facet.name)}" alias "${String(alias)}" is not one of its aliases (or is out of order)`);
+        }
+        at += 1;
+      }
+    }
+  }
+  if (edited.equivalentProblems !== undefined) {
+    const kept = Array.isArray(edited.equivalentProblems) ? edited.equivalentProblems : undefined;
+    const known = Array.isArray(current.equivalentProblems) ? current.equivalentProblems.map((entry) => object(entry, "equivalent problem")) : [];
+    if (kept === undefined) throw needsEditError(nodeId, "equivalentProblems must be a list");
+    let at = 0;
+    for (const raw of kept) {
+      const entry = object(raw, "edited equivalent problem");
+      while (at < known.length && known[at]!.name !== entry.name) at += 1;
+      if (at >= known.length) {
+        throw needsEditError(nodeId, `equivalent problem "${String(entry.name)}" is not one of the classifier's (or is out of order)`);
+      }
+      const original = known[at]!;
+      at += 1;
+      for (const key of new Set([...Object.keys(original), ...Object.keys(entry)])) {
+        if (key === "confidence") continue;
+        if (!sameJson(original[key], entry[key])) {
+          throw needsEditError(nodeId, `equivalent problem "${String(entry.name)}" may not change "${key}"`);
+        }
+      }
+      if (!unitInterval(entry.confidence)) {
+        throw needsEditError(nodeId, `equivalent problem "${String(entry.name)}" needs a confidence within [0, 1]`);
+      }
+    }
+  }
+  const parsed = embeddingInputSchema.safeParse(edited);
+  if (!parsed.success) {
+    throw needsEditError(
+      nodeId,
+      `the edited embedding input is invalid: ${parsed.error.issues.map((issue) => `${issue.path.join(".") || "(root)"}: ${issue.message}`).join("; ")}`,
+    );
+  }
+  return edited;
 }
 
 /**
@@ -286,6 +411,29 @@ export function applyGateDecision(
   } else if (decision.type !== undefined || decision.requestedOutputs !== undefined) {
     throw new BrainstormRuntimeError(
       `human gate action "${decision.action}" does not permit classification edits`,
+      "INVALID_GATE_DECISION",
+    );
+  }
+
+  if (action.editRule === "needs") {
+    if (!action.edits) {
+      throw new BrainstormRuntimeError(
+        `human gate "${node.id}" needs action has no edit target`,
+        "INVALID_GATE",
+      );
+    }
+    // An edit carrying no embedding input is a plain approval of the needs.
+    if (decision.embeddingInput !== undefined) {
+      const current = object(
+        resolveDataReference(action.edits, scope, next, { required: true }),
+        "needs edit target",
+      );
+      const edited = applyNeedsEdit(current, decision.embeddingInput, node.id);
+      next = writeDataReference(next, action.edits, edited, scope).state;
+    }
+  } else if (decision.embeddingInput !== undefined) {
+    throw new BrainstormRuntimeError(
+      `human gate action "${decision.action}" does not permit needs edits`,
       "INVALID_GATE_DECISION",
     );
   }

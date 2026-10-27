@@ -3,6 +3,7 @@
  * BrainstormRuntime. Providers are chosen here — never in content or core.
  */
 import { readFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 
 import {
   ToolLoopAgentExecutor,
@@ -14,6 +15,7 @@ import {
   BrainstormAgentTaskAdapter,
   BrainstormRuntime,
   ContentArtifactOutputValidator,
+  literatureActivities,
   StaticCapabilityToolResolver,
   taxonomyActivities,
   type BrainstormRouteResolver,
@@ -32,14 +34,23 @@ import {
   type AgentTask,
   type ArtifactStore,
   type CheckpointStore,
+  type EncoderProvider,
+  type FactAccess,
+  type FactVerdict,
   type JsonObject,
   type JsonValue,
   type ModelRequest,
   type ModelResponse,
+  type NotesAccess,
   type ProviderNativeOffer,
   type RunEventListener,
   type TaxonomyAccess,
   type WebAccess,
+  NotesScopeRegistry,
+  notesScopeOf,
+  FactScopeRegistry,
+  factScopeOf,
+  factSubmitContextOf,
 } from "@brainstorm-agentic/core";
 import {
   isCreditLimitMessage,
@@ -47,11 +58,13 @@ import {
 } from "@brainstorm-agentic/credit-recovery";
 import type { LivePreviewSink } from "@brainstorm-agentic/core";
 import type { ContentBundle, LoadedInputTypes } from "@brainstorm-agentic/content";
+import { factConsultationSchema, factVerdictSchema } from "@brainstorm-agentic/content";
 import { ClaudeAgentExecutor } from "@brainstorm-agentic/executor-claude-agent";
 import { CursorAgentExecutor } from "@brainstorm-agentic/executor-cursor-agent";
 import { AnthropicMessagesProvider } from "@brainstorm-agentic/provider-anthropic";
 
 import { attachmentTools, ATTACHMENT_TOOL_NAMES } from "./attachment-tools.js";
+import { lazyEncoderProvider, nodeTextsFromBundle } from "./literature-wiring.js";
 import {
   launchIntervalFor,
   StaggeredLaunchAgentExecutor,
@@ -59,13 +72,17 @@ import {
 import {
   ALL_HOST_TOOL_MANIFESTS,
   ATTACHMENT_MANIFESTS,
+  FACT_MANIFESTS,
   GPU_RUN_MANIFESTS,
+  NOTES_MANIFESTS,
   TAXONOMY_MANIFESTS,
   TAXONOMY_TOOL_NAMES,
   WEB_SEARCH_MANIFESTS,
   codeExecutionTools,
   createHostToolRegistry,
+  factTools,
   gpuRunTools,
+  notesTools,
   taxonomyTools,
   webAccessTools,
   webFetchTools,
@@ -74,7 +91,10 @@ import {
   type WebSearchRuntimeConfig,
   type WebSearchSecrets,
 } from "@brainstorm-agentic/host-tools";
-import { OfflineBrainstormExecutor } from "./offline-executor.js";
+import { FileFactTable } from "./fact-table.js";
+import { FactUpdateSpawner } from "./fact-updates.js";
+import { ArtifactNotesAccess } from "./notes-access.js";
+import { OfflineBrainstormExecutor, OFFLINE_GAME_FACT } from "./offline-executor.js";
 import type { PromptSink } from "./prompt-capture.js";
 import { sliceThoughtsBySteps } from "./thought-slices.js";
 
@@ -167,6 +187,12 @@ export interface RuntimeWiringOptions {
    * agent is told so honestly.
    */
   readonly web?: WebAccess;
+  /**
+   * True when the deployment handed web search to the agents' OWN tools
+   * (webSearch.mode "agent"). No host web layer is wired then; the backend's
+   * native web tools are offered to the broker and admitted by the executor.
+   */
+  readonly nativeWeb?: boolean;
   readonly bundle: ContentBundle;
   readonly skillResolver?: SkillResolver;
   readonly onEvent?: RunEventListener;
@@ -201,6 +227,37 @@ export interface RuntimeWiringOptions {
    * serve the records from, and then executors build none at all.
    */
   readonly onPrompt?: PromptSink;
+  /**
+   * The paper-based panel composition: the encoder provider, the per-call
+   * retrieval cache directory and which key-gated sources have their key.
+   * Absent parts fall back to the encoder package resolved lazily (the
+   * hash-ngram-v1 embedder when it is not installed), an in-memory cache and
+   * OpenAlex left uncalled (it is never called without its key).
+   */
+  readonly literature?: {
+    readonly encoders?: EncoderProvider;
+    readonly cacheDir?: string;
+    readonly keyedSources?: ReadonlySet<string>;
+  };
+  /**
+   * The run's fact table, `<session>/<runId>/facts.jsonl` (see fact-table.ts).
+   * The table exists when the bundle carries the control
+   * (catalog/fact-table.json) and the run is not offline; without a path
+   * there is no table, and nothing of it is registered or enabled.
+   */
+  readonly factLogPath?: string;
+  /**
+   * Tests only: the run's fact table and its log path, given instead of one
+   * opened from `factLogPath` (an offline run otherwise has none). The test
+   * attaches its own verifier; the fact-update spawner is attached here when
+   * the control declares `updates` (fact updates, design 6.9 and section 10).
+   */
+  readonly factTableForTests?: { readonly table: FileFactTable; readonly logPath: string };
+  /**
+   * When the host wants the run to stop starting work. Read by the fact-update
+   * spawner, which starts no reconsideration task after it (design 6.8).
+   */
+  readonly windDown?: { readonly at: number; readonly reason: string };
 }
 
 /** Reads the model id the brainstorm compiler resolved into the task description. */
@@ -217,6 +274,8 @@ class TaskDescribedRouteResolver implements ModelRouteResolver {
 const HIGH_PRIORITY_TASK_KINDS: ReadonlySet<string> = new Set([
   "brainstorm.judge",
   "brainstorm.redeveloper",
+  "brainstorm.committee-chair",
+  "brainstorm.game-redeveloper",
 ]);
 
 /**
@@ -263,9 +322,14 @@ export function buildAgentExecutor(
   codeEnvironment?: CodeRuntimeEnvironment,
   gpuRun?: GpuRunConfig,
   web?: WebAccess,
+  nativeWeb = false,
+  notes?: { readonly access: NotesAccess; readonly scopes: NotesScopeRegistry },
+  facts?: { readonly access: FactAccess; readonly scopes: FactScopeRegistry },
+  factAccessMode?: "supreme-mediated/v1",
 ): AgentExecutor {
   if (config.provider === "offline") {
-    return new OfflineBrainstormExecutor({ ...(inputTypes ? { inputTypes } : {}) });
+    return new OfflineBrainstormExecutor({ ...(inputTypes ? { inputTypes } : {}),
+      ...(factAccessMode !== undefined ? { factAccessMode } : {}) });
   }
   if (config.provider === "cursor-agent") {
     if (!config.cursorApiKey) {
@@ -286,8 +350,14 @@ export function buildAgentExecutor(
       // Same for GPU runs: no built-in submits cluster jobs.
       ...(gpuRun ? { gpuRun } : {}),
       // The web is host-owned: Cursor's own webSearch/webFetch never enter
-      // the tools allowlist, and the unified host web tools serve instead.
+      // the tools allowlist, and the unified host web tools serve instead —
+      // unless the deployment handed search to the agents' own tools.
       ...(web ? { web } : {}),
+      ...(nativeWeb ? { nativeWeb: true } : {}),
+      // The thinker notes reach review tasks as a scoped custom tool.
+      ...(notes ? { notes: notes.access } : {}),
+      // The fact table reaches the roles that declare it as a custom tool too.
+      ...(facts ? { facts: facts.access } : {}),
       outputValidator: new ContentArtifactOutputValidator(),
       maxValidationAttempts: 3,
       ...(model ? { model } : {}),
@@ -334,8 +404,14 @@ export function buildAgentExecutor(
       // gpu_run tool is bridged in-process when the deployment set it up.
       ...(gpuRun ? { gpuRun } : {}),
       // The web is host-owned: Claude Code's WebSearch/WebFetch are always
-      // disallowed, and the unified host web tools serve instead.
+      // disallowed, and the unified host web tools serve instead — unless the
+      // deployment handed search to the agents' own tools.
       ...(web ? { web } : {}),
+      ...(nativeWeb ? { nativeWeb: true } : {}),
+      // The thinker notes reach review tasks as a scoped in-process MCP tool.
+      ...(notes ? { notes: notes.access } : {}),
+      // The fact table reaches the roles that declare it as one too.
+      ...(facts ? { facts: facts.access } : {}),
       outputValidator: new ContentArtifactOutputValidator(),
       maxValidationAttempts: 3,
       ...(model ? { model } : {}),
@@ -392,6 +468,20 @@ export function buildAgentExecutor(
   }
   if (gpuRun) {
     for (const tool of gpuRunTools(gpuRun)) registry.register(tool);
+  }
+  // Thinker notes: one registration, scoped per call through the registry
+  // of executing tasks (the Messages path registers tools once per run).
+  if (notes) {
+    for (const tool of notesTools(notes.access, (context) => notes.scopes.get(context.taskId))) {
+      registry.register(tool);
+    }
+  }
+  // The fact table: one registration as well; the scope registry hands each
+  // call its task's scope and task data (see FactScopeAgentExecutor).
+  if (facts) {
+    for (const tool of factTools(facts.access, (context) => facts.scopes.get(context.taskId))) {
+      registry.register(tool);
+    }
   }
   // The web is host-owned: with a manager wired, BOTH web tools run through
   // it (routed, bounded, coalesced, and logged verbatim); without one, the
@@ -564,6 +654,11 @@ export class ThinkingArtifactAgentExecutor implements AgentExecutor {
           kind: "thinking",
           nodePath: context.nodePath,
           taskId: task.taskId,
+          // Who wrote the chain and which form it took: what lets the notes
+          // tool collect one seat's traces (see notes-access.ts).
+          ...(task.agentId !== undefined ? { agentId: task.agentId } : {}),
+          ...(typeof task.metadata?.schema === "string" ? { schema: task.metadata.schema } : {}),
+          ...(typeof task.metadata?.nodeId === "string" ? { nodeId: task.metadata.nodeId } : {}),
         },
       });
     } catch {
@@ -579,6 +674,55 @@ export class ThinkingArtifactAgentExecutor implements AgentExecutor {
           : {}),
       },
     };
+  }
+}
+
+/**
+ * Records the executing task's notes scope for the run-global notes tool
+ * (the Messages path), for exactly as long as the task runs. The SDK
+ * executors read the scope off the task directly; this wrapper is what lets
+ * one registered tool answer the right seat's notes to each caller.
+ */
+export class NotesScopeAgentExecutor implements AgentExecutor {
+  constructor(
+    private readonly inner: AgentExecutor,
+    private readonly scopes: NotesScopeRegistry,
+  ) {}
+
+  async execute(task: AgentTask, context: AgentExecutionContext): Promise<AgentResult> {
+    const scope = notesScopeOf(task.metadata);
+    if (scope === undefined) return this.inner.execute(task, context);
+    this.scopes.enter(task.taskId, scope);
+    try {
+      return await this.inner.execute(task, context);
+    } finally {
+      this.scopes.leave(task.taskId);
+    }
+  }
+}
+
+/**
+ * Records the executing task's fact scope and task data for the run-global
+ * fact_table tool (the Messages path), for exactly as long as the task runs.
+ * The SDK executors read both off the task and its context directly; this
+ * wrapper is what lets one registered tool record each submission against
+ * the right requester and hand the supreme judge that task's files.
+ */
+export class FactScopeAgentExecutor implements AgentExecutor {
+  constructor(
+    private readonly inner: AgentExecutor,
+    private readonly scopes: FactScopeRegistry,
+  ) {}
+
+  async execute(task: AgentTask, context: AgentExecutionContext): Promise<AgentResult> {
+    const scope = factScopeOf(task.metadata);
+    if (scope === undefined) return this.inner.execute(task, context);
+    this.scopes.enter(task.taskId, { scope, context: factSubmitContextOf(task, context) });
+    try {
+      return await this.inner.execute(task, context);
+    } finally {
+      this.scopes.leave(task.taskId);
+    }
   }
 }
 
@@ -624,6 +768,31 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
     options.providerConfig.provider === "anthropic" && options.taxonomy
       ? [...TAXONOMY_TOOL_NAMES]
       : [];
+  // The thinker notes live in the run's artifacts, so every run has them;
+  // the per-task scope registry is what the Messages-path tool reads.
+  const notes = {
+    access: new ArtifactNotesAccess(options.artifacts) as NotesAccess,
+    scopes: new NotesScopeRegistry(),
+  };
+  // The run's fact table (control catalog/fact-table.json): an append-only
+  // log in the run directory, whose submissions the supreme judge rules on
+  // through this run's own executor (attached below, once the runtime
+  // exists). An offline run has no verifier, so it has no table; neither has
+  // a bundle without the control, or a host that names no log path.
+  const factControl = options.bundle.factTable;
+  const factTable =
+    options.factTableForTests?.table ??
+    (factControl !== undefined &&
+    options.factLogPath !== undefined &&
+    options.providerConfig.provider !== "offline"
+      ? new FileFactTable({ logPath: options.factLogPath, limits: factControl.limits,
+          ...(factControl.accessMode !== undefined ? { accessMode: factControl.accessMode } : {}),
+          ...(factControl.updates !== undefined ? { updates: factControl.updates } : {}) })
+      : undefined);
+  const facts =
+    factTable !== undefined
+      ? { access: factTable as FactAccess, scopes: new FactScopeRegistry() }
+      : undefined;
 
   // Determine enabled host tools from config or defaults
   const enabledHostToolIds = new Set<string>(
@@ -641,6 +810,18 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
   // guard exists to catch — the placer then fails loud instead).
   for (const manifest of TAXONOMY_MANIFESTS) {
     if (options.taxonomy) enabledHostToolIds.add(manifest.toolId);
+    else enabledHostToolIds.delete(manifest.toolId);
+  }
+  // The notes tool is a deployment resource in the same sense: the notes are
+  // the run's own artifacts, so it is always backed and always enabled —
+  // which task may read which seat's notes is the runtime's per-task scope.
+  for (const manifest of NOTES_MANIFESTS) enabledHostToolIds.add(manifest.toolId);
+  // The fact table's tool likewise, but only where the run has a table: with
+  // one it is always enabled (which task may use it is the role's declared
+  // capability); without one it is removed, so the broker never offers a
+  // tool nothing backs.
+  for (const manifest of FACT_MANIFESTS) {
+    if (facts) enabledHostToolIds.add(manifest.toolId);
     else enabledHostToolIds.delete(manifest.toolId);
   }
   // Same truthfulness rule for the attachment tools: a run with no ingested
@@ -671,6 +852,13 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
   for (const manifest of WEB_SEARCH_MANIFESTS) {
     if (options.web) enabledHostToolIds.add(manifest.toolId);
     else enabledHostToolIds.delete(manifest.toolId);
+  }
+  // Agents' own web tools (webSearch.mode "agent"): the backend searches
+  // natively, and where it has no native fetch (the Messages path) the
+  // host's plain web_fetch stays the fetch — the bare, un-searched one the
+  // registry registers when no manager is wired.
+  if (options.web === undefined && options.nativeWeb === true) {
+    enabledHostToolIds.add("web_fetch");
   }
 
   /**
@@ -705,6 +893,10 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
       "code-execution",
       "This run was launched offline: it has no interpreter.",
     );
+    vacantCapabilities.set(
+      "fact-table",
+      "This run was launched offline: it has no fact verifier.",
+    );
   }
 
   // Per-run capability disables from the submission. taxonomy-access is
@@ -724,6 +916,7 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
   // readiness probe has to answer the same question before a job exists.
   const providerOffers = nativeOffersFor(options.providerConfig.provider, {
     attachmentRootsPresent: attachmentRoots.length > 0,
+    nativeWeb: options.nativeWeb === true && options.providerConfig.provider !== "offline",
   });
 
   /**
@@ -739,35 +932,46 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
     ? []
     : attachmentRoots;
 
-  const executorStack = new ThinkingArtifactAgentExecutor(
-    new CreditBlockDetectingAgentExecutor(
-      buildAgentExecutor(
-        options.providerConfig,
-        executorAttachmentRoots,
-        options.bundle.catalogs.inputTypes,
-        options.taxonomy,
-        options.codeEnvironment,
-        // Registration follows config presence; EXPOSURE stays with the
-        // broker, which only offers gpu_run while it is in the enabled set.
-        options.gpuRun !== undefined && enabledHostToolIds.has(GPU_RUN_MANIFESTS[0]!.toolId)
-          ? options.gpuRun
-          : undefined,
-        options.web,
+  const executorStack = new NotesScopeAgentExecutor(
+    new ThinkingArtifactAgentExecutor(
+      new CreditBlockDetectingAgentExecutor(
+        buildAgentExecutor(
+          options.providerConfig,
+          executorAttachmentRoots,
+          options.bundle.catalogs.inputTypes,
+          options.taxonomy,
+          options.codeEnvironment,
+          // Registration follows config presence; EXPOSURE stays with the
+          // broker, which only offers gpu_run while it is in the enabled set.
+          options.gpuRun !== undefined && enabledHostToolIds.has(GPU_RUN_MANIFESTS[0]!.toolId)
+            ? options.gpuRun
+            : undefined,
+          options.web,
+          options.nativeWeb === true,
+          notes,
+          facts,
+          factControl?.accessMode,
+        ),
+        options.providerConfig.creditRecovery,
       ),
-      options.providerConfig.creditRecovery,
+      options.artifacts,
     ),
-    options.artifacts,
+    notes.scopes,
   );
+  // The fact table's Messages-path tool finds its caller the same way, so its
+  // scope registry wraps the stack too (only when the run has a table).
+  const factScopedStack =
+    facts === undefined ? executorStack : new FactScopeAgentExecutor(executorStack, facts.scopes);
   // Outermost by design: the stagger gates the moment a task ENTERS
   // execution, so a parallel wave (first pass, a review round's
   // commentors) launches one agent per interval instead of all at once.
   const launchIntervalMs = launchIntervalFor(options.providerConfig);
   const staggered =
     launchIntervalMs > 0
-      ? new StaggeredLaunchAgentExecutor(executorStack, {
+      ? new StaggeredLaunchAgentExecutor(factScopedStack, {
           intervalMs: launchIntervalMs,
         })
-      : executorStack;
+      : factScopedStack;
   // Above the stagger without taking its place: the sink rides the CONTEXT, so
   // it has to be attached before any executor that talks to a model sees it,
   // and this wrapper only decorates — the stagger remains the outermost thing
@@ -780,17 +984,44 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
   const runtime = new BrainstormRuntime({
     agentExecutor,
     bundle: options.bundle,
+    // Cited badges are checked against the actual shared table, not a status
+    // supplied by a model. Missing cited evidence fails closed; the chair can
+    // admit directly inspectable reasoning that needs no separate table claim.
+    readGameFacts: () => factTable !== undefined
+      ? factTable.entries()
+      : Promise.resolve(options.providerConfig.provider === "offline" ? [OFFLINE_GAME_FACT] : []),
+    readGameEvidence: () => factTable !== undefined
+      ? factTable.evidence()
+      : Promise.resolve({ facts: [], approvals: [] }),
     skillResolver: options.skillResolver,
     routeResolver: contentRouteResolver(options.providerConfig),
     // The deterministic taxonomy activities (match/suggest/bridge) run over
-    // the same shared-taxonomy access the placer's tools read from.
-    ...(options.taxonomy ? { activities: taxonomyActivities(options.taxonomy) } : {}),
+    // the same shared-taxonomy access the placer's tools read from. The
+    // paper-based panel composition's activities (literature.retrieve,
+    // literature.noScreen, panel.compose, panel.seat) read the host web
+    // layer, that taxonomy, the encoders and the bundle's node texts; the
+    // old handlers stay registered for pinned runs.
+    activities: {
+      ...(options.taxonomy ? taxonomyActivities(options.taxonomy) : {}),
+      ...literatureActivities({
+        ...(options.web ? { web: options.web } : {}),
+        ...(options.taxonomy ? { taxonomy: options.taxonomy } : {}),
+        encoders: options.literature?.encoders ?? lazyEncoderProvider(),
+        nodeTexts: nodeTextsFromBundle(options.bundle),
+        ...(options.literature?.cacheDir !== undefined ? { cacheDir: options.literature.cacheDir } : {}),
+        ...(options.literature?.keyedSources !== undefined
+          ? { keyedSources: options.literature.keyedSources }
+          : {}),
+      }),
+    },
     // Legacy capability tool resolver (kept for backward compatibility)
     capabilityTools: new StaticCapabilityToolResolver({
       "web-search": [],
       "code-execution": [],
       "attachment-access": anthropicAttachmentTools,
       "taxonomy-access": anthropicTaxonomyTools,
+      "notes-access": [],
+      "fact-table": [],
     }),
     // Capability broker inputs
     providerOffers,
@@ -811,6 +1042,11 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
     ...(options.onLivePreview !== undefined
       ? { onLivePreview: options.onLivePreview }
       : {}),
+    // The run's fact-table deletion epoch (fact updates, design 6.6), read at
+    // each game critic dispatch; one path, through the compile options (D17).
+    ...(factTable !== undefined && factControl?.updates !== undefined
+      ? { factEpoch: () => factTable.deletionEpoch() }
+      : {}),
   });
   // A dismissal that does not reach the compiler is a silent, expensive lie:
   // the seat keeps thinking and commenting, the dashboard shows it dismissed,
@@ -826,6 +1062,64 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
         "dismissal guards — refusing to run the full panel behind the " +
         "submitter's back",
     );
+  }
+  // The supreme judge rules on each fact-table submission as a task of its
+  // own, through the outermost executor (prompt capture and credit-block
+  // detection apply to it as to any task) but not on the requester's
+  // channels: its progress and live text would read as the requester's.
+  if (factTable !== undefined && options.factLogPath !== undefined) {
+    // The log sits in the run directory, which is named after the run.
+    const factRunId = basename(dirname(options.factLogPath));
+    factTable.attachVerifier(async ({ submission, bindings, execution, signal }) => {
+      const build = runtime.compiled.factVerificationTask;
+      if (build === undefined) throw new Error("this bundle declares no fact verifier");
+      const task = await build({ taskId: `fact-verification:${submission}`, bindings });
+      const result = await agentExecutor.execute(task, {
+        runId: execution?.runId ?? factRunId,
+        nodePath: `${execution?.nodePath ?? "fact-table"}/fact-verification[${submission}]`,
+        signal,
+      });
+      if (result.status !== "ok") throw new Error(result.error.message);
+      return {
+        verdict: factVerdictSchema.parse(result.output) as FactVerdict,
+        taskId: task.taskId,
+        ...(result.usage ? { usage: result.usage } : {}),
+      };
+    });
+    if (factTable.accessMode === "supreme-mediated/v1") {
+      factTable.attachConsultant(async ({ consultation, bindings, execution, signal }) => {
+        const build = runtime.compiled.factConsultationTask;
+        if (build === undefined) throw new Error("this bundle declares no supreme consultation role");
+        const task = await build({ taskId: `fact-consultation:${consultation}`, bindings });
+        const result = await agentExecutor.execute(task, {
+          runId: execution?.runId ?? factRunId,
+          nodePath: `${execution?.nodePath ?? "fact-table"}/fact-consultation[${consultation}]`, signal,
+        });
+        if (result.status !== "ok") throw new Error(result.error.message);
+        return { result: factConsultationSchema.parse(result.output), taskId: task.taskId,
+          ...(result.usage ? { usage: result.usage } : {}) };
+      });
+    }
+  }
+  // Fact updates (control `updates`, design section 6): the spawner of the
+  // reconsideration tasks, journaling beside the run's fact log. It hears
+  // every durable deletion of the shared table; the workflow's merge points
+  // wait on it, and each run or resume binds its tasks to the run's abort
+  // signal (D16). A critic's dispatch reads the deletion epoch through the
+  // runtime's factEpoch option (D17).
+  const factUpdatesLogPath = options.factLogPath ?? options.factTableForTests?.logPath;
+  if (factTable !== undefined && factControl?.updates !== undefined && factUpdatesLogPath !== undefined &&
+      runtime.compiled.attachFactUpdates !== undefined) {
+    const spawner = new FactUpdateSpawner({
+      runId: basename(dirname(factUpdatesLogPath)),
+      journalPath: join(dirname(factUpdatesLogPath), "fact-updates.jsonl"),
+      table: factTable,
+      compiled: runtime.compiled,
+      executor: agentExecutor,
+      ...(options.windDown !== undefined ? { windDown: options.windDown } : {}),
+    });
+    factTable.onUpdate((event) => spawner.onDeletion(event));
+    runtime.compiled.attachFactUpdates(spawner);
   }
   return runtime;
 }
@@ -902,6 +1196,7 @@ function credentialsFromFile(env: NodeJS.ProcessEnv): {
   braveApiKey?: string;
   semanticScholarApiKey?: string;
   openAlexApiKey?: string;
+  coreApiKey?: string;
 } {
   const path = env.BRAINSTORM_AGENTIC_CREDENTIALS_FILE?.trim();
   if (!path) return {};
@@ -920,6 +1215,7 @@ function credentialsFromFile(env: NodeJS.ProcessEnv): {
       ...field("braveApiKey"),
       ...field("semanticScholarApiKey"),
       ...field("openAlexApiKey"),
+      ...field("coreApiKey"),
     };
   } catch {
     return {};
@@ -966,6 +1262,7 @@ export function webSearchRuntimeFromEnv(env: NodeJS.ProcessEnv): {
   const semanticScholar =
     secret(env.SEMANTIC_SCHOLAR_API_KEY) ?? fileCredentials.semanticScholarApiKey;
   const openAlex = secret(env.OPENALEX_API_KEY) ?? fileCredentials.openAlexApiKey;
+  const core = secret(env.CORE_API_KEY) ?? fileCredentials.coreApiKey;
   return {
     config,
     secrets: {
@@ -973,6 +1270,7 @@ export function webSearchRuntimeFromEnv(env: NodeJS.ProcessEnv): {
       ...(brave !== undefined ? { braveApiKey: brave } : {}),
       ...(semanticScholar !== undefined ? { semanticScholarApiKey: semanticScholar } : {}),
       ...(openAlex !== undefined ? { openAlexApiKey: openAlex } : {}),
+      ...(core !== undefined ? { coreApiKey: core } : {}),
     },
   };
 }

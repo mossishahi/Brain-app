@@ -22,6 +22,17 @@ export interface JobRecord {
    * need an explicit -M for the job to be visible at all.
    */
   slurmCluster?: string;
+  /**
+   * Durable ownership of an sbatch request whose receipt is not yet known.
+   * While present, no automatic or manual path may submit another worker.
+   */
+  slurmSubmission?: {
+    readonly token: string;
+    readonly submittedAt: number;
+    readonly script: string;
+    state: "submitting" | "unknown";
+    detail?: string;
+  };
   pid?: number;
   warnings?: string[];
   error?: string;
@@ -75,7 +86,7 @@ export interface JobRecord {
    */
   gateAnswer?: {
     readonly gateKey: string;
-    readonly action: "approve" | "shrink" | "revise";
+    readonly action: "approve" | "shrink" | "revise" | "edit";
     readonly members?: readonly string[];
     readonly addedMembers?: readonly CustomSeatRequest[];
     readonly type?: string;

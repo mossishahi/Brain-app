@@ -21,7 +21,6 @@ import type { WorkflowCheckpoint } from "@brainstorm-agentic/core";
 import { MIN_SUPPORTED_WORKFLOW_VERSION } from "@brainstorm-agentic/content";
 import {
   slurmClusterArgs,
-  slurmClusterFrom,
   stripSlurmClusterBanners,
 } from "@brainstorm-agentic/host-tools";
 import {
@@ -58,6 +57,8 @@ import {
   shellQuote,
 } from "./command.js";
 import { atomicWriteFile, atomicWriteJson, readJsonFile } from "./files.js";
+import { slurmSubmissionDiagnostic, slurmSubmissionReceipt } from "./slurm-submission.js";
+import { gameReviewConfiguration, gameReviewEnabled } from "./game-review.js";
 import { LiveTextStore } from "./live-text.js";
 import { readJsonCached, statStamp } from "./read-cache.js";
 import type { JobRecord } from "./model.js";
@@ -71,14 +72,26 @@ import {
   agentIdentity,
   buildJobDetailWithActivity,
   compactJobDetail,
+  compositionInputs,
   liveIdentityPanel,
   resolveFullThoughts,
   resolveThoughtsRef,
   thoughtsFilename,
 } from "./stage-mapper.js";
+import {
+  CONFIRM_NEEDS_GATE,
+  buildNeedsGateView,
+  buildPanelEvidenceView,
+  needsEditViolation,
+  type NeedsGateView,
+  type PanelEvidenceView,
+  type ServerGateAnswer,
+} from "./panel-evidence.js";
 
 export interface JobManagerOptions {
   readonly workspace: string;
+  /** Local search belongs to this server, even when its workspace is shared. */
+  readonly searxngInstanceId?: string;
   readonly contentRegistryUrl?: string;
   readonly workerPath?: string;
   readonly env?: NodeJS.ProcessEnv;
@@ -135,6 +148,18 @@ interface CommandResult {
   readonly stderr: string;
 }
 
+class CommandExecutionError extends Error {
+  constructor(
+    message: string,
+    readonly code: string | number | undefined,
+    readonly interrupted: boolean,
+    readonly stdout: string,
+    readonly stderr: string,
+  ) {
+    super(message);
+  }
+}
+
 function execute(
   command: string,
   args: readonly string[],
@@ -144,8 +169,12 @@ function execute(
     execFile(command, [...args], options, (error, stdout, stderr) => {
       if (error) {
         reject(
-          new Error(
+          new CommandExecutionError(
             `${command} failed: ${String(stderr || error.message).trim()}`,
+            error.code ?? undefined,
+            error.killed === true || error.signal != null,
+            String(stdout),
+            String(stderr),
           ),
         );
         return;
@@ -249,7 +278,14 @@ export const LIVE_NODE_SKILLS: Readonly<Record<string, string>> = {
   "comment-step": "commentor",
   "comment-step-bridge": "interdisciplinary-commentor",
   "judge-step": "judge",
+  "game-comment-step": "game-commentor",
+  "game-comment-step-bridge": "game-interdisciplinary-commentor",
+  "chair-step": "committee-chair",
+  // Fact updates: a round's re-assessment runs the role of the step it repeats.
+  "game-chair-reassess": "committee-chair",
+  "judge-reassess": "judge",
   "redevelop-idea": "redeveloper",
+  "game-redevelop-idea": "redeveloper",
   "bridge-audit": "integrator",
   "synthesize-proposal": "chair",
 };
@@ -288,6 +324,9 @@ export class JobManager {
 
   constructor(options: JobManagerOptions) {
     this.settings = new SettingsStore(options.workspace, {
+      ...(options.searxngInstanceId !== undefined
+        ? { searxngInstanceId: options.searxngInstanceId }
+        : {}),
       ...(options.contentRegistryUrl
         ? { defaultContentRegistryUrl: options.contentRegistryUrl }
         : {}),
@@ -333,7 +372,17 @@ export class JobManager {
         const record = readJsonFile<JobRecord>(
           join(this.jobsDir, entry.name, "job.json"),
         );
-        if (record?.jobId === entry.name) this.jobs.set(record.jobId, record);
+        if (record?.jobId === entry.name) {
+          if (record.slurmSubmission?.state === "submitting") {
+            const detail = `The server stopped before committing SLURM submission ${record.slurmSubmission.token}${record.slurmJobId ? ` (job ${record.slurmJobId})` : ""}. Inspect its scheduler comment before retrying; a worker may already exist.`;
+            record.slurmSubmission = { ...record.slurmSubmission, state: "unknown", detail };
+            record.status = "failed";
+            record.error = detail;
+            record.updatedAt = this.now();
+            atomicWriteJson(join(this.jobDir(record.jobId), "job.json"), record);
+          }
+          this.jobs.set(record.jobId, record);
+        }
       } catch {
         // A malformed job file is isolated; other restart-recovered jobs remain usable.
       }
@@ -406,7 +455,7 @@ export class JobManager {
     record: JobRecord,
     mode: "run" | "resume",
     settings: ServerSettings,
-    gate?: GateAnswerRequest,
+    gate?: ServerGateAnswer,
   ): string {
     return buildOrchestrationCommand({
       workerPath: this.workerPath,
@@ -436,7 +485,14 @@ export class JobManager {
       ...(settings.contentRegistry?.version
         ? { contentRegistryVersion: settings.contentRegistry.version }
         : {}),
-      settings,
+      // Other settings retain their legacy fallback, but this opt-in is tied
+      // to the run. A legacy job without a snapshot/checkpoint must not adopt
+      // today's mode if an interrupted start is submitted again as `run`.
+      settings: {
+        ...settings,
+        gamifiedReview: gameReviewEnabled(this.checkpoint(record.jobId), record.executionSettings),
+        gameReview: gameReviewConfiguration(this.checkpoint(record.jobId), record.executionSettings),
+      },
       // Threaded here, in the one builder every submission path goes through,
       // so a dismissal survives a gate answer, a credit resume, a retry and an
       // interrupted-job resubmission without each having to remember it.
@@ -455,6 +511,9 @@ export class JobManager {
               ...(gate.type !== undefined ? { type: gate.type } : {}),
               ...(gate.requestedOutputs !== undefined
                 ? { requestedOutputs: gate.requestedOutputs }
+                : {}),
+              ...(gate.embeddingInput !== undefined
+                ? { embeddingInput: gate.embeddingInput }
                 : {}),
             },
           }
@@ -763,6 +822,11 @@ export class JobManager {
     script: string,
     settings: ServerSettings,
   ): Promise<void> {
+    if (record.slurmSubmission !== undefined) {
+      throw new JobConflictError(
+        `A previous SLURM submission is unresolved (${record.slurmSubmission.token}); inspect its scheduler comment before retrying.`,
+      );
+    }
     await this.reapPreviousHost(record);
     const executionEnv = this.settings.executionEnvironment(this.env, settings);
     if (record.runner === "slurm") {
@@ -773,26 +837,71 @@ export class JobManager {
       // --job-name on the command line beats the template's directive, so the
       // operator keeps owning the template and the queue still shows which
       // submission this is.
-      const result = await execute(
-        "sbatch",
-        ["--job-name", JobManager.jobNameFor(record, script), script],
-        {
-          cwd: this.jobDir(record.jobId),
-          env: executionEnv,
-          timeout: 10_000,
-        },
-      );
-      const match = /Submitted batch job\s+(\S+)/.exec(result.stdout);
-      if (!match) {
-        throw new Error(`sbatch returned an unrecognized response: ${result.stdout.trim()}`);
+      const submission = {
+        token: `brain-${record.jobId}-${randomBytes(8).toString("hex")}`,
+        submittedAt: this.now(),
+        script,
+        state: "submitting" as "submitting" | "unknown",
+      };
+      record.slurmSubmission = submission;
+      record.updatedAt = this.now();
+      this.write(record);
+      let result: CommandResult;
+      let rejected: CommandExecutionError | undefined;
+      try {
+        result = await execute(
+          "sbatch",
+          ["--parsable", `--comment=${submission.token}`, "--job-name", JobManager.jobNameFor(record, script), script],
+          { cwd: this.jobDir(record.jobId), env: executionEnv, timeout: 10_000 },
+        );
+      } catch (error) {
+        // Only a failure to spawn proves no job could have been accepted. A
+        // wrapper can fail after submission, so reconcile nonzero exits too.
+        if (error instanceof CommandExecutionError && !error.interrupted &&
+          !slurmSubmissionReceipt(error.stdout, error.stderr) &&
+          (error.code === "ENOENT" || error.code === "EACCES")) {
+          delete record.slurmSubmission;
+          record.updatedAt = this.now();
+          this.write(record);
+          throw error;
+        }
+        if (error instanceof CommandExecutionError && !error.interrupted && typeof error.code === "number") {
+          rejected = error;
+        }
+        result = error instanceof CommandExecutionError
+          ? { stdout: error.stdout, stderr: error.stderr || error.message }
+          : { stdout: "", stderr: error instanceof Error ? error.message : String(error) };
       }
-      record.slurmJobId = match[1]!;
+      const receipt = slurmSubmissionReceipt(result.stdout, result.stderr)
+        ?? await this.findSlurmSubmission(submission.token, submission.submittedAt);
+      if (!receipt) {
+        // The native scheduler's explicit rejection is distinguishable from
+        // an arbitrary wrapper's nonzero exit. The latter stays uncertain.
+        if (rejected && /^sbatch: error: (?:Batch job submission failed|invalid partition specified)/mi.test(rejected.stderr)) {
+          delete record.slurmSubmission;
+          record.updatedAt = this.now();
+          this.write(record);
+          throw rejected;
+        }
+        const detail = `sbatch did not return a job ID: ${slurmSubmissionDiagnostic(result.stdout, result.stderr)}. A job may have been accepted; inspect scheduler comment ${submission.token} before retrying.`;
+        record.slurmSubmission = { ...submission, state: "unknown", detail };
+        record.error = detail;
+        record.updatedAt = this.now();
+        this.write(record);
+        throw new Error(detail);
+      }
+      record.slurmJobId = receipt.jobId;
       // Multi-cluster sites (LRZ) name the landing cluster; every later
       // squeue/sacct/scancel needs it or the job is invisible to them.
-      const cluster = slurmClusterFrom(result.stdout);
+      const cluster = receipt.cluster;
       if (cluster !== undefined) record.slurmCluster = cluster;
       else delete record.slurmCluster;
       delete record.pid;
+      // Retain the durable claim until the caller commits its status/count
+      // and resume metadata. A crash between these writes must not turn an
+      // old suspended checkpoint into permission to submit another worker.
+      record.updatedAt = this.now();
+      this.write(record);
       return;
     }
 
@@ -811,6 +920,48 @@ export class JobManager {
     } finally {
       closeSync(log);
     }
+  }
+
+  /** Reconcile a lost receipt by exact ownership, never by name or queue order. */
+  private async findSlurmSubmission(
+    token: string,
+    submittedAt: number,
+  ): Promise<{ readonly jobId: string; readonly cluster?: string } | undefined> {
+    const matches = new Map<string, { jobId: string; cluster?: string }>();
+    const read = (stdout: string, accounting: boolean): void => {
+      for (const line of stripSlurmClusterBanners(stdout).split(/\r?\n/)) {
+        const [id = "", comment = "", cluster = ""] = line.trim().split("|");
+        if (!/^\d+$/.test(id.trim()) || comment.trim() !== token) continue;
+        const key = id.trim();
+        const previous = matches.get(key);
+        if (previous?.cluster && cluster.trim() && previous.cluster !== cluster.trim()) {
+          matches.set(`${key};${cluster.trim()}`, { jobId: key, cluster: cluster.trim() });
+          continue;
+        }
+        matches.set(key, {
+          jobId: id.trim(),
+          ...(accounting && /^[A-Za-z0-9_.-]+$/.test(cluster.trim()) ? { cluster: cluster.trim() } : {}),
+        });
+      }
+    };
+    const user = this.env.USER ?? this.env.LOGNAME;
+    try {
+      const queue = await execute("squeue", ["-h", ...(user ? ["-u", user] : []), "-o", "%i|%k"], {
+        env: this.env, timeout: 5_000,
+      });
+      read(queue.stdout, false);
+    } catch { /* Accounting can identify a job that already left the queue. */ }
+    try {
+      const since = new Date(submittedAt - 60_000);
+      const localStart = `${since.getFullYear()}-${pad(since.getMonth() + 1)}-${pad(since.getDate())}T${pad(since.getHours())}:${pad(since.getMinutes())}:${pad(since.getSeconds())}`;
+      const accounting = await execute("sacct", [
+        "-n", "-P", "-X", ...(user ? ["-u", user] : []),
+        "--starttime", localStart,
+        "--format=JobIDRaw,Comment,Cluster",
+      ], { env: this.env, timeout: 5_000 });
+      read(accounting.stdout, true);
+    } catch { /* Leave the durable marker in place when evidence is missing. */ }
+    return matches.size === 1 ? [...matches.values()][0] : undefined;
   }
 
   async submit(
@@ -865,6 +1016,9 @@ export class JobManager {
         "Configure and verify the Cursor API key in Settings before submitting a job",
       );
     }
+    // Do this before creating a job: readiness is asynchronous, and the
+    // selected local service may have failed since its last successful probe.
+    this.settings.assertWebSearchReady(settings);
     let jobId = createJobId(new Date(this.now()));
     while (this.jobs.has(jobId)) jobId = createJobId(new Date(this.now() + 1));
     const record: JobRecord = {
@@ -880,6 +1034,9 @@ export class JobManager {
     };
     mkdirSync(join(this.jobDir(jobId), "logs"), { recursive: true });
     this.write(record);
+    // A queued record exists before sbatch returns. Pollers must not treat
+    // its temporarily absent job ID as a vanished worker and resubmit it.
+    this.autoResuming.add(jobId);
     try {
       if (attachments.length > 0) {
         const manifest = await ingestAttachments(
@@ -892,6 +1049,7 @@ export class JobManager {
       const command = this.command(record, "run", settings);
       const script = this.writeScript(record, "submit.sh", command, settings.slurmTemplate);
       await this.submitScript(record, script, settings);
+      delete record.slurmSubmission;
       record.status = "running";
       record.submissionCount = 1;
       record.updatedAt = this.now();
@@ -902,7 +1060,12 @@ export class JobManager {
       record.error = error instanceof Error ? error.message : String(error);
       record.updatedAt = this.now();
       this.write(record);
+      // Keep ambiguous submissions inspectable in the dashboard. Returning
+      // the run also prevents a composer error inviting a blind new submit.
+      if (record.slurmSubmission !== undefined) return jobId;
       throw error;
+    } finally {
+      this.autoResuming.delete(jobId);
     }
   }
 
@@ -1179,6 +1342,10 @@ export class JobManager {
   }
 
   private async reconcile(record: JobRecord): Promise<JobStatus> {
+    if (this.autoResuming.has(record.jobId)) return record.status;
+    // A stale checkpoint cannot prove that an unacknowledged sbatch request
+    // never ran. Keep its durable guard until its scheduler ownership is known.
+    if (record.slurmSubmission !== undefined) return record.status;
     if (record.status === "cancelled") return "cancelled";
     // A paused run is a DECISION, not a state to be inferred: its worker is gone
     // and its checkpoint says running, which is exactly the shape of an
@@ -1281,8 +1448,8 @@ export class JobManager {
    * Built details memoized by a fingerprint of everything the build reads:
    * the record itself, the reconciled status, the settings, and the stat
    * stamps of the workspace files (checkpoint, event log, artifact index,
-   * content pin). SSE ticks, polls, and page refreshes hit the cache for
-   * the price of four stats; a change in any input rebuilds exactly once.
+   * content pin, shared fact table, fact-update journal). SSE ticks, polls, and page refreshes hit the cache for
+   * the price of six stats; a change in any input rebuilds exactly once.
    */
   private readonly detailCache = new Map<
     string,
@@ -1307,6 +1474,8 @@ export class JobManager {
       status,
       JSON.stringify(settings),
       statStamp(join(sessionDir, "checkpoint.json")),
+      statStamp(join(sessionDir, "facts.jsonl")),
+      statStamp(join(sessionDir, "fact-updates.jsonl")),
       statStamp(join(jobDir, "events.jsonl")),
       statStamp(join(sessionDir, "artifacts", "index.json")),
       statStamp(join(jobDir, "content", "content-pin.json")),
@@ -1320,7 +1489,10 @@ export class JobManager {
       jobDir,
       settings,
     });
-    this.detailCache.set(jobId, { fingerprint, value, activity, outputHistory });
+    // Keep the companion histories available to their endpoints while a fact
+    // read is failing, but invalidate the fingerprint so the next call retries.
+    const factReadFailed = value.stages.some((stage) => stage.id === "done" && stage.factTable?.error !== undefined);
+    this.detailCache.set(jobId, { fingerprint: factReadFailed ? "" : fingerprint, value, activity, outputHistory });
     return value;
   }
 
@@ -1440,6 +1612,7 @@ export class JobManager {
    */
   async trash(jobId: string): Promise<TrashJobResponse> {
     const record = this.record(jobId);
+    this.assertSubmissionResolved(record);
     if (record.trashedAt !== undefined) {
       return { jobId, trashedAt: record.trashedAt };
     }
@@ -1460,6 +1633,17 @@ export class JobManager {
       process.kill(-pid, signal);
     } catch {
       process.kill(pid, signal);
+    }
+  }
+
+  private assertSubmissionResolved(record: JobRecord): void {
+    if (record.slurmSubmission !== undefined) {
+      throw new JobConflictError(
+        `SLURM submission ${record.slurmSubmission.token} is unresolved; inspect its scheduler comment before changing this run.`,
+      );
+    }
+    if (this.autoResuming.has(record.jobId)) {
+      throw new JobConflictError(`job "${record.jobId}" has a submission in progress`);
     }
   }
 
@@ -1512,6 +1696,7 @@ export class JobManager {
    */
   async pause(jobId: string): Promise<JobStatus> {
     const record = this.record(jobId);
+    this.assertSubmissionResolved(record);
     if (record.trashedAt !== undefined) {
       throw new JobConflictError(`job "${jobId}" is in the trash`);
     }
@@ -1571,6 +1756,7 @@ export class JobManager {
         settings.slurmTemplate,
       );
       await this.submitScript(record, script, settings);
+      delete record.slurmSubmission;
       record.status = "queued";
       delete record.pausedAt;
       delete record.error;
@@ -1586,6 +1772,7 @@ export class JobManager {
 
   async cancel(jobId: string): Promise<JobStatus> {
     const record = this.record(jobId);
+    this.assertSubmissionResolved(record);
     const current = await this.reconcile(record);
     if (
       current === "completed" ||
@@ -1613,6 +1800,7 @@ export class JobManager {
     const recovery = this.settings.get().creditRecovery;
     if (!recovery.autoResume) return;
     for (const record of this.jobs.values()) {
+      if (record.slurmSubmission !== undefined) continue;
       if (
         record.status === "cancelled" ||
         // A run the submitter paused is waiting for THEM, not for the provider's
@@ -1763,6 +1951,7 @@ export class JobManager {
         settings.slurmTemplate,
       );
       await this.submitScript(record, script, settings);
+      delete record.slurmSubmission;
       record.status = "queued";
       delete record.error;
       record.submissionCount = number;
@@ -1790,6 +1979,7 @@ export class JobManager {
       executionSettings.slurmTemplate,
     );
     await this.submitScript(record, script, executionSettings);
+    delete record.slurmSubmission;
     record.status = "queued";
     record.submissionCount = number;
     record.autoResumePending = {
@@ -1851,6 +2041,7 @@ export class JobManager {
     const recovery = this.settings.get().interruptedRecovery;
     if (recovery !== undefined && recovery.autoResume === false) return;
     for (const record of this.jobs.values()) {
+      if (record.slurmSubmission !== undefined) continue;
       if (record.trashedAt !== undefined) continue;
       if (
         record.status !== "running" &&
@@ -1934,6 +2125,7 @@ export class JobManager {
       settings.slurmTemplate,
     );
     await this.submitScript(record, script, settings);
+    delete record.slurmSubmission;
     record.status = "queued";
     record.submissionCount = number;
     record.interruptedResume = {
@@ -1974,7 +2166,30 @@ export class JobManager {
     }
   }
 
-  async answerGate(jobId: string, answer: GateAnswerRequest): Promise<JobDetail> {
+  /**
+   * The confirm-panel gate's coverage view (contract K), built from the run's
+   * panelEvidence and literature artifacts. Undefined for runs pinned to
+   * bundles without the paper-based composition.
+   */
+  async panelEvidence(jobId: string): Promise<PanelEvidenceView | undefined> {
+    this.record(jobId); // "was not found" maps to 404 in the route's handler
+    const inputs = compositionInputs(this.sessionDir(jobId));
+    return buildPanelEvidenceView(inputs.panelEvidence, inputs.literature);
+  }
+
+  /**
+   * The optional confirm-needs gate's payload (the classifier's
+   * embeddingInput and the run's weight params), only while the run is
+   * suspended on that gate.
+   */
+  async needsGate(jobId: string): Promise<NeedsGateView | undefined> {
+    this.record(jobId); // "was not found" maps to 404 in the route's handler
+    const inputs = compositionInputs(this.sessionDir(jobId));
+    if (inputs.pendingGateKey !== CONFIRM_NEEDS_GATE) return undefined;
+    return buildNeedsGateView(inputs.pendingGateKey, inputs.classification, inputs.params);
+  }
+
+  async answerGate(jobId: string, answer: ServerGateAnswer): Promise<JobDetail> {
     const record = this.record(jobId);
     // An answered gate is a resubmission like any other, and it needs the same
     // in-flight claim. Without one, the resumed worker has not yet written a
@@ -1995,6 +2210,31 @@ export class JobManager {
     }
     if (detail.pendingGate.gateKey !== answer.gateKey) {
       throw new Error(`job "${jobId}" has no pending gate "${answer.gateKey}"`);
+    }
+    if (answer.action === "edit") {
+      // The confirm-needs gate (contract D/K): the edited embeddingInput may
+      // only remove facets, aliases or equivalent problems and re-weight
+      // within [0,1]. Mirrored here so the card cannot submit what the runtime
+      // would refuse; the runtime re-validates authoritatively.
+      if (
+        answer.members !== undefined ||
+        (answer.addedMembers?.length ?? 0) > 0 ||
+        answer.type !== undefined ||
+        answer.requestedOutputs !== undefined
+      ) {
+        throw new Error("a needs edit accepts only the edited embeddingInput");
+      }
+      const needs = await this.needsGate(jobId);
+      if (!needs || needs.gateKey !== answer.gateKey) {
+        throw new Error(`gate "${answer.gateKey}" does not accept a needs edit`);
+      }
+      if (answer.embeddingInput === undefined) {
+        throw new Error("a needs edit needs the edited embeddingInput");
+      }
+      const violation = needsEditViolation(needs.embeddingInput, answer.embeddingInput);
+      if (violation !== undefined) throw new Error(violation);
+    } else if (answer.embeddingInput !== undefined) {
+      throw new Error(`action "${answer.action}" does not accept a needs edit`);
     }
     if (answer.action === "revise") {
       // A revise answers the classification gate: validate against the
@@ -2105,6 +2345,7 @@ export class JobManager {
         settings.slurmTemplate,
       );
       await this.submitScript(record, script, settings);
+      delete record.slurmSubmission;
       // "queued", not "running": the worker has been submitted, not started.
       // Paired with the claim below, this is what stops reconcile from reading
       // the still-suspended checkpoint as the live truth and re-offering a gate
@@ -2247,6 +2488,7 @@ export class JobManager {
       );
       try {
         await this.submitScript(record, script, settings);
+        delete record.slurmSubmission;
       } catch (error) {
         // The seat is dismissed and the worker is stopped, but the replacement
         // did not reach the scheduler. Say so on the job: the interrupted-job
@@ -2339,6 +2581,7 @@ export class JobManager {
     // and has not yet reached the panel gate.
     const countdownEnabled = this.settings.get().gateAutoApprove !== false;
     for (const record of this.jobs.values()) {
+      if (record.slurmSubmission !== undefined) continue;
       if (record.trashedAt !== undefined) continue;
       if (!countdownEnabled) {
         // Switching it off retires any countdown already showing, so the card

@@ -2786,3 +2786,163 @@ test("a queued job with nothing recorded stays all-pending", () => {
     rmSync(workspace, { recursive: true, force: true });
   }
 });
+
+/** Materializes one recorded run for the fact-update projections; returns its detail. */
+function factUpdateRun(options: {
+  journal: readonly unknown[];
+  factUpdates?: readonly unknown[];
+  facts?: readonly unknown[];
+  privateJournal?: readonly unknown[];
+  events?: readonly unknown[];
+  cot: readonly unknown[];
+  status?: "completed" | "running";
+}) {
+  const status = options.status ?? "completed";
+  const workspace = mkdtempSync(join(tmpdir(), "stage-mapper-test-"));
+  try {
+    const sessionDir = join(workspace, "session");
+    const jobDir = join(workspace, "job");
+    mkdirSync(join(sessionDir, "artifacts"), { recursive: true });
+    mkdirSync(jobDir, { recursive: true });
+    const lines = (records: readonly unknown[]): string => records.map((record) => JSON.stringify(record)).join("\n") + "\n";
+    writeFileSync(join(sessionDir, "checkpoint.json"), JSON.stringify({
+      runId: "job-1", workflowId: "brainstorm", status, input: {}, journal: options.journal, pendingGates: [], seq: 1, updatedAt: Date.now(),
+    }));
+    if (options.factUpdates) writeFileSync(join(sessionDir, "fact-updates.jsonl"), lines(options.factUpdates));
+    if (options.facts) writeFileSync(join(sessionDir, "facts.jsonl"), lines(options.facts));
+    if (options.privateJournal) {
+      mkdirSync(join(sessionDir, "fact-views", "group"), { recursive: true });
+      writeFileSync(join(sessionDir, "fact-views", "group", "task.jsonl"), lines(options.privateJournal));
+    }
+    if (options.events) writeFileSync(join(jobDir, "events.jsonl"), lines(options.events));
+    writeFileSync(join(sessionDir, "artifacts", "index.json"), JSON.stringify({ refs: [
+      { id: "a-panel", metadata: { schema: "panel", path: "panel" } },
+      { id: "a-idea", metadata: { schema: "brainIdeaParts", path: "ideas.member-1" } },
+    ] }));
+    writeFileSync(join(sessionDir, "artifacts", "a-panel"), JSON.stringify({ members: [
+      { id: "member-1", department: "Physics", umbrella: "Quantum Optics", subfields: [] },
+      { id: "member-2", department: "Biology", umbrella: "Systems Biology", subfields: [] },
+    ] }));
+    writeFileSync(join(sessionDir, "artifacts", "a-idea"), JSON.stringify({
+      output: { type: "research idea", paper: { abstract: [paragraph], introduction: [paragraph], method: [paragraph], discussion: [paragraph], conclusion: [paragraph] } },
+      cot: options.cot,
+    }));
+    const record: JobRecord = { jobId: "job-1", topic: "topic", status, runner: "local", createdAt: 1, updatedAt: 2 };
+    return buildJobDetail({ record, status, sessionDir, jobDir, settings });
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+}
+
+const partsStep = (label: string) => ({ part1: `${label} premise.`, part2: `${label} assumption.`, part3: `${label} calculation.`, part4: `${label} conclusion.` });
+
+test("fact-update chain merges replay into the reviewed chain and mark exactly the steps revised after the walk passed them", () => {
+  const seat = "brainstorm-root/review-members/review-members-fanout/member[0]/review-steps";
+  const round = (step: number) => `${seat}/cotStep[${step}]/review-round/review-round-loop/iter[0]/review-round-iteration/review-round-body`;
+  const comment = (step: number) => ({
+    key: `${round(step)}/gather-comments/gather-comments-fanout/commentor[0]/dispatch-comment/else/comment-step-execute::result`, kind: "agent",
+    value: { status: "ok", output: { verdict: "Pass", reason: `Step ${step + 1} holds as written.`, suggestion: "", evidence: noEvidence } },
+  });
+  const judge = (step: number) => ({
+    key: `${round(step)}/judge-step/judge-step-execute::result`, kind: "agent",
+    value: { status: "ok", output: { verdict: "Pass", reason: "Nothing blocks this step.", issues: [], assessment: [{ commentorId: "member-2", basis: "authority" }] } },
+  });
+  const merge = (path: string, node: string, merged: unknown[]) => ({ key: `${path}/${node}/${node}-run::result`, kind: "activity", value: { merged, discarded: [] } });
+  const revision = (attempt: number, notices: string[], steps: unknown[], decision = "revised") => ({
+    key: "chain:member-1", taskId: `fact-update:chain:member-1:${attempt}`, notices, output: { decision, reason: "The chain cited a deleted badge.", steps },
+  });
+  const detail = factUpdateRun({
+    cot: [partsStep("One"), partsStep("Two"), partsStep("Three")],
+    journal: [
+      merge(round(0), "apply-fact-updates", []), comment(0), judge(0),
+      // At walk position 2 the reconsideration rewrites step 1 (passed) and step 2 (about to be reviewed).
+      merge(round(1), "apply-fact-updates", [revision(1, ["N:1"], [{ index: 1, ...partsStep("New one") }, { index: 2, ...partsStep("New two") }])]),
+      comment(1), judge(1),
+      merge(round(2), "apply-fact-updates", []), comment(2), judge(2),
+      merge("brainstorm-root", "apply-fact-updates-after-review", [revision(2, ["N:2"], [{ index: 3, ...partsStep("New three") }])]),
+      merge("brainstorm-root", "apply-fact-updates-before-synthesis", [revision(3, ["N:3"], [], "unchanged")]),
+    ],
+    factUpdates: [
+      { type: "notice", id: "N:1", seq: 1, at: 100, deleted: "F:1", replacedBy: "F:4", notice: {}, subscribers: ["chain:member-1"] },
+      { type: "notice", id: "N:2", seq: 2, at: 200, deleted: "F:2", notice: {}, subscribers: ["chain:member-1"] },
+      { type: "notice", id: "N:3", seq: 3, at: 300, deleted: "F:3", notice: {}, subscribers: ["chain:member-1"] },
+    ],
+  });
+  const review = detail.stages.find((stage) => stage.id === "review-members");
+  assert.ok(review && review.id === "review-members");
+  const member = review.members.find((candidate) => candidate.memberId === "member-1");
+  assert.ok(member);
+  assert.deepEqual(member.steps.map((step) => step.revisedAfterReview), [
+    [{ notice: "N:1", deleted: "F:1", replacedBy: "F:4", at: 100 }],
+    undefined,
+    [{ notice: "N:2", deleted: "F:2", at: 200 }],
+  ], "a step rewritten at or after the position under review is reviewed again and carries no mark");
+  assert.deepEqual(member.steps[0]?.rounds[0]?.cot, partsStep("One"), "step 1 was reviewed before the reconsideration");
+  assert.deepEqual(member.steps[1]?.rounds[0]?.cot, partsStep("New two"), "step 2's round reviewed the merged chain");
+  assert.deepEqual(member.finalIdea?.cot, [partsStep("New one"), partsStep("New two"), partsStep("New three")]);
+  assert.equal(member.revisionCount, 2, "two merged reconsiderations changed the chain; an unchanged one did not");
+  assert.equal(member.steps.every((step) => step.outcome === "passed"), true, "a merge changes no verdict");
+});
+
+test("stage token totals include verifications, consultations and reconsideration tasks", () => {
+  const commentPath =
+    "brainstorm-root/review-members/review-members-fanout/member[0]/review-steps/cotStep[0]/review-round/review-round-loop/iter[0]/" +
+    "review-round-iteration/review-round-body/gather-comments/gather-comments-fanout/commentor[0]/dispatch-comment/else/comment-step-execute";
+  const devPath = "brainstorm-root/first-pass/first-pass-fanout/member[0]/develop-idea/develop-idea-execute";
+  const usage = (inputTokens: number, outputTokens: number) => ({ inputTokens, outputTokens });
+  const requester = (path: string) => ({ taskId: `job-1:${path}`, role: "commentor", agent: "member-2" });
+  const detail = factUpdateRun({
+    cot: [partsStep("One")],
+    journal: [{
+      key: `${commentPath}::result`, kind: "agent",
+      value: { taskId: `job-1:${commentPath}`, status: "ok", output: { verdict: "Pass", reason: "Step 1 holds as written.", suggestion: "", evidence: noEvidence }, usage: usage(500, 25) },
+    }],
+    facts: [
+      // A submission's scan names the verification as its requester; it counts for the submitter's stage.
+      { type: "consultation", at: 1, requester: { taskId: "fact-verification:S:1", role: "supreme_judge", agent: "supreme_judge" }, request: { mode: "submit" }, answer: "", matches: [], taskIds: ["c1"], usage: usage(7, 1) },
+      { type: "transaction", records: [{ type: "submission", id: "S:1", requester: requester(devPath), case: "justified-new", conflicts: [], verifierTaskId: "fact-verification:S:1", usage: usage(100, 10) }] },
+      { type: "consultation", at: 2, requester: requester(commentPath), request: { mode: "lookup" }, answer: "", matches: [], taskIds: ["c2"], usage: usage(20, 2) },
+      { type: "submission", id: "S:2", requester: { taskId: "fact-update:chain:member-1:1", role: "reconsider-chain", agent: "member-1" }, case: "justified-new", conflicts: [], verifierTaskId: "fact-verification:S:2", usage: usage(60000, 6) },
+      // A consultation whose requester cannot be placed counts nowhere.
+      { type: "consultation", at: 3, requester: { taskId: "fact-verification:S:99", role: "supreme_judge", agent: "supreme_judge" }, request: { mode: "submit" }, answer: "", matches: [], taskIds: ["c3"], usage: usage(9_000_000, 9) },
+    ],
+    privateJournal: [
+      { type: "consultation", at: 4, requester: requester(commentPath), request: { mode: "status" }, answer: "", matches: [], taskIds: ["c4"], usage: usage(300, 3) },
+    ],
+    factUpdates: [
+      { type: "task", key: "chain:member-1", taskId: "fact-update:chain:member-1:1", notices: ["N:1"], epoch: 1, base: {}, at: 5 },
+      { type: "result", taskId: "fact-update:chain:member-1:1", status: "ok", output: { decision: "unchanged", reason: "r", steps: [] }, usage: usage(4000, 40), at: 6 },
+    ],
+  });
+  const stageUsage = new Map(detail.stages.map((stage) => [stage.id, stage.usage]));
+  assert.deepEqual(stageUsage.get("first-pass"), { inputTokens: 107, outputTokens: 11 });
+  assert.deepEqual(stageUsage.get("review-members"), { inputTokens: 500 + 20 + 60000 + 300 + 4000, outputTokens: 25 + 2 + 6 + 3 + 40 });
+  const review = detail.stages.find((stage) => stage.id === "review-members");
+  assert.ok(review && review.id === "review-members");
+  assert.deepEqual(review.members[0]?.steps[0]?.rounds[0]?.comments[0]?.usage, usage(500, 25), "a comment still carries its own task's spend only");
+});
+
+test("the root fact-update merges belong to the stage that reads the merged chains", async () => {
+  const { stageForPath } = await import("../src/stage-mapper.js");
+  assert.equal(stageForPath("brainstorm-root/apply-fact-updates-after-review"), "bridge-audit");
+  assert.equal(stageForPath("brainstorm-root/apply-fact-updates-after-review/apply-fact-updates-after-review-run"), "bridge-audit");
+  assert.equal(stageForPath("brainstorm-root/apply-fact-updates-before-synthesis"), "synthesize-proposal");
+  assert.equal(stageForPath("brainstorm-root/review-members/review-members-fanout/member[0]/review-steps/cotStep[0]/review-round/review-round-loop/iter[0]/review-round-iteration/review-round-body/apply-fact-updates"), "review-members");
+  // A merge that fails names its call where it happened; its completion does not end the stage it opens.
+  const merge = "brainstorm-root/review-members/review-members-fanout/member[0]/review-steps/cotStep[0]/review-round/review-round-loop/iter[0]/review-round-iteration/review-round-body/apply-comment-updates/apply-comment-updates-run";
+  const detail = factUpdateRun({
+    cot: [partsStep("One")],
+    journal: [],
+    status: "running",
+    events: [
+      { type: "node:started", runId: "job-1", seq: 1, at: 10, path: "brainstorm-root/apply-fact-updates-after-review", kind: "activity" },
+      { type: "node:completed", runId: "job-1", seq: 2, at: 20, path: "brainstorm-root/apply-fact-updates-after-review", kind: "activity" },
+      { type: "node:failed", runId: "job-1", seq: 3, at: 30, path: merge, kind: "activity", error: { message: "fact-update task fact-update:comment:member-1:1:1:member-2:1 failed: boom" } },
+    ],
+  });
+  const bridge = detail.stages.find((stage) => stage.id === "bridge-audit");
+  assert.equal(bridge?.startedAt, 10);
+  assert.equal(bridge?.finishedAt, undefined, "the merge's completion is progress, not the end of the bridge audit");
+  const review = detail.stages.find((stage) => stage.id === "review-members");
+  assert.match(review?.errors?.[0]?.where ?? "", /fact-update merge/);
+});

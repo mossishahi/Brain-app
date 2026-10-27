@@ -15,7 +15,9 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 const INDEX_SCHEMA = "content-registry-index/v1";
 const MANIFEST_SCHEMA = "content-registry-manifest/v1";
 const MAX_FILES = 500;
-const MAX_FILE_BYTES = 2 * 1024 * 1024;
+// Taxonomy text catalogs can exceed 2 MiB; retain a finite per-file limit and
+// the independent total bundle ceiling below.
+const MAX_FILE_BYTES = 4 * 1024 * 1024;
 const MAX_TOTAL_BYTES = 20 * 1024 * 1024;
 
 export interface ContentRegistryIndexBundle {

@@ -1,0 +1,2713 @@
+{
+ "version": 1,
+ "params": {
+  "panelSize": 6,
+  "panelSizeMode": "auto",
+  "askUserToConfirmNeeds": false,
+  "coreWeight": 1.0,
+  "formulationWeight": 0.5,
+  "equivalentProblemWeight": 0,
+  "sourceArxiv": true,
+  "sourceCrossref": true,
+  "sourceSemanticScholar": true,
+  "sourceOpenAlex": true,
+  "sourceEuropePmc": false,
+  "sourceCore": true,
+  "sourceOpenCitations": true,
+  "resultsPerCall": 25,
+  "maxCalls": 150,
+  "yearFrom": 0,
+  "routeTitle": true,
+  "routeFacetNames": true,
+  "routeFacetAliases": true,
+  "routePairs": "all",
+  "maxPairQueries": 15,
+  "routeStatements": true,
+  "routeEquivalents": true,
+  "routeKnn": true,
+  "knnK": 5,
+  "knnHopK": 0,
+  "knnKeywords": 0,
+  "knnMaxQueries": 20,
+  "routeCitations": true,
+  "citationSeeds": 10,
+  "citationLimit": 25,
+  "citationDirections": "both",
+  "routeFeedback": true,
+  "feedbackSeeds": 10,
+  "feedbackTerms": 5,
+  "routeKeyTerms": false,
+  "maxRounds": 2,
+  "minNewShare": 0.1,
+  "relevanceScreen": true,
+  "encoder": "specter2",
+  "minAbstractChars": 200,
+  "maxPapers": 1000,
+  "topicsPerPaper": 3,
+  "papersPerNeed": 20,
+  "weakPlacementQuantile": 0.05,
+  "minSupport": 2,
+  "saturationShare": 0.3,
+  "maxAffinity": 0.8,
+  "seatsPerSubfield": 0,
+  "seatsPerField": 0,
+  "gainStop": 0.05,
+  "criticalWeight": 0.5,
+  "criticalCoverage": 0.75,
+  "anchors": true,
+  "anchorThreshold": 0.4,
+  "anchorAffinity": 0.6,
+  "rescueUncoveredNeeds": true,
+  "shareAlarm": 0.6,
+  "thinNeed": 0.25,
+  "hubShare": 0.5
+ },
+ "evidence": [
+  {
+   "need": 0,
+   "ownShare": 0.1,
+   "thin": true,
+   "sK1": 0.936961,
+   "papers": [
+    {
+     "pid": "P0265",
+     "sim": 0.953641,
+     "omega": 0.154892
+    },
+    {
+     "pid": "P1457",
+     "sim": 0.948048,
+     "omega": 0.102955
+    },
+    {
+     "pid": "P0109",
+     "sim": 0.947922,
+     "omega": 0.101785
+    },
+    {
+     "pid": "P0166",
+     "sim": 0.947509,
+     "omega": 0.09795
+    },
+    {
+     "pid": "P0256",
+     "sim": 0.947182,
+     "omega": 0.094913
+    },
+    {
+     "pid": "P0864",
+     "sim": 0.944523,
+     "omega": 0.070221
+    },
+    {
+     "pid": "P0203",
+     "sim": 0.943061,
+     "omega": 0.056645
+    },
+    {
+     "pid": "P0556",
+     "sim": 0.942348,
+     "omega": 0.050024
+    },
+    {
+     "pid": "P0128",
+     "sim": 0.941744,
+     "omega": 0.044415
+    },
+    {
+     "pid": "P0177",
+     "sim": 0.941724,
+     "omega": 0.04423
+    },
+    {
+     "pid": "P1564",
+     "sim": 0.941656,
+     "omega": 0.043598
+    },
+    {
+     "pid": "P1214",
+     "sim": 0.941081,
+     "omega": 0.038259
+    },
+    {
+     "pid": "P1138",
+     "sim": 0.939625,
+     "omega": 0.024738
+    },
+    {
+     "pid": "P0432",
+     "sim": 0.93922,
+     "omega": 0.020977
+    },
+    {
+     "pid": "P1135",
+     "sim": 0.938737,
+     "omega": 0.016492
+    },
+    {
+     "pid": "P0598",
+     "sim": 0.938464,
+     "omega": 0.013957
+    },
+    {
+     "pid": "P0127",
+     "sim": 0.93842,
+     "omega": 0.013548
+    },
+    {
+     "pid": "P0180",
+     "sim": 0.937841,
+     "omega": 0.008172
+    },
+    {
+     "pid": "P0907",
+     "sim": 0.937173,
+     "omega": 0.001969
+    },
+    {
+     "pid": "P1574",
+     "sim": 0.936989,
+     "omega": 0.00026
+    }
+   ],
+   "topTopics": [
+    {
+     "topic": "C:graph-generation",
+     "P": 0.5791
+    },
+    {
+     "topic": "C:molecular-graph-generation",
+     "P": 0.167796
+    },
+    {
+     "topic": "C:generative-models",
+     "P": 0.081046
+    },
+    {
+     "topic": "T11273",
+     "P": 0.063697
+    },
+    {
+     "topic": "C:variational-autoencoders",
+     "P": 0.03227
+    },
+    {
+     "topic": "C:probabilistic-machine-learning",
+     "P": 0.025408
+    },
+    {
+     "topic": "C:molecular-representation-learning",
+     "P": 0.02331
+    },
+    {
+     "topic": "T11303",
+     "P": 0.011622
+    },
+    {
+     "topic": "C:diffusion-models",
+     "P": 0.011273
+    },
+    {
+     "topic": "C:representation-learning",
+     "P": 0.002503
+    },
+    {
+     "topic": "C:foundation-models",
+     "P": 0.001008
+    },
+    {
+     "topic": "C:normalizing-flows",
+     "P": 0.000966
+    }
+   ]
+  },
+  {
+   "need": 1,
+   "ownShare": 0.55,
+   "thin": false,
+   "sK1": 0.798856,
+   "papers": [
+    {
+     "pid": "P1244",
+     "sim": 0.821376,
+     "omega": 0.111214
+    },
+    {
+     "pid": "P1501",
+     "sim": 0.81827,
+     "omega": 0.095875
+    },
+    {
+     "pid": "P1071",
+     "sim": 0.816437,
+     "omega": 0.086823
+    },
+    {
+     "pid": "P1018",
+     "sim": 0.815904,
+     "omega": 0.084191
+    },
+    {
+     "pid": "P0143",
+     "sim": 0.815774,
+     "omega": 0.083549
+    },
+    {
+     "pid": "P1568",
+     "sim": 0.815661,
+     "omega": 0.082991
+    },
+    {
+     "pid": "P1081",
+     "sim": 0.812773,
+     "omega": 0.068729
+    },
+    {
+     "pid": "P0038",
+     "sim": 0.811876,
+     "omega": 0.064299
+    },
+    {
+     "pid": "P1138",
+     "sim": 0.811526,
+     "omega": 0.06257
+    },
+    {
+     "pid": "P0177",
+     "sim": 0.809407,
+     "omega": 0.052106
+    },
+    {
+     "pid": "P0796",
+     "sim": 0.808679,
+     "omega": 0.048511
+    },
+    {
+     "pid": "P1141",
+     "sim": 0.80802,
+     "omega": 0.045256
+    },
+    {
+     "pid": "P0039",
+     "sim": 0.806619,
+     "omega": 0.038337
+    },
+    {
+     "pid": "P0397",
+     "sim": 0.80304,
+     "omega": 0.020663
+    },
+    {
+     "pid": "P0967",
+     "sim": 0.801584,
+     "omega": 0.013472
+    },
+    {
+     "pid": "P0789",
+     "sim": 0.801219,
+     "omega": 0.01167
+    },
+    {
+     "pid": "P1496",
+     "sim": 0.800853,
+     "omega": 0.009862
+    },
+    {
+     "pid": "P0670",
+     "sim": 0.800802,
+     "omega": 0.00961
+    },
+    {
+     "pid": "P1575",
+     "sim": 0.80022,
+     "omega": 0.006736
+    },
+    {
+     "pid": "P0496",
+     "sim": 0.799572,
+     "omega": 0.003536
+    }
+   ],
+   "topTopics": [
+    {
+     "topic": "T11273",
+     "P": 0.600384
+    },
+    {
+     "topic": "C:representation-learning",
+     "P": 0.095739
+    },
+    {
+     "topic": "C:neural-network-theory",
+     "P": 0.075687
+    },
+    {
+     "topic": "C:molecular-representation-learning",
+     "P": 0.058858
+    },
+    {
+     "topic": "C:probabilistic-machine-learning",
+     "P": 0.043846
+    },
+    {
+     "topic": "C:geometric-deep-learning",
+     "P": 0.027995
+    },
+    {
+     "topic": "C:molecular-machine-learning",
+     "P": 0.020755
+    },
+    {
+     "topic": "C:graph-generation",
+     "P": 0.019902
+    },
+    {
+     "topic": "C:diffusion-models",
+     "P": 0.015446
+    },
+    {
+     "topic": "T11303",
+     "P": 0.013691
+    },
+    {
+     "topic": "C:relational-learning",
+     "P": 0.007633
+    },
+    {
+     "topic": "C:graph-mining",
+     "P": 0.006924
+    }
+   ]
+  },
+  {
+   "need": 2,
+   "ownShare": 0.95,
+   "thin": false,
+   "sK1": 0.798925,
+   "papers": [
+    {
+     "pid": "P0256",
+     "sim": 0.824356,
+     "omega": 0.105712
+    },
+    {
+     "pid": "P0864",
+     "sim": 0.8211,
+     "omega": 0.092177
+    },
+    {
+     "pid": "P0203",
+     "sim": 0.819075,
+     "omega": 0.08376
+    },
+    {
+     "pid": "P0128",
+     "sim": 0.818703,
+     "omega": 0.082213
+    },
+    {
+     "pid": "P0788",
+     "sim": 0.817972,
+     "omega": 0.079175
+    },
+    {
+     "pid": "P0180",
+     "sim": 0.815671,
+     "omega": 0.06961
+    },
+    {
+     "pid": "P0077",
+     "sim": 0.812955,
+     "omega": 0.05832
+    },
+    {
+     "pid": "P0626",
+     "sim": 0.812927,
+     "omega": 0.058204
+    },
+    {
+     "pid": "P0265",
+     "sim": 0.812569,
+     "omega": 0.056716
+    },
+    {
+     "pid": "P1430",
+     "sim": 0.812329,
+     "omega": 0.055718
+    },
+    {
+     "pid": "P0109",
+     "sim": 0.811683,
+     "omega": 0.053033
+    },
+    {
+     "pid": "P0907",
+     "sim": 0.811347,
+     "omega": 0.051636
+    },
+    {
+     "pid": "P1564",
+     "sim": 0.809706,
+     "omega": 0.044815
+    },
+    {
+     "pid": "P0556",
+     "sim": 0.805889,
+     "omega": 0.028948
+    },
+    {
+     "pid": "P0645",
+     "sim": 0.805832,
+     "omega": 0.028711
+    },
+    {
+     "pid": "P1080",
+     "sim": 0.803526,
+     "omega": 0.019125
+    },
+    {
+     "pid": "P1457",
+     "sim": 0.802825,
+     "omega": 0.016212
+    },
+    {
+     "pid": "P0911",
+     "sim": 0.801721,
+     "omega": 0.011622
+    },
+    {
+     "pid": "P1594",
+     "sim": 0.799649,
+     "omega": 0.00301
+    },
+    {
+     "pid": "P0166",
+     "sim": 0.799234,
+     "omega": 0.001284
+    }
+   ],
+   "topTopics": [
+    {
+     "topic": "C:graph-generation",
+     "P": 0.609593
+    },
+    {
+     "topic": "C:molecular-graph-generation",
+     "P": 0.245652
+    },
+    {
+     "topic": "C:generative-models",
+     "P": 0.066403
+    },
+    {
+     "topic": "C:molecular-representation-learning",
+     "P": 0.044194
+    },
+    {
+     "topic": "T11273",
+     "P": 0.022073
+    },
+    {
+     "topic": "C:normalizing-flows",
+     "P": 0.008896
+    },
+    {
+     "topic": "C:diffusion-models",
+     "P": 0.001775
+    },
+    {
+     "topic": "C:probabilistic-machine-learning",
+     "P": 0.001064
+    },
+    {
+     "topic": "C:variational-autoencoders",
+     "P": 0.00035
+    }
+   ]
+  },
+  {
+   "need": 3,
+   "ownShare": 0.85,
+   "thin": false,
+   "sK1": 0.796552,
+   "papers": [
+    {
+     "pid": "P0177",
+     "sim": 0.831523,
+     "omega": 0.142352
+    },
+    {
+     "pid": "P0185",
+     "sim": 0.818702,
+     "omega": 0.090163
+    },
+    {
+     "pid": "P0016",
+     "sim": 0.817375,
+     "omega": 0.084762
+    },
+    {
+     "pid": "P0376",
+     "sim": 0.817197,
+     "omega": 0.084037
+    },
+    {
+     "pid": "P0187",
+     "sim": 0.815284,
+     "omega": 0.07625
+    },
+    {
+     "pid": "P1071",
+     "sim": 0.812552,
+     "omega": 0.065129
+    },
+    {
+     "pid": "P1011",
+     "sim": 0.812276,
+     "omega": 0.064006
+    },
+    {
+     "pid": "P0618",
+     "sim": 0.812124,
+     "omega": 0.063387
+    },
+    {
+     "pid": "P0930",
+     "sim": 0.81148,
+     "omega": 0.060766
+    },
+    {
+     "pid": "P0094",
+     "sim": 0.809724,
+     "omega": 0.053618
+    },
+    {
+     "pid": "P0476",
+     "sim": 0.808688,
+     "omega": 0.049401
+    },
+    {
+     "pid": "P0783",
+     "sim": 0.804655,
+     "omega": 0.032984
+    },
+    {
+     "pid": "P0897",
+     "sim": 0.804425,
+     "omega": 0.032048
+    },
+    {
+     "pid": "P1278",
+     "sim": 0.803144,
+     "omega": 0.026833
+    },
+    {
+     "pid": "P0069",
+     "sim": 0.802115,
+     "omega": 0.022645
+    },
+    {
+     "pid": "P1437",
+     "sim": 0.801166,
+     "omega": 0.018782
+    },
+    {
+     "pid": "P0152",
+     "sim": 0.800925,
+     "omega": 0.017801
+    },
+    {
+     "pid": "P0479",
+     "sim": 0.799417,
+     "omega": 0.011662
+    },
+    {
+     "pid": "P0844",
+     "sim": 0.797112,
+     "omega": 0.00228
+    },
+    {
+     "pid": "P1137",
+     "sim": 0.796821,
+     "omega": 0.001095
+    }
+   ],
+   "topTopics": [
+    {
+     "topic": "C:probabilistic-machine-learning",
+     "P": 0.556658
+    },
+    {
+     "topic": "T11303",
+     "P": 0.12929
+    },
+    {
+     "topic": "T11273",
+     "P": 0.09877
+    },
+    {
+     "topic": "C:bayesian-statistics",
+     "P": 0.039275
+    },
+    {
+     "topic": "C:variational-autoencoders",
+     "P": 0.035444
+    },
+    {
+     "topic": "C:diffusion-models",
+     "P": 0.024788
+    },
+    {
+     "topic": "T10374",
+     "P": 0.02222
+    },
+    {
+     "topic": "C:neural-network-theory",
+     "P": 0.021594
+    },
+    {
+     "topic": "T11321",
+     "P": 0.01702
+    },
+    {
+     "topic": "T10136",
+     "P": 0.013783
+    },
+    {
+     "topic": "T11612",
+     "P": 0.007633
+    },
+    {
+     "topic": "C:generative-models",
+     "P": 0.006327
+    }
+   ]
+  },
+  {
+   "need": 4,
+   "ownShare": 0.85,
+   "thin": false,
+   "sK1": 0.809137,
+   "papers": [
+    {
+     "pid": "P0151",
+     "sim": 0.837608,
+     "omega": 0.130414
+    },
+    {
+     "pid": "P0403",
+     "sim": 0.836705,
+     "omega": 0.126278
+    },
+    {
+     "pid": "P0703",
+     "sim": 0.831284,
+     "omega": 0.101447
+    },
+    {
+     "pid": "P0028",
+     "sim": 0.828112,
+     "omega": 0.086917
+    },
+    {
+     "pid": "P0650",
+     "sim": 0.826365,
+     "omega": 0.078915
+    },
+    {
+     "pid": "P0644",
+     "sim": 0.824249,
+     "omega": 0.069222
+    },
+    {
+     "pid": "P0422",
+     "sim": 0.823224,
+     "omega": 0.064527
+    },
+    {
+     "pid": "P1217",
+     "sim": 0.819267,
+     "omega": 0.046401
+    },
+    {
+     "pid": "P0205",
+     "sim": 0.819122,
+     "omega": 0.045737
+    },
+    {
+     "pid": "P0257",
+     "sim": 0.818501,
+     "omega": 0.042893
+    },
+    {
+     "pid": "P0168",
+     "sim": 0.817647,
+     "omega": 0.038981
+    },
+    {
+     "pid": "P1346",
+     "sim": 0.817454,
+     "omega": 0.038097
+    },
+    {
+     "pid": "P1118",
+     "sim": 0.816039,
+     "omega": 0.031615
+    },
+    {
+     "pid": "P0905",
+     "sim": 0.815863,
+     "omega": 0.030809
+    },
+    {
+     "pid": "P1294",
+     "sim": 0.813626,
+     "omega": 0.020562
+    },
+    {
+     "pid": "P0864",
+     "sim": 0.813476,
+     "omega": 0.019875
+    },
+    {
+     "pid": "P0464",
+     "sim": 0.812924,
+     "omega": 0.017347
+    },
+    {
+     "pid": "P1614",
+     "sim": 0.810813,
+     "omega": 0.007677
+    },
+    {
+     "pid": "P0127",
+     "sim": 0.809584,
+     "omega": 0.002048
+    },
+    {
+     "pid": "P1169",
+     "sim": 0.809189,
+     "omega": 0.000238
+    }
+   ],
+   "topTopics": [
+    {
+     "topic": "C:random-graph-theory",
+     "P": 0.44509
+    },
+    {
+     "topic": "C:network-analysis",
+     "P": 0.212383
+    },
+    {
+     "topic": "T11329",
+     "P": 0.072091
+    },
+    {
+     "topic": "T10136",
+     "P": 0.055281
+    },
+    {
+     "topic": "T11303",
+     "P": 0.049017
+    },
+    {
+     "topic": "T11476",
+     "P": 0.032139
+    },
+    {
+     "topic": "T10241",
+     "P": 0.03211
+    },
+    {
+     "topic": "T12404",
+     "P": 0.025733
+    },
+    {
+     "topic": "T13283",
+     "P": 0.02028
+    },
+    {
+     "topic": "C:graph-generation",
+     "P": 0.011091
+    },
+    {
+     "topic": "C:molecular-graph-generation",
+     "P": 0.009028
+    },
+    {
+     "topic": "C:probabilistic-machine-learning",
+     "P": 0.008943
+    }
+   ]
+  },
+  {
+   "need": 5,
+   "ownShare": 0.3,
+   "thin": false,
+   "sK1": 0.772862,
+   "papers": [
+    {
+     "pid": "P0955",
+     "sim": 0.793698,
+     "omega": 0.141239
+    },
+    {
+     "pid": "P0421",
+     "sim": 0.791829,
+     "omega": 0.12857
+    },
+    {
+     "pid": "P0485",
+     "sim": 0.785718,
+     "omega": 0.087146
+    },
+    {
+     "pid": "P0718",
+     "sim": 0.784737,
+     "omega": 0.080496
+    },
+    {
+     "pid": "P1246",
+     "sim": 0.783728,
+     "omega": 0.073656
+    },
+    {
+     "pid": "P0841",
+     "sim": 0.781251,
+     "omega": 0.056866
+    },
+    {
+     "pid": "P0185",
+     "sim": 0.781158,
+     "omega": 0.056235
+    },
+    {
+     "pid": "P0793",
+     "sim": 0.780764,
+     "omega": 0.053565
+    },
+    {
+     "pid": "P0419",
+     "sim": 0.780375,
+     "omega": 0.050928
+    },
+    {
+     "pid": "P0094",
+     "sim": 0.778391,
+     "omega": 0.037479
+    },
+    {
+     "pid": "P0779",
+     "sim": 0.778296,
+     "omega": 0.036835
+    },
+    {
+     "pid": "P0471",
+     "sim": 0.778234,
+     "omega": 0.036415
+    },
+    {
+     "pid": "P1154",
+     "sim": 0.777993,
+     "omega": 0.034781
+    },
+    {
+     "pid": "P0319",
+     "sim": 0.777583,
+     "omega": 0.032002
+    },
+    {
+     "pid": "P0280",
+     "sim": 0.777249,
+     "omega": 0.029738
+    },
+    {
+     "pid": "P0671",
+     "sim": 0.77671,
+     "omega": 0.026084
+    },
+    {
+     "pid": "P1024",
+     "sim": 0.775647,
+     "omega": 0.018878
+    },
+    {
+     "pid": "P0930",
+     "sim": 0.774152,
+     "omega": 0.008744
+    },
+    {
+     "pid": "P0166",
+     "sim": 0.773871,
+     "omega": 0.00684
+    },
+    {
+     "pid": "P0897",
+     "sim": 0.773379,
+     "omega": 0.003505
+    }
+   ],
+   "topTopics": [
+    {
+     "topic": "C:variational-autoencoders",
+     "P": 0.568926
+    },
+    {
+     "topic": "C:probabilistic-machine-learning",
+     "P": 0.10986
+    },
+    {
+     "topic": "T11901",
+     "P": 0.072832
+    },
+    {
+     "topic": "C:generative-models",
+     "P": 0.058801
+    },
+    {
+     "topic": "C:uncertainty-quantification",
+     "P": 0.057873
+    },
+    {
+     "topic": "C:bayesian-nonparametrics",
+     "P": 0.042456
+    },
+    {
+     "topic": "T10136",
+     "P": 0.033751
+    },
+    {
+     "topic": "C:neural-network-theory",
+     "P": 0.014777
+    },
+    {
+     "topic": "C:normalizing-flows",
+     "P": 0.012998
+    },
+    {
+     "topic": "C:diffusion-models",
+     "P": 0.010228
+    },
+    {
+     "topic": "T11612",
+     "P": 0.004371
+    },
+    {
+     "topic": "T11273",
+     "P": 0.003679
+    }
+   ]
+  },
+  {
+   "need": 6,
+   "ownShare": 0.25,
+   "thin": false,
+   "sK1": 0.80664,
+   "papers": [
+    {
+     "pid": "P1091",
+     "sim": 0.833397,
+     "omega": 0.128633
+    },
+    {
+     "pid": "P1201",
+     "sim": 0.83142,
+     "omega": 0.119128
+    },
+    {
+     "pid": "P0185",
+     "sim": 0.829447,
+     "omega": 0.109643
+    },
+    {
+     "pid": "P0267",
+     "sim": 0.828352,
+     "omega": 0.104379
+    },
+    {
+     "pid": "P1278",
+     "sim": 0.827563,
+     "omega": 0.100586
+    },
+    {
+     "pid": "P0376",
+     "sim": 0.826106,
+     "omega": 0.093582
+    },
+    {
+     "pid": "P0177",
+     "sim": 0.818863,
+     "omega": 0.058761
+    },
+    {
+     "pid": "P0441",
+     "sim": 0.818519,
+     "omega": 0.057108
+    },
+    {
+     "pid": "P0115",
+     "sim": 0.816726,
+     "omega": 0.048488
+    },
+    {
+     "pid": "P1149",
+     "sim": 0.813604,
+     "omega": 0.033479
+    },
+    {
+     "pid": "P1311",
+     "sim": 0.812642,
+     "omega": 0.028854
+    },
+    {
+     "pid": "P1015",
+     "sim": 0.811725,
+     "omega": 0.024446
+    },
+    {
+     "pid": "P0562",
+     "sim": 0.811582,
+     "omega": 0.023758
+    },
+    {
+     "pid": "P0088",
+     "sim": 0.810429,
+     "omega": 0.018215
+    },
+    {
+     "pid": "P1071",
+     "sim": 0.80963,
+     "omega": 0.014374
+    },
+    {
+     "pid": "P1006",
+     "sim": 0.808868,
+     "omega": 0.010711
+    },
+    {
+     "pid": "P1011",
+     "sim": 0.808827,
+     "omega": 0.010514
+    },
+    {
+     "pid": "P1213",
+     "sim": 0.808629,
+     "omega": 0.009562
+    },
+    {
+     "pid": "P0039",
+     "sim": 0.807401,
+     "omega": 0.003658
+    },
+    {
+     "pid": "P0046",
+     "sim": 0.807081,
+     "omega": 0.00212
+    }
+   ],
+   "topTopics": [
+    {
+     "topic": "C:probabilistic-machine-learning",
+     "P": 0.264925
+    },
+    {
+     "topic": "C:neural-network-theory",
+     "P": 0.250769
+    },
+    {
+     "topic": "C:uncertainty-quantification",
+     "P": 0.165478
+    },
+    {
+     "topic": "C:diffusion-models",
+     "P": 0.057336
+    },
+    {
+     "topic": "C:deep-learning",
+     "P": 0.048637
+    },
+    {
+     "topic": "T10581",
+     "P": 0.039493
+    },
+    {
+     "topic": "T11273",
+     "P": 0.036332
+    },
+    {
+     "topic": "C:bayesian-statistics",
+     "P": 0.022967
+    },
+    {
+     "topic": "T11612",
+     "P": 0.0222
+    },
+    {
+     "topic": "T11303",
+     "P": 0.016884
+    },
+    {
+     "topic": "T12026",
+     "P": 0.012043
+    },
+    {
+     "topic": "T13062",
+     "P": 0.011966
+    }
+   ]
+  },
+  {
+   "need": 7,
+   "ownShare": 0.0,
+   "thin": true,
+   "sK1": 0.909697,
+   "papers": [
+    {
+     "pid": "P1138",
+     "sim": 0.91936,
+     "omega": 0.100809
+    },
+    {
+     "pid": "P1594",
+     "sim": 0.919064,
+     "omega": 0.097721
+    },
+    {
+     "pid": "P0109",
+     "sim": 0.918566,
+     "omega": 0.092525
+    },
+    {
+     "pid": "P0187",
+     "sim": 0.918304,
+     "omega": 0.089792
+    },
+    {
+     "pid": "P0256",
+     "sim": 0.916639,
+     "omega": 0.072422
+    },
+    {
+     "pid": "P0864",
+     "sim": 0.916585,
+     "omega": 0.071859
+    },
+    {
+     "pid": "P0911",
+     "sim": 0.916405,
+     "omega": 0.069981
+    },
+    {
+     "pid": "P0265",
+     "sim": 0.916109,
+     "omega": 0.066893
+    },
+    {
+     "pid": "P0203",
+     "sim": 0.915858,
+     "omega": 0.064274
+    },
+    {
+     "pid": "P1141",
+     "sim": 0.914325,
+     "omega": 0.048281
+    },
+    {
+     "pid": "P0556",
+     "sim": 0.914093,
+     "omega": 0.045861
+    },
+    {
+     "pid": "P1244",
+     "sim": 0.913724,
+     "omega": 0.042011
+    },
+    {
+     "pid": "P1564",
+     "sim": 0.913283,
+     "omega": 0.037411
+    },
+    {
+     "pid": "P0672",
+     "sim": 0.911977,
+     "omega": 0.023786
+    },
+    {
+     "pid": "P0177",
+     "sim": 0.911955,
+     "omega": 0.023556
+    },
+    {
+     "pid": "P0094",
+     "sim": 0.911927,
+     "omega": 0.023264
+    },
+    {
+     "pid": "P0092",
+     "sim": 0.911384,
+     "omega": 0.017599
+    },
+    {
+     "pid": "P0166",
+     "sim": 0.910482,
+     "omega": 0.008189
+    },
+    {
+     "pid": "P0425",
+     "sim": 0.909997,
+     "omega": 0.00313
+    },
+    {
+     "pid": "P0598",
+     "sim": 0.909758,
+     "omega": 0.000636
+    }
+   ],
+   "topTopics": [
+    {
+     "topic": "C:graph-generation",
+     "P": 0.40103
+    },
+    {
+     "topic": "T11273",
+     "P": 0.177864
+    },
+    {
+     "topic": "C:molecular-graph-generation",
+     "P": 0.150998
+    },
+    {
+     "topic": "C:probabilistic-machine-learning",
+     "P": 0.08085
+    },
+    {
+     "topic": "C:generative-models",
+     "P": 0.05407
+    },
+    {
+     "topic": "T11303",
+     "P": 0.03686
+    },
+    {
+     "topic": "C:representation-learning",
+     "P": 0.032035
+    },
+    {
+     "topic": "C:molecular-representation-learning",
+     "P": 0.024426
+    },
+    {
+     "topic": "C:variational-autoencoders",
+     "P": 0.017366
+    },
+    {
+     "topic": "C:graph-mining",
+     "P": 0.007556
+    },
+    {
+     "topic": "C:neural-network-theory",
+     "P": 0.005711
+    },
+    {
+     "topic": "C:foundation-models",
+     "P": 0.004109
+    }
+   ]
+  }
+ ],
+ "candidates": [
+  {
+   "cand": "C:bayesian-nonparametrics",
+   "kind": "topic",
+   "name": "Bayesian Nonparametrics",
+   "subfield": "S2613",
+   "field": "F26",
+   "support": 2,
+   "a": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.113217,
+    0.0,
+    0.0
+   ],
+   "P": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.042456,
+    0.0,
+    0.0
+   ],
+   "M": 0.025474
+  },
+  {
+   "cand": "C:bayesian-statistics",
+   "kind": "topic",
+   "name": "Bayesian Statistics",
+   "subfield": "S2613",
+   "field": "F26",
+   "support": 4,
+   "a": [
+    0.0,
+    0.0,
+    0.0,
+    0.104734,
+    0.0,
+    0.006698,
+    0.061245,
+    0.0
+   ],
+   "P": [
+    0.0,
+    0.0,
+    0.0,
+    0.039275,
+    0.0,
+    0.002512,
+    0.022967,
+    0.0
+   ],
+   "M": 0.043595
+  },
+  {
+   "cand": "C:deep-learning",
+   "kind": "topic",
+   "name": "Deep Learning",
+   "subfield": "S1702",
+   "field": "F17",
+   "support": 3,
+   "a": [
+    0.0,
+    0.010221,
+    0.0,
+    0.013689,
+    0.0,
+    0.008538,
+    0.129698,
+    0.0
+   ],
+   "P": [
+    0.0,
+    0.003833,
+    0.0,
+    0.005133,
+    0.0,
+    0.003202,
+    0.048637,
+    0.0
+   ],
+   "M": 0.036163
+  },
+  {
+   "cand": "C:diffusion-models",
+   "kind": "topic",
+   "name": "Diffusion Models",
+   "subfield": "S1702",
+   "field": "F17",
+   "support": 9,
+   "a": [
+    0.030062,
+    0.041189,
+    0.004734,
+    0.066103,
+    0.0,
+    0.027274,
+    0.152895,
+    0.0
+   ],
+   "P": [
+    0.011273,
+    0.015446,
+    0.001775,
+    0.024788,
+    0.0,
+    0.010228,
+    0.057336,
+    0.0
+   ],
+   "M": 0.083807
+  },
+  {
+   "cand": "C:foundation-models",
+   "kind": "topic",
+   "name": "Foundation Models",
+   "subfield": "S1702",
+   "field": "F17",
+   "support": 2,
+   "a": [
+    0.002689,
+    0.011602,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.010958
+   ],
+   "P": [
+    0.001008,
+    0.004351,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.004109
+   ],
+   "M": 0.007196
+  },
+  {
+   "cand": "C:generative-models",
+   "kind": "topic",
+   "name": "Generative Models",
+   "subfield": "S1702",
+   "field": "F17",
+   "support": 20,
+   "a": [
+    0.216124,
+    0.0,
+    0.177074,
+    0.016871,
+    0.000735,
+    0.156802,
+    0.0,
+    0.144186
+   ],
+   "P": [
+    0.081046,
+    0.0,
+    0.066403,
+    0.006327,
+    0.000276,
+    0.058801,
+    0.0,
+    0.05407
+   ],
+   "M": 0.208062
+  },
+  {
+   "cand": "C:geometric-deep-learning",
+   "kind": "topic",
+   "name": "Geometric Deep Learning",
+   "subfield": "S1702",
+   "field": "F17",
+   "support": 7,
+   "a": [
+    0.0,
+    0.074652,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "P": [
+    0.0,
+    0.027995,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "M": 0.026595
+  },
+  {
+   "cand": "C:graph-generation",
+   "kind": "topic",
+   "name": "Graph Generation",
+   "subfield": "S1702",
+   "field": "F17",
+   "support": 31,
+   "a": [
+    0.8,
+    0.053073,
+    0.8,
+    0.0,
+    0.029577,
+    0.009689,
+    0.0,
+    0.8
+   ],
+   "P": [
+    0.5791,
+    0.019902,
+    0.609593,
+    0.0,
+    0.011091,
+    0.003634,
+    0.0,
+    0.40103
+   ],
+   "M": 1.3571
+  },
+  {
+   "cand": "C:graph-mining",
+   "kind": "topic",
+   "name": "Graph Mining",
+   "subfield": "S1710",
+   "field": "F17",
+   "support": 3,
+   "a": [
+    0.0,
+    0.018464,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.020149
+   ],
+   "P": [
+    0.0,
+    0.006924,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.007556
+   ],
+   "M": 0.010356
+  },
+  {
+   "cand": "C:molecular-graph-generation",
+   "kind": "topic",
+   "name": "Molecular Graph Generation",
+   "subfield": "S1702",
+   "field": "F17",
+   "support": 25,
+   "a": [
+    0.447457,
+    0.003135,
+    0.655073,
+    0.0,
+    0.024075,
+    0.0,
+    0.0,
+    0.402661
+   ],
+   "P": [
+    0.167796,
+    0.001176,
+    0.245652,
+    0.0,
+    0.009028,
+    0.0,
+    0.0,
+    0.150998
+   ],
+   "M": 0.471819
+  },
+  {
+   "cand": "C:molecular-machine-learning",
+   "kind": "topic",
+   "name": "Molecular Machine Learning",
+   "subfield": "S1702",
+   "field": "F17",
+   "support": 2,
+   "a": [
+    0.0,
+    0.055348,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "P": [
+    0.0,
+    0.020755,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "M": 0.019718
+  },
+  {
+   "cand": "C:molecular-representation-learning",
+   "kind": "topic",
+   "name": "Molecular Representation Learning",
+   "subfield": "S1702",
+   "field": "F17",
+   "support": 8,
+   "a": [
+    0.062159,
+    0.156954,
+    0.117851,
+    0.0,
+    0.009928,
+    0.0,
+    0.0,
+    0.065136
+   ],
+   "P": [
+    0.02331,
+    0.058858,
+    0.044194,
+    0.0,
+    0.003723,
+    0.0,
+    0.0,
+    0.024426
+   ],
+   "M": 0.133818
+  },
+  {
+   "cand": "C:network-analysis",
+   "kind": "topic",
+   "name": "Network Analysis",
+   "subfield": "S3109",
+   "field": "F31",
+   "support": 8,
+   "a": [
+    0.0,
+    0.0,
+    0.0,
+    0.007921,
+    0.566354,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "P": [
+    0.0,
+    0.0,
+    0.0,
+    0.00297,
+    0.212383,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "M": 0.150896
+  },
+  {
+   "cand": "C:neural-network-theory",
+   "kind": "topic",
+   "name": "Neural Network Theory",
+   "subfield": "S1702",
+   "field": "F17",
+   "support": 14,
+   "a": [
+    0.0,
+    0.201831,
+    0.0,
+    0.057584,
+    0.0,
+    0.039405,
+    0.668718,
+    0.015229
+   ],
+   "P": [
+    0.0,
+    0.075687,
+    0.0,
+    0.021594,
+    0.0,
+    0.014777,
+    0.250769,
+    0.005711
+   ],
+   "M": 0.237742
+  },
+  {
+   "cand": "C:normalizing-flows",
+   "kind": "topic",
+   "name": "Normalizing Flows",
+   "subfield": "S1702",
+   "field": "F17",
+   "support": 9,
+   "a": [
+    0.002576,
+    0.0,
+    0.023723,
+    0.002007,
+    0.0,
+    0.034663,
+    0.0,
+    0.008305
+   ],
+   "P": [
+    0.000966,
+    0.0,
+    0.008896,
+    0.000752,
+    0.0,
+    0.012998,
+    0.0,
+    0.003114
+   ],
+   "M": 0.018893
+  },
+  {
+   "cand": "C:probabilistic-machine-learning",
+   "kind": "topic",
+   "name": "Probabilistic Machine Learning",
+   "subfield": "S1702",
+   "field": "F17",
+   "support": 28,
+   "a": [
+    0.067755,
+    0.116924,
+    0.002836,
+    0.8,
+    0.023847,
+    0.292959,
+    0.706466,
+    0.215599
+   ],
+   "P": [
+    0.025408,
+    0.043846,
+    0.001064,
+    0.556658,
+    0.008943,
+    0.10986,
+    0.264925,
+    0.08085
+   ],
+   "M": 0.743822
+  },
+  {
+   "cand": "C:random-graph-theory",
+   "kind": "topic",
+   "name": "Random Graph Theory",
+   "subfield": "S2607",
+   "field": "F26",
+   "support": 13,
+   "a": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.8,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "P": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.44509,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "M": 0.311563
+  },
+  {
+   "cand": "C:relational-learning",
+   "kind": "topic",
+   "name": "Relational Learning",
+   "subfield": "S1702",
+   "field": "F17",
+   "support": 4,
+   "a": [
+    0.0,
+    0.020354,
+    0.0,
+    0.009746,
+    0.0,
+    0.000269,
+    0.001267,
+    0.0
+   ],
+   "P": [
+    0.0,
+    0.007633,
+    0.0,
+    0.003655,
+    0.0,
+    0.000101,
+    0.000475,
+    0.0
+   ],
+   "M": 0.010314
+  },
+  {
+   "cand": "C:representation-learning",
+   "kind": "topic",
+   "name": "Representation Learning",
+   "subfield": "S1702",
+   "field": "F17",
+   "support": 9,
+   "a": [
+    0.006674,
+    0.255303,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.085427
+   ],
+   "P": [
+    0.002503,
+    0.095739,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.032035
+   ],
+   "M": 0.109472
+  },
+  {
+   "cand": "C:uncertainty-quantification",
+   "kind": "topic",
+   "name": "Uncertainty Quantification",
+   "subfield": "S1702",
+   "field": "F17",
+   "support": 8,
+   "a": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.154328,
+    0.441275,
+    0.0
+   ],
+   "P": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.057873,
+    0.165478,
+    0.0
+   ],
+   "M": 0.125737
+  },
+  {
+   "cand": "C:variational-autoencoders",
+   "kind": "topic",
+   "name": "Variational Autoencoders",
+   "subfield": "S1702",
+   "field": "F17",
+   "support": 20,
+   "a": [
+    0.086054,
+    0.0,
+    0.000934,
+    0.094517,
+    0.0,
+    0.8,
+    0.007506,
+    0.04631
+   ],
+   "P": [
+    0.03227,
+    0.0,
+    0.00035,
+    0.035444,
+    0.0,
+    0.568926,
+    0.002815,
+    0.017366
+   ],
+   "M": 0.410755
+  },
+  {
+   "cand": "T10136",
+   "kind": "topic",
+   "name": "Statistical Methods and Inference",
+   "subfield": "S2613",
+   "field": "F26",
+   "support": 11,
+   "a": [
+    0.0,
+    0.0,
+    0.0,
+    0.036755,
+    0.147417,
+    0.090003,
+    0.0,
+    0.0
+   ],
+   "P": [
+    0.0,
+    0.0,
+    0.0,
+    0.013783,
+    0.055281,
+    0.033751,
+    0.0,
+    0.0
+   ],
+   "M": 0.069285
+  },
+  {
+   "cand": "T10320",
+   "kind": "topic",
+   "name": "Neural Networks and Applications",
+   "subfield": "S1702",
+   "field": "F17",
+   "support": 2,
+   "a": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0151,
+    0.0
+   ],
+   "P": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.005663,
+    0.0
+   ],
+   "M": 0.003114
+  },
+  {
+   "cand": "T10374",
+   "kind": "topic",
+   "name": "Advanced Graph Theory Research",
+   "subfield": "S1703",
+   "field": "F17",
+   "support": 4,
+   "a": [
+    0.0,
+    0.004219,
+    0.0,
+    0.059253,
+    0.001862,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "P": [
+    0.0,
+    0.001582,
+    0.0,
+    0.02222,
+    0.000698,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "M": 0.018657
+  },
+  {
+   "cand": "T11273",
+   "kind": "topic",
+   "name": "Advanced Graph Neural Networks",
+   "subfield": "S1702",
+   "field": "F17",
+   "support": 29,
+   "a": [
+    0.169859,
+    0.8,
+    0.058862,
+    0.263387,
+    0.023158,
+    0.009811,
+    0.096886,
+    0.474303
+   ],
+   "P": [
+    0.063697,
+    0.600384,
+    0.022073,
+    0.09877,
+    0.008684,
+    0.003679,
+    0.036332,
+    0.177864
+   ],
+   "M": 0.845207
+  },
+  {
+   "cand": "T11303",
+   "kind": "topic",
+   "name": "Bayesian Modeling and Causal Inference",
+   "subfield": "S1702",
+   "field": "F17",
+   "support": 11,
+   "a": [
+    0.030992,
+    0.03651,
+    0.0,
+    0.344773,
+    0.130713,
+    0.0,
+    0.045025,
+    0.098294
+   ],
+   "P": [
+    0.011622,
+    0.013691,
+    0.0,
+    0.12929,
+    0.049017,
+    0.0,
+    0.016884,
+    0.03686
+   ],
+   "M": 0.183625
+  },
+  {
+   "cand": "T11329",
+   "kind": "topic",
+   "name": "Limits and Structures in Graph Theory",
+   "subfield": "S2607",
+   "field": "F26",
+   "support": 5,
+   "a": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.192243,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "P": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.072091,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "M": 0.050464
+  },
+  {
+   "cand": "T11476",
+   "kind": "topic",
+   "name": "Graph theory and applications",
+   "subfield": "S2608",
+   "field": "F26",
+   "support": 3,
+   "a": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.085705,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "P": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.032139,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "M": 0.022498
+  },
+  {
+   "cand": "T11612",
+   "kind": "topic",
+   "name": "Stochastic Gradient Optimization Techniques",
+   "subfield": "S1702",
+   "field": "F17",
+   "support": 6,
+   "a": [
+    0.0,
+    0.0,
+    0.0,
+    0.020354,
+    0.0,
+    0.011657,
+    0.059201,
+    0.0
+   ],
+   "P": [
+    0.0,
+    0.0,
+    0.0,
+    0.007633,
+    0.0,
+    0.004371,
+    0.0222,
+    0.0
+   ],
+   "M": 0.020558
+  },
+  {
+   "cand": "T11901",
+   "kind": "topic",
+   "name": "Bayesian Methods and Mixture Models",
+   "subfield": "S1702",
+   "field": "F17",
+   "support": 6,
+   "a": [
+    0.0,
+    0.0,
+    0.0,
+    0.011151,
+    0.0,
+    0.194219,
+    0.0,
+    0.010697
+   ],
+   "P": [
+    0.0,
+    0.0,
+    0.0,
+    0.004182,
+    0.0,
+    0.072832,
+    0.0,
+    0.004011
+   ],
+   "M": 0.048841
+  },
+  {
+   "cand": "T12056",
+   "kind": "topic",
+   "name": "Markov Chains and Monte Carlo Methods",
+   "subfield": "S2613",
+   "field": "F26",
+   "support": 2,
+   "a": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.00112,
+    0.0,
+    0.014928,
+    0.0
+   ],
+   "P": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.00042,
+    0.0,
+    0.005598,
+    0.0
+   ],
+   "M": 0.003373
+  },
+  {
+   "cand": "T12404",
+   "kind": "topic",
+   "name": "Mathematical Approximation and Integration",
+   "subfield": "S2612",
+   "field": "F26",
+   "support": 2,
+   "a": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.068621,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "P": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.025733,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "M": 0.018013
+  },
+  {
+   "cand": "T13283",
+   "kind": "topic",
+   "name": "Mental Health Research Topics",
+   "subfield": "S3205",
+   "field": "F32",
+   "support": 2,
+   "a": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.05408,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "P": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.02028,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "M": 0.014196
+  },
+  {
+   "cand": "T13500",
+   "kind": "topic",
+   "name": "Probability and Statistical Research",
+   "subfield": "S2613",
+   "field": "F26",
+   "support": 4,
+   "a": [
+    0.0,
+    0.0,
+    0.0,
+    0.015253,
+    0.019231,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "P": [
+    0.0,
+    0.0,
+    0.0,
+    0.00572,
+    0.007212,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "M": 0.009338
+  },
+  {
+   "cand": "anchor:5",
+   "kind": "anchor",
+   "name": "variational inference",
+   "subfield": "S1702",
+   "field": "F17",
+   "support": 0,
+   "a": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.6,
+    0.0,
+    0.0
+   ],
+   "P": [],
+   "M": 0.552768,
+   "anchorNeed": 5
+  }
+ ],
+ "greedy": {
+  "trace": [
+   {
+    "k": 1,
+    "cand": "C:graph-generation",
+    "gain": 1.996937,
+    "F": 1.996937,
+    "Fnorm": 0.33562,
+    "coverage": [
+     0.8,
+     0.053073,
+     0.8,
+     0.0,
+     0.029577,
+     0.009689,
+     0.0,
+     0.8
+    ],
+    "runnerUp": "T11273",
+    "runnerUpGain": 1.492912,
+    "contrib": {
+     "0": 0.8,
+     "1": 0.050419,
+     "2": 0.72,
+     "4": 0.020704,
+     "5": 0.005814,
+     "7": 0.4
+    }
+   },
+   {
+    "k": 2,
+    "cand": "C:probabilistic-machine-learning",
+    "gain": 1.319632,
+    "F": 3.316569,
+    "Fnorm": 0.557406,
+    "coverage": [
+     0.813551,
+     0.163791,
+     0.800567,
+     0.8,
+     0.052719,
+     0.29981,
+     0.706466,
+     0.84312
+    ],
+    "runnerUp": "T11273",
+    "runnerUpGain": 1.08405,
+    "contrib": {
+     "0": 0.013551,
+     "1": 0.105182,
+     "2": 0.000511,
+     "3": 0.6,
+     "4": 0.016199,
+     "5": 0.174072,
+     "6": 0.388556,
+     "7": 0.02156
+    }
+   },
+   {
+    "k": 3,
+    "cand": "T11273",
+    "gain": 0.789586,
+    "F": 4.106154,
+    "Fnorm": 0.69011,
+    "coverage": [
+     0.845221,
+     0.832758,
+     0.812306,
+     0.852677,
+     0.074657,
+     0.306679,
+     0.734905,
+     0.917528
+    ],
+    "runnerUp": "C:random-graph-theory",
+    "runnerUpGain": 0.530477,
+    "contrib": {
+     "0": 0.03167,
+     "1": 0.635519,
+     "2": 0.010565,
+     "3": 0.039508,
+     "4": 0.015356,
+     "5": 0.004122,
+     "6": 0.015642,
+     "7": 0.037204
+    }
+   },
+   {
+    "k": 4,
+    "cand": "C:random-graph-theory",
+    "gain": 0.518192,
+    "F": 4.624347,
+    "Fnorm": 0.777201,
+    "coverage": [
+     0.845221,
+     0.832758,
+     0.812306,
+     0.852677,
+     0.814931,
+     0.306679,
+     0.734905,
+     0.917528
+    ],
+    "runnerUp": "C:network-analysis",
+    "runnerUpGain": 0.367725,
+    "contrib": {
+     "4": 0.518192
+    }
+   },
+   {
+    "k": 5,
+    "cand": "anchor:5",
+    "gain": 0.249595,
+    "F": 4.873942,
+    "Fnorm": 0.81915,
+    "coverage": [
+     0.845221,
+     0.832758,
+     0.812306,
+     0.852677,
+     0.814931,
+     0.722672,
+     0.734905,
+     0.917528
+    ],
+    "contrib": {
+     "5": 0.249595
+    }
+   },
+   {
+    "k": 6,
+    "cand": "C:network-analysis",
+    "gain": 0.074245,
+    "F": 4.948187,
+    "Fnorm": 0.831628,
+    "coverage": [
+     0.845221,
+     0.832758,
+     0.812306,
+     0.853844,
+     0.919746,
+     0.722672,
+     0.734905,
+     0.917528
+    ],
+    "runnerUp": "T10136",
+    "runnerUpGain": 0.038135,
+    "contrib": {
+     "3": 0.000875,
+     "4": 0.07337
+    }
+   }
+  ],
+  "droppedByCap": [
+   {
+    "cand": "C:molecular-graph-generation",
+    "why": "field cap",
+    "atK": 6,
+    "gain": 0.200136
+   },
+   {
+    "cand": "C:variational-autoencoders",
+    "why": "field cap",
+    "atK": 6,
+    "gain": 0.160042
+   },
+   {
+    "cand": "C:neural-network-theory",
+    "why": "field cap",
+    "atK": 6,
+    "gain": 0.143115
+   },
+   {
+    "cand": "C:generative-models",
+    "why": "field cap",
+    "atK": 6,
+    "gain": 0.09736
+   },
+   {
+    "cand": "C:uncertainty-quantification",
+    "why": "field cap",
+    "atK": 6,
+    "gain": 0.090019
+   },
+   {
+    "cand": "T11303",
+    "why": "field cap",
+    "atK": 6,
+    "gain": 0.076244
+   }
+  ],
+  "rescued": [
+   "anchor:5"
+  ],
+  "kStar": 5,
+  "kCov": null,
+  "epsW": 0.2975
+ },
+ "seats": [
+  {
+   "id": "member-1",
+   "department": "Computer Science",
+   "umbrella": "Artificial Intelligence",
+   "subfields": [
+    "Graph Generation"
+   ],
+   "kind": "topic",
+   "cand": "C:graph-generation",
+   "covers": [
+    "core",
+    "graph generative modeling",
+    "problem formulation"
+   ],
+   "exemplars": [
+    {
+     "pid": "P0256",
+     "score": 0.167307
+    },
+    {
+     "pid": "P0265",
+     "score": 0.161221
+    },
+    {
+     "pid": "P0109",
+     "score": 0.122524
+    }
+   ],
+   "inKStar": true
+  },
+  {
+   "id": "member-2",
+   "department": "Computer Science",
+   "umbrella": "Artificial Intelligence",
+   "subfields": [
+    "Probabilistic Machine Learning"
+   ],
+   "kind": "topic",
+   "cand": "C:probabilistic-machine-learning",
+   "covers": [
+    "probabilistic graphical models",
+    "variational inference",
+    "uncertainty propagation",
+    "problem formulation"
+   ],
+   "exemplars": [
+    {
+     "pid": "P0177",
+     "score": 0.140509
+    },
+    {
+     "pid": "P0185",
+     "score": 0.113744
+    },
+    {
+     "pid": "P0376",
+     "score": 0.08861
+    }
+   ],
+   "inKStar": true
+  },
+  {
+   "id": "member-3",
+   "department": "Computer Science",
+   "umbrella": "Artificial Intelligence",
+   "subfields": [
+    "Advanced Graph Neural Networks"
+   ],
+   "kind": "topic",
+   "cand": "T11273",
+   "covers": [
+    "message passing neural networks",
+    "probabilistic graphical models",
+    "problem formulation"
+   ],
+   "exemplars": [
+    {
+     "pid": "P1071",
+     "score": 0.11592
+    },
+    {
+     "pid": "P1138",
+     "score": 0.115482
+    },
+    {
+     "pid": "P0143",
+     "score": 0.070361
+    }
+   ],
+   "inKStar": true
+  },
+  {
+   "id": "member-4",
+   "department": "Mathematics",
+   "umbrella": "Discrete Mathematics and Combinatorics",
+   "subfields": [
+    "Random Graph Theory"
+   ],
+   "kind": "topic",
+   "cand": "C:random-graph-theory",
+   "covers": [
+    "random graph models"
+   ],
+   "exemplars": [
+    {
+     "pid": "P0403",
+     "score": 0.06728
+    },
+    {
+     "pid": "P0151",
+     "score": 0.06496
+    },
+    {
+     "pid": "P0422",
+     "score": 0.037211
+    }
+   ],
+   "inKStar": true
+  },
+  {
+   "id": "member-5",
+   "department": "Computer Science",
+   "umbrella": "Artificial Intelligence",
+   "subfields": [
+    "variational inference"
+   ],
+   "kind": "anchor",
+   "cand": "anchor:5",
+   "covers": [
+    "variational inference"
+   ],
+   "exemplars": [],
+   "inKStar": true
+  },
+  {
+   "id": "member-6",
+   "department": "Physics and Astronomy",
+   "umbrella": "Statistical and Nonlinear Physics",
+   "subfields": [
+    "Network Analysis"
+   ],
+   "kind": "topic",
+   "cand": "C:network-analysis",
+   "covers": [
+    "random graph models"
+   ],
+   "exemplars": [
+    {
+     "pid": "P0644",
+     "score": 0.036041
+    },
+    {
+     "pid": "P0650",
+     "score": 0.035501
+    },
+    {
+     "pid": "P0703",
+     "score": 0.030989
+    }
+   ],
+   "inKStar": false
+  }
+ ],
+ "flags": {
+  "sourceShare": {
+   "arxiv": 0.779538,
+   "crossref": 0.103486,
+   "semantic-scholar": 0.116975
+  },
+  "sourceAlarm": [
+   "arxiv"
+  ],
+  "thinNeeds": [
+   "core",
+   "problem formulation"
+  ],
+  "anchoredSeats": [
+   "member-5"
+  ],
+  "failedSources": [
+   "semantic-scholar"
+  ],
+  "screenedOut": 366,
+  "weakPlacements": 25
+ },
+ "determinismSha256": "f6c4ac6dc70822621b2fd6e69834c7a099ca8fea4bcd35e9d63c6741b9b864ae"
+}

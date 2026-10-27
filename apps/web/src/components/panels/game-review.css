@@ -1,0 +1,9 @@
+.game-scoreboard { margin: 12px 0; padding: 14px; border: 1px solid var(--border); border-radius: 10px; }
+.game-scoreboard-heading { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.game-score-table-wrap { overflow-x: auto; }
+.game-scoreboard table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.game-scoreboard th, .game-scoreboard td { padding: 7px 10px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.game-review-prose { white-space: pre-wrap; overflow-wrap: anywhere; }
+.game-feedback { margin-top: 12px; }
+.game-feedback summary { cursor: pointer; font-weight: 600; }
+.game-feedback article { margin: 12px 0; padding: 10px 12px; border-left: 2px solid var(--border); }

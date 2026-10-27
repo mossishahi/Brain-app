@@ -1,0 +1,36 @@
+/* The optional confirm-needs gate (NeedsGateCard.tsx). */
+.needs-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.needs-table th,
+.needs-table td {
+  padding: 0.3rem 0.4rem;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.needs-table th[scope="row"] {
+  font-weight: 500;
+}
+
+.needs-table .chip {
+  margin-right: 0.3rem;
+}
+
+.needs-statement {
+  display: block;
+  margin-top: 0.15rem;
+  font-weight: 400;
+}
+
+.needs-table .tag-row {
+  margin-top: 0.25rem;
+}
+
+.needs-weight-input {
+  width: 4.5rem;
+}

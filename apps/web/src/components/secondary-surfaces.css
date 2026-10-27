@@ -1,0 +1,61 @@
+/* The hover popover carries this information; avoid a second tooltip over it. */
+.env-status .env-icon::after { content: none; }
+
+.canvas-env-positioner {
+  z-index: 80;
+  outline: none;
+}
+
+.env-popover.canvas-env-popover {
+  position: relative;
+  inset: auto;
+  box-sizing: border-box;
+  width: min(350px, calc(100vw - 24px));
+  max-width: calc(100vw - 24px);
+  max-height: min(440px, var(--available-height), calc(100dvh - 24px));
+  overflow: auto;
+  overscroll-behavior: contain;
+  overflow-wrap: anywhere;
+  animation: none;
+}
+
+.canvas-env-popover .env-popover-head {
+  min-width: 0;
+}
+
+.canvas-env-popover .env-popover-title {
+  min-width: 0;
+}
+
+.canvas-env-popover .env-popover-detail {
+  flex: none;
+}
+
+.canvas-env-popover .env-popover-actions {
+  flex-wrap: wrap;
+}
+
+.canvas-env-close {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: var(--ui-compact-target);
+  height: var(--ui-compact-target);
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: var(--ui-icon-lg);
+  cursor: pointer;
+}
+
+.canvas-env-close:hover {
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+}
+
+.canvas-env-close:focus-visible,
+.canvas-env-popover:focus-visible {
+  outline: none;
+  background-color: var(--ui-focus-fill);
+  color: var(--ui-focus-text);
+}

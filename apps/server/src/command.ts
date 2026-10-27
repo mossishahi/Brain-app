@@ -4,6 +4,8 @@ import {
   type ServerSettings,
 } from "@brainstorm-agentic/protocol";
 
+import { workflowParamsJson } from "./panel-composition.js";
+
 export function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\"'\"'`)}'`;
 }
@@ -37,7 +39,7 @@ export interface OrchestrationCommandOptions {
   readonly dismissedMembers?: readonly string[];
   readonly gate?: {
     readonly gateKey: string;
-    readonly action: "approve" | "shrink" | "revise";
+    readonly action: "approve" | "shrink" | "revise" | "edit";
     readonly members?: readonly string[];
     /** Custom seats added at confirmation; forces the JSON gate transport. */
     readonly addedMembers?: readonly CustomSeatRequest[];
@@ -45,6 +47,8 @@ export interface OrchestrationCommandOptions {
     readonly type?: string;
     /** Classification revision: the replacement asks (JSON transport). */
     readonly requestedOutputs?: readonly { title: string; ask: string }[];
+    /** Needs confirmation: the edited embeddingInput (JSON transport). */
+    readonly embeddingInput?: Readonly<Record<string, unknown>>;
   };
 }
 
@@ -145,7 +149,8 @@ export function buildOrchestrationCommand(
     const needsJson =
       (options.gate.addedMembers && options.gate.addedMembers.length > 0) ||
       options.gate.type !== undefined ||
-      options.gate.requestedOutputs !== undefined;
+      options.gate.requestedOutputs !== undefined ||
+      options.gate.embeddingInput !== undefined;
     if (needsJson) {
       // Custom seats and classification revisions do not fit the compact
       // key=action[:ids] syntax; the JSON transport carries the full response.
@@ -162,6 +167,9 @@ export function buildOrchestrationCommand(
             ...(options.gate.type !== undefined ? { type: options.gate.type } : {}),
             ...(options.gate.requestedOutputs !== undefined
               ? { requestedOutputs: options.gate.requestedOutputs }
+              : {}),
+            ...(options.gate.embeddingInput !== undefined
+              ? { embeddingInput: options.gate.embeddingInput }
               : {}),
           }),
         ),
@@ -197,6 +205,10 @@ export function buildOrchestrationCommand(
   // option the runtime's weave activity honors. Resumes carry both too — a
   // run interrupted before its panel was journaled weaves on resume, and it
   // must weave the way this job was submitted.
+  // Every other panel-composition param (spec v2 Section 12) rides one JSON
+  // object of the values that differ from the bundle defaults; the size
+  // variable above keeps winning for panelSize.
+  const workflowParams = workflowParamsJson(options.settings);
   const panelEnv = [
     ...(options.settings.panel?.size !== undefined
       ? [
@@ -204,6 +216,9 @@ export function buildOrchestrationCommand(
             String(options.settings.panel.size),
           )}`,
         ]
+      : []),
+    ...(workflowParams !== undefined
+      ? [`BRAINSTORM_AGENTIC_WORKFLOW_PARAMS=${shellQuote(workflowParams)}`]
       : []),
     ...(options.settings.panel?.interdisciplinarySeat === false
       ? ["BRAINSTORM_AGENTIC_INTERDISCIPLINARY_SEAT=off"]

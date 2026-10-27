@@ -1,13 +1,16 @@
 import {
   lazy,
   Suspense,
-  useCallback,
   useEffect,
   useLayoutEffect,
   useRef,
   useState,
 } from "react";
-import type { KeyboardEvent, ReactNode } from "react";
+import type { KeyboardEvent, ReactNode, RefObject } from "react";
+import { useHoverMenuFocus } from "../shell/useHoverMenuFocus";
+import { hostStorageKey } from "../desktop/context";
+import { Menu } from "@base-ui/react/menu";
+import { Popover } from "@base-ui/react/popover";
 import {
   FileImageOutlined,
   FileOutlined,
@@ -16,14 +19,14 @@ import {
   FolderOutlined,
   LinkOutlined,
   VideoCameraOutlined,
-  DownOutlined,
 } from "@ant-design/icons";
-import { LuBrain } from "react-icons/lu";
+import { LuPlus, LuX } from "react-icons/lu";
+import { useCapabilityDraft } from "../features/composer/capability-draft";
+import { RegistryIndicator } from "../features/composer/RegistryIndicator";
+import { useNavigationDismiss } from "../shell/useNavigationDismiss";
 import {
   ATTACHMENT_LIMITS,
   type AttachmentSelectionKind,
-  type CapabilityOptionsResponse,
-  type ModelOptionsResponse,
   type ReadinessCheckId,
   type ReadinessReport,
   type ServerSettings,
@@ -32,11 +35,8 @@ import {
 import {
   blockedReadiness,
   errorMessage,
-  getCapabilityOptions,
   getHealth,
-  getModelOptions,
   getSettings,
-  putModelsByRoute,
   validateAttachments,
 } from "../api";
 import { EnvironmentStatus } from "./EnvironmentStatus";
@@ -123,22 +123,6 @@ function attachmentMeta(attachment: ValidatedAttachment): string {
     .join(" · ");
 }
 
-function titleCase(value: string): string {
-  return value
-    .split(/[-_\s]+/)
-    .filter(Boolean)
-    .map((part) => part[0]!.toUpperCase() + part.slice(1))
-    .join(" ");
-}
-
-function formatModelName(value: string): string {
-  return titleCase(
-    value
-      .replace(/^claude[-_]/i, "")
-      .replace(/[-_](\d+)[-_](\d+)(?:[-_]\d{8})?$/i, " $1.$2"),
-  );
-}
-
 function registryHost(url: string | undefined): string {
   if (!url) return "Brain Registry";
   try {
@@ -161,218 +145,25 @@ function registryPageUrl(url: string | undefined): string | undefined {
   }
 }
 
-function providerLabel(
-  provider: ServerSettings["llm"]["provider"] | undefined,
-): string {
-  switch (provider) {
-    case "anthropic":
-      return "Anthropic API";
-    case "claude-agent":
-      return "Claude Agent SDK";
-    case "cursor-agent":
-      return "Cursor SDK";
-    case "offline":
-      return "Offline (deterministic)";
-    default:
-      return "Provider";
-  }
-}
-
-function modelDisplay(settings: ServerSettings | null): {
-  model: string;
-  profile?: string;
-} {
-  if (!settings) return { model: "Model" };
-  if (settings.llm.provider === "offline") {
-    return { model: "Offline" };
-  }
-  const configured = settings.llm.model?.trim();
-  const model =
-    configured && configured.length > 0
-      ? formatModelName(configured)
-      : settings.llm.provider === "claude-agent"
-        ? "Claude default"
-        : settings.llm.provider === "cursor-agent"
-          ? "Cursor auto"
-          : "Anthropic";
-  const effort = settings.llm.agentSdk?.effort;
-  return {
-    model,
-    ...(effort ? { profile: titleCase(effort) } : {}),
-  };
-}
-
-/**
- * The attachment picker: a small trigger that fans its options out to the right.
- *
- * Hand-rolled rather than MUI's SpeedDial. That component brought
- * @mui/material and both emotion packages into the bundle for this one widget,
- * and most of its configuration here was spent overriding MUI's own defaults
- * (its 64px FAB assumption, its shadows, its colours) back to this app's
- * tokens. Plain buttons and a flex row express the same thing, react to the
- * theme through the same CSS variables as everything else, and cost nothing.
- *
- * What SpeedDial did give away for free, and is therefore written out here, is
- * the keyboard contract that role="menu" promises: arrow keys move between
- * options, Home/End jump to the ends, only the active option is a tab stop
- * (a roving tabindex — seven tab stops for one control is worse than none),
- * opening moves focus into the menu, and closing puts it back on the trigger.
- * Declaring the role without the behaviour is the worse of the two failures:
- * it tells a screen reader to expect a menu and then hands it a row of buttons.
- */
-function AttachmentPicker({
-  disabled,
-  onSelect,
-}: {
+/** Shared menu primitives own focus, keyboard navigation and viewport collision. */
+function AttachmentPicker({ disabled, onSelect, triggerRef }: {
   readonly disabled: boolean;
   readonly onSelect: (kind: AttachmentSelectionKind) => void;
+  readonly triggerRef: RefObject<HTMLButtonElement | null>;
 }) {
   const [open, setOpen] = useState(false);
-  /** Which option is the single tab stop, and what focus follows on open. */
-  const [active, setActive] = useState(0);
-  const root = useRef<HTMLDivElement | null>(null);
-  const trigger = useRef<HTMLButtonElement | null>(null);
-  const options = useRef<(HTMLButtonElement | null)[]>([]);
-  /** Set when the fan closes, so focus returns only for a real close. */
-  const restoreFocus = useRef(false);
-
-  const close = useCallback((returnFocus: boolean) => {
-    restoreFocus.current = returnFocus;
-    setOpen(false);
-  }, []);
-
-  useEffect(() => {
-    if (!open) return;
-    const onPointerDown = (event: PointerEvent) => {
-      // A pointer close must NOT pull focus back to the trigger: the user is
-      // already on their way somewhere else.
-      if (!root.current?.contains(event.target as Node)) close(false);
-    };
-    document.addEventListener("pointerdown", onPointerDown);
-    return () => document.removeEventListener("pointerdown", onPointerDown);
-  }, [open, close]);
-
-  // A disabled trigger cannot be re-opened, so a fan left open when the box
-  // becomes disabled would be unclosable. No focus return: nothing to focus.
-  useEffect(() => {
-    if (disabled) close(false);
-  }, [disabled, close]);
-
-  // Focus follows the fan in both directions. Closing returns it to the trigger
-  // rather than dropping it on <body>, which is what strands a keyboard user —
-  // and it must happen before the fan is hidden, or the browser blurs the
-  // element out from under them.
-  useEffect(() => {
-    if (open) {
-      options.current[active]?.focus();
-      return;
-    }
-    if (restoreFocus.current) {
-      restoreFocus.current = false;
-      trigger.current?.focus();
-    }
-    // `active` deliberately excluded: re-running on every arrow key would fight
-    // the roving focus below, which already moves focus itself.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
-
-  const move = (to: number) => {
-    const wrapped = (to + PICKER_OPTIONS.length) % PICKER_OPTIONS.length;
-    setActive(wrapped);
-    options.current[wrapped]?.focus();
-  };
-
-  const onMenuKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    switch (event.key) {
-      case "ArrowRight":
-      case "ArrowDown":
-        event.preventDefault();
-        move(active + 1);
-        break;
-      case "ArrowLeft":
-      case "ArrowUp":
-        event.preventDefault();
-        move(active - 1);
-        break;
-      case "Home":
-        event.preventDefault();
-        move(0);
-        break;
-      case "End":
-        event.preventDefault();
-        move(PICKER_OPTIONS.length - 1);
-        break;
-      case "Escape":
-        event.preventDefault();
-        close(true);
-        break;
-      case "Tab":
-        // Tabbing away is a legitimate exit, but it must not leave an expanded
-        // menu behind claiming to own the focus that just left.
-        close(false);
-        break;
-      default:
-        break;
-    }
-  };
-
-  return (
-    <div className="attach-picker" ref={root}>
-      <button
-        type="button"
-        ref={trigger}
-        className="attach-trigger"
-        aria-label="Attach from server"
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-controls="attach-fan"
-        disabled={disabled}
-        onClick={() => {
-          setActive(0);
-          setOpen((previous) => !previous);
-        }}
-      >
-        <span aria-hidden>+</span>
-      </button>
-      <div
-        id="attach-fan"
-        className={`attach-fan${open ? " attach-fan-open" : ""}`}
-        role="menu"
-        aria-label="Attach from server"
-        // Only hidden while closed. Marking a subtree aria-hidden while it holds
-        // focus is its own serious bug, which is why the close path moves focus
-        // out first.
-        aria-hidden={!open}
-        onKeyDown={onMenuKeyDown}
-      >
-        {PICKER_OPTIONS.map((option, index) => (
-          <button
-            key={option.kind}
-            type="button"
-            role="menuitem"
-            ref={(node) => {
-              options.current[index] = node;
-            }}
-            className="attach-option"
-            // The hint reaches keyboard and touch users through the app's own
-            // tooltip (shown on :hover AND :focus-visible); `title` alone is
-            // mouse-hover only, so it read as decoration to everyone else.
-            data-tooltip={`${option.label} — ${option.hint}`}
-            aria-label={`${option.label} — ${option.hint}`}
-            // A roving tabindex: the fan is one tab stop, not seven, and while
-            // it is closed it is none.
-            tabIndex={open && index === active ? 0 : -1}
-            onClick={() => {
-              onSelect(option.kind);
-              close(true);
-            }}
-          >
-            {option.icon}
-          </button>
-        ))}
-      </div>
-    </div>
-  );
+  const hoverFocus = useHoverMenuFocus();
+  useNavigationDismiss(() => setOpen(false));
+  useEffect(() => { if (disabled) setOpen(false); }, [disabled]);
+  return <Menu.Root {...hoverFocus.rootProps} open={open} onOpenChange={(next, details) => { hoverFocus.onOpenChange(next, details); setOpen(next); }} modal={false}>
+    <Menu.Trigger {...hoverFocus.triggerProps} openOnHover delay={160} closeDelay={240} ref={triggerRef} className="attach-trigger canvas-attach-trigger" aria-label="Attach from server" disabled={disabled}><LuPlus aria-hidden="true" /></Menu.Trigger>
+    <Menu.Portal><Menu.Positioner side="bottom" align="start" sideOffset={10} collisionPadding={12} className="canvas-composer-positioner">
+      <Menu.Popup {...hoverFocus.popupProps} className="canvas-attachment-menu" aria-label="Attach from server">
+        <div className="canvas-menu-caption">Add research material</div>
+        {PICKER_OPTIONS.map((option) => <Menu.Item key={option.kind} className="canvas-attachment-option" onClick={() => onSelect(option.kind)}><span className="canvas-attachment-icon">{option.icon}</span><span><strong>{option.label}</strong><small>{option.hint}</small></span></Menu.Item>)}
+      </Menu.Popup>
+    </Menu.Positioner></Menu.Portal>
+  </Menu.Root>;
 }
 
 /**
@@ -381,7 +172,7 @@ function AttachmentPicker({
  * vanish with it. Per tab, cleared on successful launch; a restored
  * attachment is still revalidated at submit like any other.
  */
-const DRAFT_KEY = "brainstorm-composer-draft";
+const DRAFT_KEY = hostStorageKey("brainstorm-composer-draft");
 
 interface ComposerDraft {
   readonly topic: string;
@@ -433,6 +224,7 @@ function guessAttachmentKind(path: string): AttachmentSelectionKind {
 }
 
 export function SubmissionBox({
+  active = true,
   onSubmit,
   onOpenSettings,
   readiness,
@@ -440,6 +232,7 @@ export function SubmissionBox({
   onDiagnoseReadiness,
   prefill,
 }: {
+  readonly active?: boolean;
   readonly onSubmit: (
     topic: string,
     attachmentPaths: readonly string[],
@@ -469,23 +262,9 @@ export function SubmissionBox({
   const [attachments, setAttachments] = useState<
     readonly ValidatedAttachment[]
   >(() => readDraft()?.attachments ?? []);
-  // The attachments-so-far tray: a paperclip in the footer whose hover (or
-  // focus) opens the list UPWARD. Chips used to render inline and wrap onto
-  // the footer's row once they filled a line.
+  // Attachment review shares managed positioning and keyboard behavior with
+  // the other composer popovers; opening it never changes the draft.
   const [trayOpen, setTrayOpen] = useState(false);
-  const trayTimer = useRef<number | undefined>(undefined);
-  const showTray = () => {
-    if (trayTimer.current !== undefined) {
-      window.clearTimeout(trayTimer.current);
-      trayTimer.current = undefined;
-    }
-    setTrayOpen(true);
-  };
-  // A short grace on leave, so crossing the gap between the clip and the
-  // list never snaps it shut mid-read.
-  const hideTray = () => {
-    trayTimer.current = window.setTimeout(() => setTrayOpen(false), 200);
-  };
   // Every keystroke and attachment change lands in the tab's draft, so
   // opening a run and coming back does not eat the composition. A successful
   // launch clears both states, which clears the draft with them.
@@ -505,33 +284,20 @@ export function SubmissionBox({
   const [settings, setSettings] = useState<ServerSettings | null>(
     null,
   );
-  const [modelMenuOpen, setModelMenuOpen] = useState(false);
-  const [modelOptions, setModelOptions] =
-    useState<ModelOptionsResponse | null>(null);
-  const [modelDraft, setModelDraft] = useState<Record<string, string>>({});
-  const [modelError, setModelError] = useState<string | null>(null);
-  const [savingModels, setSavingModels] = useState(false);
-  const [capabilityMenuOpen, setCapabilityMenuOpen] = useState(false);
-  const [capabilityOptions, setCapabilityOptions] =
-    useState<CapabilityOptionsResponse | null>(null);
-  const [capabilityError, setCapabilityError] = useState<string | null>(null);
-  /**
-   * Per-run capability switches: capability id -> enabled. Only ids the user
-   * touched are present; they ride the next submission (and stay selected in
-   * the composer for follow-up runs until changed).
-   */
-  const [capabilityDraft, setCapabilityDraft] = useState<
-    Record<string, boolean>
-  >({});
+  const capabilityDraft = useCapabilityDraft();
   const [registryConnected, setRegistryConnected] = useState(false);
   const [registryTarget, setRegistryTarget] = useState("Brain Registry");
   const [registryPage, setRegistryPage] = useState<string | undefined>();
   /** "brainstorm v0.11.0 (latest) · registry v0.1.0 · app v0.1.0" */
   const [registryVersionLine, setRegistryVersionLine] = useState<string | undefined>();
   const ref = useRef<HTMLTextAreaElement>(null);
+  const attachmentTriggerRef = useRef<HTMLButtonElement>(null);
   const pastedRef = useRef(false);
-  const capabilityPickerRef = useRef<HTMLDivElement | null>(null);
-  const modelPickerRef = useRef<HTMLDivElement | null>(null);
+  useNavigationDismiss(() => { setTrayOpen(false); });
+  useEffect(() => {
+    if (!active) { setTrayOpen(false); }
+  }, [active]);
+  useEffect(() => { if (attachments.length === 0) setTrayOpen(false); }, [attachments.length]);
 
   // A redo request from a job card: the topic lands in the box, the job's
   // original attachments are revalidated and re-attached — folders probed
@@ -543,8 +309,7 @@ export function SubmissionBox({
     setValue(prefill.topic);
     setSelectionError(null);
     setAttachments([]);
-    ref.current?.focus();
-    ref.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    if (active) { ref.current?.focus(); ref.current?.scrollIntoView({ behavior: "smooth", block: "center" }); }
     if (prefill.attachmentPaths.length === 0) return;
     let live = true;
     void (async () => {
@@ -598,28 +363,8 @@ export function SubmissionBox({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prefill?.nonce]);
 
-  // Light-dismiss for the composer popovers, same contract as the attachment
-  // fan: a pointer press anywhere outside a popover (and its trigger) closes
-  // it, so stale menus never linger over the page.
-  useEffect(() => {
-    if (!capabilityMenuOpen && !modelMenuOpen) return;
-    const onPointerDown = (event: PointerEvent) => {
-      const target = event.target as Node;
-      if (
-        capabilityMenuOpen &&
-        !capabilityPickerRef.current?.contains(target)
-      ) {
-        setCapabilityMenuOpen(false);
-      }
-      if (modelMenuOpen && !modelPickerRef.current?.contains(target)) {
-        setModelMenuOpen(false);
-      }
-    };
-    document.addEventListener("pointerdown", onPointerDown);
-    return () => document.removeEventListener("pointerdown", onPointerDown);
-  }, [capabilityMenuOpen, modelMenuOpen]);
-
   useLayoutEffect(() => {
+    if (!active) return;
     const element = ref.current;
     if (!element) return;
     // The CSS max-height is authoritative (it also covers mobile styles);
@@ -658,7 +403,36 @@ export function SubmissionBox({
       // the browser still scrolls the caret into view when typing past the cap.
       element.scrollTop = 0;
     }
-  }, [value]);
+  }, [value, active]);
+
+  useLayoutEffect(() => {
+    if (!active) return;
+    const element = ref.current;
+    if (!element) return;
+    let width = element.clientWidth;
+    let heightLimit = Number.parseFloat(window.getComputedStyle(element).maxHeight) || MAX_HEIGHT_FALLBACK;
+    const resize = () => {
+      const nextWidth = element.clientWidth;
+      const nextLimit = Number.parseFloat(window.getComputedStyle(element).maxHeight) || MAX_HEIGHT_FALLBACK;
+      if (nextWidth === 0 || (nextWidth === width && nextLimit === heightLimit)) return;
+      width = nextWidth;
+      heightLimit = nextLimit;
+      // Viewport changes can wrap an unchanged draft onto additional lines.
+      // Measure only when available dimensions change; observing our own height
+      // update must not loop or move the user's reading position or focus.
+      const scrollTop = element.scrollTop;
+      element.style.height = "auto";
+      element.style.height = `${Math.min(element.scrollHeight, heightLimit)}px`;
+      element.scrollTop = scrollTop;
+    };
+    const observer = new ResizeObserver(resize);
+    observer.observe(element);
+    window.addEventListener("resize", resize);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", resize);
+    };
+  }, [active]);
 
   useEffect(() => {
     let live = true;
@@ -685,6 +459,7 @@ export function SubmissionBox({
   }, []);
 
   useEffect(() => {
+    if (!active) return;
     let live = true;
     const refresh = async (): Promise<void> => {
       try {
@@ -731,7 +506,7 @@ export function SubmissionBox({
       live = false;
       window.clearInterval(timer);
     };
-  }, [settings?.contentRegistry.url]);
+  }, [settings?.contentRegistry.url, active]);
 
   const addValidated = (
     items: readonly ValidatedAttachment[],
@@ -871,8 +646,10 @@ export function SubmissionBox({
       }
       await launch(topic, attachmentPaths, capabilityOverrides);
       return;
-    } catch {
-      // The parent owns the server error; retain selections for retry.
+    } catch (error) {
+      // Path validation happens here, before the parent receives a submit.
+      // Keep the draft and show the failure so the user can retry deliberately.
+      setSelectionError(errorMessage(error));
     } finally {
       setSubmitting(false);
       setSubmitPhase("");
@@ -881,7 +658,7 @@ export function SubmissionBox({
 
   // Auto-fire the held submission once every required check is green.
   useEffect(() => {
-    if (heldSubmission === null || submitting) return;
+    if (!active || heldSubmission === null || submitting) return;
     if (readiness === null || !readiness.ready) return;
     void launch(
       heldSubmission.topic,
@@ -889,7 +666,7 @@ export function SubmissionBox({
       heldSubmission.capabilityOverrides,
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [readiness?.ready, heldSubmission, submitting]);
+  }, [readiness?.ready, heldSubmission, submitting, active]);
 
   const onKeyDown = (
     event: KeyboardEvent<HTMLTextAreaElement>,
@@ -904,65 +681,9 @@ export function SubmissionBox({
     }
   };
 
-  const toggleModelMenu = async (): Promise<void> => {
-    if (modelMenuOpen) {
-      setModelMenuOpen(false);
-      return;
-    }
-    // The two composer popovers share the same corner; only one at a time.
-    setCapabilityMenuOpen(false);
-    setModelMenuOpen(true);
-    setModelError(null);
-    try {
-      const options = await getModelOptions();
-      setModelOptions(options);
-      setModelDraft({ ...options.modelsByRoute });
-    } catch (error) {
-      setModelError(errorMessage(error));
-    }
-  };
-
-  const toggleCapabilityMenu = async (): Promise<void> => {
-    if (capabilityMenuOpen) {
-      setCapabilityMenuOpen(false);
-      return;
-    }
-    setModelMenuOpen(false);
-    setCapabilityMenuOpen(true);
-    setCapabilityError(null);
-    try {
-      setCapabilityOptions(await getCapabilityOptions());
-    } catch (error) {
-      setCapabilityError(errorMessage(error));
-    }
-  };
-
-  const disabledCapabilityCount = Object.values(capabilityDraft).filter(
-    (enabled) => enabled === false,
-  ).length;
-
-  const saveModels = async (): Promise<void> => {
-    if (savingModels) return;
-    setSavingModels(true);
-    setModelError(null);
-    try {
-      const updated = await putModelsByRoute({ modelsByRoute: modelDraft });
-      setSettings(updated);
-      window.dispatchEvent(
-        new CustomEvent("brain-settings-updated", { detail: updated }),
-      );
-      setModelMenuOpen(false);
-    } catch (error) {
-      setModelError(errorMessage(error));
-    } finally {
-      setSavingModels(false);
-    }
-  };
-  const display = modelDisplay(settings);
-
   return (
-    <div className="chatbox-stack">
-      <div className="chatbox composer">
+    <div className="chatbox-stack canvas-composer-stack">
+      <div className={`chatbox composer canvas-composer${value.length > 90 || value.includes("\n") ? " canvas-composer-expanded" : ""}`}>
         <textarea
           ref={ref}
           rows={1}
@@ -1003,7 +724,7 @@ export function SubmissionBox({
                   setUrlDraft("");
                 }
               }}
-              autoFocus
+              autoFocus={active}
             />
             <button
               type="button"
@@ -1048,44 +769,33 @@ export function SubmissionBox({
           <div className="composer-footer">
             <div className="composer-footer-left">
               <AttachmentPicker
+                triggerRef={attachmentTriggerRef}
                 disabled={
-                  submitting ||
+                  !active || submitting || heldSubmission !== null ||
                   attachments.length >=
                     ATTACHMENT_LIMITS.maxReferences
                 }
                 onSelect={openPicker}
               />
-              {/* The attachments so far: a paperclip and a count, whose
-                  hover opens the list UPWARD — scrollable, each entry
-                  removable. Nothing here is green; a problem shows red. */}
+              {/* Hover previews the list; touch and keyboard retain explicit access. */}
               {attachments.length > 0 && (
-                <span
-                  className="attach-tray"
-                  onMouseEnter={showTray}
-                  onMouseLeave={hideTray}
-                  onFocus={showTray}
-                  onBlur={hideTray}
-                  onKeyDown={(event) => {
-                    if (event.key === "Escape") setTrayOpen(false);
-                  }}
-                >
-                  <button
+                <Popover.Root open={trayOpen} onOpenChange={setTrayOpen}>
+                  <Popover.Trigger
+                    openOnHover delay={160} closeDelay={240}
                     type="button"
                     className={`ghost-btn attach-tray-btn${
                       attachments.some((item) => !item.valid) ? " has-invalid" : ""
                     }`}
                     aria-label={`${attachments.length} attachment${
                       attachments.length === 1 ? "" : "s"
-                    } — hover to review or remove`}
+                    } — review or remove`}
                     aria-expanded={trayOpen}
-                    onClick={() => (trayOpen ? setTrayOpen(false) : showTray())}
                   >
                     <PaperclipIcon />
                     <span className="attach-tray-count">{attachments.length}</span>
-                  </button>
-                  {trayOpen && (
-                    <div
-                      className="attach-tray-pop"
+                  </Popover.Trigger>
+                  <Popover.Portal><Popover.Positioner side="bottom" align="start" sideOffset={10} collisionPadding={12} className="canvas-composer-positioner"><Popover.Popup
+                      className="canvas-attachments-popover"
                       role="dialog"
                       aria-label="attachments for the next run"
                     >
@@ -1107,7 +817,7 @@ export function SubmissionBox({
                             type="button"
                             className="attach-remove"
                             aria-label={`remove attachment ${attachment.path}`}
-                            disabled={submitting}
+                            disabled={submitting || heldSubmission !== null}
                             onClick={() =>
                               setAttachments(
                                 attachments.filter(
@@ -1116,283 +826,27 @@ export function SubmissionBox({
                               )
                             }
                           >
-                            ×
+                            <LuX aria-hidden="true" />
                           </button>
                         </div>
                       ))}
-                    </div>
-                  )}
-                </span>
+                    </Popover.Popup></Popover.Positioner></Popover.Portal>
+                </Popover.Root>
               )}
             </div>
             <div className="composer-footer-right">
-              <div
-                className="model-picker capability-picker"
-                ref={capabilityPickerRef}
-              >
-                <button
-                  type="button"
-                  className="composer-model"
-                  title="Enable or disable agent capabilities for the next run"
-                  aria-haspopup="dialog"
-                  aria-expanded={capabilityMenuOpen}
-                  aria-label={
-                    disabledCapabilityCount > 0
-                      ? `Capabilities: ${disabledCapabilityCount} disabled for the next run`
-                      : "Capabilities: all enabled"
-                  }
-                  onClick={() => void toggleCapabilityMenu()}
-                >
-                  <span className="composer-model-name">Capabilities</span>
-                  {disabledCapabilityCount > 0 && (
-                    <span className="composer-model-profile">
-                      {disabledCapabilityCount} off
-                    </span>
-                  )}
-                  <DownOutlined aria-hidden />
-                </button>
-                {capabilityMenuOpen && (
-                  <div
-                    className="model-popover"
-                    role="dialog"
-                    aria-label="Capabilities for the next run"
-                    onKeyDown={(event) => {
-                      if (event.key === "Escape") setCapabilityMenuOpen(false);
-                    }}
-                  >
-                    <div className="model-popover-header">
-                      <span className="model-popover-title">
-                        Capabilities for the next run
-                      </span>
-                    </div>
-                    {capabilityError && (
-                      <p className="error-text">{capabilityError}</p>
-                    )}
-                    {!capabilityOptions && !capabilityError && (
-                      <p className="model-popover-hint">Loading…</p>
-                    )}
-                    {capabilityOptions?.capabilities.map((capability) => {
-                      const enabled =
-                        capability.locked ||
-                        (capabilityDraft[capability.id] ?? true);
-                      return (
-                        <label
-                          key={capability.id}
-                          className="model-popover-row"
-                          title={capability.description}
-                        >
-                          <span className="model-popover-type">
-                            {titleCase(capability.id.replace(/-/g, " "))}
-                            {capability.locked && " (always on)"}
-                          </span>
-                          <input
-                            type="checkbox"
-                            checked={enabled}
-                            disabled={capability.locked || submitting}
-                            onChange={(event) =>
-                              setCapabilityDraft((current) => ({
-                                ...current,
-                                [capability.id]: event.target.checked,
-                              }))
-                            }
-                          />
-                        </label>
-                      );
-                    })}
-                    <p className="model-popover-hint">
-                      Disabled capabilities are switched off for the next
-                      submission only — the agents are told you turned them
-                      off, and any provider-native equivalent is off too.
-                    </p>
-                    <div className="model-popover-footer">
-                      <button
-                        type="button"
-                        className="btn btn-small"
-                        disabled={disabledCapabilityCount === 0}
-                        onClick={() => setCapabilityDraft({})}
-                      >
-                        Enable all
-                      </button>
-                      <span className="model-popover-actions">
-                        <button
-                          type="button"
-                          className="btn btn-small"
-                          onClick={() => setCapabilityMenuOpen(false)}
-                        >
-                          Done
-                        </button>
-                      </span>
-                    </div>
-                  </div>
-                )}
+              <div className="canvas-composer-health">
+                {active && <>
+                  <RegistryIndicator connected={registryConnected} page={registryPage} target={registryTarget} versionLine={registryVersionLine} />
+                  <EnvironmentStatus
+                    showToolChecks={false}
+                    readiness={readiness}
+                    onRecheck={onRecheckReadiness}
+                    onDiagnose={onDiagnoseReadiness}
+                    onOpenSettings={onOpenSettings}
+                  />
+                </>}
               </div>
-              <div className="model-picker" ref={modelPickerRef}>
-                <button
-                  type="button"
-                  className="composer-model"
-                  title="Choose the model per task type"
-                  aria-haspopup="dialog"
-                  aria-expanded={modelMenuOpen}
-                  aria-label={`Models by task type: ${display.model}${display.profile ? `, ${display.profile} effort` : ""}`}
-                  onClick={() => void toggleModelMenu()}
-                >
-                  <span className="composer-model-name">
-                    {display.model}
-                  </span>
-                  {display.profile && (
-                    <span className="composer-model-profile">
-                      {display.profile}
-                    </span>
-                  )}
-                  <DownOutlined aria-hidden />
-                </button>
-                {modelMenuOpen && (
-                  <div
-                    className="model-popover"
-                    role="dialog"
-                    aria-label="Models by task type"
-                    onKeyDown={(event) => {
-                      if (event.key === "Escape") setModelMenuOpen(false);
-                    }}
-                  >
-                    <div className="model-popover-header">
-                      <span className="model-popover-title">
-                        Models by task type
-                      </span>
-                      <span className="model-popover-provider">
-                        {providerLabel(
-                          modelOptions?.provider ?? settings?.llm.provider,
-                        )}
-                      </span>
-                    </div>
-                    {modelError && (
-                      <p className="error-text">{modelError}</p>
-                    )}
-                    {!modelOptions && !modelError && (
-                      <p className="model-popover-hint">Loading…</p>
-                    )}
-                    {modelOptions?.provider === "offline" && (
-                      <p className="model-popover-hint">
-                        The offline provider is deterministic; model
-                        selection does not apply.
-                      </p>
-                    )}
-                    {modelOptions &&
-                      modelOptions.provider !== "offline" &&
-                      modelOptions.taskTypes.map((taskType) => {
-                        const selected = modelDraft[taskType.id] ?? "";
-                        const known =
-                          selected.length === 0 ||
-                          modelOptions.models.some(
-                            (model) => model.id === selected,
-                          );
-                        return (
-                          <label
-                            key={taskType.id}
-                            className="model-popover-row"
-                            title={taskType.description}
-                          >
-                            <span className="model-popover-type">
-                              {titleCase(taskType.id)}
-                            </span>
-                            <select
-                              value={selected}
-                              disabled={savingModels}
-                              onChange={(event) =>
-                                setModelDraft((current) => ({
-                                  ...current,
-                                  [taskType.id]: event.target.value,
-                                }))
-                              }
-                            >
-                              <option value="">
-                                Default
-                                {modelOptions.defaultModel
-                                  ? ` (${formatModelName(modelOptions.defaultModel)})`
-                                  : ""}
-                              </option>
-                              {!known && (
-                                <option value={selected}>
-                                  {formatModelName(selected)}
-                                </option>
-                              )}
-                              {modelOptions.models.map((model) => (
-                                <option key={model.id} value={model.id}>
-                                  {model.label}
-                                </option>
-                              ))}
-                            </select>
-                          </label>
-                        );
-                      })}
-                    <div className="model-popover-footer">
-                      <button
-                        type="button"
-                        className="btn btn-small"
-                        onClick={() => {
-                          setModelMenuOpen(false);
-                          onOpenSettings();
-                        }}
-                      >
-                        Provider settings…
-                      </button>
-                      <span className="model-popover-actions">
-                        <button
-                          type="button"
-                          className="btn btn-small"
-                          disabled={savingModels}
-                          onClick={() => setModelMenuOpen(false)}
-                        >
-                          Cancel
-                        </button>
-                        <button
-                          type="button"
-                          className="btn btn-small"
-                          disabled={
-                            savingModels ||
-                            !modelOptions ||
-                            modelOptions.provider === "offline"
-                          }
-                          onClick={() => void saveModels()}
-                        >
-                          {savingModels ? "Saving…" : "Save"}
-                        </button>
-                      </span>
-                    </div>
-                  </div>
-                )}
-              </div>
-              <a
-                className={`registry-indicator ${
-                  registryConnected ? "connected" : "disconnected"
-                }`}
-                href={registryPage}
-                target="_blank"
-                rel="noreferrer"
-                data-tooltip={
-                  registryConnected
-                    ? `connected to ${registryTarget}` +
-                      (registryVersionLine ? ` — ${registryVersionLine}` : "")
-                    : `not connected to ${registryTarget} — the registry could not be verified just now (no stale connection is shown)`
-                }
-                aria-label={
-                  registryConnected
-                    ? `Connected to Brain Registry at ${registryTarget}` +
-                      (registryVersionLine ? ` (${registryVersionLine})` : "")
-                    : `Not connected to Brain Registry at ${registryTarget}: the registry could not be verified just now`
-                }
-                onClick={(event) => {
-                  if (!registryPage) event.preventDefault();
-                }}
-              >
-                <LuBrain aria-hidden />
-              </a>
-              <EnvironmentStatus
-                readiness={readiness}
-                onRecheck={onRecheckReadiness}
-                onDiagnose={onDiagnoseReadiness}
-                onOpenSettings={onOpenSettings}
-              />
               <button
                 type="button"
                 className="send-btn"
@@ -1405,7 +859,7 @@ export function SubmissionBox({
                 }
                 onClick={() => void send()}
               >
-                <SendIcon size={18} />
+                <SendIcon size={16} />
               </button>
             </div>
           </div>
@@ -1469,10 +923,11 @@ export function SubmissionBox({
         </div>
       )}
 
-      {pickerKind && (
-        <Suspense fallback={null}>
+      {active && pickerKind && (
+        <Suspense fallback={<p className="canvas-composer-loading" role="status">Opening server files…</p>}>
           <ServerFileExplorer
             key={pickerKind}
+            returnFocusRef={attachmentTriggerRef}
             kind={pickerKind}
             onClose={() => setPickerKind(null)}
             onAttach={(items) => {

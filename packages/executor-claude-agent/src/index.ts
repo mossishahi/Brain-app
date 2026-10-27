@@ -1,5 +1,6 @@
 export {
   ClaudeAgentExecutor,
+  normalizeClaudeSetupToken,
   salvageJsonText,
   SessionStalledError,
   validateClaudeSetupToken,
@@ -11,4 +12,3 @@ export {
   type ClaudeAgentValidationResult,
   type ValidateClaudeSetupTokenInput,
 } from "./executor.js";
-

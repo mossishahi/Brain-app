@@ -2,17 +2,22 @@
  * The environment status icons next to the Brain Registry indicator: model
  * connection, internet, code workspace, and — only when the runner is SLURM —
  * the scheduler. Icons are hidden entirely when their check is not required
- * ("skipped"); clicking one opens a popover with the outcome, the technical
+ * ("skipped"); hovering or clicking opens a popover with the outcome, the technical
  * detail, the (LLM-generated) fix advice, and re-run / diagnose actions.
  */
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useState } from "react";
 import type { ReactNode } from "react";
+import { Popover } from "@base-ui/react/popover";
+import { useNavigationDismiss } from "../shell/useNavigationDismiss";
 import type {
   ReadinessCheck,
   ReadinessCheckId,
   ReadinessReport,
 } from "@brainstorm-agentic/protocol";
 import { GlobeIcon, PlugIcon, QueueIcon, SparkIcon, TerminalIcon } from "./Icons";
+import { ToolsAndProviders } from "./settings/ToolsAndProviders";
+import { GpuSetupControl } from "../features/gpu/GpuSetup";
+import "./secondary-surfaces.css";
 
 const ICONS: Partial<Record<ReadinessCheckId, ReactNode>> = {
   llm: <SparkIcon size={15} />,
@@ -62,66 +67,53 @@ export function EnvironmentStatus({
   onRecheck,
   onDiagnose,
   onOpenSettings,
+  showToolChecks = true,
 }: {
   readonly readiness: ReadinessReport | null;
   readonly onRecheck: (checks?: readonly ReadinessCheckId[]) => void;
   readonly onDiagnose: (check: ReadinessCheckId) => void;
   readonly onOpenSettings: () => void;
+  readonly showToolChecks?: boolean;
 }) {
   const [openCheck, setOpenCheck] = useState<ReadinessCheckId | null>(null);
-  const rootRef = useRef<HTMLDivElement>(null);
+  useNavigationDismiss(() => setOpenCheck(null));
 
-  useEffect(() => {
-    if (openCheck === null) return;
-    const onPointerDown = (event: PointerEvent): void => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpenCheck(null);
-    };
-    const onKey = (event: globalThis.KeyboardEvent): void => {
-      if (event.key === "Escape") setOpenCheck(null);
-    };
-    window.addEventListener("pointerdown", onPointerDown);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("pointerdown", onPointerDown);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [openCheck]);
-
-  if (!readiness) return null;
-  const visible = readiness.checks.filter(
-    (check) => check.state !== "skipped" && ICONS[check.id] !== undefined,
+  const visible = (readiness?.checks ?? []).filter(
+    (check) => check.state !== "skipped" && ICONS[check.id] !== undefined
+      && (showToolChecks || !["capabilities", "code", "internet"].includes(check.id)),
   );
   const ordered = STRIP_ORDER.flatMap((id) => {
     const check = visible.find((candidate) => candidate.id === id);
     return check ? [check] : [];
   });
-  if (ordered.length === 0) return null;
-  const open = openCheck
-    ? (ordered.find((check) => check.id === openCheck) ?? null)
-    : null;
-
   return (
-    <div className="env-status" ref={rootRef}>
-      {ordered.map((check) => (
-        <button
-          key={check.id}
+    <div className="env-status">
+      {!ordered.some(check => check.id === "llm") && <GpuSetupControl compact />}
+      {ordered.map((check) => {
+        const open = check;
+        return <Fragment key={check.id}><Popover.Root
+          open={openCheck === check.id}
+          onOpenChange={(next) => setOpenCheck((current) => next ? check.id : current === check.id ? null : current)}
+        >
+        <Popover.Trigger
+          openOnHover
+          delay={160}
+          closeDelay={240}
           type="button"
           className={`env-icon ${stateClass(check)}${openCheck === check.id ? " env-icon-open" : ""}`}
           aria-label={`${check.label}: ${stateWord(check)}${check.message ? ` — ${check.message}` : ""}`}
           data-tooltip={`${check.label} · ${stateWord(check)}${check.message ? ` — ${check.message}` : ""}`}
-          onClick={() =>
-            setOpenCheck((current) => (current === check.id ? null : check.id))
-          }
         >
           {ICONS[check.id]}
-        </button>
-      ))}
-      {open && (
-        <div className="env-popover" role="dialog" aria-label={`${open.label} check`}>
+        </Popover.Trigger>
+        <Popover.Portal>
+        <Popover.Positioner side="top" align="end" sideOffset={10} collisionPadding={12} className="canvas-env-positioner">
+        <Popover.Popup className="env-popover canvas-env-popover" aria-label={`${open.label} check`}>
           <div className="env-popover-head">
             <span className={`env-state-dot ${stateClass(open)}`} aria-hidden />
             <span className="env-popover-title">{open.label}</span>
             <span className="env-popover-state">{stateWord(open)}</span>
+            <Popover.Close className="canvas-env-close" aria-label="Close environment check">×</Popover.Close>
           </div>
           {open.message && <p className="env-popover-message">{open.message}</p>}
           {open.detail && (
@@ -169,8 +161,12 @@ export function EnvironmentStatus({
               </button>
             )}
           </div>
-        </div>
-      )}
+        </Popover.Popup>
+        </Popover.Positioner>
+        </Popover.Portal>
+        </Popover.Root>{check.id === "llm" && <GpuSetupControl compact />}</Fragment>;
+      })}
+      {showToolChecks && <ToolsAndProviders compact />}
     </div>
   );
 }

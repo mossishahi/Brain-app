@@ -12,7 +12,8 @@ import {
   type Server as HttpServer,
   type ServerResponse,
 } from "node:http";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
+import { randomUUID } from "node:crypto";
 import { delimiter, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -24,6 +25,7 @@ import {
   type HealthResponse,
   type ModelOption,
   type ModelOptionsResponse,
+  type AvailabilityServerEvent,
   type ReadinessCheckId,
   type ServerEvent,
   type StageActivityPage,
@@ -31,8 +33,16 @@ import {
   type SubmitJobRequest,
 } from "@brainstorm-agentic/protocol";
 import { activityCsv } from "./activity-csv.js";
+import { allowsSourceUpdates, authorizedDesktopRequest, validateDesktopApiToken } from "./desktop-auth.js";
 
 import { createReadinessAdvisor } from "./advisor.js";
+import { GpuSetupService, GpuSetupError, type GpuSetupOptions } from "./gpu-setup.js";
+import type { GpuDraftUpdate, GpuProbeApproval } from "@brainstorm-agentic/protocol";
+import {
+  AvailabilityService,
+  affectedTools,
+  type ToolProbe,
+} from "./availability.js";
 import { JobConflictError, JobManager } from "./job-manager.js";
 import { installId, TelemetrySpool } from "@brainstorm-agentic/telemetry";
 import { TelemetrySender } from "./telemetry-sender.js";
@@ -41,9 +51,16 @@ import type { ContentRegistryRuntimeStatus } from "./model.js";
 import {
   ReadinessService,
   defaultReadinessProbes,
+  encoderReadiness,
   type ReadinessAdvisor,
   type ReadinessProbes,
 } from "./readiness.js";
+import {
+  WorkflowParamsCatalog,
+  panelCompositionOf,
+  panelCompositionView,
+} from "./panel-composition.js";
+import type { ServerGateAnswer } from "./panel-evidence.js";
 import {
   promptFilename,
   promptIdentity,
@@ -52,6 +69,7 @@ import {
 } from "./prompt-record.js";
 import { aggregateToolUsage } from "./tool-usage.js";
 import { SearxngLauncher } from "./searxng-launcher.js";
+import { searxngAdvertiseHost, searxngPort } from "./searxng-endpoint.js";
 import {
   readSearchLogText,
   readSearchTable,
@@ -82,6 +100,7 @@ import {
   type CursorAgentConnectionValidator,
 } from "./settings.js";
 import { listCursorModels } from "@brainstorm-agentic/executor-cursor-agent";
+import type { ProviderFetch } from "@brainstorm-agentic/host-tools";
 
 /**
  * The announced app version, read from the app-root package.json at startup.
@@ -145,6 +164,12 @@ const INTERRUPTED_SCAN_MS = 30_000;
  * a healthy one costs a single in-memory status read.
  */
 const SEARXNG_SUPERVISION_MS = 60_000;
+/**
+ * How long POST /api/availability/probe waits for the asked probes before
+ * answering with what it has (the slow ones finish in the background and the
+ * table shows them as probing) — the probe button must get its answer.
+ */
+const AVAILABILITY_PROBE_WAIT_MS = 20_000;
 /**
  * How long a graceful post-update shutdown may take before the process is
  * ended hard. The close path's own drains are bounded well below this; the
@@ -224,6 +249,8 @@ async function probeContentRegistry(
 
 export interface StartBrainServerOptions {
   readonly workspace: string;
+  /** Required bearer token for a desktop-managed backend; omitted for legacy deployments. */
+  readonly apiToken?: string;
   readonly host?: string;
   readonly port?: number;
   /** Reachable Brain Registry URL; `brain launch` supplies local or remote. */
@@ -269,8 +296,14 @@ export interface StartBrainServerOptions {
   readonly exitForUpdate?: () => void;
   /** Per-check probe overrides (test seam / special deployments). */
   readonly readinessProbes?: Partial<ReadinessProbes>;
+  /** Test seam: the fetch every tool-availability probe goes through. */
+  readonly availabilityFetch?: ProviderFetch;
+  /** Per-tool availability probe overrides (test seam / special deployments). */
+  readonly availabilityProbes?: Readonly<Record<string, ToolProbe>>;
   /** LLM fix-advice provider; null disables it (built-in hints only). */
   readonly readinessAdvisor?: ReadinessAdvisor | null;
+  /** GPU discovery/planner/probe seams; a probe always requires HTTP approval. */
+  readonly gpuSetup?: Pick<GpuSetupOptions, "discover" | "planner" | "runProbe" | "cancelOwnedJob" | "runScheduler">;
   /** Ceiling for the SLURM probe job (submission + queue wait). */
   readonly slurmProbeTimeoutMs?: number;
   /** Unattended panel gates approve themselves after this. Default 30s. */
@@ -293,6 +326,8 @@ export interface RunningBrainServer {
   readonly manager: JobManager;
   readonly contentRegistry: ContentRegistryRuntimeStatus;
   readonly readiness: ReadinessService;
+  readonly availability: AvailabilityService;
+  readonly gpuSetup: GpuSetupService;
   readonly httpServer: HttpServer;
   close(): Promise<void>;
 }
@@ -558,6 +593,17 @@ export async function startBrainServer(
   options: StartBrainServerOptions,
 ): Promise<RunningBrainServer> {
   const host = options.host ?? "127.0.0.1";
+  if (options.apiToken !== undefined) validateDesktopApiToken(options.apiToken);
+  const instanceId = randomUUID();
+  const searxngHost = searxngAdvertiseHost(host, options.env ?? process.env);
+  const searxngListenPort = searxngPort(searxngHost, options.env ?? process.env);
+  // Desktop and cluster backends may share a home directory. Their local
+  // search service/configuration must not overwrite one another's record.
+  // A fixed listener keeps its identity over restarts; ephemeral listeners
+  // receive a unique identity because they can coexist on the same host.
+  const searxngInstanceId = options.searxngLauncher?.instanceId ??
+    JSON.stringify([hostname(), searxngHost, options.port || instanceId]);
+  const selfUpdateEnabled = options.selfUpdateCheck === true && allowsSourceUpdates(options.env ?? process.env);
   const contentRegistry = options.contentRegistryStatus ?? {
     running: true,
     url: options.contentRegistryUrl,
@@ -631,7 +677,7 @@ export async function startBrainServer(
    *  share one, and rapid re-triggers within the window reuse the cache. */
   const APP_UPDATE_PROBE_THROTTLE_MS = options.appUpdateThrottleMs ?? 30_000;
   const probeAppUpdate = async (): Promise<AppUpdate | undefined> => {
-    if (options.selfUpdateCheck !== true) return undefined;
+    if (!selfUpdateEnabled) return undefined;
     if (appUpdateInFlight) return appUpdateInFlight;
     if (Date.now() - appUpdateProbedAt < APP_UPDATE_PROBE_THROTTLE_MS) {
       return appUpdate;
@@ -649,7 +695,7 @@ export async function startBrainServer(
       });
     return appUpdateInFlight;
   };
-  if (options.selfUpdateCheck === true) {
+  if (selfUpdateEnabled) {
     void probeAppUpdate();
     // Half-hourly as the floor; opening the dashboard and submitting a run
     // each trigger a fresh (throttled) check so "the beginning of a
@@ -662,6 +708,7 @@ export async function startBrainServer(
   const detailStreams = new Map<string, Set<SseConnection>>();
   const routeCatalog = new RouteCatalog();
   const capabilityCatalog = new CapabilityCatalog();
+  const workflowParamsCatalog = new WorkflowParamsCatalog();
 
   // The account's live Cursor model catalog, TTL-cached: new models appear
   // in the picker without an app release, but a settings render never pays
@@ -738,6 +785,7 @@ export async function startBrainServer(
 
   manager = new JobManager({
     workspace: options.workspace,
+    searxngInstanceId,
     contentRegistryUrl,
     ...(options.workerPath ? { workerPath: options.workerPath } : {}),
     ...(options.env ? { env: options.env } : {}),
@@ -806,13 +854,17 @@ export async function startBrainServer(
     options.searxngLauncher ??
     new SearxngLauncher({
       workspace: options.workspace,
-      advertiseHost: host,
+      instanceId: searxngInstanceId,
+      advertiseHost: searxngHost,
+      ...(searxngListenPort !== undefined ? { port: searxngListenPort } : {}),
       ...(options.env ? { env: options.env } : {}),
     });
   let searxngLastState: string = searxng.status().state;
   const syncSearxng = (): void => {
+    // Search handed to the agents' own tools uses no local instance.
+    const webSettings = manager.settings.get().webSearch;
     const wanted =
-      manager.settings.get().webSearch?.provider === "searxng-local";
+      webSettings?.provider === "searxng-local" && webSettings.mode !== "agent";
     const settle = (state: string): void => {
       // A state transition changes what the capabilities probe would say,
       // so the readiness panel re-verifies once — never on every tick.
@@ -831,6 +883,50 @@ export async function startBrainServer(
   syncSearxng();
   const searxngPoll = setInterval(syncSearxng, SEARXNG_SUPERVISION_MS);
   searxngPoll.unref();
+
+  // Tool availability (spec 2026-10-03): one probe per provider/tool, the
+  // derived per-purpose order, persisted in this instance's service directory
+  // and passed explicitly to workers. Probed at start, on settings saves, on
+  // demand, and on the periodic/cooldown timers; every change goes out on the
+  // dashboard stream.
+  const availability = new AvailabilityService({
+    workspace: options.workspace,
+    settings: manager.settings,
+    ...(options.env ? { env: options.env } : {}),
+    ...(options.availabilityFetch ? { fetchImpl: options.availabilityFetch } : {}),
+    ...(options.availabilityProbes ? { probeOverrides: options.availabilityProbes } : {}),
+    searxngStatus: () => searxng.status(),
+    readinessChecks: () => readiness.report().checks,
+    refreshReadiness: (ids) => {
+      readiness.refresh(ids);
+      broadcastReadiness();
+    },
+  });
+  // The availability table rides the dashboard stream like readiness does.
+  const availabilityEvent = (): AvailabilityServerEvent => ({
+    type: "availability",
+    availability: availability.report(),
+  });
+  const broadcastAvailability = (): void => {
+    for (const stream of jobStreams) {
+      stream.schedule("availability", async () => availabilityEvent());
+    }
+  };
+  availability.subscribe(broadcastAvailability);
+  const gpuSetup = new GpuSetupService({
+    workspace: options.workspace,
+    settings: manager.settings,
+    ...(options.env ? { env: options.env } : {}),
+    ...options.gpuSetup,
+  });
+  // Detached probes (start, settings saves) never surface as unhandled
+  // rejections: the service records failures on the tools; anything that
+  // still escapes is reported once here.
+  const detachedProbe = (work: Promise<unknown>): void => {
+    void work.catch((error: unknown) => {
+      console.error(`[availability] probe failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  };
 
   // Starting points for the file picker, not a boundary: any server-readable
   // path can be attached. Defaults cover home, the launch workspace, and the
@@ -860,9 +956,22 @@ export async function startBrainServer(
 
   const httpServer = createServer(async (req, res) => {
     try {
+      if (options.apiToken !== undefined && !authorizedDesktopRequest(req.headers.authorization, options.apiToken)) {
+        res.setHeader("www-authenticate", "Bearer");
+        res.setHeader("cache-control", "no-store");
+        sendJson(res, 401, { error: "Desktop connection authentication required" });
+        return;
+      }
       const authority = host.includes(":") ? `[${host}]` : host;
       const url = new URL(req.url ?? "/", `http://${authority}`);
       const path = url.pathname;
+      if (req.method === "GET" && path === "/api/desktop/handshake") {
+        sendJson(res, 200, {
+          protocolVersion: 1, version: VERSION, workspace: options.workspace, instanceId,
+          capabilities: ["http-api", "sse", ...(options.apiToken ? ["bearer-auth"] : [])],
+        });
+        return;
+      }
       if (req.method === "GET" && path === "/api/health") {
         const settings = manager.settings.get();
         const { latest, latestNotes } = await registryLatest(
@@ -910,7 +1019,7 @@ export async function startBrainServer(
         const found = await probeAppUpdate();
         sendJson(res, 200, {
           version: VERSION,
-          selfUpdateEnabled: options.selfUpdateCheck === true,
+          selfUpdateEnabled,
           ...(found ? { appUpdate: found } : {}),
         });
         return;
@@ -919,7 +1028,7 @@ export async function startBrainServer(
         // One-click self-update: hand over to a detached updater and exit.
         // Active jobs are their own detached processes over workspace files;
         // they survive the restart and the relaunched server adopts them.
-        if (options.selfUpdateCheck !== true) {
+        if (!selfUpdateEnabled) {
           throw new HttpError(409, "self-update is disabled on this deployment");
         }
         // The cache may lag a release pushed minutes ago, and the user
@@ -1051,7 +1160,11 @@ export async function startBrainServer(
         try {
           const body = await readJson(req);
           const before = manager.settings.get();
+          if (body && typeof body === "object" && "gpu" in body && gpuSetup.report().phase === "probing") {
+            throw new HttpError(409, "Cancel or finish the GPU probe before changing its profile");
+          }
           const settings = await manager.settings.put(body);
+          gpuSetup.settingsChanged();
           broadcast();
           // The app-launched search instance follows the setting: selecting
           // it starts the launch (in the background — the first start may
@@ -1072,10 +1185,16 @@ export async function startBrainServer(
             readiness.refresh();
             broadcastReadiness();
           }
+          // Tool availability re-probes only what this save touched (a pasted
+          // key, a provider or toggle, the model, the encoder) — spec 3 (b).
+          const touched = affectedTools(before, settings, body);
+          if (touched.length > 0) {
+            detachedProbe(availability.probe(touched, { reason: "settings" }));
+          }
           sendJson(res, 200, settings);
         } catch (error) {
           throw new HttpError(
-            400,
+            error instanceof HttpError ? error.status : 400,
             error instanceof Error ? error.message : String(error),
           );
         }
@@ -1083,6 +1202,19 @@ export async function startBrainServer(
       }
       if (req.method === "GET" && path === "/api/readiness") {
         sendJson(res, 200, readiness.report());
+        return;
+      }
+      if (path.startsWith("/api/gpu/")) {
+        try {
+          if (req.method === "GET" && path === "/api/gpu/setup") sendJson(res, 200, gpuSetup.report());
+          else if (req.method === "POST" && path === "/api/gpu/discover") sendJson(res, 202, gpuSetup.discover());
+          else if (req.method === "PUT" && path === "/api/gpu/draft") sendJson(res, 200, gpuSetup.updateDraft(requestObject(await readJson(req)) as unknown as GpuDraftUpdate));
+          else if (req.method === "POST" && path === "/api/gpu/probe") sendJson(res, 202, gpuSetup.approve(requestObject(await readJson(req)) as unknown as GpuProbeApproval));
+          else if (req.method === "POST" && path === "/api/gpu/cancel") sendJson(res, 200, await gpuSetup.cancel());
+          else throw new HttpError(404, "Unknown GPU setup route");
+        } catch (error) {
+          throw new HttpError(error instanceof GpuSetupError || error instanceof HttpError ? error.status : 400, error instanceof Error ? error.message : String(error));
+        }
         return;
       }
       if (req.method === "POST" && path === "/api/readiness/check") {
@@ -1119,6 +1251,34 @@ export async function startBrainServer(
         sendJson(res, 200, readiness.report());
         return;
       }
+      if (req.method === "GET" && path === "/api/availability") {
+        sendJson(res, 200, availability.report());
+        return;
+      }
+      if (req.method === "POST" && path === "/api/availability/probe") {
+        const body = requestObject(await readJson(req));
+        let tools: string[] | undefined;
+        if (body.tools !== undefined) {
+          const known = availability.knownIds();
+          if (
+            !Array.isArray(body.tools) ||
+            !body.tools.every(
+              (id): id is string => typeof id === "string" && known.includes(id),
+            )
+          ) {
+            throw new HttpError(400, "tools must be an array of tool ids");
+          }
+          tools = body.tools;
+        }
+        // Synchronous up to 20 s so the probe button gets its answer; slower
+        // probes keep running and the table shows them as probing.
+        const report =
+          tools === undefined
+            ? await availability.probeAll({ waitMs: AVAILABILITY_PROBE_WAIT_MS })
+            : await availability.probe(tools, { waitMs: AVAILABILITY_PROBE_WAIT_MS });
+        sendJson(res, 200, report);
+        return;
+      }
       if (req.method === "GET" && path === "/api/model-options") {
         const settings = manager.settings.get();
         const catalog = loadModelCatalog(options.workspace);
@@ -1146,6 +1306,42 @@ export async function startBrainServer(
         sendJson(res, 200, response);
         return;
       }
+      // Panel composition (contract K): every spec v2 Section 0 param with the
+      // pinned bundle's default, the stored overrides, and the CORE key flag.
+      if (req.method === "GET" && path === "/api/panel-composition") {
+        const settings = manager.settings.get();
+        const declared = await workflowParamsCatalog.declared(
+          settings.contentRegistry.url,
+          settings.contentRegistry.bundle,
+          settings.contentRegistry.version,
+        );
+        sendJson(
+          res,
+          200,
+          panelCompositionView(
+            settings,
+            declared,
+            manager.settings.getCoreApiKey() !== undefined,
+          ),
+        );
+        return;
+      }
+      // Which text encoders this host can run (informational; a run falls
+      // back to hash-ngram-v1 and records it).
+      if (req.method === "GET" && path === "/api/readiness/encoders") {
+        const settings = manager.settings.get();
+        const selected = panelCompositionOf(settings)?.params.encoder;
+        sendJson(
+          res,
+          200,
+          encoderReadiness({
+            env: options.env ?? process.env,
+            openRouterKeyConfigured: settings.creditRecovery.openRouterKeyConfigured === true,
+            ...(typeof selected === "string" ? { selected } : {}),
+          }),
+        );
+        return;
+      }
       if (req.method === "GET" && path === "/api/capabilities") {
         const settings = manager.settings.get();
         const snapshot = await capabilityCatalog.options(
@@ -1158,7 +1354,7 @@ export async function startBrainServer(
       }
       if (req.method === "PUT" && path === "/api/settings/models-by-route") {
         try {
-          const settings = manager.settings.putModelsByRoute(
+          const settings = await manager.settings.putModelsByRoute(
             await readJson(req),
           );
           broadcast();
@@ -1294,6 +1490,7 @@ export async function startBrainServer(
           type: "readiness",
           readiness: readiness.report(),
         }));
+        connection.schedule("availability", async () => availabilityEvent());
         return;
       }
 
@@ -1512,7 +1709,12 @@ export async function startBrainServer(
           typeof body.gateKey !== "string" ||
           (body.action !== "approve" &&
             body.action !== "shrink" &&
-            body.action !== "revise") ||
+            body.action !== "revise" &&
+            body.action !== "edit") ||
+          (body.embeddingInput !== undefined &&
+            (typeof body.embeddingInput !== "object" ||
+              body.embeddingInput === null ||
+              Array.isArray(body.embeddingInput))) ||
           (body.members !== undefined &&
             (!Array.isArray(body.members) ||
               !body.members.every((member) => typeof member === "string"))) ||
@@ -1536,7 +1738,7 @@ export async function startBrainServer(
         ) {
           throw new HttpError(400, "invalid gate answer");
         }
-        const answer = body as unknown as GateAnswerRequest;
+        const answer = body as unknown as ServerGateAnswer;
         let detail;
         try {
           detail = await manager.answerGate(
@@ -1578,6 +1780,24 @@ export async function startBrainServer(
         return;
       }
 
+      // The paper-based panel composition's gate views (contract K), read from
+      // the run's own artifacts. 404 on runs pinned to bundles without them,
+      // so their gate cards render exactly as before.
+      const evidenceMatch = /^\/api\/jobs\/([^/]+)\/panel-evidence$/.exec(path);
+      if (req.method === "GET" && evidenceMatch) {
+        const view = await manager.panelEvidence(decodeURIComponent(evidenceMatch[1]!));
+        if (!view) throw new HttpError(404, "this run has no panel evidence");
+        sendJson(res, 200, view);
+        return;
+      }
+      const needsMatch = /^\/api\/jobs\/([^/]+)\/needs$/.exec(path);
+      if (req.method === "GET" && needsMatch) {
+        const view = await manager.needsGate(decodeURIComponent(needsMatch[1]!));
+        if (!view) throw new HttpError(404, "this run is not waiting on the needs confirmation");
+        sendJson(res, 200, view);
+        return;
+      }
+
       const usageMatch = /^\/api\/jobs\/([^/]+)\/tool-usage$/.exec(path);
       if (req.method === "GET" && usageMatch) {
         const jobId = decodeURIComponent(usageMatch[1]!);
@@ -1586,7 +1806,7 @@ export async function startBrainServer(
         return;
       }
 
-      // The unified web log: one row per web_search/web_fetch call across the
+      // The unified web log: one row per web tool call across the
       // whole pipeline, written verbatim by the worker's one manager. Three
       // renditions of the same file — the JSON table, its CSV, and the raw
       // verbatim records — all before the job-detail matcher below, which
@@ -1901,7 +2121,8 @@ export async function startBrainServer(
     void probeContentRegistry(contentRegistryUrl, contentRegistry);
   }, REGISTRY_HEARTBEAT_MS);
   await manager.resumeDueCreditBlocks();
-  await probeContentRegistry(contentRegistryUrl, contentRegistry);
+  if (options.apiToken) void probeContentRegistry(contentRegistryUrl, contentRegistry);
+  else await probeContentRegistry(contentRegistryUrl, contentRegistry);
   // Startup recovery + verification run in the background: interrupted jobs
   // found on the shared workspace resume from their checkpoints, and every
   // required environment check re-verifies for the status icons.
@@ -1911,6 +2132,12 @@ export async function startBrainServer(
   // one transient failure at launch cannot hold the submission gate red
   // until a human finds the recheck button.
   readiness.startAutoRecheck();
+  // Every tool is probed once at start (non-blocking); unreachable or blocked
+  // tools are re-probed after their cooldown and everything on the slow
+  // periodic timer (settings availability.periodicMinutes).
+  detachedProbe(availability.probeAll({ reason: "start" }));
+  availability.startTimers();
+  detachedProbe(gpuSetup.start());
 
   return {
     port,
@@ -1920,6 +2147,8 @@ export async function startBrainServer(
     manager,
     contentRegistry,
     readiness,
+    availability,
+    gpuSetup,
     httpServer,
     close: async () => {
       clearInterval(poll);
@@ -1928,6 +2157,10 @@ export async function startBrainServer(
       clearInterval(telemetryPoll);
       clearInterval(searxngPoll);
       if (appUpdateTimer) clearInterval(appUpdateTimer);
+      // In-flight availability probes are aborted first: nothing may touch
+      // the workspace or the streams once close() has begun.
+      availability.close();
+      await gpuSetup.close();
       // Politely, before the listener goes down: the container is a child of
       // this deployment and must never outlive it.
       await searxng.stop().catch(() => undefined);

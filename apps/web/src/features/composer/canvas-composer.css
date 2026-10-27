@@ -1,0 +1,114 @@
+/* Home and composer own their sizing; portaled menus use the same shared tokens. */
+.canvas-landing.landing { display: block; width: 100%; min-width: 0; padding: 0; flex: 1; }
+.canvas-home.landing-column { width: min(100%, 850px); max-width: 850px; margin: clamp(72px, 27svh, 300px) auto 0; padding: 0 var(--ui-space-5) 80px; }
+.canvas-home[hidden] { display: none; }
+.canvas-home-intro { text-align: center; margin-bottom: var(--ui-space-8); }
+.canvas-composer-stack.chatbox-stack { gap: var(--ui-space-2); min-width: 0; container: composer / inline-size; }
+.canvas-readiness-error { display: flex; flex-wrap: wrap; align-items: center; gap: var(--ui-space-2); padding: var(--ui-space-3); border: 0; border-radius: var(--ui-radius-lg); background: var(--surface-raised); color: var(--muted); font-size: var(--ui-font-caption); line-height: 1.6; }
+.canvas-readiness-error > span { flex: 1 1 200px; }
+
+/* A 32px control and 12px vertical insets produce the 56px desktop composer. */
+/* This writing surface stays dark in both themes; portals keep the page palette. */
+.canvas-composer.chatbox.composer {
+  --text: #e9eaf2; --text-dim: #a4abbd; --muted: var(--text-dim);
+  --accent: #a2b4ff; --accent-soft: #222a42; --line: #333b4f;
+  --ui-field-bg: #161a23; --ui-control-fill: #252c3b;
+  --ui-focus-fill: #3b4b76; --ui-focus-text: #f1f4ff;
+  --text-on-accent: #0c0e13;
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; column-gap: var(--ui-space-2); row-gap: var(--ui-space-2); padding: var(--ui-space-3); min-height: var(--ui-composer-height); height: auto; border: 0; border-radius: var(--ui-radius-composer); background: #0c0e13; color: var(--text); box-shadow: 0 2px 5px #00000003, 0 6px 20px #17264407;
+}
+.canvas-composer.chatbox.composer:focus-within { box-shadow: 0 2px 5px #00000003, 0 6px 20px #17264407; }
+.canvas-composer.chatbox textarea:focus, .canvas-composer.chatbox textarea:focus-visible { outline: none; background: transparent; color: var(--text); box-shadow: none; }
+.canvas-composer.chatbox textarea { grid-column: 2; grid-row: 1; min-height: 24px; max-height: min(45svh, 446px); height: 24px; padding: 0; font-size: var(--ui-font-input); line-height: 24px; border: none; background: transparent; width: 100%; min-width: 0; }
+.canvas-composer textarea::placeholder { color: var(--muted); opacity: .85; }
+.canvas-composer .attach-zone, .canvas-composer .composer-footer { display: contents; }
+.canvas-composer .composer-footer { min-height: var(--ui-control-height); }
+.canvas-composer .composer-footer-left { grid-column: 1; grid-row: 1; display: flex; align-items: center; gap: var(--ui-space-1); min-width: 0; }
+.canvas-composer .composer-footer-right { grid-column: 3; grid-row: 1; display: flex; align-items: center; align-self: end; gap: var(--ui-space-1); min-width: 0; }
+.canvas-composer .attach-trigger, .canvas-composer .send-btn { display: grid; place-items: center; flex: none; width: var(--ui-control-height); height: var(--ui-control-height); padding: 0; border: 0; border-radius: 50%; }
+.canvas-composer .attach-trigger { border: 0; background: transparent; color: var(--text); }
+.canvas-composer .attach-trigger > svg, .canvas-composer .send-btn > svg, .canvas-composer .attach-tray-btn > svg { display: block; flex: none; width: var(--ui-icon-md); height: var(--ui-icon-md); }
+.canvas-composer .attach-trigger:hover, .canvas-composer .attach-trigger[data-popup-open] { background: var(--accent-soft); }
+.canvas-composer .send-btn { margin-left: 0; box-shadow: none; }
+.canvas-composer .attach-tray-btn { display: inline-flex; align-items: center; justify-content: center; flex: none; width: calc(var(--ui-control-height) + var(--ui-space-1)); height: var(--ui-control-height); padding: 0; gap: var(--ui-space-1); border: 0; background: var(--ui-control-fill); border-radius: var(--ui-radius-md); }
+.canvas-composer .attach-tray-count { font-size: var(--ui-font-xs); }
+.canvas-composer.chatbox.composer.canvas-composer-expanded { grid-template-columns: auto minmax(0, 1fr); padding: var(--ui-space-3); }
+.canvas-composer.canvas-composer-expanded textarea { grid-column: 1 / -1; grid-row: 1; }
+.canvas-composer.canvas-composer-expanded .composer-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--ui-space-2); grid-column: 1 / -1; grid-row: 2; min-width: 0; }
+.canvas-composer.canvas-composer-expanded .composer-footer-right { margin-left: auto; }
+.canvas-composer .attach-input-row, .canvas-composer .attach-error, .canvas-composer .attachment-submit-status { grid-column: 1 / -1; grid-row: auto; }
+.canvas-composer .attach-input-row { display: flex; flex-wrap: wrap; gap: var(--ui-space-2); padding-top: var(--ui-space-2); }
+.canvas-composer .attach-input { flex: 1 1 240px; min-width: 0; min-height: var(--ui-control-height); padding: var(--ui-space-1) var(--ui-space-2); background: var(--ui-field-bg); border: 0; border-radius: var(--ui-radius-md); font-size: var(--ui-font-input); line-height: 22px; }
+.canvas-composer .attach-input-row .btn { border: 0; background: var(--ui-control-fill); min-height: var(--ui-control-height); padding: var(--ui-space-1) var(--ui-space-2); border-radius: var(--ui-radius-md); font-size: var(--ui-font-control); }
+.canvas-composer-health { display: flex; align-items: center; gap: var(--ui-space-1); flex-shrink: 0; }
+.canvas-composer-health .env-status { gap: var(--ui-space-1); }
+.canvas-composer-health .env-icon, .canvas-composer-health .registry-indicator { width: var(--ui-control-height); height: var(--ui-control-height); margin: 0; }
+.canvas-composer-health .env-icon svg, .canvas-composer-health .registry-indicator svg { display: block; width: var(--ui-icon-md); height: var(--ui-icon-md); }
+.canvas-composer-health .registry-indicator::after, .canvas-composer-health .env-icon::after { display: none; }
+.canvas-registry-tooltip { max-width: min(340px, calc(100vw - 24px)); padding: var(--ui-space-2) var(--ui-space-3); background: var(--surface-raised); color: var(--text); border: 0; border-radius: var(--ui-radius-lg); box-shadow: var(--ui-float-shadow); font-size: var(--ui-font-caption); line-height: 1.6; overflow-wrap: anywhere; }
+.canvas-composer-health .env-popover { width: min(350px, calc(100vw - 90px)); max-height: min(400px, 65svh); overflow: auto; }
+.canvas-composer-stack .waiting-card { border: 0; border-radius: var(--ui-radius-xl); background: var(--surface-raised); padding: var(--ui-space-4); }
+.canvas-composer-stack .waiting-head { flex-wrap: wrap; }
+.canvas-composer-stack .waiting-check { grid-template-columns: 8px minmax(0, 1fr); }
+.canvas-composer-stack .waiting-check-message, .canvas-composer-stack .waiting-check-advice { grid-column: 2; overflow-wrap: anywhere; }
+
+/* Portals stay viewport-bounded independently of the floating library. */
+.canvas-composer-positioner { z-index: 180; max-width: calc(100vw - 24px); outline: none; }
+.canvas-attachment-menu, .canvas-attachments-popover { border: 0; background: var(--surface-raised); color: var(--text); box-shadow: var(--ui-float-shadow); border-radius: var(--ui-radius-xl); outline: none; max-height: min(var(--available-height, 520px), 72svh); overflow-y: auto; overscroll-behavior: contain; }
+.canvas-attachment-menu { width: min(260px, calc(100vw - 24px)); padding: var(--ui-space-1); }
+.canvas-menu-caption { padding: var(--ui-space-2) var(--ui-space-3); color: var(--muted); font-size: var(--ui-font-xs); }
+.canvas-attachment-option { display: flex; align-items: center; gap: var(--ui-space-3); min-height: var(--ui-control-height); padding: var(--ui-space-2) var(--ui-space-3); border: 0; border-radius: var(--ui-radius-md); background: transparent; cursor: pointer; outline: none; }
+.canvas-attachment-option[data-highlighted], .canvas-attachment-option:focus-visible, .canvas-attachment-option:not([data-disabled]):hover { outline: none; background: var(--ui-focus-fill); color: var(--ui-focus-text); }
+.canvas-attachment-icon { width: var(--ui-icon-md); height: var(--ui-icon-md); flex: none; display: grid; place-items: center; color: var(--text); font-size: var(--ui-icon-md); }
+.canvas-attachment-icon svg { display: block; width: var(--ui-icon-md); height: var(--ui-icon-md); }
+.canvas-attachment-option strong { display: block; font-size: var(--ui-font-control); font-weight: 450; line-height: 20px; }
+.canvas-attachment-option small { display: block; color: var(--muted); font-size: var(--ui-font-xs); line-height: 16px; }
+.canvas-attachments-popover { width: min(420px, calc(100vw - 24px)); padding: var(--ui-space-2); }
+.canvas-attachments-popover .attach-tray-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: var(--ui-space-1) var(--ui-space-2); padding: var(--ui-space-2) var(--ui-space-1); }
+.canvas-attachments-popover .attach-tray-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--ui-font-control); }
+.canvas-attachments-popover .attach-meta { grid-column: 2; font-size: var(--ui-font-xs); }
+.canvas-attachments-popover .attach-remove { display: grid; place-items: center; grid-column: 3; grid-row: 1 / 3; width: var(--ui-compact-target); height: var(--ui-compact-target); padding: 0; border: 0; background: var(--ui-control-fill); border-radius: var(--ui-radius-sm); }
+.canvas-attachments-popover .attach-remove svg { width: var(--ui-icon-md); height: var(--ui-icon-md); }
+.canvas-attachments-popover .attach-kind { font-size: var(--ui-font-xs); color: var(--muted); }
+.canvas-attachments-popover .attach-tray-invalid { grid-column: 2; }
+.canvas-composer :is(button, input):focus-visible, .canvas-composer-health :is(button, a):focus-visible, .canvas-attachments-popover button:focus-visible { outline: none; background: var(--ui-focus-fill); color: var(--ui-focus-text); box-shadow: none; }
+
+/* Reflow follows the available composer width as the viewport changes. */
+@container composer (max-width: 620px) {
+  .canvas-composer.chatbox.composer { grid-template-columns: auto minmax(0, 1fr); padding: var(--ui-space-3); }
+  .canvas-composer.chatbox textarea { grid-column: 1 / -1; grid-row: 1; }
+  .canvas-composer .composer-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--ui-space-2); grid-column: 1 / -1; grid-row: 2; min-width: 0; }
+  .canvas-composer .composer-footer-right { margin-left: auto; }
+}
+
+/* Retained for the legacy trash page while the sidebar owns normal library UI. */
+.canvas-history-pagination { display: flex; align-items: center; justify-content: space-between; gap: var(--ui-space-3); margin-top: var(--ui-space-6); }
+.canvas-history-pagination > span { color: var(--muted); font-size: var(--ui-font-caption); }
+.canvas-history-pagination .btn { gap: var(--ui-space-2); font-size: var(--ui-font-caption); }
+@media (min-width: 1800px) { .canvas-home.landing-column { max-width: 950px; width: min(100%, 950px); margin-top: min(30svh, 360px); } }
+@media (max-width: 900px) { .canvas-home.landing-column { margin-top: clamp(65px, 24svh, 210px); } }
+@media (max-width: 640px) {
+  .canvas-home.landing-column { margin-top: clamp(42px, 18svh, 150px); padding: 0 var(--ui-space-3) 60px; }
+  .canvas-home-intro { margin-bottom: var(--ui-space-6); }
+  .canvas-composer.chatbox textarea { font-size: var(--ui-font-input-touch); max-height: min(35svh, 320px); }
+  .canvas-composer .attach-input { font-size: var(--ui-font-input-touch); }
+  .canvas-history-pagination { gap: var(--ui-space-2); }
+  .canvas-history-pagination > span { text-align: center; }
+}
+@media (pointer: coarse) {
+  .canvas-composer.chatbox textarea, .canvas-composer .attach-input { font-size: var(--ui-font-input-touch); }
+}
+@media (max-width: 360px) { .canvas-home.landing-column { padding-inline: var(--ui-space-2); } }
+@media (max-height: 650px) and (min-width: 641px) { .canvas-home.landing-column { margin-top: var(--ui-space-8); } .canvas-home-intro { margin-bottom: var(--ui-space-5); } }
+@media (forced-colors: active) {
+  .canvas-composer.chatbox.composer {
+    --text: CanvasText; --text-dim: GrayText; --accent: Highlight;
+    --accent-soft: ButtonFace; --line: ButtonText; --ui-field-bg: Field;
+    --ui-control-fill: ButtonFace; --ui-focus-fill: Highlight;
+    --ui-focus-text: HighlightText; --text-on-accent: HighlightText;
+    background: Canvas;
+  }
+  .canvas-composer.chatbox.composer:has(textarea:focus) { forced-color-adjust: none; background: Highlight; color: HighlightText; }
+  .canvas-composer.chatbox.composer:has(textarea:focus) :is(textarea, button) { color: HighlightText; }
+  .canvas-composer.chatbox textarea:focus::placeholder { color: HighlightText; opacity: 1; }
+}

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { Key, ReactNode } from "react";
+import type { Key, ReactNode, RefObject } from "react";
 import {
   Alert,
   Button,
@@ -38,6 +38,7 @@ import {
   searchServerFiles,
   validateAttachments,
 } from "../api";
+import "./server-file-explorer.css";
 
 const { DirectoryTree } = Tree;
 
@@ -58,6 +59,8 @@ export interface ServerFileExplorerProps {
   readonly onAttach: (
     attachments: readonly ValidatedAttachment[],
   ) => void;
+  /** The menu item that opened this dialog unmounts; restore its stable trigger. */
+  readonly returnFocusRef?: RefObject<HTMLElement | null>;
 }
 
 interface ExplorerNode extends TreeDataNode {
@@ -146,7 +149,24 @@ export function ServerFileExplorer({
   kind,
   onClose,
   onAttach,
+  returnFocusRef,
 }: ServerFileExplorerProps) {
+  const focusReturnMounted = useRef(false);
+  useEffect(() => {
+    focusReturnMounted.current = true;
+    return () => {
+      focusReturnMounted.current = false;
+      const trigger = returnFocusRef?.current;
+      if (!trigger) return;
+      window.requestAnimationFrame(() => {
+        // StrictMode rehearses cleanup while keeping the dialog mounted. A real
+        // route change can also hide the composer; neither should steal focus.
+        if (!focusReturnMounted.current && trigger.isConnected && trigger.getClientRects().length > 0) {
+          trigger.focus({ preventScroll: true });
+        }
+      });
+    };
+  }, [returnFocusRef]);
   const [listing, setListing] =
     useState<BrowseServerFilesResponse | null>(null);
   const [treeData, setTreeData] = useState<ExplorerNode[]>([]);
@@ -337,7 +357,7 @@ export function ServerFileExplorer({
         width={780}
         title={
           <Space size={6}>
-            <FolderOpenOutlined />
+            <FolderOpenOutlined aria-hidden />
             <span>Select {KIND_LABELS[kind]}</span>
           </Space>
         }
@@ -345,6 +365,7 @@ export function ServerFileExplorer({
         destroyOnHidden
         maskClosable={!validating}
         keyboard={!validating}
+        focusTriggerAfterClose={!returnFocusRef}
         footer={[
           <Typography.Text key="count" type="secondary">
             {checkedKeys.length} selected
@@ -368,6 +389,7 @@ export function ServerFileExplorer({
           <div className="server-directory-toolbar">
             {listing.roots.length > 1 && (
               <Select
+                aria-label="Server root folder"
                 value={listing.rootId}
                 className="server-root-select"
                 options={listing.roots.map((root) => ({
@@ -382,6 +404,7 @@ export function ServerFileExplorer({
             )}
           <Tooltip title="Root folder">
             <Button
+              aria-label="Root folder"
               icon={<HomeOutlined />}
               onClick={() =>
                 void loadDirectory(listing.rootId)
@@ -390,6 +413,7 @@ export function ServerFileExplorer({
           </Tooltip>
           <Tooltip title="Parent folder">
             <Button
+              aria-label="Parent folder"
               icon={<ArrowUpOutlined />}
               disabled={!listing.parentPath}
               onClick={() =>
@@ -402,6 +426,7 @@ export function ServerFileExplorer({
           </Tooltip>
           <Tooltip title="Refresh">
             <Button
+              aria-label="Refresh server folder"
               icon={<ReloadOutlined />}
               onClick={() =>
                 void loadDirectory(
@@ -429,6 +454,7 @@ export function ServerFileExplorer({
 
       <Input
         allowClear
+        aria-label="Search this server folder and subfolders"
         prefix={<SearchOutlined />}
         placeholder="Search this server folder and subfolders"
         value={search}

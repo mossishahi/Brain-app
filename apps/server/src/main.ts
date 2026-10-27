@@ -14,6 +14,7 @@ import { configureOutboundHttp } from "./proxy.js";
 import { startBrainServer } from "./server.js";
 import { ContentRegistryClient } from "@brainstorm-agentic/registry-client";
 import { DEFAULT_CONTENT_REGISTRY_URL } from "./settings.js";
+import { allowsSourceUpdates, readDesktopApiToken } from "./desktop-auth.js";
 
 interface ParsedArgs {
   readonly command: string;
@@ -200,6 +201,10 @@ async function main(): Promise<void> {
   // cryptic dependency crash minutes later.
   assertSupportedNodeVersion();
   const args = parseArgs(process.argv.slice(2));
+  if (args.command === "desktop-check") {
+    console.log("CO_INFERENCE_PROTOCOL=1");
+    return;
+  }
   if (
     args.command === "help" ||
     args.values.has("help") ||
@@ -217,6 +222,7 @@ async function main(): Promise<void> {
   console.log(`[launch] outbound HTTP: ${configureOutboundHttp()}`);
 
   const host = stringFlag(args, "ip") ?? "127.0.0.1";
+  const apiToken = readDesktopApiToken();
   const port = portFlag(args, "port", 8787);
   const contentRegistryPort = portFlag(args, "content-registry-port", 0);
   const workspace = expandHome(
@@ -236,8 +242,10 @@ async function main(): Promise<void> {
   const remoteContentRegistry =
     configuredRegistryUrl ??
     (localRegistryMain ? undefined : DEFAULT_CONTENT_REGISTRY_URL);
-  const spawned = remoteContentRegistry
-    ? await connectRemoteContentRegistry(remoteContentRegistry, contentRegistryStatus)
+  const spawned: ContentRegistryConnection = remoteContentRegistry
+    ? apiToken
+      ? { url: remoteContentRegistry }
+      : await connectRemoteContentRegistry(remoteContentRegistry, contentRegistryStatus)
     : await spawnContentRegistry(
         "127.0.0.1",
         contentRegistryPort,
@@ -251,6 +259,7 @@ async function main(): Promise<void> {
       workspace,
       host,
       port,
+      apiToken,
       ...(attachmentRoots && attachmentRoots.length > 0
         ? { attachmentRoots }
         : {}),
@@ -259,7 +268,7 @@ async function main(): Promise<void> {
       // A shift job cannot rebuild after an in-app update checkout (no
       // wrapper loop follows it), so shifts launch with --no-self-update
       // and releases are applied from the login node by the runway script.
-      selfUpdateCheck: !args.values.has("no-self-update"),
+      selfUpdateCheck: !args.values.has("no-self-update") && allowsSourceUpdates(),
       ...(pilotPool !== undefined
         ? { pilotPoolDir: expandHome(pilotPool) }
         : {}),

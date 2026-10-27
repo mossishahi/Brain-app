@@ -34,9 +34,21 @@ function positiveParam(
   value: JsonValue,
   definition: ContentWorkflowDefinition["params"][string],
 ): void {
+  if (typeof value !== typeof definition.default) {
+    throw new BrainstormRuntimeError(
+      `workflow param "${name}" must be ${typeof definition.default}`,
+      "INVALID_WORKFLOW_PARAM",
+    );
+  }
+  if (name === "gameDecisionRule" && value !== "committee-mean" && value !== "chair-decisive") {
+    throw new BrainstormRuntimeError('workflow param "gameDecisionRule" must be "committee-mean" or "chair-decisive"', "INVALID_WORKFLOW_PARAM");
+  }
   if (typeof definition.default !== "number") return;
   if (typeof value !== "number" || !Number.isFinite(value)) {
     throw new BrainstormRuntimeError(`workflow param "${name}" must be numeric`, "INVALID_WORKFLOW_PARAM");
+  }
+  if (name === "gameInitialPoints" && value < 0 && value !== -1) {
+    throw new BrainstormRuntimeError('workflow param "gameInitialPoints" must be -1 (automatic) or nonnegative', "INVALID_WORKFLOW_PARAM");
   }
   if (definition.min !== undefined && value < definition.min) {
     throw new BrainstormRuntimeError(
@@ -64,7 +76,7 @@ export function createInitialState(
   }
   const params: MutableJsonObject = {};
   for (const [name, definition] of Object.entries(workflow.params)) {
-    const value = overrides[name] ?? definition.default;
+    const value = Object.prototype.hasOwnProperty.call(overrides, name) ? overrides[name]! : definition.default;
     positiveParam(name, value, definition);
     params[name] = value;
   }
@@ -79,11 +91,10 @@ export function createInitialState(
     // Seats are created lazily by initializeReview — the panel is not known
     // when the run starts.
     reviews: {},
-    // The per-member objection ledger: one compact, ANONYMIZED record per
-    // review round (judge verdict, its issues content-only, and the
-    // change-set of the redevelopment that followed, when one did). The
-    // runtime — never a model — writes it; the seat's `history` is the
-    // per-round projection bound into commentor/judge/redeveloper tasks.
+    // The per-member objection ledger: the anonymized scientific decision
+    // and repair changes for each round, plus optional host-only game score
+    // observations. The runtime writes it; task history projections strip
+    // those observations before any model receives the scientific record.
     reviewLog: {},
     // The thinking behind each seat's chain, one entry per step, keyed by
     // member id (parallel-merge safe like `ideas`). Written by the runtime
@@ -259,6 +270,139 @@ export function applyRedevelopment(
 
 function isObject(value: JsonValue | undefined): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Merges one fact-update reconsideration of a seat's chain (fact-update design
+ * 5.1) into `ideas[seat]` with the redevelopment merge: the rewritten
+ * four-part steps, the developed sections and the novelty it names, the chain
+ * length fixed and `literature` kept. The rewritten steps' thoughts become ""
+ * (the reconsideration's own thinking stays in its thinking artifact).
+ * `reviews[seat]`, the review log and every settlement are not touched (U2).
+ * An `unchanged` decision changes nothing. Returns the steps it rewrote.
+ */
+export function applyChainReconsideration(
+  state: JsonObject,
+  seat: string,
+  revisionValue: JsonValue,
+  nodeId: string,
+): { readonly state: JsonObject; readonly touched: readonly number[] } {
+  const revision = object(revisionValue, "chain reconsideration");
+  if (revision.decision !== "revised") return { state, touched: [] };
+  const ideas = isObject(state.ideas) ? state.ideas : {};
+  const previous = object(ideas[seat], `idea for ${seat}`);
+  const previousCot = previous.cot;
+  if (!Array.isArray(previousCot) || !previousCot.every((step) => isObject(step))) {
+    throw new BrainstormRuntimeError(
+      `node "${nodeId}" can merge a fact-update reconsideration only into a four-part chain`,
+      "INVALID_REDEVELOPMENT",
+    );
+  }
+  let merged;
+  try {
+    merged = mergeRedevelopmentParts(
+      {
+        output: object(previous.output, `idea for ${seat}: output`),
+        cot: previousCot as unknown as readonly CotStepParts[],
+        ...(typeof previous.novelty === "string" ? { novelty: previous.novelty } : {}),
+      },
+      {
+        steps: Array.isArray(revision.steps) ? revision.steps : [],
+        ...(revision.outputPatch !== undefined ? { outputPatch: revision.outputPatch } : {}),
+        ...(revision.novelty !== undefined ? { novelty: revision.novelty } : {}),
+      } as unknown as RedevelopmentPatchParts,
+    );
+  } catch (error) {
+    throw new BrainstormRuntimeError(
+      `node "${nodeId}" merged a fact-update reconsideration that does not fit the chain it revises: ` +
+        (error instanceof Error ? error.message : String(error)),
+      "INVALID_REDEVELOPMENT",
+    );
+  }
+  const steps = [...merged.steps] as unknown as JsonValue[];
+  const touched: number[] = [];
+  steps.forEach((step, index) => {
+    if (!jsonEqual(step, previousCot[index])) touched.push(index + 1);
+  });
+  const revisedIdea: JsonObject = {
+    output: merged.output as JsonValue,
+    cot: structuredClone(steps),
+    ...(merged.novelty !== undefined ? { novelty: merged.novelty } : {}),
+    ...(previous.literature !== undefined ? { literature: structuredClone(previous.literature) } : {}),
+  };
+  const next: MutableJsonObject = { ...state, ideas: { ...ideas, [seat]: revisedIdea } };
+  const thoughts = isObject(state.thoughts) ? state.thoughts : undefined;
+  const seatThoughts = thoughts?.[seat];
+  if (thoughts !== undefined && Array.isArray(seatThoughts) && touched.length > 0) {
+    const cleared = [...seatThoughts];
+    for (const step of touched) if (step <= cleared.length) cleared[step - 1] = "";
+    next.thoughts = { ...thoughts, [seat]: cleared };
+  }
+  return { state: next, touched };
+}
+
+/**
+ * Applies a report or comment merge point's journaled entries (fact-update
+ * design 5.2, 5.3, 6.3) to the round record `reviews[seat].current`: a revised
+ * report or comment replaces the critic's, a game report with its revision's
+ * request epoch in `gameReportEpochs`; a withdrawn one leaves the round and is
+ * recorded in `gameWithdrawn` or `commentsWithdrawn` with its notices and
+ * reason; an unchanged one stays. With `keepFirst` (a late merge that set
+ * `reassess`) the first assessment is kept in `gameChairFirst` or
+ * `decisionFirst` before the re-assessment replaces it (D4). Returns whether
+ * anything was revised or withdrawn.
+ */
+export function applyReportReconsiderations(
+  state: JsonObject,
+  seat: string,
+  kind: "game-report" | "comment",
+  merged: readonly JsonValue[],
+  keepFirst: boolean,
+  normalize: (report: JsonValue) => JsonValue = (report) => report,
+): { readonly state: JsonObject; readonly changed: boolean } {
+  const seatState = reviewSeat(state, seat);
+  const current = isObject(seatState.current) ? seatState.current : {};
+  const reportsKey = kind === "game-report" ? "gameCritiques" : "comments";
+  const withdrawnKey = kind === "game-report" ? "gameWithdrawn" : "commentsWithdrawn";
+  const reports: MutableJsonObject = { ...(isObject(current[reportsKey]) ? current[reportsKey] : {}) };
+  const epochs: MutableJsonObject = { ...(isObject(current.gameReportEpochs) ? current.gameReportEpochs : {}) };
+  const withdrawn: MutableJsonObject = { ...(isObject(current[withdrawnKey]) ? current[withdrawnKey] : {}) };
+  let changed = false;
+  let epochsChanged = false;
+  let withdrawals = false;
+  for (const raw of merged) {
+    const entry = object(raw, "fact-update merge entry");
+    const parts = typeof entry.key === "string" ? entry.key.split(":") : [];
+    if (parts.length !== 5 || parts[0] !== kind || parts[1] !== seat || parts[4] === "") {
+      throw new BrainstormRuntimeError(`fact-update merge entry "${String(entry.key)}" does not belong to this round`, "INVALID_REVIEW_STATE");
+    }
+    const critic = parts[4]!;
+    const output = object(entry.output, "fact-update merge output");
+    if (output.decision === "revised") {
+      reports[critic] = normalize(structuredClone(kind === "game-report" ? output.report! : output.comment!));
+      if (kind === "game-report" && typeof entry.epoch === "number") {
+        epochs[critic] = entry.epoch;
+        epochsChanged = true;
+      }
+      changed = true;
+    } else if (output.decision === "withdrawn") {
+      delete reports[critic];
+      withdrawn[critic] = { notices: structuredClone(entry.notices ?? []), reason: output.reason ?? "" };
+      withdrawals = true;
+      changed = true;
+    }
+  }
+  if (!changed && !keepFirst) return { state, changed };
+  const updated: MutableJsonObject = { ...current, [reportsKey]: reports };
+  if (epochsChanged) updated.gameReportEpochs = epochs;
+  if (withdrawals) updated[withdrawnKey] = withdrawn;
+  if (keepFirst) {
+    const first = kind === "game-report" ? current.gameChair : current.decision;
+    if (first !== undefined) updated[kind === "game-report" ? "gameChairFirst" : "decisionFirst"] = structuredClone(first);
+  }
+  const next: MutableJsonObject = { ...state };
+  putSeat(next, seat, { ...seatState, current: updated });
+  return { state: next, changed };
 }
 
 /** The per-step thought slices of one agent result, from its journaled metadata. */
@@ -531,8 +675,11 @@ function clampRoundToPosition(round: JsonObject, currentStep: number): JsonObjec
       : undefined;
   const touched = visible(round.touched);
   const untouched = visible(round.untouched);
+  // Scores are host observations, not feedback to later model tasks. Keep
+  // them in the durable ledger/dashboard only, including after a repair.
+  const { gameSettlement: _observations, gameLabels: _labels, ...taskRecord } = round;
   return {
-    ...round,
+    ...taskRecord,
     ...(touched !== undefined ? { touched } : {}),
     ...(untouched !== undefined ? { untouched } : {}),
   };
@@ -596,7 +743,7 @@ function scopedRecord(
     settled.push({
       step,
       rounds: rounds.length,
-      outcome: passed ? "passed" : "force-passed",
+      outcome: passed ? "passed" : last.gameStatus === "unresolved" ? "unresolved" : "force-passed",
       objections,
       // A closed position's revisions may have rewritten steps the CURRENT
       // reader has not been shown yet (a prospective repair); only the
@@ -739,7 +886,7 @@ export function initializeReview(
     history: boundHistory(next, memberId, position),
     record: scopedRecord(next, memberId, position),
     phase: "commenting",
-    current: { comments: {} },
+    current: { comments: {}, ...(object(next.params, "params").gamifiedReview === true ? { gameCritiques: {} } : {}) },
   });
   return next;
 }
@@ -786,8 +933,12 @@ export function prepareReviewRound(
     finalRound: round >= roundBudget(next),
     phase: "commenting",
     // Reset wholesale so last round's comments AND decision are dropped; the
-    // loop's until-condition must never be satisfied by a stale verdict.
-    current: { comments: {} },
+    // loop's until-condition must never be satisfied by a stale verdict. With
+    // fact updates the round record may gain, all optional and all dropped
+    // here: gameReportEpochs, gameWithdrawn, commentsWithdrawn,
+    // factReportUpdate, factLateUpdate, gameChairFirst, decisionFirst and
+    // gameChairEarlierTaskIds (fact-update design 11.10).
+    current: { comments: {}, ...(object(next.params, "params").gamifiedReview === true ? { gameCritiques: {} } : {}) },
   });
   return next;
 }
@@ -838,6 +989,27 @@ export function finishReviewRound(state: JsonObject, scope: ScopeReader): JsonOb
     verdict: decision.verdict,
     reason: typeof decision.reason === "string" ? decision.reason : "",
     issues: (Array.isArray(decision.issues) ? decision.issues : []).map(ledgerIssue),
+    ...(isObject(current.gameSettlement)
+      ? {
+          gameSettlement: structuredClone(current.gameSettlement),
+          gameStatus: current.gameSettlement.y === 0
+            ? "passed"
+            : current.gameSettlement.y === null || seat.finalRound === true
+              ? "unresolved"
+              : "continuing",
+          // Scoring v3 records the rule the round was decided under and the
+          // chair's label of each report. The labels are host observations
+          // like the settlement itself and are stripped from task records.
+          ...(typeof current.gameSettlement.decisionRule === "string"
+            ? {
+                gameDecisionRule: current.gameSettlement.decisionRule,
+                gameLeaveOneOut: current.gameSettlement.leaveOneOut === true,
+                gameLabels: Object.fromEntries((Array.isArray(current.gameSettlement.rows) ? current.gameSettlement.rows : [])
+                  .filter(isObject).map((row) => [String(row.criticId), typeof row.label === "string" ? row.label : null] as const)),
+              }
+            : {}),
+        }
+      : {}),
     ...(Array.isArray(current.touched)
       ? {
           touched: structuredClone(current.touched),

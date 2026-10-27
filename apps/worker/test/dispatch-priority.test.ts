@@ -55,6 +55,9 @@ test("a round's gating calls dispatch high; everything else stays normal", () =>
   assert.equal(redeveloped.metadata?.dispatchPriority, "high");
   assert.equal(comment.metadata?.dispatchPriority, "normal");
   assert.equal(brain.metadata?.dispatchPriority, "normal");
+  for (const kind of ["brainstorm.committee-chair", "brainstorm.game-redeveloper"]) {
+    assert.equal(adapter.createRequest(taskOf(kind), context, route).metadata?.dispatchPriority, "high");
+  }
   // The inner adapter's metadata survives the stamp.
   assert.equal(judged.metadata?.nodeId, "brainstorm.judge-node");
 });

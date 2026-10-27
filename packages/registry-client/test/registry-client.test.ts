@@ -111,6 +111,76 @@ test("a declared app floor rides the manifest; a malformed one is refused", () =
   );
 });
 
+test("a 3 MiB taxonomy catalog loads through the registry store with byte and hash verification", async () => {
+  const bytes = 3 * 1024 * 1024;
+  const empty = JSON.stringify({ texts: [""] });
+  const catalog = JSON.stringify({ texts: ["x".repeat(bytes - Buffer.byteLength(empty, "utf8"))] });
+  const path = "catalog/taxonomy-texts.json";
+  const pin = fixturePin();
+  const manifest = parseContentRegistryManifest({
+    ...pin.manifest,
+    entrypoints: { ...pin.manifest.entrypoints, controls: [...pin.manifest.entrypoints.controls, path] },
+    files: [...pin.manifest.files, {
+      path, bytes, mediaType: "application/json",
+      sha256: createHash("sha256").update(catalog).digest("hex"),
+    }],
+  }, pin.bundle, pin.version);
+  let reads = 0;
+  const client = {
+    async readText(requested: string): Promise<string> {
+      assert.equal(requested, `bundles/${pin.bundle}/${pin.version}/${path}`);
+      reads += 1;
+      return catalog;
+    },
+  } as ContentRegistryClient;
+  const largePin: ContentRegistryPin = {
+    ...pin, manifest, manifestSha256: createHash("sha256").update(JSON.stringify(manifest)).digest("hex"),
+  };
+  const store = new ContentRegistryStore(largePin, client);
+  assert.equal(await store.ensure(path), catalog);
+  assert.equal(Buffer.byteLength(store.loaded().get(path)!, "utf8"), bytes);
+  assert.equal(reads, 1);
+
+  const corrupt = new ContentRegistryStore(largePin, {
+    async readText(): Promise<string> { return catalog.replace("x", "y"); },
+  } as unknown as ContentRegistryClient);
+  await assert.rejects(corrupt.ensure(path), /SHA-256 verification/);
+  assert.equal(corrupt.loaded().has(path), false, "large catalogs remain subject to integrity checks");
+});
+
+test("the generic per-file ceiling accepts exactly 4 MiB and rejects one additional byte", () => {
+  const pin = fixturePin();
+  const raw = {
+    ...pin.manifest,
+    files: [...pin.manifest.files, {
+      path: "catalog/large-catalog.json", bytes: 4 * 1024 * 1024,
+      sha256: "a".repeat(64), mediaType: "application/json",
+    }],
+  };
+  assert.equal(parseContentRegistryManifest(raw).files.at(-1)!.bytes, 4 * 1024 * 1024);
+  const oversized = { ...raw, files: raw.files.map((file, index) =>
+    index === raw.files.length - 1 ? { ...file, bytes: file.bytes + 1 } : file,
+  ) };
+  assert.throws(() => parseContentRegistryManifest(oversized), /large-catalog\.json.*invalid byte size/);
+});
+
+test("the total bundle ceiling stays 20 MiB even when every file is below its own ceiling", () => {
+  const perFile = 4 * 1024 * 1024;
+  const raw = {
+    schemaVersion: "content-registry-manifest/v1",
+    bundle: "size-boundary", version: "1.0.0", runtimeProtocol: "brainstorm.workflow/v1",
+    entrypoints: { workflow: "workflows/test.json", controls: [] },
+    files: Array.from({ length: 6 }, (_, index) => ({
+      path: index === 0 ? "workflows/test.json" : `catalog/part-${index}.json`,
+      bytes: index < 4 ? perFile : 2 * 1024 * 1024,
+      sha256: "b".repeat(64), mediaType: "application/json",
+    })),
+  };
+  assert.equal(parseContentRegistryManifest(raw).files.reduce((total, entry) => total + entry.bytes, 0), 20 * 1024 * 1024);
+  raw.files.at(-1)!.bytes += 1;
+  assert.throws(() => parseContentRegistryManifest(raw), /bundle exceeds 20971520 bytes/);
+});
+
 test("pin roundtrip rejects modified manifest metadata", () => {
   const root = mkdtempSync(join(tmpdir(), "registry-pin-"));
   const path = join(root, "pin.json");

@@ -1,0 +1,44 @@
+.brain-background {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+  user-select: none;
+  contain: strict;
+  background: #f9f9f8;
+}
+
+.brain-background[data-background-theme="dark"] {
+  background: #111421;
+}
+
+.brain-background-renderer {
+  position: absolute;
+  inset: 0;
+  opacity: 1;
+  transition: opacity 300ms ease;
+}
+
+.brain-background-renderer,
+.brain-background-renderer * {
+  pointer-events: none !important;
+}
+
+.brain-background--subdued .brain-background-renderer {
+  opacity: 0.38;
+}
+
+.brain-background-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .brain-background-renderer { transition: none; }
+}
+
+@media print {
+  .brain-background { display: none; }
+}

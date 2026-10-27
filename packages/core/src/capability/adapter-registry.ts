@@ -42,6 +42,12 @@ export interface ProviderAdapterDescriptor {
  * so a model cannot reach the provider's search at all. Restoring a native
  * offer here would silently split the pipeline's search across backends
  * again; do not add one without also deciding what happens to the log.
+ *
+ * The one exception is explicit: a deployment owner may hand web search to
+ * the agents' OWN tools (webSearch.mode "agent"). The host web layer is then
+ * not wired at all, the offers in NATIVE_WEB_OFFERS below are added for the
+ * run, and the run's search log stays empty by design: those searches happen
+ * inside the backend and are visible only in its tool-call events.
  */
 export const ANTHROPIC_ADAPTER: ProviderAdapterDescriptor = {
   providerId: "anthropic",
@@ -86,6 +92,25 @@ export const CURSOR_AGENT_ADAPTER: ProviderAdapterDescriptor = {
 
 
 
+/**
+ * Provider-native web tools, offered ONLY when the deployment switched web
+ * search to the agents' own tools (see the host-owned-web note above).
+ * Anthropic's Messages path offers its server-side search only; fetching
+ * stays on the host's plain web_fetch there, because the server-side fetch
+ * tool is versioned separately and may need a beta header.
+ */
+const NATIVE_WEB_OFFERS: Readonly<Record<string, readonly ProviderNativeOffer[]>> = {
+  anthropic: [{ operationId: "web.search", nativeKey: "web_search" }],
+  "claude-agent": [
+    { operationId: "web.search", nativeKey: "WebSearch" },
+    { operationId: "web.fetch", nativeKey: "WebFetch" },
+  ],
+  "cursor-agent": [
+    { operationId: "web.search", nativeKey: "webSearch" },
+    { operationId: "web.fetch", nativeKey: "webFetch" },
+  ],
+};
+
 /** Every adapter this build knows, by provider id. */
 const ADAPTERS: readonly ProviderAdapterDescriptor[] = [
   ANTHROPIC_ADAPTER,
@@ -118,12 +143,19 @@ export function adapterFor(
  * exists. Two copies of this rule would let the pre-submission promise drift
  * away from what a run actually does — which is exactly how a deployment came to
  * report attachment access green while every resumed run had none.
+ *
+ * `nativeWeb` adds the backend's own web tools (NATIVE_WEB_OFFERS); it is set
+ * only when the deployment chose webSearch.mode "agent".
  */
 export function nativeOffersFor(
   providerId: string,
-  options: { readonly attachmentRootsPresent: boolean },
+  options: { readonly attachmentRootsPresent: boolean; readonly nativeWeb?: boolean },
 ): readonly ProviderNativeOffer[] {
   const declared = adapterFor(providerId)?.staticOffers ?? [];
-  if (options.attachmentRootsPresent) return declared;
-  return declared.filter((offer) => !offer.operationId.startsWith("attachment."));
+  const offers =
+    options.nativeWeb === true
+      ? [...declared, ...(NATIVE_WEB_OFFERS[providerId] ?? [])]
+      : declared;
+  if (options.attachmentRootsPresent) return offers;
+  return offers.filter((offer) => !offer.operationId.startsWith("attachment."));
 }

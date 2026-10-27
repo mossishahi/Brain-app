@@ -1,0 +1,41 @@
+.gpu-icon { position: relative; }
+.gpu-icon > svg { width: var(--ui-icon-md); height: var(--ui-icon-md); }
+.gpu-icon .gpu-pending-mark { position: absolute; right: -2px; bottom: -1px; width: 9px; height: 9px; background: var(--surface); border-radius: 50%; }
+.gpu-icon.state-pending, .gpu-status.state-pending { color: var(--warn); }
+.gpu-icon-progress { position: absolute; height: 2px; inset: auto 3px 0; border-radius: 2px; background: currentColor; animation: gpu-progress-pulse 1.2s ease-in-out infinite; }
+.gpu-backdrop { position: fixed; inset: 0; z-index: 120; background: color-mix(in srgb, var(--bg) 65%, transparent); backdrop-filter: blur(5px); }
+.gpu-dialog { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 121; display: flex; flex-direction: column; width: min(780px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); box-sizing: border-box; border: 0; border-radius: var(--ui-radius-lg, 16px); color: var(--text); background: var(--surface); box-shadow: var(--ui-float-shadow); overflow: hidden; }
+.gpu-dialog-header, .gpu-dialog-footer { display: flex; flex: none; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 20px; }
+.gpu-dialog-header h2 { margin: 0 0 4px; font-size: 19px; }
+.gpu-status { color: var(--text-dim); font-size: 13px; }
+.gpu-description { margin: 0; padding: 0 20px 12px; color: var(--text-dim); font-size: 13px; }
+.gpu-dialog-body { min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 0 20px 8px; }
+.gpu-close { display: grid; place-items: center; width: var(--ui-compact-target); height: var(--ui-compact-target); border: 0; background: var(--ui-control-fill); color: var(--text-dim); border-radius: 50%; }
+.gpu-dialog button:focus-visible, .gpu-dialog input:focus-visible, .gpu-dialog select:focus-visible, .gpu-dialog textarea:focus-visible, .gpu-dialog pre:focus-visible, .gpu-dialog summary:focus-visible { outline: 0; background-color: var(--ui-focus-fill); color: var(--ui-focus-text); }
+.gpu-progress { display: grid; gap: 8px; margin: 12px 0; font-size: 13px; }
+.gpu-progress progress { width: 100%; height: 6px; accent-color: var(--accent); }
+.gpu-host { display: grid; grid-template-columns: max-content 1fr; gap: 8px 16px; padding: 12px 0; font-size: 13px; }
+.gpu-host dt { color: var(--text-dim); }
+.gpu-host dd { margin: 0; overflow-wrap: anywhere; }
+.gpu-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 16px; margin: 16px 0; }
+.gpu-field { display: grid; gap: 6px; min-width: 0; font-size: 13px; }
+.gpu-field input, .gpu-field select, .gpu-field textarea { box-sizing: border-box; min-width: 0; width: 100%; min-height: var(--ui-control-height, 32px); border: 0; border-radius: var(--ui-radius-sm, 6px); background: var(--ui-field-bg); color: var(--text); padding: 8px 10px; font: inherit; }
+.gpu-field textarea { resize: vertical; font-family: var(--mono); }
+.gpu-field small, .gpu-note, .gpu-actions small { font-size: 12px; color: var(--text-dim); line-height: 1.5; }
+.gpu-actions, .gpu-dialog-footer { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.gpu-actions { margin: 12px 0; }
+.gpu-dialog-footer { justify-content: flex-end; }
+.gpu-dialog-footer p { flex: 1 1 100%; margin: 0; font-size: 13px; }
+.gpu-dialog h3 { font-size: 14px; margin: 16px 0 8px; }
+.gpu-script pre, .gpu-probe pre, .gpu-evidence pre { overflow: auto; max-height: 280px; max-width: 100%; font-size: 12px; line-height: 1.5; background: var(--ui-field-bg); padding: 12px; border-radius: 8px; white-space: pre; }
+.gpu-script summary, .gpu-probe summary, .gpu-evidence summary { cursor: pointer; padding: 8px 0; font-size: 13px; }
+.gpu-notes { padding-left: 20px; font-size: 12px; line-height: 1.5; color: var(--text-dim); }
+.gpu-approval { padding: 12px 0; font-size: 13px; }
+.gpu-approve { background: var(--accent); color: var(--bg); }
+.gpu-error { color: var(--bad); font-size: 13px; overflow-wrap: anywhere; }
+.gpu-error button { display: block; margin-top: 8px; }
+.gpu-success { color: var(--ok); font-size: 13px; }
+@keyframes gpu-progress-pulse { 50% { opacity: .35; } }
+@media (max-width: 480px) { .gpu-fields { grid-template-columns: minmax(0, 1fr); } .gpu-dialog-header, .gpu-dialog-footer { padding: 12px; } .gpu-description { padding-inline: 12px; } .gpu-dialog-body { padding-inline: 12px; } }
+@media (pointer: coarse) { .gpu-field input, .gpu-field select, .gpu-field textarea { font-size: 16px; min-height: 44px; } .gpu-dialog button { min-height: 44px; } }
+@media (prefers-reduced-motion: reduce) { .gpu-icon-progress { animation: none; } }

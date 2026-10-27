@@ -1,0 +1,22 @@
+/* The row is the hit target; the small track is a state indicator. */
+.settings-toggle { display: flex; align-items: center; justify-content: space-between; gap: var(--ui-space-4); width: 100%; min-width: 0; min-height: var(--ui-control-height); padding: var(--ui-space-1) 0; margin: 0; border: 0; border-radius: var(--ui-radius-sm); background: transparent; color: var(--text); font: inherit; font-size: var(--ui-font-control); line-height: 20px; text-align: start; cursor: pointer; }
+.settings-toggle-copy { min-width: 0; overflow-wrap: anywhere; }
+.settings-toggle-description { display: block; margin-top: var(--ui-space-1); color: var(--muted); font-size: var(--ui-font-caption); }
+.settings-toggle:focus-visible { outline: none; box-shadow: none; background: var(--ui-focus-fill); color: var(--ui-focus-text); }
+.settings-toggle:focus-visible .settings-toggle-description { color: inherit; }
+.settings-toggle:disabled { cursor: default; opacity: .5; }
+.settings-selection-card { color: inherit; font: inherit; text-align: start; }
+.settings-selection-card:focus-visible { outline: none; box-shadow: none; background: var(--ui-focus-fill); color: var(--ui-focus-text); }
+.settings-toggle-track { display: inline-flex; align-items: center; flex: none; box-sizing: border-box; width: 32px; height: 18px; padding: 3px; border: 0; border-radius: 999px; background: var(--ui-control-fill); transition: background-color 140ms ease; }
+.settings-toggle-thumb { display: block; width: 12px; height: 12px; flex: none; border-radius: 50%; background: var(--muted); transform: translateX(0); transition: transform 140ms ease, background-color 140ms ease; }
+.settings-toggle-track[data-checked] { background: var(--accent); }
+.settings-toggle-track[data-checked] .settings-toggle-thumb { transform: translateX(14px); background: var(--surface); }
+@media (prefers-reduced-motion: reduce) { .settings-toggle-track, .settings-toggle-thumb { transition: none; } }
+@media (forced-colors: active) {
+  .settings-toggle-track { forced-color-adjust: none; background: GrayText; }
+  .settings-toggle-thumb { background: Canvas; }
+  .settings-toggle-track[data-checked] { background: Highlight; }
+  .settings-toggle-track[data-checked] .settings-toggle-thumb { background: HighlightText; }
+  .settings-toggle:focus-visible, .settings-selection-card:focus-visible { forced-color-adjust: none; background: Highlight; color: HighlightText; }
+  .settings-toggle:focus-visible .settings-toggle-description { color: inherit; }
+}

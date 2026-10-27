@@ -513,6 +513,9 @@ export function timelineSignature(
       parts.push(
         `r${round.round}:${round.decision?.verdict ?? "-"}:${fingerprintStep(round.cot ?? "")}`,
       );
+      // Cached timelines retain round objects. Invalidate when SSE fills in
+      // reports or settlement even when the reviewed text did not change.
+      parts.push(fingerprint(JSON.stringify([round.comments, round.decision, round.gameCritiques, round.gameChair, round.gameSettlement])));
       for (const entry of round.revision?.rewritten ?? []) {
         parts.push(`w${entry.index}:${fingerprintStep(entry.text)}`);
       }

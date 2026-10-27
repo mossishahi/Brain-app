@@ -300,10 +300,88 @@ export const embeddingFacetSchema = z
       }),
     /** Centrality of this facet to the submission's core, 0-1. */
     relevance: z.number().min(0).max(1),
+    /**
+     * Optional (classifier v2): up to five other names of the same concept,
+     * including the names other communities publish under. Each is a term of
+     * art (3-80 characters, one line), distinct from the facet name and from
+     * every other alias. Absent means "not provided".
+     */
+    aliases: z
+      .array(
+        singleLine(
+          z
+            .string()
+            .min(3, "facet alias must be at least 3 characters")
+            .max(80, "facet alias must stay a short term of art (at most 80 characters)"),
+        ),
+      )
+      .max(5)
+      .optional(),
+    /** Optional (classifier v2): what kind of concept the facet names. */
+    kind: z.enum(["method", "theory", "problem", "object", "application"]).optional(),
+  })
+  .strict()
+  .superRefine((facet, ctx) => {
+    if (facet.aliases === undefined) return;
+    const name = facet.name.trim().toLowerCase();
+    const seen = new Set<string>();
+    facet.aliases.forEach((alias, index) => {
+      const key = alias.trim().toLowerCase();
+      if (key === name) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["aliases", index],
+          message: `alias "${alias}" repeats the facet name — an alias must be another name`,
+        });
+      }
+      if (seen.has(key)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["aliases", index],
+          message: `duplicate alias "${alias}"`,
+        });
+      }
+      seen.add(key);
+    });
+  });
+
+export type EmbeddingFacet = z.infer<typeof embeddingFacetSchema>;
+
+/**
+ * Optional (classifier v2): a field where an equivalent or closely analogous
+ * problem is studied under another name, with the classifier's confidence
+ * that the analogy holds.
+ */
+export const equivalentProblemSchema = z
+  .object({
+    /** The field that studies it (2-80 characters, one line). */
+    field: singleLine(
+      z
+        .string()
+        .min(2, "equivalent-problem field must be at least 2 characters")
+        .max(80, "equivalent-problem field must stay at most 80 characters"),
+    ),
+    /** The problem's name in that field (3-120 characters, one line). */
+    name: singleLine(
+      z
+        .string()
+        .min(3, "equivalent-problem name must be at least 3 characters")
+        .max(120, "equivalent-problem name must stay at most 120 characters"),
+    ),
+    /** One or two self-contained sentences stating the analogous problem. */
+    statement: z
+      .string()
+      .min(40, "equivalent-problem statement must be at least 40 characters")
+      .max(400, "equivalent-problem statement must stay at most 400 characters (1-2 sentences)")
+      .refine((value) => paragraphs(1).safeParse(value).success, {
+        message: "equivalent-problem statement must be a single paragraph",
+      }),
+    /** Confidence that the problem is equivalent or closely analogous, 0-1. */
+    confidence: z.number().min(0).max(1),
   })
   .strict();
 
-export type EmbeddingFacet = z.infer<typeof embeddingFacetSchema>;
+export type EquivalentProblem = z.infer<typeof equivalentProblemSchema>;
 
 /**
  * The submission distilled into embedding-ready text: one title+abstract
@@ -334,6 +412,40 @@ export const embeddingInputSchema = z
       }),
     /** The submission's distinct concepts, most central first. */
     facets: z.array(embeddingFacetSchema).min(3).max(8),
+    /**
+     * Optional (classifier v2): one paragraph (150-1,500 characters)
+     * restating the problem with every application word removed — what is
+     * given, what is sought, which structure or constraints matter — in the
+     * vocabulary of mathematics, statistics and computer science.
+     */
+    problemFormulation: answered(150, "problem formulation")
+      .refine((value) => paragraphs(1).safeParse(value).success, {
+        message: "problem formulation must be a single paragraph",
+      })
+      .refine((value) => value.length <= 1500, {
+        message: "problem formulation is runaway output; keep it to at most 1,500 characters",
+      })
+      .optional(),
+    /**
+     * Optional (classifier v2): at most five fields where an equivalent or
+     * closely analogous problem is studied under another name.
+     */
+    equivalentProblems: z.array(equivalentProblemSchema).max(5).optional(),
+    /**
+     * Optional (classifier v2): at most twelve phrases copied verbatim from
+     * the submission (the submitter's own wording), 2-80 characters each.
+     */
+    keyTerms: z
+      .array(
+        singleLine(
+          z
+            .string()
+            .min(2, "key term must be at least 2 characters")
+            .max(80, "key term must stay at most 80 characters"),
+        ),
+      )
+      .max(12)
+      .optional(),
   })
   .strict()
   .superRefine((value, ctx) => {
@@ -1793,6 +1905,46 @@ export const redevelopmentPatchPartsSchema = z
 
 export type RedevelopmentPatchParts = z.infer<typeof redevelopmentPatchPartsSchema>;
 
+/**
+ * A reconsideration of a member's chain after the fact table deleted a badge
+ * it cites: the rewritten steps only (none when unchanged), each a complete
+ * four-part replacement, plus the developed sections and novelty the change
+ * moved. Steps travel inline; no stepwise submit_step contract applies.
+ */
+export const chainReconsiderationPartsSchema = z
+  .object({
+    decision: z.enum(["revised", "unchanged"]),
+    reason: paragraphs(1),
+    steps: z
+      .array(
+        z
+          .object({
+            index: z.number().int().min(1).max(9),
+            part1: z.string(),
+            part2: z.string(),
+            part3: z.string(),
+            part4: z.string(),
+          })
+          .strict(),
+      )
+      .max(9)
+      .superRefine(requireAscendingSteps),
+    outputPatch: redevelopmentOutputPatchSchema.optional(),
+    novelty: paragraphs(1).optional(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    const changes = value.steps.length > 0 || value.outputPatch !== undefined || value.novelty !== undefined;
+    if (value.decision === "unchanged" && changes) {
+      ctx.addIssue({ code: "custom", path: ["decision"], message: "an unchanged decision carries no steps, outputPatch or novelty" });
+    }
+    if (value.decision === "revised" && !changes) {
+      ctx.addIssue({ code: "custom", path: ["decision"], message: "a revised decision carries at least one step, an outputPatch or a novelty" });
+    }
+  });
+
+export type ChainReconsiderationParts = z.infer<typeof chainReconsiderationPartsSchema>;
+
 /** A patch that cannot be applied to the version it claims to revise. */
 export class RedevelopmentMergeError extends Error {
   constructor(message: string) {
@@ -2282,6 +2434,497 @@ export const judgeDecisionPartsSchema = judgeDecisionFields
 
 export type JudgeDecisionParts = z.infer<typeof judgeDecisionPartsSchema>;
 
+/** The game critic's entire report. Identity and scores are host metadata. */
+export const gameCritiqueSchema = z
+  .object({
+    q: z.number().min(0).max(1),
+    justification: nonEmpty,
+  })
+  .strict();
+
+export type GameCritique = z.infer<typeof gameCritiqueSchema>;
+
+const reconsiderationDecision = z.enum(["revised", "withdrawn", "unchanged"]);
+
+/** A critic's reconsideration of its game report after a fact-table deletion. */
+export const gameReportReconsiderationSchema = z
+  .object({
+    decision: reconsiderationDecision,
+    reason: nonEmpty,
+    report: gameCritiqueSchema.optional(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if ((value.decision === "revised") !== (value.report !== undefined)) {
+      ctx.addIssue({ code: "custom", path: ["report"], message: "a report is returned exactly when the decision is revised" });
+    }
+  });
+
+export type GameReportReconsideration = z.infer<typeof gameReportReconsiderationSchema>;
+
+/** A critic's reconsideration of its review comment after a fact-table deletion. */
+export const commentReconsiderationSchema = z
+  .object({
+    decision: reconsiderationDecision,
+    reason: nonEmpty,
+    comment: commentPartsSchema.optional(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if ((value.decision === "revised") !== (value.comment !== undefined)) {
+      ctx.addIssue({ code: "custom", path: ["comment"], message: "a comment is returned exactly when the decision is revised" });
+    }
+  });
+
+export type CommentReconsideration = z.infer<typeof commentReconsiderationSchema>;
+
+/** What one fact-update merge point merged and discarded, in notice order. */
+export const factUpdateMergeSchema = z
+  .object({
+    merged: z.array(
+      z
+        .object({
+          /** Subscriber key: chain:<seat>, game-report:<seat>:<step>:<round>:<critic> or comment:<seat>:<step>:<round>:<critic>. */
+          key: nonEmpty,
+          taskId: nonEmpty,
+          notices: z.array(nonEmpty).min(1),
+          /** The task's validated output: chainReconsiderationParts, gameReportReconsideration or commentReconsideration, by key. */
+          output: z.record(z.string(), z.unknown()),
+          /** Game reports only: the deletion epoch the revision was requested at. */
+          epoch: z.number().int().min(0).optional(),
+        })
+        .strict(),
+    ),
+    discarded: z.array(
+      z
+        .object({
+          key: nonEmpty,
+          taskId: nonEmpty,
+          notices: z.array(nonEmpty).min(1),
+          reason: z.enum(["superseded", "report-changed", "seat-dismissed"]),
+        })
+        .strict(),
+    ),
+    /** Late merges only: true when a report or comment the chair or judge already had was revised or withdrawn. */
+    reassess: z.boolean().optional(),
+  })
+  .strict();
+
+export type FactUpdateMerge = z.infer<typeof factUpdateMergeSchema>;
+
+/** Whether a submitted justification can contribute to the chair's consensus. */
+export const gameReportAdmissionSchema = z
+  .object({ admissible: z.boolean(), reason: nonEmpty })
+  .strict();
+
+/**
+ * The chair's readable reason is the final decision artifact for this round.
+ * A null label explicitly means no admissible report; it is never a clean pass.
+ * Exact report IDs and issue positions require the round's inputs and are
+ * checked by the runtime, in addition to these context-free invariants.
+ */
+export const gameChairDecisionSchema = z
+  .object({
+    reports: z.record(nonEmpty, gameReportAdmissionSchema),
+    y: z.union([z.literal(0), z.literal(1), z.null()]),
+    reason: nonEmpty,
+    issues: z.array(judgeIssuePartsSchema).max(12),
+  })
+  .strict()
+  .superRefine((decision, ctx) => {
+    const admitted = Object.values(decision.reports).some((report) => report.admissible);
+    if ((decision.y === null) !== !admitted) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["y"],
+        message: "y is null exactly when no report is admissible",
+      });
+    }
+    if (decision.y !== 1 && decision.issues.length > 0) {
+      ctx.addIssue({ code: "custom", path: ["issues"], message: "only y=1 carries repair issues" });
+    }
+    if (decision.y === 1 && !decision.issues.some((issue) => issue.mustAddress)) {
+      ctx.addIssue({ code: "custom", path: ["issues"], message: "y=1 requires a must-address issue" });
+    }
+  });
+
+export type GameChairDecision = z.infer<typeof gameChairDecisionSchema>;
+
+/** Committee fact checks cite host-issued Supreme receipts in mediated bundles.
+ * Legacy bundles still use exact fact conditions. Both paths check real standing
+ * and complete citation coverage again during deterministic settlement. */
+export const gameFactCheckSchema = z.object({
+  factId: z.string().regex(/^F:[1-9][0-9]*$/),
+  /** Required by the host for supreme-mediated bundles; optional for pinned legacy outputs. */
+  approvalId: nonEmpty.optional(),
+  /** Hash of the original cited badge, never the approved replacement target. */
+  badgeHash: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional(),
+  /** Approved target badge. Supreme authorizes semantic support in mediated
+   * bundles; legacy bundles require exact same-premise reconciliation. */
+  verifiedFactId: z.string().regex(/^F:[1-9][0-9]*$/).optional(),
+  conditions: nonEmpty,
+  supportsConclusion: z.boolean(),
+  reason: nonEmpty,
+}).strict();
+
+/** The chair's decisiveness label for one report's argument (scoring v3):
+ * `decisive` holds and changes the requested solution's correctness,
+ * `not-decisive` holds but changes nothing, `invalid` does not hold or does
+ * not address the major-flaw event. The host decides y from it only under the
+ * chair-decisive rule; an admitted report is scored whatever its label. */
+export const gameReportLabelSchema = z.enum(["decisive", "not-decisive", "invalid"]);
+
+export type GameReportLabel = z.infer<typeof gameReportLabelSchema>;
+
+/** Run-level decision rule for committee settlement (workflow param gameDecisionRule). */
+export const gameDecisionRuleSchema = z.enum(["committee-mean", "chair-decisive"]);
+
+export type GameDecisionRule = z.infer<typeof gameDecisionRuleSchema>;
+
+export const gameCommitteeReportSchema = z.object({
+  admissible: z.boolean(),
+  reason: nonEmpty,
+  /** Required by the host for bundles that declare gameDecisionRule (the task
+   * schema pins it); optional for pinned legacy outputs, which never carry it. */
+  label: gameReportLabelSchema.optional(),
+  factChecks: z.array(gameFactCheckSchema),
+}).strict().superRefine((report, ctx) => {
+  if (new Set(report.factChecks.map((check) => check.factId)).size !== report.factChecks.length) {
+    ctx.addIssue({ code: "custom", path: ["factChecks"], message: "check each fact ID once" });
+  }
+  // Directly inspectable reasoning may need no table lookup. The chair's
+  // reason explains admission; every badge that is cited must still support it.
+  if (report.admissible && report.factChecks.some((check) => !check.supportsConclusion)) {
+    ctx.addIssue({ code: "custom", path: ["factChecks"], message: "every checked fact must support an admitted conclusion" });
+  }
+});
+
+/** The model admits arguments; the runtime alone computes the mean and label. */
+export const gameCommitteeDecisionSchema = z.object({
+  reports: z.record(nonEmpty, gameCommitteeReportSchema),
+  reason: nonEmpty,
+}).strict();
+
+export type GameCommitteeDecision = z.infer<typeof gameCommitteeDecisionSchema>;
+
+/** Supreme-only semantic consultation over a host-selected scoped table batch. */
+export const factConsultationSchema = z.object({
+  answer: nonEmpty,
+  matches: z.array(z.object({
+    factId: z.string().regex(/^F:[1-9][0-9]*$/),
+    relation: z.enum(["equivalent", "supports", "conflicts", "related"]),
+    reason: nonEmpty,
+  }).strict()),
+  approval: z.object({ approved: z.boolean(), targetFactId: z.string().regex(/^F:[1-9][0-9]*$/).optional(), reason: nonEmpty }).strict().optional(),
+}).strict().superRefine((value, ctx) => {
+  if (new Set(value.matches.map((match) => match.factId)).size !== value.matches.length) {
+    ctx.addIssue({ code: "custom", path: ["matches"], message: "each supplied fact is assessed at most once" });
+  }
+  if (value.approval?.approved === true && value.approval.targetFactId === undefined) {
+    ctx.addIssue({ code: "custom", path: ["approval", "targetFactId"], message: "approval must name the fact that supports the requested use" });
+  }
+});
+
+export type FactConsultation = z.infer<typeof factConsultationSchema>;
+
+/** The floor of the committee scoring rule, 2 x (-75) - 25 = -175: the lowest
+ * score one round can record (base S in [-75, 25], R = 2 S - the peer mean of S).
+ * A v3 row penalised for an invented badge records exactly this score. */
+export const GAME_SCORE_FLOOR = -175;
+
+/** Host-computed observations; rejected reports carry nulls, except a v3 invented-badge penalty row (score GAME_SCORE_FLOOR). */
+export const gameScoreRowSchema = z
+  .object({
+    criticId: nonEmpty,
+    q: z.number().min(0).max(1),
+    admissible: z.boolean(),
+    reason: nonEmpty,
+    brierLoss: z.number().min(0).max(1).nullable(),
+    baseScore: z.number().min(-75).max(25).nullable(),
+    peerMeanBaseScore: z.number().min(-75).max(25).nullable(),
+    score: z.number().min(-175).max(125).nullable(),
+  })
+  .strict();
+
+export type GameScoreRow = z.infer<typeof gameScoreRowSchema>;
+
+/**
+ * A deterministic score artifact plus the compatibility signal for the existing
+ * patching loop. An unresolved round may use Interrupt only as a control signal;
+ * its scientific label stays null and its issues stay empty.
+ */
+export const gameSettlementV1Schema = z
+  .object({
+    ruleVersion: z.literal("brier-peer/v1"),
+    version: nonEmpty,
+    y: z.union([z.literal(0), z.literal(1), z.null()]),
+    status: z.enum(["settled", "no-valid-reports"]),
+    admittedCount: z.number().int().min(0),
+    rows: z.array(gameScoreRowSchema),
+    decision: z.object({
+      verdict: z.enum(["Pass", "Interrupt"]),
+      reason: nonEmpty,
+      suggestion: z.string(),
+      evidence: evidenceSchema,
+      issues: z.array(judgeIssuePartsSchema).max(12),
+    }).strict(),
+  })
+  .strict()
+  .superRefine((settlement, ctx) => {
+    const admitted = settlement.rows.filter((row) => row.admissible);
+    if (settlement.admittedCount !== admitted.length) {
+      ctx.addIssue({ code: "custom", path: ["admittedCount"], message: "admittedCount must match the rows" });
+    }
+    if (new Set(settlement.rows.map((row) => row.criticId)).size !== settlement.rows.length) {
+      ctx.addIssue({ code: "custom", path: ["rows"], message: "each critic has exactly one score row" });
+    }
+    const noReports = admitted.length === 0;
+    if ((settlement.y === null) !== noReports || (settlement.status === "no-valid-reports") !== noReports) {
+      ctx.addIssue({ code: "custom", path: ["status"], message: "only a round with no admitted reports is unresolved" });
+    }
+    if (settlement.decision.verdict !== (settlement.y === 0 ? "Pass" : "Interrupt")) {
+      ctx.addIssue({ code: "custom", path: ["decision", "verdict"], message: "the compatibility verdict must preserve the chair label" });
+    }
+    if (settlement.y !== 1 && settlement.decision.issues.length > 0) {
+      ctx.addIssue({ code: "custom", path: ["decision", "issues"], message: "only y=1 carries repair issues" });
+    }
+    if (settlement.y === 1 && !settlement.decision.issues.some((issue) => issue.mustAddress)) {
+      ctx.addIssue({ code: "custom", path: ["decision", "issues"], message: "y=1 requires a must-address issue" });
+    }
+    settlement.rows.forEach((row, index) => {
+      const scored = row.admissible && settlement.y !== null;
+      if ([row.brierLoss, row.baseScore, row.score].some((value) => (value !== null) !== scored)) {
+        ctx.addIssue({ code: "custom", path: ["rows", index], message: "only admitted reports with a label receive scores" });
+      }
+      if ((row.peerMeanBaseScore !== null) !== (scored && admitted.length > 1)) {
+        ctx.addIssue({ code: "custom", path: ["rows", index, "peerMeanBaseScore"], message: "a peer mean requires another admitted report" });
+      }
+    });
+  });
+
+export type GameSettlementV1 = z.infer<typeof gameSettlementV1Schema>;
+
+export const gameScoreRowV2Schema = gameScoreRowSchema.extend({
+  balanceBefore: z.number(),
+  balanceAfter: z.number(),
+  /** Latched removal from future critic assignments, never from thinking. */
+  excluded: z.boolean(),
+});
+
+/** Centering preserves an identical probability exactly, including a threshold
+ * tie; compensated addition limits cancellation for heterogeneous reports. */
+export function stableGameMean(values: readonly number[]): number | null {
+  if (values.length === 0) return null;
+  const anchor = values[0]!;
+  let sum = 0;
+  let compensation = 0;
+  for (const value of values) {
+    const delta = value - anchor - compensation;
+    const next = sum + delta;
+    compensation = (next - sum) - delta;
+    sum = next;
+  }
+  return Math.min(1, Math.max(0, anchor + sum / values.length));
+}
+
+/** Committee settlement: the arithmetic decision and a durable private ledger.
+ * Anonymous repair arguments contain only admitted reports at the threshold. */
+export const gameSettlementV2Schema = z.object({
+  ruleVersion: z.literal("brier-peer/v2"),
+  version: nonEmpty,
+  settlementId: nonEmpty,
+  ledgerSequence: z.number().int().min(1),
+  criticIds: z.array(nonEmpty),
+  initialPoints: z.number().min(0),
+  meanQ: z.number().min(0).max(1).nullable(),
+  threshold: z.number().min(0).max(1),
+  y: z.union([z.literal(0), z.literal(1), z.null()]),
+  status: z.enum(["settled", "no-valid-reports"]),
+  admittedCount: z.number().int().min(0),
+  rows: z.array(gameScoreRowV2Schema),
+  repairArguments: z.array(nonEmpty),
+  decision: z.object({
+    verdict: z.enum(["Pass", "Interrupt"]),
+    reason: nonEmpty,
+    suggestion: z.string(),
+    evidence: evidenceSchema,
+    issues: z.array(judgeIssuePartsSchema).max(12),
+  }).strict(),
+}).strict().superRefine((settlement, ctx) => {
+  const fail = (path: (string | number)[], message: string) => ctx.addIssue({ code: "custom", path, message });
+  const close = (a: number, b: number) => Math.abs(a - b) <= 1e-8 * Math.max(1, Math.abs(a), Math.abs(b));
+  const admitted = settlement.rows.filter((row) => row.admissible);
+  if (new Set(settlement.criticIds).size !== settlement.criticIds.length) fail(["criticIds"], "confirmed critic IDs must be unique");
+  if (new Set(settlement.rows.map((row) => row.criticId)).size !== settlement.rows.length) fail(["rows"], "each critic has one score row");
+  if (settlement.rows.some((row) => !settlement.criticIds.includes(row.criticId))) fail(["rows"], "score rows belong to the confirmed panel");
+  if (settlement.admittedCount !== admitted.length) fail(["admittedCount"], "admittedCount must match the rows");
+  const mean = stableGameMean(admitted.map((row) => row.q));
+  const label = mean === null ? null : mean >= settlement.threshold ? 1 : 0;
+  if ((mean === null) !== (settlement.meanQ === null) || (mean !== null && settlement.meanQ !== null && !close(mean, settlement.meanQ))) fail(["meanQ"], "meanQ is the arithmetic mean of admitted probabilities");
+  if (settlement.y !== label) fail(["y"], "the threshold applied to the admitted mean determines y");
+  if ((settlement.status === "no-valid-reports") !== (mean === null)) fail(["status"], "no admissible reports means unresolved");
+  if (settlement.decision.verdict !== (label === 0 ? "Pass" : "Interrupt")) fail(["decision", "verdict"], "the repair signal must preserve the computed label");
+  if (settlement.decision.issues.length !== 0) fail(["decision", "issues"], "committee repair uses anonymous arguments, not model-selected issues");
+  if ((label !== 1 && settlement.repairArguments.length !== 0) || (label === 1 && settlement.repairArguments.length === 0)) fail(["repairArguments"], "only a blocked round carries repair arguments");
+  settlement.rows.forEach((row, index) => {
+    const path = ["rows", index];
+    const scored = row.admissible && label !== null;
+    if ([row.brierLoss, row.baseScore, row.score].some((value) => (value !== null) !== scored)) fail(path, "rejected reports receive no score");
+    if ((row.peerMeanBaseScore !== null) !== (scored && admitted.length > 1)) fail([...path, "peerMeanBaseScore"], "a peer mean requires another admitted report");
+    if (scored) {
+      const loss = (row.q - label) ** 2;
+      const base = 25 - 100 * loss;
+      const peers = admitted.filter((other) => other.criticId !== row.criticId);
+      const peerMean = peers.length ? peers.reduce((sum, other) => sum + 25 - 100 * (other.q - label) ** 2, 0) / peers.length : null;
+      const score = peerMean === null ? base : 2 * base - peerMean;
+      if (row.brierLoss !== null && !close(row.brierLoss, loss)) fail([...path, "brierLoss"], "incorrect Brier loss");
+      if (row.baseScore !== null && !close(row.baseScore, base)) fail([...path, "baseScore"], "incorrect base score");
+      if (row.peerMeanBaseScore !== null && peerMean !== null && !close(row.peerMeanBaseScore, peerMean)) fail([...path, "peerMeanBaseScore"], "incorrect peer mean");
+      if (row.score !== null && !close(row.score, score)) fail([...path, "score"], "incorrect peer-adjusted score");
+    }
+    if (!close(row.balanceAfter, row.balanceBefore + (row.score ?? 0))) fail([...path, "balanceAfter"], "only a scored report changes the balance");
+    if ((row.balanceBefore < 0 || row.balanceAfter < 0) && !row.excluded) fail([...path, "excluded"], "a negative balance disables future criticism");
+  });
+});
+
+export type GameSettlementV2 = z.infer<typeof gameSettlementV2Schema>;
+
+export const gameScoreRowV3Schema = gameScoreRowV2Schema.extend({
+  /** The chair's label; null for a report the host did not admit or that carried none. */
+  label: gameReportLabelSchema.nullable(),
+  /** The label this report was scored against; null for an unscored report. */
+  scoringLabel: z.union([z.literal(0), z.literal(1), z.null()]),
+  /**
+   * Present only on a penalised report: "invented-badge" when it cites a badge
+   * never issued in the run's fact table, else "deleted-badge" when it cites,
+   * as support, one deleted from the table before the report was requested.
+   */
+  penalty: z.enum(["invented-badge", "deleted-badge"]).optional(),
+  /** The invented badge ids, unique and string-sorted (citedGameFactIds order). */
+  inventedBadges: z.array(z.string().regex(/^F:[1-9][0-9]*$/)).min(1).optional(),
+  /** The badge ids deleted before the report was requested that it cites as support, unique and string-sorted. */
+  deletedBadges: z.array(z.string().regex(/^F:[1-9][0-9]*$/)).min(1).optional(),
+});
+
+export type GameScoreRowV3 = z.infer<typeof gameScoreRowV3Schema>;
+
+/** Committee settlement under a recorded decision rule. `chair-decisive`: y is 1
+ * exactly when an admitted report is labelled decisive, and every admitted
+ * report is scored against y. `committee-mean`: y is the threshold applied to
+ * the admitted mean; with leaveOneOut each report is scored against the label
+ * the OTHER admitted reports produce, and a lone admitted report is unscored.
+ * Base score, peer mean, peer-adjusted score and balances are the v2 arithmetic
+ * over the scored rows. */
+export const gameSettlementV3Schema = z.object({
+  ruleVersion: z.literal("brier-peer/v3"),
+  version: nonEmpty,
+  settlementId: nonEmpty,
+  ledgerSequence: z.number().int().min(1),
+  criticIds: z.array(nonEmpty),
+  initialPoints: z.number().min(0),
+  decisionRule: gameDecisionRuleSchema,
+  leaveOneOut: z.boolean(),
+  /** Present exactly when the run enables the invented-badge penalty. */
+  inventedBadgePenalty: z.literal(true).optional(),
+  /** Present exactly when the run also fines badges deleted from its fact table before a report was requested. */
+  deletedBadgePenalty: z.literal(true).optional(),
+  meanQ: z.number().min(0).max(1).nullable(),
+  threshold: z.number().min(0).max(1),
+  y: z.union([z.literal(0), z.literal(1), z.null()]),
+  status: z.enum(["settled", "no-valid-reports"]),
+  admittedCount: z.number().int().min(0),
+  rows: z.array(gameScoreRowV3Schema),
+  repairArguments: z.array(nonEmpty),
+  decision: z.object({
+    verdict: z.enum(["Pass", "Interrupt"]),
+    reason: nonEmpty,
+    suggestion: z.string(),
+    evidence: evidenceSchema,
+    issues: z.array(judgeIssuePartsSchema).max(12),
+  }).strict(),
+}).strict().superRefine((settlement, ctx) => {
+  const fail = (path: (string | number)[], message: string) => ctx.addIssue({ code: "custom", path, message });
+  const close = (a: number, b: number) => Math.abs(a - b) <= 1e-8 * Math.max(1, Math.abs(a), Math.abs(b));
+  const admitted = settlement.rows.filter((row) => row.admissible);
+  if (new Set(settlement.criticIds).size !== settlement.criticIds.length) fail(["criticIds"], "confirmed critic IDs must be unique");
+  if (new Set(settlement.rows.map((row) => row.criticId)).size !== settlement.rows.length) fail(["rows"], "each critic has one score row");
+  if (settlement.rows.some((row) => !settlement.criticIds.includes(row.criticId))) fail(["rows"], "score rows belong to the confirmed panel");
+  if (settlement.admittedCount !== admitted.length) fail(["admittedCount"], "admittedCount must match the rows");
+  const mean = stableGameMean(admitted.map((row) => row.q));
+  if ((mean === null) !== (settlement.meanQ === null) || (mean !== null && settlement.meanQ !== null && !close(mean, settlement.meanQ))) fail(["meanQ"], "meanQ is the arithmetic mean of admitted probabilities");
+  const chairRule = settlement.decisionRule === "chair-decisive";
+  const label = mean === null ? null : chairRule ? (admitted.some((row) => row.label === "decisive") ? 1 : 0) : mean >= settlement.threshold ? 1 : 0;
+  if (settlement.y !== label) fail(["y"], chairRule ? "a decisive admitted report determines y under chair-decisive" : "the threshold applied to the admitted mean determines y");
+  if ((settlement.status === "no-valid-reports") !== (mean === null)) fail(["status"], "no admissible reports means unresolved");
+  if (settlement.decision.verdict !== (label === 0 ? "Pass" : "Interrupt")) fail(["decision", "verdict"], "the repair signal must preserve the computed label");
+  if (settlement.decision.issues.length !== 0) fail(["decision", "issues"], "committee repair uses anonymous arguments, not model-selected issues");
+  if ((label !== 1 && settlement.repairArguments.length !== 0) || (label === 1 && settlement.repairArguments.length === 0)) fail(["repairArguments"], "only a blocked round carries repair arguments");
+  const leaveOneOut = !chairRule && settlement.leaveOneOut;
+  const targetOf = (row: GameScoreRowV3): 0 | 1 | null => {
+    if (!row.admissible || label === null) return null;
+    if (!leaveOneOut) return label;
+    const others = stableGameMean(admitted.filter((other) => other.criticId !== row.criticId).map((other) => other.q));
+    return others === null ? null : others >= settlement.threshold ? 1 : 0;
+  };
+  const targets = new Map(settlement.rows.map((row) => [row.criticId, targetOf(row)] as const));
+  const scoredRows = settlement.rows.filter((row) => targets.get(row.criticId) !== null);
+  settlement.rows.forEach((row, index) => {
+    const path = ["rows", index];
+    const target = targets.get(row.criticId) ?? null;
+    if (!row.admissible && row.label !== null) fail([...path, "label"], "a rejected report carries no chair label");
+    if (chairRule && row.admissible && row.label === null) fail([...path, "label"], "chair-decisive scores admitted reports the chair labelled");
+    if (row.scoringLabel !== target) fail([...path, "scoringLabel"], leaveOneOut ? "the scoring label is the threshold applied to the other admitted reports" : "the scoring label is y");
+    const scored = target !== null;
+    // A penalty row records GAME_SCORE_FLOOR as its score (checked below); its
+    // other score fields stay null, as on any rejected report.
+    const penalty = row.penalty !== undefined;
+    if ([row.brierLoss, row.baseScore, ...(penalty ? [] : [row.score])].some((value) => (value !== null) !== scored)) fail(path, "only reports with a scoring label receive scores");
+    if ((row.peerMeanBaseScore !== null) !== (scored && scoredRows.length > 1)) fail([...path, "peerMeanBaseScore"], "a peer mean requires another scored report");
+    if (scored) {
+      const loss = (row.q - target) ** 2;
+      const base = 25 - 100 * loss;
+      const peers = scoredRows.filter((other) => other.criticId !== row.criticId);
+      const peerMean = peers.length ? peers.reduce((sum, other) => sum + 25 - 100 * (other.q - targets.get(other.criticId)!) ** 2, 0) / peers.length : null;
+      const score = peerMean === null ? base : 2 * base - peerMean;
+      if (row.brierLoss !== null && !close(row.brierLoss, loss)) fail([...path, "brierLoss"], "incorrect Brier loss");
+      if (row.baseScore !== null && !close(row.baseScore, base)) fail([...path, "baseScore"], "incorrect base score");
+      if (row.peerMeanBaseScore !== null && peerMean !== null && !close(row.peerMeanBaseScore, peerMean)) fail([...path, "peerMeanBaseScore"], "incorrect peer mean");
+      if (row.score !== null && !close(row.score, score)) fail([...path, "score"], "incorrect peer-adjusted score");
+    }
+    const badges = row.inventedBadges;
+    const invented = row.penalty === "invented-badge";
+    if (invented !== (badges !== undefined)) fail([...path, "penalty"], "an invented-badge penalty and its invented badges are recorded together");
+    if (badges !== undefined && badges.some((id, at) => at > 0 && !(badges[at - 1]! < id))) fail([...path, "inventedBadges"], "invented badges are unique and string-sorted");
+    if (invented) {
+      if (row.admissible || row.label !== null || row.scoringLabel !== null || row.brierLoss !== null || row.baseScore !== null || row.peerMeanBaseScore !== null) {
+        fail(path, "an invented-badge penalty row is a rejected report without labels or base scores");
+      }
+      if (row.score !== GAME_SCORE_FLOOR) fail([...path, "score"], "an invented-badge penalty records exactly GAME_SCORE_FLOOR");
+      if (settlement.inventedBadgePenalty !== true) fail([...path, "penalty"], "an invented-badge penalty requires a settlement that enables it");
+    }
+    // A deleted-badge penalty (fact updates): the same floor row, with the
+    // deleted ids; a row fined for both offences is an invented-badge row that
+    // also lists its deleted ids.
+    const deleted = row.deletedBadges;
+    if (row.penalty === "deleted-badge" && deleted === undefined) fail([...path, "deletedBadges"], "a deleted-badge penalty records its deleted badges");
+    if (deleted !== undefined && !penalty) fail([...path, "deletedBadges"], "deleted badges are recorded only on a penalty row");
+    if (deleted !== undefined && deleted.some((id, at) => at > 0 && !(deleted[at - 1]! < id))) fail([...path, "deletedBadges"], "deleted badges are unique and string-sorted");
+    if (deleted !== undefined && settlement.deletedBadgePenalty !== true) fail([...path, "deletedBadges"], "a deleted-badge penalty requires a settlement that enables it");
+    if (row.penalty === "deleted-badge") {
+      if (row.admissible || row.label !== null || row.scoringLabel !== null || row.brierLoss !== null || row.baseScore !== null || row.peerMeanBaseScore !== null) {
+        fail(path, "a deleted-badge penalty row is a rejected report without labels or base scores");
+      }
+      if (row.score !== GAME_SCORE_FLOOR) fail([...path, "score"], "a deleted-badge penalty records exactly GAME_SCORE_FLOOR");
+    }
+    if (!close(row.balanceAfter, row.balanceBefore + (row.score ?? 0))) fail([...path, "balanceAfter"], "only a scored report changes the balance");
+    if ((row.balanceBefore < 0 || row.balanceAfter < 0) && !row.excluded) fail([...path, "excluded"], "a negative balance disables future criticism");
+  });
+});
+
+export type GameSettlementV3 = z.infer<typeof gameSettlementV3Schema>;
+export const gameSettlementSchema = z.union([gameSettlementV1Schema, gameSettlementV2Schema, gameSettlementV3Schema]);
+export type GameSettlement = z.infer<typeof gameSettlementSchema>;
+
 // ---------------------------------------------------------------------------
 // final proposal
 // ---------------------------------------------------------------------------
@@ -2405,6 +3048,503 @@ export const bridgeReportSchema = z
 export type BridgeReport = z.infer<typeof bridgeReportSchema>;
 
 // ---------------------------------------------------------------------------
+// paper-based panel composition (literature -> literatureScreen -> panelEvidence)
+// ---------------------------------------------------------------------------
+
+/** A number (artifact numbers are rounded to 6 decimals by the producer). */
+const finite = z.number();
+const count = z.number().int().min(0);
+
+/** The search routes a literature query can come from (spec v2, Step 2). */
+export const LITERATURE_ROUTES = [
+  "title",
+  "facet",
+  "alias",
+  "pair",
+  "statement",
+  "equivalent",
+  "knn",
+  "citation",
+  "feedback",
+  "keyterm",
+] as const;
+
+export type LiteratureRoute = (typeof LITERATURE_ROUTES)[number];
+
+/** Why a merged paper is (not) part of the eligible evidence set. */
+export const LITERATURE_DECISIONS = [
+  "eligible",
+  "excluded:no-abstract",
+  "excluded:short-abstract",
+  "excluded:cap",
+  "excluded:type",
+] as const;
+
+/** One retrieval need: the core, a facet, the formulation or an equivalent problem. */
+export const literatureNeedSchema = z
+  .object({
+    id: count,
+    kind: z.enum(["core", "facet", "formulation", "equivalent"]),
+    name: z.string(),
+    text: z.string(),
+    /** w_f; 0 means the need only feeds retrieval. */
+    weight: finite.min(0),
+    /** Encoder mode the need text is embedded in. */
+    mode: z.enum(["doc", "query"]),
+  })
+  .strict();
+
+export const literaturePaperSchema = z
+  .object({
+    /** Run-local id (P0001...), assigned in fused-rank order. */
+    pid: nonEmpty,
+    /** Canonical id: doi:..., arxiv:..., s2:..., oa:..., core:..., or title:... */
+    cid: nonEmpty,
+    title: z.string(),
+    year: z.number().int().optional(),
+    venue: z.string().optional(),
+    ids: z
+      .object({
+        doi: z.string().optional(),
+        arxivId: z.string().optional(),
+        pmid: z.string().optional(),
+        s2Id: z.string().optional(),
+        oaId: z.string().optional(),
+        coreId: z.string().optional(),
+      })
+      .strict(),
+    sources: z.array(z.string()),
+    routes: z.array(z.string()),
+    rounds: z.array(z.number().int().min(1)),
+    /** One (best) rank per (query, source). */
+    hits: z.array(
+      z
+        .object({
+          source: z.string(),
+          query: z.string(),
+          rank: z.number().int().min(1),
+        })
+        .strict(),
+    ),
+    rrf: finite,
+    abstract: z.string().optional(),
+    abstractChars: count,
+    decision: z.enum(LITERATURE_DECISIONS),
+    /** The m most similar topics with their margin weights pi(d,t). */
+    placement: z
+      .array(z.object({ topic: nonEmpty, sim: finite, pi: finite }).strict())
+      .optional(),
+    /** c(d, t_(m+1)): the similarity of the first topic outside the placement. */
+    nextSim: finite.optional(),
+    /** s(d,f) for every need, in need order. */
+    needSims: z.array(finite).optional(),
+    /** Best placement similarity in the run's lowest weakPlacementQuantile. */
+    weak: z.boolean().optional(),
+  })
+  .strict();
+
+export type LiteraturePaper = z.infer<typeof literaturePaperSchema>;
+
+/**
+ * The literature record of one run (literature.retrieve, spec v2 Steps 1-5):
+ * needs, query plan, every call, the merged papers with their placement into
+ * the taxonomy and their similarity to every need, and the run's flags.
+ */
+export const literatureSchema = z
+  .object({
+    version: z.literal(1),
+    needs: z.array(literatureNeedSchema),
+    W: finite,
+    encoder: z
+      .object({
+        id: nonEmpty,
+        dim: z.number().int().min(0),
+        models: z.record(z.string(), z.string()),
+        nodeVectorsSha256: z.string(),
+        nodeTextsSha256: z.string(),
+        taxonomyRevision: z.number().int(),
+      })
+      .strict(),
+    sources: z.array(
+      z
+        .object({
+          id: nonEmpty,
+          state: z.enum(["available", "needs-key", "unavailable", "disabled"]),
+          detail: z.string().optional(),
+        })
+        .strict(),
+    ),
+    queries: z.array(
+      z
+        .object({
+          id: nonEmpty,
+          text: z.string(),
+          route: z.enum(LITERATURE_ROUTES),
+          round: z.number().int().min(1),
+          own: z.number().int().min(0).nullable(),
+          sources: z.array(z.string()),
+        })
+        .strict(),
+    ),
+    calls: z.array(
+      z
+        .object({
+          source: z.string(),
+          query: z.string(),
+          ok: z.boolean(),
+          outcome: z.enum(["ok", "cached", "error"]),
+          n: count,
+          nAbstract: count,
+          error: z.string().optional(),
+        })
+        .strict(),
+    ),
+    rounds: z.array(
+      z
+        .object({
+          round: z.number().int().min(1),
+          calls: count,
+          newPapers: count,
+          newEligible: count,
+        })
+        .strict(),
+    ),
+    papers: z.array(literaturePaperSchema),
+    /** Eligible papers, abstract cut to 600 characters, for the relevance screen. */
+    screenItems: z.array(
+      z.object({ pid: nonEmpty, title: z.string(), abstract: z.string() }).strict(),
+    ),
+    flags: z
+      .object({
+        weakCut: finite.optional(),
+        hubs: z.array(z.object({ topic: nonEmpty, share: finite }).strict()),
+        budgetExhausted: z.boolean(),
+        notes: z.array(z.string()),
+      })
+      .strict(),
+  })
+  .strict();
+
+export type Literature = z.infer<typeof literatureSchema>;
+
+/** The optional relevance screen's verdicts (literature-screener, or literature.noScreen). */
+export const literatureScreenSchema = z
+  .object({
+    decisions: z.array(
+      z
+        .object({
+          pid: nonEmpty,
+          onTopic: z.boolean(),
+          reason: z.string().max(200),
+        })
+        .strict(),
+    ),
+    /** Why no screen ran (e.g. "relevance screen off"). */
+    skipped: z.string().optional(),
+  })
+  .strict();
+
+export type LiteratureScreen = z.infer<typeof literatureScreenSchema>;
+
+/**
+ * The evidence record of panel.compose (spec v2 Steps 6-11): evidence per
+ * need, the candidates with their affinities, the greedy order with its
+ * curve, every seat in greedy order, the flags and the determinism hash.
+ */
+export const panelEvidenceSchema = z
+  .object({
+    version: z.literal(1),
+    params: z.record(z.string(), z.unknown()),
+    evidence: z.array(
+      z
+        .object({
+          need: count,
+          ownShare: finite,
+          thin: z.boolean(),
+          sK1: finite.nullable(),
+          papers: z.array(z.object({ pid: nonEmpty, sim: finite, omega: finite }).strict()),
+          topTopics: z.array(z.object({ topic: nonEmpty, P: finite }).strict()),
+        })
+        .strict(),
+    ),
+    candidates: z.array(
+      z
+        .object({
+          cand: nonEmpty,
+          kind: z.enum(["topic", "anchor"]),
+          name: z.string(),
+          subfield: z.string(),
+          field: z.string(),
+          support: count,
+          a: z.array(finite),
+          P: z.array(finite),
+          M: finite,
+          anchorNeed: count.optional(),
+        })
+        .strict(),
+    ),
+    greedy: z
+      .object({
+        trace: z.array(
+          z
+            .object({
+              k: z.number().int().min(1),
+              cand: nonEmpty,
+              gain: finite,
+              F: finite,
+              Fnorm: finite,
+              coverage: z.array(finite),
+              runnerUp: z.string().optional(),
+              runnerUpGain: finite.optional(),
+              contrib: z.record(z.string(), finite),
+            })
+            .strict(),
+        ),
+        droppedByCap: z.array(
+          z
+            .object({
+              cand: nonEmpty,
+              why: z.enum(["subfield cap", "field cap"]),
+              atK: z.number().int().min(1),
+              gain: finite,
+            })
+            .strict(),
+        ),
+        rescued: z.array(z.string()),
+        kStar: count,
+        kCov: count.nullable(),
+        epsW: finite,
+      })
+      .strict(),
+    seats: z.array(
+      z
+        .object({
+          id: nonEmpty,
+          department: nonEmpty,
+          umbrella: nonEmpty,
+          subfields: z.array(nonEmpty),
+          kind: z.enum(["topic", "anchor"]),
+          cand: nonEmpty,
+          covers: z.array(z.string()),
+          exemplars: z.array(z.object({ pid: nonEmpty, score: finite }).strict()),
+          inKStar: z.boolean(),
+        })
+        .strict(),
+    ),
+    flags: z
+      .object({
+        sourceShare: z.record(z.string(), finite),
+        sourceAlarm: z.array(z.string()),
+        thinNeeds: z.array(z.string()),
+        anchoredSeats: z.array(z.string()),
+        failedSources: z.array(z.string()),
+        screenedOut: count,
+        weakPlacements: count,
+        /** What the record could not do as specified (label-only fallback, unknown topics, fill-up). */
+        notes: z.array(z.string()).optional(),
+      })
+      .strict(),
+    determinismSha256: z.string().regex(/^[0-9a-f]{64}$/),
+  })
+  .strict();
+
+export type PanelEvidence = z.infer<typeof panelEvidenceSchema>;
+
+// ---------------------------------------------------------------------------
+// fact table (the supreme judge's ruling on one submission)
+// ---------------------------------------------------------------------------
+
+/**
+ * The fact table's closed vocabularies: core's FACT_CASES, FACT_METHODS,
+ * FACT_RESOLUTIONS, FACT_KINDS and FACT_INTEGRITY (core/src/facts.ts),
+ * restated because content does not depend on core. A brainstorm-runtime
+ * test asserts that both copies agree; the names differ from core's so a
+ * module importing both packages sees no clash.
+ * - cases: the answer one submission receives;
+ * - methods: how the supreme judge checked a claim ("none" only when nothing
+ *   could be checked);
+ * - resolutions: what a ruling does to an entry the submission contradicts;
+ * - kinds: what a submitted fact is about;
+ * - integrity: whether the submitted justification itself was honest.
+ */
+export const FACT_VERDICT_CASES = [
+  "justified",
+  "justified-new",
+  "narrowed",
+  "conflict",
+  "refuted",
+  "unverified",
+  "not-a-fact",
+] as const;
+
+export const FACT_VERDICT_METHODS = [
+  "re-executed",
+  "source-quoted",
+  "record-match",
+  "judgement-only",
+  "none",
+] as const;
+
+export const FACT_VERDICT_RESOLUTIONS = [
+  "incumbent-stands",
+  "incumbent-revoked",
+  "both-narrowed",
+  "disputed",
+] as const;
+
+export const FACT_VERDICT_KINDS = ["code", "record", "result", "literature", "math", "background"] as const;
+
+export const FACT_VERDICT_INTEGRITY = ["honest", "unsupported", "misrepresented", "fabricated"] as const;
+
+/** The id of a table entry: "F:" and a positive integer. */
+const factId = z.string().regex(/^F:[1-9][0-9]*$/, { message: 'an entry id is "F:" and a positive integer' });
+
+/** One contradicted entry of the table, and what the ruling does to it. */
+const factConflictSchema = z
+  .object({
+    id: factId,
+    resolution: z.enum(FACT_VERDICT_RESOLUTIONS),
+    /** For "both-narrowed": the conditions the entry holds under from now on. */
+    conditions: z.string().min(1).max(1200).optional(),
+    explanation: z.string().min(1).max(1200),
+  })
+  .strict();
+
+/**
+ * The supreme judge's ruling on one fact-table submission (core's
+ * FactVerdict). The worker commits it to the run's table, so the case and the
+ * rest of the ruling must agree:
+ * - "justified" names, in `existing`, the entry that already covers the
+ *   claim — and no other case names one — and it contradicts nothing;
+ * - "conflict" contradicts at least one entry, each of which stands or is
+ *   disputed;
+ * - "justified-new" and "narrowed" issue a badge, so the claim was checked
+ *   (a method other than "none", evidence that is not blank) and every entry
+ *   it contradicts is revoked or narrowed;
+ * - "refuted" carries the evidence that refutes the claim and contradicts
+ *   nothing; "unverified" and "not-a-fact" contradict nothing;
+ * - a "both-narrowed" entry states the conditions it keeps, and no entry is
+ *   ruled on twice.
+ * The rules say what a case MEANS, so they stay strict: a ruling that breaks
+ * one would put a badge in the table that its own record contradicts.
+ */
+export const factVerdictSchema = z
+  .object({
+    case: z.enum(FACT_VERDICT_CASES),
+    /** The claim as checked: for "narrowed", the narrowed claim. */
+    claim: z.string().min(1).max(600),
+    /** The conditions it holds under ("none" when unconditional). */
+    conditions: z.string().min(1).max(1200),
+    method: z.enum(FACT_VERDICT_METHODS),
+    /** What the supreme judge did and found: the script and its output, the quote and its source, the file and line. */
+    evidence: z.string().max(8000),
+    /** Addressed to the requester: what was found and why the case follows. */
+    explanation: z.string().min(1).max(2000),
+    /** For "justified": the entry that already covers the claim. */
+    existing: factId.optional(),
+    /** The entries the claim contradicts, each with its ruling. */
+    conflicts: z.array(factConflictSchema).max(8),
+    /** Whether the submitted justification itself was honest; never shown to the requester. */
+    integrity: z.enum(FACT_VERDICT_INTEGRITY),
+  })
+  .strict()
+  .superRefine((verdict, ctx) => {
+    if (verdict.case === "justified" && verdict.existing === undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["existing"],
+        message: "justified names the entry that already covers the claim",
+      });
+    }
+    if (verdict.case !== "justified" && verdict.existing !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["existing"],
+        message: `only a justified verdict names an existing entry, not ${verdict.case}`,
+      });
+    }
+    if (
+      (verdict.case === "justified" ||
+        verdict.case === "refuted" ||
+        verdict.case === "unverified" ||
+        verdict.case === "not-a-fact") &&
+      verdict.conflicts.length > 0
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["conflicts"],
+        message: `${verdict.case} contradicts no entry, so it lists no conflicts`,
+      });
+    }
+    if (verdict.case === "conflict") {
+      if (verdict.conflicts.length === 0) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["conflicts"],
+          message: "conflict names at least one entry the claim contradicts",
+        });
+      }
+      verdict.conflicts.forEach((conflict, index) => {
+        if (conflict.resolution !== "incumbent-stands" && conflict.resolution !== "disputed") {
+          ctx.addIssue({
+            code: "custom",
+            path: ["conflicts", index, "resolution"],
+            message: `in a conflict every contradicted entry stands or is disputed, not ${conflict.resolution}`,
+          });
+        }
+      });
+    }
+    if (verdict.case === "justified-new" || verdict.case === "narrowed") {
+      verdict.conflicts.forEach((conflict, index) => {
+        if (conflict.resolution !== "incumbent-revoked" && conflict.resolution !== "both-narrowed") {
+          ctx.addIssue({
+            code: "custom",
+            path: ["conflicts", index, "resolution"],
+            message: `${verdict.case} revokes or narrows every entry it contradicts, not ${conflict.resolution}`,
+          });
+        }
+      });
+      if (verdict.method === "none") {
+        ctx.addIssue({
+          code: "custom",
+          path: ["method"],
+          message: `${verdict.case} issues a badge, so the claim was checked: the method cannot be none`,
+        });
+      }
+    }
+    if (
+      (verdict.case === "justified-new" || verdict.case === "narrowed" || verdict.case === "refuted") &&
+      verdict.evidence.trim().length === 0
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["evidence"],
+        message: `${verdict.case} carries the evidence the check produced`,
+      });
+    }
+    const seen = new Set<string>();
+    verdict.conflicts.forEach((conflict, index) => {
+      if (conflict.resolution === "both-narrowed" && conflict.conditions === undefined) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["conflicts", index, "conditions"],
+          message: "both-narrowed states the conditions the entry keeps",
+        });
+      }
+      if (seen.has(conflict.id)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["conflicts", index, "id"],
+          message: `entry "${conflict.id}" is ruled on more than once`,
+        });
+      }
+      seen.add(conflict.id);
+    });
+  });
+
+export type FactVerdictArtifact = z.infer<typeof factVerdictSchema>;
+
+// ---------------------------------------------------------------------------
 // registry
 // ---------------------------------------------------------------------------
 
@@ -2433,9 +3573,25 @@ export const artifactSchemas = {
   brainIdeaParts: brainIdeaPartsSchema,
   commentParts: commentPartsSchema,
   judgeDecisionParts: judgeDecisionPartsSchema,
+  gameCritique: gameCritiqueSchema,
+  gameChairDecision: gameChairDecisionSchema,
+  gameCommitteeDecision: gameCommitteeDecisionSchema,
+  factConsultation: factConsultationSchema,
+  gameSettlement: gameSettlementSchema,
   redevelopmentPatchParts: redevelopmentPatchPartsSchema,
   finalProposal: finalProposalSchema,
   bridgeReport: bridgeReportSchema,
+  // Paper-based panel composition: retrieval record, screen, evidence record.
+  literature: literatureSchema,
+  literatureScreen: literatureScreenSchema,
+  panelEvidence: panelEvidenceSchema,
+  // The fact table's verifier: the supreme judge's ruling on one submission.
+  factVerdict: factVerdictSchema,
+  // Fact updates: the three reconsideration outputs and what a merge point merged.
+  chainReconsiderationParts: chainReconsiderationPartsSchema,
+  gameReportReconsideration: gameReportReconsiderationSchema,
+  commentReconsideration: commentReconsiderationSchema,
+  factUpdateMerge: factUpdateMergeSchema,
 } as const;
 
 export type ArtifactSchemaName = keyof typeof artifactSchemas;

@@ -32,7 +32,10 @@ import {
   CreditBlockedError,
   addUsage,
   emptyUsage,
+  factScopeOf,
+  factSubmitContextOf,
   serializeError,
+  notesScopeOf,
   systemPromptSegments,
   textContent,
   toolCallDetail,
@@ -41,9 +44,13 @@ import {
   type AgentProgress,
   type AgentResult,
   type AgentTask,
+  type FactAccess,
+  type FactScope,
   type JsonObject,
   type JsonValue,
   type ModelMessage,
+  type NotesAccess,
+  type NotesScope,
   type PromptRecord,
   type SystemPrompt,
   type TaxonomyAccess,
@@ -57,14 +64,17 @@ import {
 } from "@brainstorm-agentic/credit-recovery";
 import {
   attachmentTools,
+  describeFactTableCall,
   gpuRunTools,
   ATTACHMENT_LIST_MANIFEST,
   ATTACHMENT_SEARCH_MANIFEST,
+  FACT_TABLE_DEFINITION,
   GPU_RUN_MANIFEST,
-  WEB_FETCH_MANIFEST,
-  WEB_SEARCH_MANIFEST,
-  parseWebSearchInput,
+  NOTES_SEARCH_DEFINITION,
   WebAccessError,
+  runFactTable,
+  runNotesSearch,
+  webToolSpecs,
   type GpuRunConfig,
 } from "@brainstorm-agentic/host-tools";
 
@@ -213,6 +223,20 @@ export interface CursorAgentExecutorConfig {
    */
   readonly taxonomy?: TaxonomyAccess;
   /**
+   * The run's thinker notes. A review task whose metadata carries a
+   * notesScope and whose skill declares `notes-access` gets notes_search as
+   * an in-process custom tool, scoped to that seat and chain position.
+   */
+  readonly notes?: NotesAccess;
+  /**
+   * The run's fact table. A task whose metadata carries a factScope and
+   * whose skill declares `fact-table` gets fact_table as an in-process
+   * custom tool, scoped to that task (role, agent, seat, chain step). A call
+   * holds the stall watchdog while it runs: a submission waits minutes on
+   * the supreme judge, and the SDK stream is silent meanwhile.
+   */
+  readonly facts?: FactAccess;
+  /**
    * GPU run setup. No Cursor built-in submits cluster jobs, so the gpu_run
    * host tool is bridged in-process when the deployment set it up.
    */
@@ -221,12 +245,21 @@ export interface CursorAgentExecutorConfig {
    * The unified host web layer. The web is HOST-OWNED throughout the
    * pipeline: Cursor's own webSearch/webFetch never enter the tools
    * allowlist (see the adapter registry's host-owned-web note), and when
-   * this is set the host web_search/web_fetch tools are bridged in-process
+   * this is set the host web tools (web_search, news_search, paper_search,
+   * paper_details, web_fetch — whichever the deployment can answer) are
+   * bridged in-process
    * to any task whose skill declares the `web-search` capability — routed,
    * bounded, and logged by the one manager every backend shares. Without it
    * the capability resolves unavailable and the agent is told so.
    */
   readonly web?: WebAccess;
+  /**
+   * Set ONLY when the deployment handed web search to the agents' own tools
+   * (webSearch.mode "agent"): provider-native web operations in a task's
+   * capability plan then admit Cursor's own webSearch/webFetch. Without it a
+   * plan naming them adds nothing and both stay off the tools allowlist.
+   */
+  readonly nativeWeb?: boolean;
   /**
    * Maximum model turns per task, enforced by this executor: the SDK
    * declares no turn ceiling of its own, so the run is cancelled when the
@@ -898,6 +931,37 @@ function toolMessage(name: string, input: unknown): string {
       const jobName = shortText(args.job_name);
       return jobName ? `Running a GPU job — ${jobName}` : "Running a GPU job";
     }
+    case "notes_search": {
+      const mode = shortText(args.mode) ?? "find";
+      const query = shortText(args.query);
+      return query ? `Searching the thinker's notes — ${mode}: ${query}` : `Searching the thinker's notes — ${mode}`;
+    }
+    case "fact_table":
+      return describeFactTableCall(args as JsonObject);
+    case "web_search": {
+      const query = shortText(args.query);
+      return query ? `Searching the web — ${query}` : "Searching the web";
+    }
+    case "web_fetch": {
+      const url = shortText(args.url);
+      return url ? `Fetching a source — ${url}` : "Fetching a source";
+    }
+    case "news_search": {
+      const query = shortText(args.query);
+      return query ? `Searching the news — ${query}` : "Searching the news";
+    }
+    case "paper_search": {
+      const query = shortText(args.query);
+      return query ? `Searching papers — ${query}` : "Searching papers";
+    }
+    case "paper_details": {
+      const count = Array.isArray(args.ids) ? args.ids.length : 0;
+      return count === 1
+        ? "Looking up a paper"
+        : count > 1
+          ? `Looking up ${count} papers`
+          : "Looking up papers";
+    }
     case RESULT_TOOL:
       return "Submitting the structured output";
     default:
@@ -918,6 +982,13 @@ const TOOL_END_LABELS: Readonly<Record<string, string>> = {
   taxonomy_tree: "Taxonomy read",
   taxonomy_resolve: "Taxonomy lookup",
   gpu_run: "GPU job",
+  notes_search: "Notes search",
+  fact_table: "Fact table",
+  web_search: "Web search",
+  web_fetch: "Source fetch",
+  news_search: "News search",
+  paper_search: "Paper search",
+  paper_details: "Paper lookup",
   [RESULT_TOOL]: "Structured output",
 };
 
@@ -1245,6 +1316,95 @@ function resultTool(
   };
 }
 
+/** The task's notes scope, when its skill may read notes and the runtime stamped one. */
+function notesScopeFor(task: AgentTask): NotesScope | undefined {
+  return taskUsesCapability(task, "notes-access") ? notesScopeOf(task.metadata) : undefined;
+}
+
+/** notes_search for ONE task: the scope is fixed, so only that seat's notes are readable. */
+function notesCustomTools(
+  notes: NotesAccess,
+  scope: NotesScope,
+  context: AgentExecutionContext,
+): CustomToolMap {
+  return {
+    notes_search: {
+      description: NOTES_SEARCH_DEFINITION.description,
+      inputSchema: NOTES_SEARCH_DEFINITION.inputSchema,
+      execute: reported("notes_search", context, async (args) => {
+        const result = await runNotesSearch(notes, scope, args);
+        return result.isError === true ? toolError(String(result.output)) : result.output;
+      }),
+    },
+  };
+}
+
+/** The task's fact scope, when its skill may use the fact table and the runtime stamped one. */
+function factScopeFor(task: AgentTask): FactScope | undefined {
+  return taskUsesCapability(task, "fact-table") ? factScopeOf(task.metadata) : undefined;
+}
+
+/**
+ * Custom tool calls that hold the stall watchdog — the Claude path's
+ * SessionWatchdog hold/release, as a counter the watchdog reads. A held call
+ * may block for minutes while the SDK stream stays silent (a fact_table
+ * submission waits while the supreme judge re-checks the claim), and that
+ * silence is work, not a dead connection: while a held call is in flight the
+ * stall timer re-arms instead of cancelling, and the last release re-arms it
+ * from that moment. Only fact_table calls are held (gpu_run is not).
+ */
+class StallHold {
+  /** Held calls in flight. */
+  calls = 0;
+  /** Set by the attempt's watchdog: restarts its quiet window. */
+  onRelease: (() => void) | undefined;
+
+  /** Wraps a custom tool's execute so its runtime never counts as silence. */
+  held(execute: CursorSdkCustomTool["execute"]): CursorSdkCustomTool["execute"] {
+    return async (args, context) => {
+      this.calls += 1;
+      try {
+        return await execute(args, context);
+      } finally {
+        this.calls = Math.max(0, this.calls - 1);
+        if (this.calls === 0) this.onRelease?.();
+      }
+    };
+  }
+}
+
+/**
+ * fact_table for ONE task: the scope is fixed, so submissions are recorded
+ * against this task and `status` reads the badges its chain cites. The call
+ * holds the stall watchdog (StallHold).
+ */
+function factCustomTools(
+  facts: FactAccess,
+  scope: FactScope,
+  task: AgentTask,
+  context: AgentExecutionContext,
+  hold: StallHold,
+): CustomToolMap {
+  return {
+    fact_table: {
+      description: FACT_TABLE_DEFINITION.description,
+      inputSchema: FACT_TABLE_DEFINITION.inputSchema,
+      execute: hold.held(
+        reported("fact_table", context, async (args) => {
+          const result = await runFactTable(
+            facts,
+            scope,
+            task.taskId,
+            args,
+            factSubmitContextOf(task, context),
+          );
+          return result.isError === true ? toolError(String(result.output)) : result.output;
+        }),
+      ),
+    },
+  };
+}
+
 /** Shared-taxonomy READ tools (reads only, like every executor path). */
 function taxonomyCustomTools(
   taxonomy: TaxonomyAccess,
@@ -1362,11 +1522,14 @@ function attachmentCustomTools(
 
 /**
  * The unified host web tools bridged in-process. Cursor's own
- * webSearch/webFetch are never offered (the web is host-owned), so every
- * search and fetch on this backend goes through the injected WebAccess — the
- * same manager, the same provider chains, and the same verbatim per-call log
- * as every other backend. A WebAccessError's message is the answer the model
- * hears (an unconfigured kind, an exhausted chain, a refused fetch).
+ * webSearch/webFetch are never offered unless the deployment handed search
+ * to the agents' own tools (webSearch.mode "agent", where this bridge is not
+ * wired at all), so every search and fetch on this backend goes through the
+ * injected WebAccess — the same manager, the same source lists, and the same
+ * per-call log as every other backend. The tools, their descriptions and
+ * their JSON Schemas all come from host-tools' webToolSpecs. A
+ * WebAccessError's message is the answer the model hears (a malformed
+ * option, an exhausted source list, a refused fetch).
  */
 function webCustomTools(
   web: WebAccess,
@@ -1378,69 +1541,28 @@ function webCustomTools(
     ...(task.agentId !== undefined ? { agentId: task.agentId } : {}),
     nodePath: context.nodePath,
   };
-  return {
-    web_search: {
-      description: WEB_SEARCH_MANIFEST.definition.description ?? "",
-      inputSchema: {
-        type: "object",
-        properties: {
-          query: { type: "string", minLength: 1 },
-          kind: { type: "string", enum: ["general", "scholarly", "news"] },
-          max_results: { type: "integer", minimum: 1, maximum: 10 },
-          recency: { type: "string", enum: ["day", "week", "month", "year"] },
-          domains: { type: "array", items: { type: "string" }, maxItems: 8 },
-        },
-        required: ["query"],
-        additionalProperties: false,
-      },
-      execute: reported("web_search", context, async (args) => {
-        const parsed = parseWebSearchInput(args as JsonValue);
-        if (parsed === undefined) {
-          return toolError("query must be a non-empty string.");
-        }
+  const tools: CustomToolMap = {};
+  for (const spec of webToolSpecs(web)) {
+    tools[spec.name] = {
+      description: spec.definition.description ?? "",
+      inputSchema: spec.definition.inputSchema,
+      execute: reported(spec.name, context, async (args) => {
         try {
-          return (await web.search(parsed, attribution)) as unknown as JsonValue;
+          return (await spec.run(args, attribution)) as JsonValue;
         } catch (error) {
           if (error instanceof WebAccessError) return toolError(error.message);
           throw error;
         }
       }),
-    },
-    web_fetch: {
-      description: WEB_FETCH_MANIFEST.definition.description ?? "",
-      inputSchema: {
-        type: "object",
-        properties: {
-          url: { type: "string", minLength: 1 },
-          max_chars: { type: "integer", minimum: 1000, maximum: 48000 },
-        },
-        required: ["url"],
-        additionalProperties: false,
-      },
-      execute: reported("web_fetch", context, async (args) => {
-        if (typeof args.url !== "string" || args.url.trim() === "") {
-          return toolError("url must be a non-empty string.");
-        }
-        try {
-          return (await web.fetch(
-            {
-              url: args.url,
-              ...(typeof args.max_chars === "number" ? { maxChars: args.max_chars } : {}),
-            },
-            attribution,
-          )) as unknown as JsonValue;
-        } catch (error) {
-          if (error instanceof WebAccessError) return toolError(error.message);
-          throw error;
-        }
-      }),
-    },
-  };
+    };
+  }
+  return tools;
 }
 
 /** The gpu_run host tool bridged in-process (bug-report-to-submitter contract). */
 function gpuCustomTools(
   config: GpuRunConfig,
+  taskId: string,
   context: AgentExecutionContext,
 ): CustomToolMap {
   const [tool] = gpuRunTools(config);
@@ -1459,7 +1581,9 @@ function gpuCustomTools(
       },
       execute: reported("gpu_run", context, async (args) => {
         const result = await tool!.execute(args as JsonValue, {
-          runId: "cursor-agent-sdk",
+          runId: context.runId,
+          taskId,
+          ...(context.signal ? { signal: context.signal } : {}),
         });
         if (result.isError === true) {
           return toolError(
@@ -1478,13 +1602,20 @@ function gpuCustomTools(
 /* Built-in tool selection                                                   */
 /* ------------------------------------------------------------------------ */
 
-function allowedBuiltinTools(task: AgentTask): string[] {
+function allowedBuiltinTools(task: AgentTask, nativeWeb = false): string[] {
   const tools = new Set<string>();
   if (task.capabilityPlan) {
     for (const op of task.capabilityPlan.operations) {
       if (op.source === "unavailable") continue;
       const capTools = CAPABILITY_TOOLS[op.capabilityId];
       if (capTools) for (const name of capTools) tools.add(name);
+      // Cursor's own web tools, only when the deployment chose them
+      // (webSearch.mode "agent"): a plan alone never re-opens them.
+      if (nativeWeb && op.source === "provider" && op.capabilityId === "web-search") {
+        for (const name of op.toolNames) {
+          if (name === "webSearch" || name === "webFetch") tools.add(name);
+        }
+      }
     }
     for (const logical of task.tools ?? []) {
       const mapped = LOGICAL_TOOLS[logical];
@@ -1497,6 +1628,10 @@ function allowedBuiltinTools(task: AgentTask): string[] {
   }
   for (const capability of task.allowedCapabilities ?? []) {
     for (const name of CAPABILITY_TOOLS[capability] ?? []) tools.add(name);
+    if (nativeWeb && capability === "web-search") {
+      tools.add("webSearch");
+      tools.add("webFetch");
+    }
   }
   for (const logical of task.tools ?? []) {
     const mapped = LOGICAL_TOOLS[logical];
@@ -1817,11 +1952,15 @@ async function executeAttempt(
   }
 
   const wantsTaxonomy = config.taxonomy !== undefined && taskUsesCapability(task, "taxonomy-access");
+  const notesScope = config.notes !== undefined ? notesScopeFor(task) : undefined;
+  const factScope = config.facts !== undefined ? factScopeFor(task) : undefined;
   const wantsAttachments =
     (config.attachmentRoots?.length ?? 0) > 0 &&
     taskUsesCapability(task, "attachment-access");
   const wantsGpu = config.gpuRun !== undefined && taskUsesCapability(task, "gpu-execution");
   const wantsWeb = config.web !== undefined && taskUsesCapability(task, "web-search");
+  // Held custom tool calls suspend the stall watchdog below (see StallHold).
+  const stallHold = new StallHold();
 
   const customTools: CustomToolMap = {
     ...(capture.stepwise !== undefined
@@ -1831,12 +1970,16 @@ async function executeAttempt(
       ? { [RESULT_TOOL]: resultTool(task.outputSchema.schema, capture, context) }
       : {}),
     ...(wantsTaxonomy ? taxonomyCustomTools(config.taxonomy!, context) : {}),
+    ...(notesScope !== undefined ? notesCustomTools(config.notes!, notesScope, context) : {}),
+    ...(factScope !== undefined
+      ? factCustomTools(config.facts!, factScope, task, context, stallHold)
+      : {}),
     ...(wantsAttachments ? attachmentCustomTools(config.attachmentRoots!, context) : {}),
-    ...(wantsGpu ? gpuCustomTools(config.gpuRun!, context) : {}),
+    ...(wantsGpu ? gpuCustomTools(config.gpuRun!, task.taskId, context) : {}),
     ...(wantsWeb ? webCustomTools(config.web!, task, context) : {}),
   };
   const hasCustomTools = Object.keys(customTools).length > 0;
-  const builtinTools = allowedBuiltinTools(task);
+  const builtinTools = allowedBuiltinTools(task, config.nativeWeb === true);
   // Exact allowlist semantics: only the listed tools are offered, so
   // everything outside the task's capabilities (edit/write/task/todo tools)
   // is off — the same posture as the Claude path's disallowedTools. "mcp"
@@ -1973,9 +2116,24 @@ async function executeAttempt(
         armStallTimer(stallMs - quietForMs + 50);
         return;
       }
+      if (stallHold.calls > 0) {
+        // A held call is in flight (a fact_table submission waiting on the
+        // supreme judge): the silence is its work, not a dead connection.
+        // Keep watching; its release restarts the window from that moment.
+        stallTimer = undefined;
+        stallArmedAt = 0; // bypass the arming throttle for this re-arm
+        armStallTimer();
+        return;
+      }
       cancelRun("stall");
       rejectOnStall?.(stallError());
     }, delayMs);
+  };
+  // When the last held call returns, the quiet window restarts from that moment.
+  stallHold.onRelease = () => {
+    lastStreamActivityAt = Date.now();
+    stallArmedAt = 0; // bypass the arming throttle for this re-arm
+    armStallTimer();
   };
   armStallTimer();
   try {
@@ -2232,6 +2390,8 @@ async function executeAttempt(
     };
   } finally {
     if (stallTimer !== undefined) clearTimeout(stallTimer);
+    // A held call still running after the attempt must not re-arm the timer.
+    stallHold.onRelease = undefined;
     context.signal?.removeEventListener("abort", onAbort);
     try {
       await agent[Symbol.asyncDispose]?.();

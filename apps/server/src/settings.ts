@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 import { userMessage } from "@brainstorm-agentic/core";
 import {
+  normalizeClaudeSetupToken,
   validateClaudeSetupToken,
 } from "@brainstorm-agentic/executor-claude-agent";
 import {
@@ -15,20 +16,106 @@ import {
   SLURM_COMMAND_TAG,
   type ClaudeAgentSettings,
   type GpuRunSettings,
+  type GameReviewSettings,
   type LlmSettings,
   type ServerSettings,
   type ServerSettingsUpdate,
   type WebSearchSettings,
 } from "@brainstorm-agentic/protocol";
 import {
+  LOCAL_SEARXNG_ENGINES,
+  paidRequestsInMonth,
   resolveGeneralProvider,
   type WebSearchRuntimeConfig,
   type WebSearchSecrets,
 } from "@brainstorm-agentic/host-tools";
 
 import { atomicWriteFile, atomicWriteJson, readJsonFile } from "./files.js";
+import { gpuProfileDigest, gpuProfileVerified, revokeGpuProfile, verifyGpuProfile } from "./gpu-verification.js";
+import {
+  panelCompositionOf,
+  validatePanelComposition,
+  type PanelCompositionSettings,
+} from "./panel-composition.js";
 import { readJsonCached } from "./read-cache.js";
-import { searxngLocalUrl } from "./searxng-launcher.js";
+import { localSearxngProxyEnvironment } from "./searxng-endpoint.js";
+import {
+  searxngDir,
+  searxngLocalUrl,
+  readSearxngState,
+  type SearxngStateFile,
+} from "./searxng-launcher.js";
+
+/** Whether a new run can spend at least one request on the opted-in fallback. */
+export function paidWebSearchFallbackAvailable(workspace: string, settings: ServerSettings): boolean {
+  const fallback = settings.webSearch?.braveFallback;
+  return fallback?.enabled === true &&
+    settings.webSearch?.braveKeyConfigured === true &&
+    (fallback.maxRequestsPerRun ?? 300) > 0 &&
+    paidRequestsInMonth(workspace, "brave") < (fallback.maxRequestsPerMonth ?? 1000);
+}
+
+/** A local service failure and the search scope the configured alternatives retain. */
+export function localWebSearchIssue(
+  workspace: string,
+  settings: ServerSettings,
+  instanceId?: string,
+): { readonly message: string; readonly detail: string; readonly blocking: boolean } | undefined {
+  if (
+    settings.llm.provider === "offline" ||
+    settings.capabilityOverrides?.["web-search"] === false ||
+    settings.webSearch?.provider !== "searxng-local" ||
+    // Search handed to the agents' own tools needs no local service.
+    settings.webSearch.mode === "agent"
+  ) {
+    return undefined;
+  }
+  let state: SearxngStateFile | undefined;
+  let unreadable = false;
+  try {
+    state = readSearxngState(workspace, instanceId);
+  } catch {
+    unreadable = true;
+  }
+  if (!unreadable && searxngLocalUrl(workspace, instanceId) !== undefined) {
+    return undefined;
+  }
+  const paidFallback = paidWebSearchFallbackAvailable(workspace, settings);
+  const scholarly = settings.webSearch.scholarly !== false;
+  const blocking = !paidFallback && !scholarly;
+  const service = unreadable
+    ? "Local SearXNG state cannot be read"
+    : `Local SearXNG is ${state?.state ?? "not started"}`;
+  const scope = paidFallback
+    ? "general web searches use the configured paid Brave fallback"
+    : scholarly
+      ? "scholarly search remains available; general web search is unavailable"
+      : "general web search is unavailable and no search alternative is enabled";
+  return {
+    message: `${service}; ${scope}`,
+    blocking,
+    detail: [
+      blocking
+        ? "web-search / web.search -> unavailable"
+        : paidFallback
+          ? "web-search / general search -> configured paid Brave fallback"
+          : "web-search / scholarly search -> host paper tools; general web search -> unavailable",
+      unreadable
+        ? "Check the server's SearXNG state file and log."
+        : state?.detail ?? "Wait for local SearXNG to start, or check the server's SearXNG log.",
+    ].join("\n"),
+  };
+}
+
+/** Admission fails only when the configured search tools have no alternative. */
+export function localWebSearchUnavailable(
+  workspace: string,
+  settings: ServerSettings,
+  instanceId?: string,
+): ReturnType<typeof localWebSearchIssue> {
+  const issue = localWebSearchIssue(workspace, settings, instanceId);
+  return issue?.blocking ? issue : undefined;
+}
 
 const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5";
 /**
@@ -42,6 +129,9 @@ const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5";
 export const DEFAULT_CONTENT_REGISTRY_URL =
   "https://167.172.170.154/mcp";
 const CONNECTION_TIMEOUT_MS = 15_000;
+// SDK validation starts a subprocess before its one-turn model request. Its
+// cold-start budget must be independent of the direct HTTP-provider timeout.
+const CLAUDE_SDK_CONNECTION_TIMEOUT_MS = 60_000;
 export const DEFAULT_CLAUDE_AGENT_SETTINGS: ClaudeAgentSettings = {
   maxTurns: 100,
   effort: "high",
@@ -81,7 +171,54 @@ type StoredServerSettings = Omit<
   readonly creditRecovery: StoredCreditRecovery;
   readonly telemetry?: StoredTelemetry;
   readonly webSearch?: StoredWebSearch;
+  /** Panel composition overrides (spec v2 Section 0); stored only when non-empty. */
+  readonly panelComposition?: PanelCompositionSettings;
+  /** Tool availability policy (availability spec 2026-10-03); stored only when set. */
+  readonly availability?: AvailabilitySettings;
 };
+
+/**
+ * The availability section (contract Section A): whether degraded tools are
+ * moved behind every available one in the derived per-purpose order (default
+ * true; off = only flagged), and how often every tool is re-checked while the
+ * server is up (minutes, default 30).
+ */
+export interface AvailabilitySettings {
+  readonly demoteDegraded?: boolean;
+  readonly periodicMinutes?: number;
+}
+
+export const DEFAULT_AVAILABILITY_PERIODIC_MINUTES = 30;
+
+/** The availability policy in effect, defaults applied. */
+export function availabilitySettingsOf(
+  settings: ServerSettings,
+): { readonly demoteDegraded: boolean; readonly periodicMinutes: number } {
+  const section = settings.availability;
+  return {
+    demoteDegraded: section?.demoteDegraded !== false,
+    periodicMinutes: section?.periodicMinutes ?? DEFAULT_AVAILABILITY_PERIODIC_MINUTES,
+  };
+}
+
+/** `{}` is valid and means "the defaults". */
+function validateAvailabilitySettings(value: unknown): AvailabilitySettings {
+  const input = object(value, "availability");
+  if (input.demoteDegraded !== undefined && typeof input.demoteDegraded !== "boolean") {
+    throw new Error("availability.demoteDegraded must be a boolean");
+  }
+  const minutes = input.periodicMinutes;
+  if (
+    minutes !== undefined &&
+    (typeof minutes !== "number" || !Number.isInteger(minutes) || minutes < 1 || minutes > 24 * 60)
+  ) {
+    throw new Error("availability.periodicMinutes must be an integer between 1 and 1440");
+  }
+  return {
+    ...(input.demoteDegraded !== undefined ? { demoteDegraded: input.demoteDegraded } : {}),
+    ...(minutes !== undefined ? { periodicMinutes: minutes } : {}),
+  };
+}
 
 interface StoredCredentials {
   readonly anthropicApiKey?: string;
@@ -92,6 +229,8 @@ interface StoredCredentials {
   readonly braveApiKey?: string;
   readonly semanticScholarApiKey?: string;
   readonly openAlexApiKey?: string;
+  /** CORE (core.ac.uk) API key for the panel composition's CORE source. */
+  readonly coreApiKey?: string;
 }
 
 export interface AnthropicConnectionInput {
@@ -133,6 +272,10 @@ export type WebSearchConnectionValidator = (
 ) => Promise<void>;
 
 export interface SettingsStoreOptions {
+  /** The local search instance owned by this app listener. */
+  readonly searxngInstanceId?: string;
+  /** Applied only when creating a new workspace, before provider onboarding. */
+  readonly defaultRunner?: "local" | "slurm";
   readonly validateAnthropic?: AnthropicConnectionValidator;
   readonly validateClaudeAgent?: ClaudeAgentConnectionValidator;
   readonly validateCursorAgent?: CursorAgentConnectionValidator;
@@ -181,6 +324,8 @@ export function defaultServerSettings(
     // An unattended run keeps moving by default; the submitter may switch the
     // countdown off and make every gate wait for a human instead.
     gateAutoApprove: true,
+    gamifiedReview: false,
+    gameReview: { threshold: 0.5, decisionRule: "chair-decisive", leaveOneOut: true },
     contentRegistry: {
       url: contentRegistryUrl,
       bundle: "brainstorm",
@@ -251,12 +396,35 @@ function optionalNonEmptyString(
   return value.trim();
 }
 
+function validateGameReviewSettings(value: unknown): GameReviewSettings {
+  const section: Record<string, unknown> = value === undefined ? {} : object(value, "gameReview");
+  const threshold = section.threshold === undefined ? 0.5 : section.threshold;
+  if (typeof threshold !== "number" || !Number.isFinite(threshold) || threshold < 0 || threshold > 1) {
+    throw new Error("gameReview.threshold must be a number from 0 to 1");
+  }
+  const initialPoints = section.initialPoints;
+  if (initialPoints !== undefined && (typeof initialPoints !== "number" || !Number.isFinite(initialPoints) || initialPoints < 0)) {
+    throw new Error("gameReview.initialPoints must be a finite nonnegative number, or omitted for automatic points");
+  }
+  const decisionRule = section.decisionRule === undefined ? "chair-decisive" : section.decisionRule;
+  if (decisionRule !== "committee-mean" && decisionRule !== "chair-decisive") {
+    throw new Error("gameReview.decisionRule must be \"committee-mean\" or \"chair-decisive\"");
+  }
+  const leaveOneOut = section.leaveOneOut === undefined ? true : section.leaveOneOut;
+  if (typeof leaveOneOut !== "boolean") {
+    throw new Error("gameReview.leaveOneOut must be a boolean");
+  }
+  return { threshold, ...(initialPoints !== undefined ? { initialPoints: initialPoints as number } : {}), decisionRule, leaveOneOut };
+}
+
 function validateCommonSettings(value: unknown): {
   readonly slurmTemplate: string;
   readonly gpu?: GpuRunSettings;
   readonly runner: "slurm" | "local";
   readonly panelConfirmation: "manual" | "auto";
   readonly gateAutoApprove: boolean;
+  readonly gamifiedReview: boolean;
+  readonly gameReview: GameReviewSettings;
   readonly review?: { readonly maxRounds?: number };
   readonly panel?: { readonly size?: number; readonly interdisciplinarySeat?: boolean };
   readonly llm: Record<string, unknown>;
@@ -267,6 +435,8 @@ function validateCommonSettings(value: unknown): {
   readonly webSearch?: Record<string, unknown>;
   readonly updateCheck?: "off" | "notify";
   readonly telemetry?: Record<string, unknown>;
+  readonly panelComposition?: PanelCompositionSettings;
+  readonly availability?: AvailabilitySettings;
 } {
   const input = object(value, "settings");
   const template = input.slurmTemplate;
@@ -278,6 +448,14 @@ function validateCommonSettings(value: unknown): {
     input.review !== undefined ? validateReviewSettings(input.review) : undefined;
   const panel =
     input.panel !== undefined ? validatePanelSettings(input.panel) : undefined;
+  const panelComposition =
+    input.panelComposition !== undefined
+      ? validatePanelComposition(input.panelComposition)
+      : undefined;
+  const availability =
+    input.availability !== undefined
+      ? validateAvailabilitySettings(input.availability)
+      : undefined;
   if (input.runner !== "slurm" && input.runner !== "local") {
     throw new Error('runner must be "slurm" or "local"');
   }
@@ -296,6 +474,11 @@ function validateCommonSettings(value: unknown): {
   // Absent in a settings file written before the switch existed = the behavior
   // that file ran under, which was always to count down and approve.
   const gateAutoApprove = input.gateAutoApprove !== false;
+  if (input.gamifiedReview !== undefined && typeof input.gamifiedReview !== "boolean") {
+    throw new Error("gamifiedReview must be a boolean");
+  }
+  const gamifiedReview = input.gamifiedReview === true;
+  const gameReview = validateGameReviewSettings(input.gameReview);
   const llm = object(input.llm, "llm");
   const creditRecovery =
     input.creditRecovery === undefined
@@ -353,6 +536,8 @@ function validateCommonSettings(value: unknown): {
     runner: input.runner,
     panelConfirmation: input.panelConfirmation,
     gateAutoApprove,
+    gamifiedReview,
+    gameReview,
     ...(review !== undefined ? { review } : {}),
     ...(panel !== undefined ? { panel } : {}),
     llm,
@@ -363,6 +548,8 @@ function validateCommonSettings(value: unknown): {
     hostTools,
     ...(webSearch !== undefined ? { webSearch } : {}),
     ...(updateCheck !== undefined ? { updateCheck } : {}),
+    ...(panelComposition !== undefined ? { panelComposition } : {}),
+    ...(availability !== undefined ? { availability } : {}),
   };
 }
 
@@ -685,6 +872,40 @@ function validateWebSearchSettings(
   if (contactEmail !== undefined && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contactEmail)) {
     throw new Error("webSearch.contactEmail must be an email address");
   }
+  const mode = value.mode;
+  if (mode !== undefined && mode !== "host" && mode !== "agent") {
+    throw new Error('webSearch.mode must be "host" or "agent"');
+  }
+  const routePreset = value.routePreset;
+  if (routePreset !== undefined && routePreset !== "searxng-first" && routePreset !== "api-first") {
+    throw new Error('webSearch.routePreset must be "searxng-first" or "api-first"');
+  }
+  let braveFallback: StoredWebSearch["braveFallback"];
+  if (value.braveFallback !== undefined) {
+    const fallback = value.braveFallback;
+    if (typeof fallback !== "object" || fallback === null || Array.isArray(fallback)) {
+      throw new Error("webSearch.braveFallback must be an object");
+    }
+    const entry = fallback as Record<string, unknown>;
+    if (typeof entry.enabled !== "boolean") {
+      throw new Error("webSearch.braveFallback.enabled must be a boolean");
+    }
+    const cap = (name: "maxRequestsPerRun" | "maxRequestsPerMonth", max: number): number | undefined => {
+      const raw = entry[name];
+      if (raw === undefined) return undefined;
+      if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 0 || raw > max) {
+        throw new Error(`webSearch.braveFallback.${name} must be an integer between 0 and ${max}`);
+      }
+      return raw;
+    };
+    const perRun = cap("maxRequestsPerRun", 10_000);
+    const perMonth = cap("maxRequestsPerMonth", 1_000_000);
+    braveFallback = {
+      enabled: entry.enabled,
+      ...(perRun !== undefined ? { maxRequestsPerRun: perRun } : {}),
+      ...(perMonth !== undefined ? { maxRequestsPerMonth: perMonth } : {}),
+    };
+  }
   return {
     provider,
     ...(searxngBaseUrl !== undefined ? { searxngBaseUrl } : {}),
@@ -692,6 +913,9 @@ function validateWebSearchSettings(
     cacheEnabled: value.cacheEnabled === true,
     ...(ttl !== undefined ? { cacheTtlHours: ttl } : {}),
     ...(contactEmail !== undefined ? { contactEmail } : {}),
+    ...(mode !== undefined ? { mode } : {}),
+    ...(braveFallback !== undefined ? { braveFallback } : {}),
+    ...(routePreset !== undefined ? { routePreset } : {}),
   };
 }
 
@@ -747,12 +971,18 @@ function validateStoredSettings(value: unknown): StoredServerSettings {
     runner: common.runner,
     panelConfirmation: common.panelConfirmation,
     gateAutoApprove: common.gateAutoApprove,
+    gamifiedReview: common.gamifiedReview,
+    gameReview: common.gameReview,
     // Stored only when it actually overrides; `{}` normalizes to absent.
     ...(common.review?.maxRounds !== undefined
       ? { review: { maxRounds: common.review.maxRounds } }
       : {}),
     ...(common.panel !== undefined && Object.keys(common.panel).length > 0
       ? { panel: common.panel }
+      : {}),
+    ...(common.panelComposition !== undefined &&
+    Object.keys(common.panelComposition.params).length > 0
+      ? { panelComposition: common.panelComposition }
       : {}),
     contentRegistry,
     creditRecovery,
@@ -771,6 +1001,10 @@ function validateStoredSettings(value: unknown): StoredServerSettings {
     // ingest URL on every read, so storing it would go stale.
     ...(common.telemetry !== undefined
       ? { telemetry: { enabled: common.telemetry.enabled === true } }
+      : {}),
+    // Stored only when it sets something; `{}` normalizes to absent.
+    ...(common.availability !== undefined && Object.keys(common.availability).length > 0
+      ? { availability: common.availability }
       : {}),
   };
 }
@@ -799,6 +1033,8 @@ interface ValidatedUpdate {
   readonly clearSemanticScholarApiKey: boolean;
   readonly submittedOpenAlexApiKey?: string;
   readonly clearOpenAlexApiKey: boolean;
+  readonly submittedCoreApiKey?: string;
+  readonly clearCoreApiKey: boolean;
   /**
    * As submitted, so put() can tell the three cases apart: absent = keep
    * the stored policy, `{}` = back to the bundle default, `{maxRounds}` =
@@ -808,6 +1044,8 @@ interface ValidatedUpdate {
   readonly review?: { readonly maxRounds?: number };
   /** Same three-way meaning as `review`, for the panel policy. */
   readonly panel?: { readonly size?: number; readonly interdisciplinarySeat?: boolean };
+  /** Same three-way meaning, for the panel composition overrides. */
+  readonly panelComposition?: PanelCompositionSettings;
 }
 
 function validateSettingsUpdate(value: unknown): ValidatedUpdate {
@@ -826,10 +1064,13 @@ function validateSettingsUpdate(value: unknown): ValidatedUpdate {
     common.llm.apiKey,
     "llm.apiKey",
   );
-  const submittedSetupToken = optionalNonEmptyString(
+  const rawSetupToken = optionalNonEmptyString(
     common.llm.setupToken,
     "llm.setupToken",
   );
+  const submittedSetupToken = rawSetupToken === undefined
+    ? undefined
+    : normalizeClaudeSetupToken(rawSetupToken);
   const submittedCursorApiKey = optionalNonEmptyString(
     common.llm.cursorApiKey,
     "llm.cursorApiKey",
@@ -926,11 +1167,16 @@ function validateSettingsUpdate(value: unknown): ValidatedUpdate {
     webSection.openAlexApiKey,
     "webSearch.openAlexApiKey",
   );
+  const submittedCoreApiKey = optionalNonEmptyString(
+    webSection.coreApiKey,
+    "webSearch.coreApiKey",
+  );
   for (const flag of [
     "clearTavilyApiKey",
     "clearBraveApiKey",
     "clearSemanticScholarApiKey",
     "clearOpenAlexApiKey",
+    "clearCoreApiKey",
   ] as const) {
     if (webSection[flag] !== undefined && typeof webSection[flag] !== "boolean") {
       throw new Error(`webSearch.${flag} must be a boolean`);
@@ -943,6 +1189,8 @@ function validateSettingsUpdate(value: unknown): ValidatedUpdate {
       runner: common.runner,
       panelConfirmation: common.panelConfirmation,
       gateAutoApprove: common.gateAutoApprove,
+      gamifiedReview: common.gamifiedReview,
+      gameReview: common.gameReview,
       ...(common.updateCheck !== undefined ? { updateCheck: common.updateCheck } : {}),
       // Opt-out has to survive the save that made it. This was validated and
       // then dropped from the persisted document, so switching telemetry off
@@ -962,6 +1210,9 @@ function validateSettingsUpdate(value: unknown): ValidatedUpdate {
       },
       ...(hostTools !== undefined ? { hostTools } : {}),
       webSearch,
+      ...(common.availability !== undefined && Object.keys(common.availability).length > 0
+        ? { availability: common.availability }
+        : {}),
     },
     ...(submittedApiKey !== undefined ? { submittedApiKey } : {}),
     ...(submittedSetupToken !== undefined ? { submittedSetupToken } : {}),
@@ -984,8 +1235,13 @@ function validateSettingsUpdate(value: unknown): ValidatedUpdate {
     clearSemanticScholarApiKey: webSection.clearSemanticScholarApiKey === true,
     ...(submittedOpenAlexApiKey !== undefined ? { submittedOpenAlexApiKey } : {}),
     clearOpenAlexApiKey: webSection.clearOpenAlexApiKey === true,
+    ...(submittedCoreApiKey !== undefined ? { submittedCoreApiKey } : {}),
+    clearCoreApiKey: webSection.clearCoreApiKey === true,
     ...(common.review !== undefined ? { review: common.review } : {}),
     ...(common.panel !== undefined ? { panel: common.panel } : {}),
+    ...(common.panelComposition !== undefined
+      ? { panelComposition: common.panelComposition }
+      : {}),
   };
 }
 
@@ -1064,9 +1320,9 @@ export async function validateClaudeAgentConnection(
 ): Promise<void> {
   try {
     await validateClaudeSetupToken({
-      token: input.token,
+      token: normalizeClaudeSetupToken(input.token),
       ...(input.model !== undefined ? { model: input.model } : {}),
-      timeoutMs: CONNECTION_TIMEOUT_MS,
+      timeoutMs: CLAUDE_SDK_CONNECTION_TIMEOUT_MS,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -1147,6 +1403,9 @@ export async function validateContentRegistryConnection(
 }
 
 export class SettingsStore {
+  readonly searxngInstanceId: string | undefined;
+  private gpuRevision = 0;
+  gpuProfileRevision(): number { return this.gpuRevision; }
   readonly path: string;
   readonly credentialsPath: string;
   /**
@@ -1169,6 +1428,7 @@ export class SettingsStore {
     readonly workspace: string,
     options: SettingsStoreOptions = {},
   ) {
+    this.searxngInstanceId = options.searxngInstanceId;
     this.path = join(workspace, "settings.json");
     this.credentialsPath = join(workspace, "credentials.json");
     this.deploymentRegistryUrl =
@@ -1204,7 +1464,7 @@ export class SettingsStore {
       this.path,
       stored === undefined
         ? validateStoredSettings(
-            defaultServerSettings(this.deploymentRegistryUrl),
+            { ...defaultServerSettings(this.deploymentRegistryUrl), runner: options.defaultRunner ?? "slurm" },
           )
         : validateStoredSettings(storedWithRegistry),
     );
@@ -1253,6 +1513,8 @@ export class SettingsStore {
         semanticScholarKeyConfigured:
           this.getSemanticScholarApiKey() !== undefined,
         openAlexKeyConfigured: this.getOpenAlexApiKey() !== undefined,
+        // Not a protocol field yet: present only once a CORE key is stored.
+        ...(this.getCoreApiKey() !== undefined ? { coreKeyConfigured: true } : {}),
       },
     };
   }
@@ -1268,7 +1530,8 @@ export class SettingsStore {
     const token = readJsonCached<StoredCredentials>(
       this.credentialsPath,
     )?.claudeSetupToken;
-    return typeof token === "string" && token.length > 0 ? token : undefined;
+    if (typeof token !== "string") return undefined;
+    return normalizeClaudeSetupToken(token) || undefined;
   }
 
   getCursorApiKey(): string | undefined {
@@ -1307,6 +1570,11 @@ export class SettingsStore {
     return typeof key === "string" && key.length > 0 ? key : undefined;
   }
 
+  getCoreApiKey(): string | undefined {
+    const key = readJsonCached<StoredCredentials>(this.credentialsPath)?.coreApiKey;
+    return typeof key === "string" && key.length > 0 ? key : undefined;
+  }
+
   /**
    * The web-search runtime config a run executes with, derived from settings
    * — the SAME shape the worker parses out of BRAINSTORM_AGENTIC_WEB_SEARCH,
@@ -1315,20 +1583,37 @@ export class SettingsStore {
    * here; they travel the credential channels.
    */
   webSearchRuntimeConfig(settings: ServerSettings = this.get()): WebSearchRuntimeConfig {
+    this.assertWebSearchReady(settings);
     const stored = settings.webSearch ?? {
       provider: "none" as const,
       scholarly: true,
       cacheEnabled: false,
     };
+    // Search handed to the agents' own tools: the worker builds no web
+    // layer, so nothing else here applies.
+    if (stored.mode === "agent") return { mode: "agent" };
+    // The paid fallback, capped per run and by what this month's allowance
+    // still permits (counted in the local usage ledger).
+    const fallback = stored.braveFallback;
+    const braveFallback =
+      fallback?.enabled === true && this.getBraveApiKey() !== undefined
+        ? {
+            enabled: true,
+            maxRequestsPerRun: fallback.maxRequestsPerRun ?? 300,
+            remainingThisMonth: Math.max(
+              0,
+              (fallback.maxRequestsPerMonth ?? 1000) - paidRequestsInMonth(this.workspace, "brave"),
+            ),
+          }
+        : undefined;
     // The app-launched local instance: the worker only ever sees "searxng
     // at this URL" — where the URL comes from the launcher's state file in
-    // this workspace. An instance that is not (yet) healthy contributes no
-    // general provider, so a run started during its warm-up answers general
-    // queries with the explicit configuration error rather than a dead URL,
-    // and the readiness panel names the launcher's own state as the cause.
+    // this app instance. If unavailable, the already configured scholarly
+    // tools / paid fallback remain usable; readiness reports the reduced
+    // scope instead of silently promising general search.
     const localUrl =
       stored.provider === "searxng-local"
-        ? searxngLocalUrl(this.workspace)
+        ? searxngLocalUrl(this.workspace, this.searxngInstanceId)
         : undefined;
     const general =
       stored.provider === "searxng-local"
@@ -1358,7 +1643,22 @@ export class SettingsStore {
       ...(stored.contactEmail !== undefined
         ? { contactEmail: stored.contactEmail }
         : {}),
+      ...(braveFallback !== undefined ? { braveFallback } : {}),
+      ...(stored.routePreset !== undefined ? { routePreset: stored.routePreset } : {}),
+      // The launched instance runs exactly these engines (the launcher
+      // renders them), so the coordinator can schedule them by name.
+      ...(stored.provider === "searxng-local" && general === "searxng"
+        ? { searxngEngines: { byRoute: LOCAL_SEARXNG_ENGINES } }
+        : {}),
     };
+  }
+
+  /** Also guards direct submissions and resumes after a readiness snapshot. */
+  assertWebSearchReady(settings: ServerSettings = this.get()): void {
+    const unavailable = localWebSearchUnavailable(this.workspace, settings, this.searxngInstanceId);
+    if (unavailable) {
+      throw new Error(`${unavailable.message}\n${unavailable.detail}`);
+    }
   }
 
   /** The web-search secrets currently configured (for probes; never logged). */
@@ -1382,6 +1682,17 @@ export class SettingsStore {
     settings: ServerSettings = this.get(),
   ): NodeJS.ProcessEnv {
     const env = { ...base };
+    // A worker must seed routing from this app's health checks, never a
+    // sibling server's snapshot from the shared workspace or parent shell.
+    delete env.BRAINSTORM_AGENTIC_AVAILABILITY_PATH;
+    if (this.searxngInstanceId !== undefined) {
+      env.BRAINSTORM_AGENTIC_AVAILABILITY_PATH = join(
+        searxngDir(this.workspace, this.searxngInstanceId),
+        "availability.json",
+      );
+    }
+    // Inherited or manually edited templates cannot bypass onboarding approval.
+    delete env.BRAINSTORM_AGENTIC_GPU_RUN;
     // Per-run capability disables ride the execution-settings snapshot.
     // Emitted before the provider branch so every provider — including
     // offline's early return — carries them to the worker's broker.
@@ -1486,9 +1797,17 @@ export class SettingsStore {
     // The host-owned web layer: the JSON config (never secrets) plus each
     // configured provider key on its own variable, exactly like the LLM
     // credentials. The worker builds ONE WebAccessManager from these.
-    env.BRAINSTORM_AGENTIC_WEB_SEARCH = JSON.stringify(
-      this.webSearchRuntimeConfig(settings),
-    );
+    const webSearchConfig = this.webSearchRuntimeConfig(settings);
+    env.BRAINSTORM_AGENTIC_WEB_SEARCH = JSON.stringify(webSearchConfig);
+    if (
+      settings.webSearch?.provider === "searxng-local" &&
+      webSearchConfig.searxngBaseUrl !== undefined
+    ) {
+      Object.assign(
+        env,
+        localSearxngProxyEnvironment(webSearchConfig.searxngBaseUrl, env),
+      );
+    }
     const tavilyKey = this.getTavilyApiKey();
     if (tavilyKey) env.TAVILY_API_KEY = tavilyKey;
     const braveKey = this.getBraveApiKey();
@@ -1497,9 +1816,11 @@ export class SettingsStore {
     if (semanticScholarKey) env.SEMANTIC_SCHOLAR_API_KEY = semanticScholarKey;
     const openAlexKey = this.getOpenAlexApiKey();
     if (openAlexKey) env.OPENALEX_API_KEY = openAlexKey;
+    const coreKey = this.getCoreApiKey();
+    if (coreKey) env.CORE_API_KEY = coreKey;
     // GPU run setup travels to the worker only when it is actually
     // configured; the worker gates the tool on this AND the enabled ids.
-    if (settings.gpu !== undefined && settings.gpu.template.trim() !== "") {
+    if (settings.gpu !== undefined && gpuProfileVerified(this.workspace, settings.gpu)) {
       env.BRAINSTORM_AGENTIC_GPU_RUN = JSON.stringify({
         template: settings.gpu.template,
         timeLimitMinutes: settings.gpu.timeLimitMinutes,
@@ -1543,7 +1864,7 @@ export class SettingsStore {
     // Deliberately the UNCACHED read that put() has always merged against.
     const stored = validateStoredSettings(readJsonFile<unknown>(this.path));
     const section = (
-      name: "llm" | "creditRecovery" | "hostTools" | "gpu" | "webSearch",
+      name: "llm" | "creditRecovery" | "hostTools" | "gpu" | "webSearch" | "availability",
     ): unknown => {
       if (patch[name] === undefined) return (stored as Record<string, unknown>)[name];
       return {
@@ -1556,18 +1877,28 @@ export class SettingsStore {
       runner: patch.runner ?? stored.runner,
       panelConfirmation: patch.panelConfirmation ?? stored.panelConfirmation,
       gateAutoApprove: patch.gateAutoApprove ?? stored.gateAutoApprove,
+      gamifiedReview: patch.gamifiedReview !== undefined ? patch.gamifiedReview : stored.gamifiedReview,
+      gameReview: patch.gameReview !== undefined ? patch.gameReview : stored.gameReview,
       updateCheck: patch.updateCheck ?? stored.updateCheck,
       llm: section("llm"),
       creditRecovery: section("creditRecovery"),
       hostTools: section("hostTools"),
       gpu: section("gpu"),
       webSearch: section("webSearch"),
+      // The availability policy merges like the other flat sections: a save
+      // of one toggle keeps the stored interval.
+      availability: section("availability"),
       interruptedRecovery: patch.interruptedRecovery ?? stored.interruptedRecovery,
       // `review` keeps its own three-way meaning: absent = keep the stored
       // policy, `{}` = follow the bundle default again, `{maxRounds}` = override.
       review: patch.review !== undefined ? patch.review : stored.review,
       // `panel` carries the same three-way meaning as `review`.
       panel: patch.panel !== undefined ? patch.panel : stored.panel,
+      // So do the panel composition overrides.
+      panelComposition:
+        patch.panelComposition !== undefined
+          ? patch.panelComposition
+          : stored.panelComposition,
       telemetry: patch.telemetry ?? stored.telemetry,
     };
     for (const key of Object.keys(merged)) {
@@ -1582,7 +1913,11 @@ export class SettingsStore {
    * re-verification; entries with an empty model string mean "use the
    * default model" and are dropped.
    */
-  putModelsByRoute(value: unknown): ServerSettings {
+  putModelsByRoute(value: unknown): Promise<ServerSettings> {
+    return this.enqueueWrite(() => this.putModelsByRouteExclusive(value));
+  }
+
+  private putModelsByRouteExclusive(value: unknown): ServerSettings {
     const body = object(value, "models-by-route update");
     const raw = object(body.modelsByRoute ?? {}, "modelsByRoute");
     const map: Record<string, string> = {};
@@ -1615,15 +1950,35 @@ export class SettingsStore {
    */
   private writeQueue: Promise<unknown> = Promise.resolve();
 
-  async put(value: unknown): Promise<ServerSettings> {
+  private enqueueWrite(
+    write: () => ServerSettings | Promise<ServerSettings>,
+  ): Promise<ServerSettings> {
     const run = this.writeQueue.then(
-      () => this.putExclusive(value),
-      () => this.putExclusive(value),
+      write,
+      write,
     );
     // The queue must not reject for the next waiter, but the caller still must
     // see its own failure.
     this.writeQueue = run.catch(() => undefined);
     return run;
+  }
+
+  put(value: unknown): Promise<ServerSettings> {
+    return this.enqueueWrite(() => this.putExclusive(value));
+  }
+
+  /** Called only by the approved probe service, serialized with ordinary edits. */
+  installVerifiedGpu(gpu: GpuRunSettings, jobId: string, signal?: AbortSignal, expectedRevision?: number): Promise<ServerSettings> {
+    return this.enqueueWrite(async () => {
+      signal?.throwIfAborted();
+      if (expectedRevision !== undefined && expectedRevision !== this.gpuRevision) throw new Error("GPU settings changed while the probe ran; review and probe the new profile");
+      const enabled = new Set(this.get().hostTools?.enabledToolIds ?? []);
+      enabled.add("gpu_run");
+      const settings = await this.putExclusive({ gpu, hostTools: { enabledToolIds: [...enabled] } });
+      signal?.throwIfAborted();
+      verifyGpuProfile(this.workspace, gpu, jobId);
+      return settings;
+    });
   }
 
   private async putExclusive(value: unknown): Promise<ServerSettings> {
@@ -1755,6 +2110,11 @@ export class SettingsStore {
           });
         }
       }
+      // The paid fallback's key, submitted without selecting Brave as the
+      // provider, is verified the same way before it is stored.
+      if (provider !== "brave" && update.submittedBraveApiKey !== undefined) {
+        await this.webSearchValidator({ provider: "brave", apiKey: update.submittedBraveApiKey });
+      }
     }
 
     // Persist only after every validation (including the real provider call)
@@ -1766,6 +2126,10 @@ export class SettingsStore {
       readJsonFile<unknown>(this.path),
     ).contentRegistry;
     const carriedGpu = update.settings.gpu ?? currentSettings.gpu;
+    if (carriedGpu && (!currentSettings.gpu || gpuProfileDigest(carriedGpu) !== gpuProfileDigest(currentSettings.gpu))) {
+      this.gpuRevision += 1;
+      revokeGpuProfile(this.workspace);
+    }
     // Review policy: absent in the update keeps the stored value; a
     // submitted `{}` clears the override (back to the bundle default).
     const carriedReview =
@@ -1782,6 +2146,14 @@ export class SettingsStore {
           ? update.panel
           : undefined
         : currentSettings.panel;
+    // Panel composition overrides: the same three-way meaning; `{params: {}}`
+    // (or `{}`) clears them all.
+    const carriedComposition =
+      update.panelComposition !== undefined
+        ? Object.keys(update.panelComposition.params).length > 0
+          ? update.panelComposition
+          : undefined
+        : panelCompositionOf(currentSettings);
     atomicWriteJson(this.path, {
       ...update.settings,
       contentRegistry: { ...storedRegistry, url: this.deploymentRegistryUrl },
@@ -1792,6 +2164,7 @@ export class SettingsStore {
       ...(carriedGpu !== undefined ? { gpu: carriedGpu } : {}),
       ...(carriedReview !== undefined ? { review: carriedReview } : {}),
       ...(carriedPanel !== undefined ? { panel: carriedPanel } : {}),
+      ...(carriedComposition !== undefined ? { panelComposition: carriedComposition } : {}),
     });
     const previousCredentials =
       readJsonFile<StoredCredentials>(this.credentialsPath) ?? {};
@@ -1804,6 +2177,7 @@ export class SettingsStore {
       braveApiKey?: string;
       semanticScholarApiKey?: string;
       openAlexApiKey?: string;
+      coreApiKey?: string;
     } = { ...previousCredentials };
     if (update.clearApiKey) delete nextCredentials.anthropicApiKey;
     if (update.clearSetupToken) delete nextCredentials.claudeSetupToken;
@@ -1817,6 +2191,7 @@ export class SettingsStore {
       delete nextCredentials.semanticScholarApiKey;
     }
     if (update.clearOpenAlexApiKey) delete nextCredentials.openAlexApiKey;
+    if (update.clearCoreApiKey) delete nextCredentials.coreApiKey;
     if (update.submittedApiKey !== undefined) {
       nextCredentials.anthropicApiKey = update.submittedApiKey;
     }
@@ -1847,6 +2222,11 @@ export class SettingsStore {
     }
     if (update.submittedOpenAlexApiKey !== undefined) {
       nextCredentials.openAlexApiKey = update.submittedOpenAlexApiKey;
+    }
+    // Stored without a live call, like the other scholarly keys (no key was
+    // available to verify against; not live-tested).
+    if (update.submittedCoreApiKey !== undefined) {
+      nextCredentials.coreApiKey = update.submittedCoreApiKey;
     }
     if (Object.keys(nextCredentials).length === 0) {
       if (existsSync(this.credentialsPath)) rmSync(this.credentialsPath);

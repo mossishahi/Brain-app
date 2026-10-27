@@ -1,0 +1,8 @@
+.brand-wordmark { display: inline-grid; flex: none; padding-inline-end: .25em; white-space: nowrap; }
+.brand-wordmark-size,.brand-wordmark-text { grid-area: 1 / 1; font: inherit; letter-spacing: inherit; }
+.brand-wordmark-size { visibility: hidden; user-select: none; }
+.brand-wordmark-text { position: relative; justify-self: start; }
+.brand-wordmark-text::after { content: ''; position: absolute; inset-inline-start: calc(100% + .08em); top: .18em; width: 1px; height: .85em; background: currentColor; opacity: 0; }
+.brand-wordmark-text[data-typing]::after { opacity: 1; animation: wordmark-caret .9s step-end infinite; }
+@keyframes wordmark-caret { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .brand-wordmark-text::after { display: none; animation: none; } }

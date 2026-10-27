@@ -1,0 +1,14 @@
+/* The library floats independently; opening it never changes workspace geometry. */
+.canvas-back { border: 0; background: transparent; cursor: pointer; padding: 8px 0; font: inherit; font-size: 13px; }
+.library-panel { --library-top: calc(var(--app-header-h) + var(--ui-space-2)); --library-left: calc(var(--canvas-rail-width) + var(--ui-space-2)); --library-bottom: var(--ui-space-3); position: fixed; z-index: 40; top: var(--library-top); left: var(--library-left); width: min(336px, calc(100vw - var(--library-left) - var(--ui-space-3))); height: min(720px, calc(100dvh - var(--library-top) - var(--library-bottom))); display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--surface); color: var(--text); outline: none; border: 0; border-radius: var(--ui-radius-xl); box-sizing: border-box; box-shadow: var(--ui-float-shadow); opacity: 1; transform: translateX(0); transition: opacity 180ms ease, transform 180ms cubic-bezier(.2,.8,.2,1); }
+.library-panel[data-starting-style], .library-panel[data-ending-style] { opacity: 0; transform: translateX(-8px); }
+.library-panel-content { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+.library-loading { color: var(--text-dim); font-size: 13px; padding: 10px 20px; }
+:where(.library-panel) :is(button, a):focus-visible { outline: none; background: var(--ui-focus-fill); color: var(--ui-focus-text); box-shadow: none; }
+@media (max-width: 640px) {
+  .library-panel { --library-left: max(var(--ui-space-3), env(safe-area-inset-left)); --library-bottom: calc(76px + env(safe-area-inset-bottom)); --library-top: calc(var(--app-header-h) + var(--ui-space-2) + env(safe-area-inset-top)); }
+}
+@media (max-height: 480px) {
+  .library-panel { --library-top: max(var(--ui-space-3), env(safe-area-inset-top)); }
+}
+@media (prefers-reduced-motion: reduce) { .library-panel { transition: none; } }

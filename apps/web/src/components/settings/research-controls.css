@@ -1,0 +1,11 @@
+.settings-research-controls { display: grid; gap: var(--ui-space-4); min-width: 0; }
+.settings-tool-check { display: grid; gap: var(--ui-space-3); min-width: 0; padding: var(--ui-space-4); border: 0; border-radius: var(--ui-radius-lg); background: var(--ui-field-bg); }
+.settings-tool-check-heading { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: var(--ui-space-2); }
+.settings-tool-check-heading h4, .settings-tool-check-advice h5 { margin: 0; font-size: var(--ui-font-control); line-height: 20px; font-weight: 500; }
+.settings-tool-check-state { color: var(--muted); font-size: var(--ui-font-caption); line-height: 20px; }
+.settings-tool-check-state.state-ok { color: var(--accent); }
+.settings-tool-check-state.state-failed { color: #b74d4d; }
+.settings-tool-check-advice { display: grid; gap: var(--ui-space-2); }
+.settings-tool-check-details { min-width: 0; font-size: var(--ui-font-caption); line-height: 20px; }
+.settings-tool-check-details summary { cursor: pointer; color: var(--muted); }
+.settings-tool-check-details pre { margin: var(--ui-space-2) 0 0; max-height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--ui-font-xs); line-height: 18px; }

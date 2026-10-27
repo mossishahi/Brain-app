@@ -21,18 +21,18 @@ import { join } from "node:path";
 
 import type { WebSearchAnswer } from "@brainstorm-agentic/core";
 
-export interface WebSearchCache {
-  get(key: string): Promise<WebSearchAnswer | undefined>;
-  put(key: string, answer: WebSearchAnswer): Promise<void>;
+export interface WebSearchCache<T = WebSearchAnswer> {
+  get(key: string): Promise<T | undefined>;
+  put(key: string, answer: T): Promise<void>;
 }
 
-interface CacheEntry {
+interface CacheEntry<T = WebSearchAnswer> {
   readonly storedAt: number;
-  readonly answer: WebSearchAnswer;
+  readonly answer: T;
 }
 
-export class MemoryWebSearchCache implements WebSearchCache {
-  private readonly entries = new Map<string, CacheEntry>();
+export class MemoryCache<T> implements WebSearchCache<T> {
+  private readonly entries = new Map<string, CacheEntry<T>>();
 
   constructor(
     private readonly ttlMs: number,
@@ -40,7 +40,7 @@ export class MemoryWebSearchCache implements WebSearchCache {
     private readonly now: () => number = () => Date.now(),
   ) {}
 
-  async get(key: string): Promise<WebSearchAnswer | undefined> {
+  async get(key: string): Promise<T | undefined> {
     const entry = this.entries.get(key);
     if (!entry) return undefined;
     if (this.now() - entry.storedAt > this.ttlMs) {
@@ -53,7 +53,7 @@ export class MemoryWebSearchCache implements WebSearchCache {
     return structuredClone(entry.answer);
   }
 
-  async put(key: string, answer: WebSearchAnswer): Promise<void> {
+  async put(key: string, answer: T): Promise<void> {
     if (this.entries.size >= this.maxEntries) {
       const coldest = this.entries.keys().next();
       if (!coldest.done) this.entries.delete(coldest.value);
@@ -67,7 +67,7 @@ export class MemoryWebSearchCache implements WebSearchCache {
  * Failures degrade to a miss (get) or are swallowed (put) — the cache is an
  * optimization and must never fail a search that could have gone upstream.
  */
-export class FsWebSearchCache implements WebSearchCache {
+export class FsCache<T> implements WebSearchCache<T> {
   constructor(
     private readonly dir: string,
     private readonly ttlMs: number,
@@ -80,11 +80,11 @@ export class FsWebSearchCache implements WebSearchCache {
     return join(this.dir, `${createHash("sha256").update(key).digest("hex")}.json`);
   }
 
-  async get(key: string): Promise<WebSearchAnswer | undefined> {
+  async get(key: string): Promise<T | undefined> {
     const path = this.pathFor(key);
-    let entry: CacheEntry;
+    let entry: CacheEntry<T>;
     try {
-      entry = JSON.parse(await readFile(path, "utf8")) as CacheEntry;
+      entry = JSON.parse(await readFile(path, "utf8")) as CacheEntry<T>;
     } catch {
       return undefined;
     }
@@ -99,13 +99,13 @@ export class FsWebSearchCache implements WebSearchCache {
     return entry.answer;
   }
 
-  async put(key: string, answer: WebSearchAnswer): Promise<void> {
+  async put(key: string, answer: T): Promise<void> {
     const path = this.pathFor(key);
     const staging = `${path}.tmp-${process.pid}`;
     try {
       await writeFile(
         staging,
-        `${JSON.stringify({ storedAt: this.now(), answer } satisfies CacheEntry)}\n`,
+        `${JSON.stringify({ storedAt: this.now(), answer } satisfies CacheEntry<T>)}\n`,
         "utf8",
       );
       await rename(staging, path);
@@ -116,13 +116,13 @@ export class FsWebSearchCache implements WebSearchCache {
 }
 
 /** Memory in front of disk: hot keys never touch the filesystem twice. */
-export class LayeredWebSearchCache implements WebSearchCache {
+export class LayeredCache<T> implements WebSearchCache<T> {
   constructor(
-    private readonly front: WebSearchCache,
-    private readonly back: WebSearchCache,
+    private readonly front: WebSearchCache<T>,
+    private readonly back: WebSearchCache<T>,
   ) {}
 
-  async get(key: string): Promise<WebSearchAnswer | undefined> {
+  async get(key: string): Promise<T | undefined> {
     const hot = await this.front.get(key);
     if (hot !== undefined) return hot;
     const cold = await this.back.get(key);
@@ -130,7 +130,12 @@ export class LayeredWebSearchCache implements WebSearchCache {
     return cold;
   }
 
-  async put(key: string, answer: WebSearchAnswer): Promise<void> {
+  async put(key: string, answer: T): Promise<void> {
     await Promise.all([this.front.put(key, answer), this.back.put(key, answer)]);
   }
 }
+
+/** The web-answer caches under their original, non-generic names. */
+export class MemoryWebSearchCache extends MemoryCache<WebSearchAnswer> {}
+export class FsWebSearchCache extends FsCache<WebSearchAnswer> {}
+export class LayeredWebSearchCache extends LayeredCache<WebSearchAnswer> {}

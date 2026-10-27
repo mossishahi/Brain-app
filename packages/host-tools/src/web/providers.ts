@@ -7,9 +7,10 @@
  * two families:
  *
  * - GENERAL web: Tavily (agent-first search API), Brave (independent
- *   index), SearXNG (self-hosted metasearch, keyless). Exactly one is
- *   selected by deployment settings; the manager routes "general" and
- *   "news" queries to it.
+ *   index), SearXNG (self-hosted metasearch, keyless). The deployment's
+ *   provider list per route decides the order (by default the app-launched
+ *   SearXNG first and the paid Brave API as the last resort); the manager
+ *   routes web, news and web-backed paper queries through that list.
  * - SCHOLARLY: OpenAlex, Crossref, arXiv, Semantic Scholar — the standard
  *   open scholarly indexes. All work without keys (keys raise rate limits),
  *   so scholarly search works on a fresh install, which is what this
@@ -25,9 +26,11 @@ import type {
   WebSearchEngineFailure,
   WebSearchHit,
   WebSearchKind,
+  WebSearchRoute,
 } from "@brainstorm-agentic/core";
 
 import { htmlToText } from "../web-search.js";
+import { loggingFetch, withSearchProbe, type WebSourceStatusWithLog } from "./probe.js";
 
 /** The one HTTP seam every provider calls; tests inject their own. */
 export type ProviderFetch = (
@@ -49,8 +52,24 @@ export interface ProviderSearchRequest {
   readonly kind: WebSearchKind;
   readonly maxResults: number;
   readonly recency?: "day" | "week" | "month" | "year";
+  /** Keep only results from these registrable domains. */
   readonly domains?: readonly string[];
   readonly signal?: AbortSignal;
+  /** The coordinator's route; web-backed paper routes rank scholarly sites first. */
+  readonly route?: WebSearchRoute;
+  /** Metasearch only: the exact engines to ask (chosen by the coordinator). */
+  readonly engines?: readonly string[];
+  /** 1-based results page. */
+  readonly page?: number;
+  /** Inclusive publication window, YYYY-MM-DD. */
+  readonly dateFrom?: string;
+  readonly dateTo?: string;
+  readonly excludeDomains?: readonly string[];
+  /** ISO 639-1 content language. */
+  readonly language?: string;
+  /** ISO 3166-1 alpha-2 country. */
+  readonly country?: string;
+  readonly fileType?: string;
 }
 
 export interface ProviderAnswer {
@@ -59,6 +78,8 @@ export interface ProviderAnswer {
   readonly total?: number;
   /** Engines that failed inside a metasearch answer, with their causes. */
   readonly engineFailures?: readonly WebSearchEngineFailure[];
+  /** Options the provider could only approximate, in plain words. */
+  readonly notes?: readonly string[];
 }
 
 /** A retryable upstream failure (429/5xx/network); the manager backs off once. */
@@ -81,27 +102,42 @@ export interface WebSearchProvider {
   readonly kinds: readonly WebSearchKind[];
   /** Politeness floor between two requests to this upstream, in ms. */
   readonly minIntervalMs?: number;
+  /** Requests this upstream may have in flight at once; absent = the run's per-source bound. */
+  readonly maxConcurrent?: number;
+  /** The routes this provider can answer; absent = derived from `kinds`. */
+  readonly routes?: readonly WebSearchRoute[];
+  /** A metasearch provider: the coordinator names its engines per call. */
+  readonly metasearch?: boolean;
+  /**
+   * The provider's terms forbid keeping its results: the manager caches them
+   * in memory only and writes a redacted log record.
+   */
+  readonly noStore?: boolean;
+  /** Metered price per successful request, USD (paid providers). */
+  readonly costPerRequestUsd?: number;
   search(request: ProviderSearchRequest): Promise<ProviderAnswer>;
+  /** One cheap known-answer request for the launch check, with the log lines it produced. */
+  check?(signal?: AbortSignal): Promise<WebSourceStatusWithLog>;
 }
 
 const DEFAULT_TIMEOUT_MS = 20_000;
 
-function record(value: unknown): Record<string, unknown> {
+export function record(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
 }
 
-function asString(value: unknown): string | undefined {
+export function asString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
 }
 
-function asNumber(value: unknown): number | undefined {
+export function asNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 /** Compact whitespace and strip any markup a snippet arrived with. */
-function cleanSnippet(value: unknown, maxChars = 600): string {
+export function cleanSnippet(value: unknown, maxChars = 600): string {
   const raw = asString(value);
   if (raw === undefined) return "";
   const text = /[<&]/.test(raw) ? htmlToText(raw).text : raw;
@@ -109,7 +145,7 @@ function cleanSnippet(value: unknown, maxChars = 600): string {
   return compact.length > maxChars ? `${compact.slice(0, maxChars - 1)}…` : compact;
 }
 
-async function requestJson(
+export async function requestJson(
   fetchImpl: ProviderFetch,
   provider: string,
   url: string,
@@ -125,7 +161,7 @@ async function requestJson(
   }
 }
 
-async function requestText(
+export async function requestText(
   fetchImpl: ProviderFetch,
   provider: string,
   url: string,
@@ -149,11 +185,17 @@ async function requestText(
     );
   }
   if (response.status === 429 || response.status >= 500) {
-    const retryAfter = Number(response.headers.get("retry-after"));
+    // Retry-After, else the first window of an X-RateLimit-Reset list
+    // ("1, 1419704": seconds until the per-second window resets).
+    const declared =
+      response.headers.get("retry-after") ??
+      response.headers.get("x-ratelimit-reset")?.split(",")[0] ??
+      null;
+    const retryAfter = Number(declared?.trim());
     throw new ProviderRequestError(
       `${provider} answered HTTP ${response.status}`,
       true,
-      Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : undefined,
+      declared !== null && Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : undefined,
     );
   }
   if (response.status === 401 || response.status === 403) {
@@ -169,6 +211,131 @@ async function requestText(
 }
 
 /* ------------------------------------------------------------------------ */
+/* Shared request shaping and result filtering                               */
+/* ------------------------------------------------------------------------ */
+
+function cleanDomain(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/^[a-z]+:\/\//, "")
+    .replace(/^www\./, "")
+    .replace(/\/.*$/, "");
+}
+
+function hostOf(url: string): string | undefined {
+  try {
+    return new URL(url).hostname.toLowerCase().replace(/^www\./, "");
+  } catch {
+    return undefined;
+  }
+}
+
+function hostMatches(url: string, domains: readonly string[]): boolean {
+  const host = hostOf(url);
+  if (host === undefined) return false;
+  return domains.some((domain) => host === domain || host.endsWith(`.${domain}`));
+}
+
+/**
+ * The query with search operators for domain and file-type options. Every
+ * engine SearXNG uses for the web, and Brave, understand site:, -site: and
+ * filetype:; results are still filtered afterwards, so an engine that
+ * ignores an operator cannot leak a result the agent excluded.
+ */
+export function withOperators(
+  query: string,
+  request: {
+    readonly domains?: readonly string[];
+    readonly excludeDomains?: readonly string[];
+    readonly fileType?: string;
+  },
+): string {
+  const parts = [query.trim()];
+  const include = (request.domains ?? []).map(cleanDomain).filter((domain) => domain !== "");
+  if (include.length === 1) parts.push(`site:${include[0]}`);
+  else if (include.length > 1) parts.push(`(${include.map((domain) => `site:${domain}`).join(" OR ")})`);
+  for (const domain of (request.excludeDomains ?? []).map(cleanDomain)) {
+    if (domain !== "") parts.push(`-site:${domain}`);
+  }
+  if (request.fileType !== undefined && request.fileType.trim() !== "") {
+    parts.push(`filetype:${request.fileType.trim().replace(/^\./, "").toLowerCase()}`);
+  }
+  return parts.join(" ");
+}
+
+/** The YYYY-MM-DD day of an ISO-like date, or undefined (relative ages, junk). */
+export function isoDay(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(value.trim());
+  return match ? `${match[1]}-${match[2]}-${match[3]}` : undefined;
+}
+
+/**
+ * The smallest recency window that still contains [dateFrom, today], for
+ * engines that filter by window only. Undefined when no window fits
+ * (older than a year): dated results are then checked one by one.
+ */
+export function recencyForWindow(
+  dateFrom: string | undefined,
+  now: number,
+): "day" | "week" | "month" | "year" | undefined {
+  if (dateFrom === undefined) return undefined;
+  const from = Date.parse(`${dateFrom}T00:00:00Z`);
+  if (!Number.isFinite(from)) return undefined;
+  const days = (now - from) / 86_400_000;
+  if (days <= 1) return "day";
+  if (days <= 7) return "week";
+  if (days <= 31) return "month";
+  if (days <= 366) return "year";
+  return undefined;
+}
+
+/**
+ * Enforces the domain and date options on normalized hits, whatever the
+ * upstream did with them, and says what could not be checked.
+ */
+export function filterHits(
+  hits: readonly WebSearchHit[],
+  request: Pick<ProviderSearchRequest, "domains" | "excludeDomains" | "dateFrom" | "dateTo">,
+): { readonly hits: WebSearchHit[]; readonly notes: string[] } {
+  const notes: string[] = [];
+  const include = (request.domains ?? []).map(cleanDomain).filter((domain) => domain !== "");
+  const exclude = (request.excludeDomains ?? []).map(cleanDomain).filter((domain) => domain !== "");
+  let kept = [...hits];
+  if (include.length > 0) kept = kept.filter((hit) => hostMatches(hit.url, include));
+  if (exclude.length > 0) kept = kept.filter((hit) => !hostMatches(hit.url, exclude));
+  if (request.dateFrom !== undefined || request.dateTo !== undefined) {
+    let undated = 0;
+    kept = kept.filter((hit) => {
+      const day = isoDay(hit.published) ?? (hit.year !== undefined ? `${hit.year}-07-01` : undefined);
+      if (day === undefined) {
+        undated += 1;
+        return true;
+      }
+      if (request.dateFrom !== undefined && day < request.dateFrom) return false;
+      if (request.dateTo !== undefined && day > request.dateTo) return false;
+      return true;
+    });
+    if (undated > 0) {
+      notes.push(
+        `${undated} result(s) carry no publication date, so the date window could not be checked for them.`,
+      );
+    }
+  }
+  return { hits: kept, notes };
+}
+
+function asStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const items = value.flatMap((entry) => {
+    const text = asString(entry);
+    return text !== undefined ? [text] : [];
+  });
+  return items.length > 0 ? items : undefined;
+}
+
+/* ------------------------------------------------------------------------ */
 /* General web: Tavily                                                       */
 /* ------------------------------------------------------------------------ */
 
@@ -177,9 +344,9 @@ export function tavilyProvider(options: {
   readonly fetchImpl?: ProviderFetch;
   readonly baseUrl?: string;
 }): WebSearchProvider {
-  const fetchImpl = options.fetchImpl ?? (fetch as unknown as ProviderFetch);
+  const fetchImpl = loggingFetch(options.fetchImpl ?? (fetch as unknown as ProviderFetch));
   const base = (options.baseUrl ?? "https://api.tavily.com").replace(/\/+$/, "");
-  return {
+  return withSearchProbe({
     id: "tavily",
     kinds: ["general", "news"],
     async search(request) {
@@ -228,7 +395,7 @@ export function tavilyProvider(options: {
         }),
       };
     },
-  };
+  }, { secrets: [options.apiKey] });
 }
 
 /* ------------------------------------------------------------------------ */
@@ -243,25 +410,99 @@ const BRAVE_FRESHNESS: Readonly<Record<string, string>> = {
   year: "py",
 };
 
+/** What one successful Brave Search request costs on the Search plan, USD. */
+export const BRAVE_COST_PER_REQUEST_USD = 0.005;
+
+/**
+ * Brave Goggles re-rank results; on web-backed paper searches these rules
+ * move scholarly sources up without dropping anything else.
+ */
+const SCHOLARLY_GOGGLE_RULES: readonly string[] = [
+  "$boost=3,site=arxiv.org",
+  "$boost=3,site=doi.org",
+  "$boost=3,site=openreview.net",
+  "$boost=3,site=aclanthology.org",
+  "$boost=3,site=semanticscholar.org",
+  "$boost=3,site=ncbi.nlm.nih.gov",
+  "$boost=3,site=europepmc.org",
+  "$boost=2,site=biorxiv.org",
+  "$boost=2,site=medrxiv.org",
+  "$boost=2,site=proceedings.neurips.cc",
+  "$boost=2,site=proceedings.mlr.press",
+  "$boost=2,site=jmlr.org",
+  "$boost=2,site=dl.acm.org",
+  "$boost=2,site=ieeexplore.ieee.org",
+  "$boost=2,site=link.springer.com",
+  "$boost=2,site=nature.com",
+  "$boost=2,site=sciencedirect.com",
+  "$downrank=3,site=medium.com",
+  "$downrank=3,site=quora.com",
+  "$discard,site=pinterest.com",
+];
+
+function braveFreshness(request: ProviderSearchRequest): string | undefined {
+  if (request.dateFrom !== undefined || request.dateTo !== undefined) {
+    const from = request.dateFrom ?? "1970-01-01";
+    const to = request.dateTo ?? new Date().toISOString().slice(0, 10);
+    return `${from}to${to}`;
+  }
+  return request.recency !== undefined ? BRAVE_FRESHNESS[request.recency] : undefined;
+}
+
+function braveGoggles(request: ProviderSearchRequest): string | undefined {
+  const rules: string[] = [];
+  if (request.route === "paper-lookup" || request.route === "paper-topic") {
+    rules.push(...SCHOLARLY_GOGGLE_RULES);
+  }
+  for (const domain of (request.excludeDomains ?? []).map(cleanDomain)) {
+    if (domain !== "") rules.push(`$discard,site=${domain}`);
+  }
+  return rules.length > 0 ? rules.join("\n") : undefined;
+}
+
 export function braveProvider(options: {
   readonly apiKey: string;
   readonly fetchImpl?: ProviderFetch;
   readonly baseUrl?: string;
 }): WebSearchProvider {
-  const fetchImpl = options.fetchImpl ?? (fetch as unknown as ProviderFetch);
+  const fetchImpl = loggingFetch(options.fetchImpl ?? (fetch as unknown as ProviderFetch));
   const base = (options.baseUrl ?? "https://api.search.brave.com").replace(/\/+$/, "");
-  return {
+  return withSearchProbe({
     id: "brave",
     kinds: ["general", "news"],
-    // Free/base Brave plans allow one request per second.
+    routes: ["web", "news", "paper-lookup", "paper-topic"],
+    // The Search plan allows 50 requests per second; one per second is
+    // ample for a last-resort fallback and keeps a runaway loop cheap.
     minIntervalMs: 1_100,
+    // Brave's terms allow only transient storage of results: memory-only
+    // cache, redacted log record.
+    noStore: true,
+    costPerRequestUsd: BRAVE_COST_PER_REQUEST_USD,
     async search(request) {
-      const url = new URL(`${base}/res/v1/web/search`);
-      url.searchParams.set("q", request.query);
-      url.searchParams.set("count", String(request.maxResults));
-      if (request.recency !== undefined) {
-        url.searchParams.set("freshness", BRAVE_FRESHNESS[request.recency]!);
+      const news = request.kind === "news" || request.route === "news";
+      const url = new URL(`${base}/res/v1/${news ? "news" : "web"}/search`);
+      // q may hold 600 characters on Web, 400 on News.
+      url.searchParams.set("q", withOperators(request.query, request).slice(0, news ? 400 : 600));
+      url.searchParams.set("count", String(Math.min(20, Math.max(1, request.maxResults))));
+      // The query is used as written (spellcheck would silently replace it),
+      // snippets come without highlight markers, and both endpoints use the
+      // same safe-search level (News would otherwise default to strict).
+      url.searchParams.set("spellcheck", "false");
+      url.searchParams.set("text_decorations", "false");
+      url.searchParams.set("safesearch", "moderate");
+      if (request.page !== undefined && request.page > 1) {
+        url.searchParams.set("offset", String(Math.min(9, request.page - 1)));
       }
+      const freshness = braveFreshness(request);
+      if (freshness !== undefined) url.searchParams.set("freshness", freshness);
+      if (request.country !== undefined) {
+        url.searchParams.set("country", request.country.toUpperCase());
+      }
+      if (request.language !== undefined) {
+        url.searchParams.set("search_lang", request.language.toLowerCase());
+      }
+      const goggles = braveGoggles(request);
+      if (goggles !== undefined) url.searchParams.set("goggles", goggles);
       const parsed = record(
         await requestJson(
           fetchImpl,
@@ -277,31 +518,35 @@ export function braveProvider(options: {
           request.signal,
         ),
       );
-      const sections =
-        request.kind === "news"
-          ? [record(parsed.news).results, record(parsed.web).results]
-          : [record(parsed.web).results, record(parsed.news).results];
+      // The News endpoint answers with a top-level results list; the Web
+      // endpoint with web/news sections, read in the order the kind wants.
+      const sections = news
+        ? [parsed.results, record(parsed.news).results, record(parsed.web).results]
+        : [record(parsed.web).results, record(parsed.news).results];
       const entries = sections.flatMap((section) => (Array.isArray(section) ? section : []));
+      const hits = entries.flatMap((entry): WebSearchHit[] => {
+        const item = record(entry);
+        const url = asString(item.url);
+        if (url === undefined) return [];
+        return [{
+          title: asString(item.title) ?? url,
+          url,
+          snippet: cleanSnippet(item.description),
+          source: "brave",
+          ...(asString(item.page_age) !== undefined
+            ? { published: asString(item.page_age) }
+            : asString(item.age) !== undefined
+              ? { published: asString(item.age) }
+              : {}),
+        }];
+      });
+      const filtered = filterHits(hits, request);
       return {
-        hits: entries.flatMap((entry): WebSearchHit[] => {
-          const item = record(entry);
-          const url = asString(item.url);
-          if (url === undefined) return [];
-          return [{
-            title: asString(item.title) ?? url,
-            url,
-            snippet: cleanSnippet(item.description),
-            source: "brave",
-            ...(asString(item.page_age) !== undefined
-              ? { published: asString(item.page_age) }
-              : asString(item.age) !== undefined
-                ? { published: asString(item.age) }
-                : {}),
-          }];
-        }),
+        hits: filtered.hits,
+        ...(filtered.notes.length > 0 ? { notes: filtered.notes } : {}),
       };
     },
-  };
+  }, { secrets: [options.apiKey] });
 }
 
 /* ------------------------------------------------------------------------ */
@@ -323,21 +568,68 @@ function parseEngineFailures(value: unknown): WebSearchEngineFailure[] {
   });
 }
 
+/**
+ * SearXNG parses special tokens ANYWHERE in q: a resolvable "!bang"
+ * overrides the engines parameter (the fan-out the coordinator prevents),
+ * ":xx" sets the language, "<N" the timeout. They are neutralized so the
+ * query means what the agent wrote and the engine list holds.
+ */
+export function neutralizeSearxngTokens(query: string): string {
+  return query
+    .split(/\s+/)
+    .map((token) =>
+      /^!{1,2}\S/.test(token)
+        ? token.replace(/^!+/, "")
+        : /^:[a-zA-Z_-]+$/.test(token)
+          ? token.slice(1)
+          : /^<\d+$/.test(token)
+            ? token.slice(1)
+            : token,
+    )
+    .filter((token) => token !== "")
+    .join(" ");
+}
+
 export function searxngProvider(options: {
   readonly baseUrl: string;
   readonly fetchImpl?: ProviderFetch;
 }): WebSearchProvider {
-  const fetchImpl = options.fetchImpl ?? (fetch as unknown as ProviderFetch);
+  const fetchImpl = loggingFetch(options.fetchImpl ?? (fetch as unknown as ProviderFetch));
   const base = options.baseUrl.replace(/\/+$/, "");
-  return {
+  return withSearchProbe({
     id: "searxng",
     kinds: ["general", "news"],
+    routes: ["web", "news", "paper-lookup", "paper-topic"],
+    metasearch: true,
     async search(request) {
       const url = new URL(`${base}/search`);
-      url.searchParams.set("q", request.query);
+      url.searchParams.set("q", withOperators(neutralizeSearxngTokens(request.query), request));
       url.searchParams.set("format", "json");
-      url.searchParams.set("categories", request.kind === "news" ? "news" : "general");
-      if (request.recency !== undefined) url.searchParams.set("time_range", request.recency);
+      // An explicit engine list, or a category — never both: SearXNG ADDS
+      // every engine of a named category to an explicit list, which is the
+      // fan-out the coordinator exists to prevent.
+      if (request.engines !== undefined && request.engines.length > 0) {
+        url.searchParams.set("engines", request.engines.join(","));
+      } else {
+        url.searchParams.set(
+          "categories",
+          request.kind === "news" || request.route === "news" ? "news" : "general",
+        );
+      }
+      const notes: string[] = [];
+      const window = request.recency ?? recencyForWindow(request.dateFrom, Date.now());
+      if (window !== undefined) url.searchParams.set("time_range", window);
+      if (request.recency === undefined && (request.dateFrom !== undefined || request.dateTo !== undefined)) {
+        notes.push(
+          window !== undefined
+            ? `SearXNG filters by recency window only: the "${window}" window was used and dated results outside the requested dates were dropped.`
+            : "SearXNG has no window this long: only dated results were checked against the requested dates.",
+        );
+      }
+      if (request.page !== undefined && request.page > 1) {
+        url.searchParams.set("pageno", String(request.page));
+      }
+      if (request.language !== undefined) url.searchParams.set("language", request.language);
       const parsed = record(
         await requestJson(
           fetchImpl,
@@ -349,26 +641,45 @@ export function searxngProvider(options: {
       );
       const results = Array.isArray(parsed.results) ? parsed.results : [];
       const engineFailures = parseEngineFailures(parsed.unresponsive_engines);
+      const hits = results.slice(0, request.maxResults * 2).flatMap((entry): WebSearchHit[] => {
+        const item = record(entry);
+        const url = asString(item.url);
+        if (url === undefined) return [];
+        const engines = asStringArray(item.engines) ?? (asString(item.engine) !== undefined ? [asString(item.engine)!] : undefined);
+        return [{
+          title: asString(item.title) ?? url,
+          url,
+          snippet: cleanSnippet(item.content),
+          source: "searxng",
+          ...(asNumber(item.score) !== undefined ? { score: asNumber(item.score) } : {}),
+          ...(engines !== undefined ? { engines } : {}),
+          ...(asString(item.publishedDate) !== undefined
+            ? { published: asString(item.publishedDate) }
+            : {}),
+          ...(asString(item.doi) !== undefined ? { doi: asString(item.doi) } : {}),
+        }];
+      });
+      if (request.engines !== undefined && request.engines.length > 0) {
+        const asked = new Set(request.engines);
+        const unexpected = [...new Set(hits.flatMap((hit) => hit.engines ?? []))].filter(
+          (engine) => !asked.has(engine),
+        );
+        if (unexpected.length > 0) {
+          notes.push(
+            `SearXNG answered with engines that were not requested (${unexpected.join(", ")}): ` +
+              "a requested engine is probably not enabled in the instance's settings.",
+          );
+        }
+      }
+      const filtered = filterHits(hits, request);
+      notes.push(...filtered.notes);
       return {
         ...(engineFailures.length > 0 ? { engineFailures } : {}),
-        hits: results.slice(0, request.maxResults * 2).flatMap((entry): WebSearchHit[] => {
-          const item = record(entry);
-          const url = asString(item.url);
-          if (url === undefined) return [];
-          return [{
-            title: asString(item.title) ?? url,
-            url,
-            snippet: cleanSnippet(item.content),
-            source: "searxng",
-            ...(asNumber(item.score) !== undefined ? { score: asNumber(item.score) } : {}),
-            ...(asString(item.publishedDate) !== undefined
-              ? { published: asString(item.publishedDate) }
-              : {}),
-          }];
-        }),
+        ...(notes.length > 0 ? { notes } : {}),
+        hits: filtered.hits,
       };
     },
-  };
+  });
 }
 
 /* ------------------------------------------------------------------------ */
@@ -468,9 +779,13 @@ export function crossrefProvider(options: {
 } = {}): WebSearchProvider {
   const fetchImpl = options.fetchImpl ?? (fetch as unknown as ProviderFetch);
   const base = (options.baseUrl ?? "https://api.crossref.org").replace(/\/+$/, "");
+  const polite = options.contactEmail !== undefined && options.contactEmail.trim() !== "";
   return {
     id: "crossref",
     kinds: ["scholarly"],
+    // The same limits as the Crossref paper index (they share one gate).
+    minIntervalMs: polite ? 350 : 1_050,
+    maxConcurrent: polite ? 3 : 1,
     async search(request) {
       const url = new URL(`${base}/works`);
       url.searchParams.set("query", request.query);
@@ -548,8 +863,9 @@ export function arxivProvider(options: {
   return {
     id: "arxiv",
     kinds: ["scholarly"],
-    // arXiv asks for no more than one request every three seconds.
+    // arXiv's terms: one request every three seconds, over one connection.
     minIntervalMs: 3_100,
+    maxConcurrent: 1,
     async search(request) {
       const url = new URL(`${base}/api/query`);
       url.searchParams.set("search_query", `all:${request.query}`);
@@ -563,6 +879,12 @@ export function arxivProvider(options: {
         request.signal,
       );
       const entries = body.match(/<entry>[\s\S]*?<\/entry>/g) ?? [];
+      // A refused query comes back as a feed whose one entry is an error.
+      for (const entry of entries) {
+        if (/\/api\/errors/.test(xmlText(entry, "id") ?? "")) {
+          throw new ProviderRequestError(`arXiv refused the query: ${xmlText(entry, "summary") ?? "error"}`, false);
+        }
+      }
       return {
         hits: entries.flatMap((entry): WebSearchHit[] => {
           const title = xmlText(entry, "title");

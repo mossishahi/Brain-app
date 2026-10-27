@@ -3,15 +3,23 @@
  * landing page and the dashboard. All shapes come from the protocol package.
  */
 import { useEffect, useRef, useState } from "react";
-import { API_BASE } from "@brainstorm-agentic/protocol";
+import { BoundedCache } from './data/bounded-cache';
+import { SerializedResource } from './data/serialized-resource';
+import { compactEvents, isServerEvent } from './data/event-batch';
+import { API_BASE } from "./desktop/context";
 import type {
   AttachmentSelectionKind,
+  AvailabilityReport,
+  AvailabilityServerEvent,
   BrowseServerFilesResponse,
   CancelJobResponse,
   CapabilityOptionsResponse,
   DiagnosticPreview,
   GateAnswerRequest,
   HealthResponse,
+  GpuSetupReport,
+  GpuDraftUpdate,
+  GpuProbeApproval,
   JobDetail,
   JobSummary,
   ModelOptionsResponse,
@@ -36,6 +44,12 @@ import type {
   UpdateCheckResponse,
   ValidateAttachmentsResponse,
 } from "@brainstorm-agentic/protocol";
+import type { PanelEvidenceView } from "./components/panels/coverage-model";
+import type { NeedsGateAnswer, NeedsGateView } from "./components/panels/needs-model";
+import type {
+  EncoderReadinessView,
+  PanelCompositionView,
+} from "./components/settings/panel-composition-model";
 
 export class ApiError extends Error {
   readonly status: number;
@@ -64,7 +78,7 @@ export function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === "AbortError";
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+async function request<T>(path: string, init?: RequestInit, measure?: (value: T, bytes: number) => void): Promise<T> {
   let res: Response;
   try {
     res = await fetch(`${API_BASE}${path}`, init);
@@ -90,6 +104,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     }
     throw new ApiError(message, res.status, payload);
   }
+  if (measure) {
+    const text = await res.text();
+    const value = JSON.parse(text) as T;
+    measure(value, text.length * 2);
+    return value;
+  }
   return (await res.json()) as T;
 }
 
@@ -99,10 +119,27 @@ function jsonInit(method: "POST" | "PUT", body: unknown): RequestInit {
 
 export const getHealth = (): Promise<HealthResponse> => request("/health");
 
-export const getSettings = (): Promise<ServerSettings> => request("/settings");
+export const getGpuSetup = (): Promise<GpuSetupReport> => request("/gpu/setup");
+export const discoverGpu = (): Promise<GpuSetupReport> => request("/gpu/discover", jsonInit("POST", {}));
+export const saveGpuDraft = (draft: GpuDraftUpdate): Promise<GpuSetupReport> => request("/gpu/draft", jsonInit("PUT", draft));
+export const approveGpuProbe = (approval: GpuProbeApproval): Promise<GpuSetupReport> => request("/gpu/probe", jsonInit("POST", approval));
+export const cancelGpuProbe = (): Promise<GpuSetupReport> => request("/gpu/cancel", jsonInit("POST", {}));
+
+const settingsResource = new SerializedResource<ServerSettings>();
+function publishSettings(settings: ServerSettings): void {
+  window.dispatchEvent(new CustomEvent('brain-settings-updated', { detail: settings }));
+}
+export const getSettings = (): Promise<ServerSettings> => settingsResource.read(() => request("/settings"));
 
 export const putSettings = (settings: ServerSettingsUpdate): Promise<ServerSettings> =>
-  request("/settings", jsonInit("PUT", settings));
+  settingsResource.mutate(() => request("/settings", jsonInit("PUT", settings)), publishSettings);
+
+/** Build dependent field updates after earlier edits finish, against the current server state. */
+export const updateSettings = (build: (current: ServerSettings) => ServerSettingsUpdate): Promise<ServerSettings> =>
+  settingsResource.mutate(async () => {
+    const current = await request<ServerSettings>("/settings");
+    return request("/settings", jsonInit("PUT", build(current)));
+  }, publishSettings);
 
 export const getModelOptions = (): Promise<ModelOptionsResponse> =>
   request("/model-options");
@@ -110,14 +147,19 @@ export const getModelOptions = (): Promise<ModelOptionsResponse> =>
 export const putModelsByRoute = (
   update: ModelsByRouteUpdate,
 ): Promise<ServerSettings> =>
-  request("/settings/models-by-route", jsonInit("PUT", update));
+  settingsResource.mutate(() => request("/settings/models-by-route", jsonInit("PUT", update)), publishSettings);
 
 /*
  * Module-level caches so navigating between the landing page and a dashboard
  * renders the last known snapshot immediately; SSE refreshes it right after.
  */
 let jobsCache: readonly JobSummary[] | null = null;
-const jobDetailCache = new Map<string, JobDetail>();
+// Bound both retained snapshots and decoded wire-text weight. A huge active job
+// can still render, but it cannot evict the browser by lingering in a hover cache.
+const jobDetailCache = new BoundedCache<string, JobDetail>(6, 16 * 1024 * 1024, 5 * 60_000);
+const detailWeights = new WeakMap<JobDetail, number>();
+const jobRequests = new Map<string, Promise<JobDetail>>();
+let prefetchCount = 0;
 
 export function cachedJobs(): readonly JobSummary[] | null {
   return jobsCache;
@@ -132,13 +174,17 @@ export function cachedJobDetail(jobId: string): JobDetail | undefined {
 }
 
 export function cacheJobDetail(detail: JobDetail): void {
-  jobDetailCache.set(detail.jobId, detail);
+  const previous = jobDetailCache.get(detail.jobId);
+  if (previous && previous.updatedAt > detail.updatedAt) return;
+  const weight = detailWeights.get(detail);
+  if (weight !== undefined) jobDetailCache.set(detail.jobId, detail, weight);
 }
 
 /** Warm the detail cache (job-card hover/focus) so opening a job is instant. */
 export function prefetchJobDetail(jobId: string): void {
-  if (jobDetailCache.has(jobId)) return;
-  void getJob(jobId).catch(() => undefined);
+  if (jobDetailCache.get(jobId) || jobRequests.has(jobId) || prefetchCount >= 2) return;
+  prefetchCount += 1;
+  void getJob(jobId).catch(() => undefined).finally(() => { prefetchCount -= 1; });
 }
 
 export const getJobs = async (): Promise<readonly JobSummary[]> => {
@@ -221,10 +267,14 @@ export const validateAttachments = (
     jsonInit("POST", { kind, paths }),
   );
 
-export const getJob = async (jobId: string): Promise<JobDetail> => {
-  const detail = await request<JobDetail>(`/jobs/${encodeURIComponent(jobId)}`);
-  jobDetailCache.set(detail.jobId, detail);
-  return detail;
+export const getJob = (jobId: string): Promise<JobDetail> => {
+  const pending = jobRequests.get(jobId); if (pending) return pending;
+  const result = request<JobDetail>(`/jobs/${encodeURIComponent(jobId)}`, undefined, (detail, bytes) => detailWeights.set(detail, bytes)).then((detail) => {
+    cacheJobDetail(detail); return detail;
+  });
+  jobRequests.set(jobId, result);
+  void result.finally(() => { if (jobRequests.get(jobId) === result) jobRequests.delete(jobId); }).catch(() => undefined);
+  return result;
 };
 
 export const cancelJob = (jobId: string): Promise<CancelJobResponse> =>
@@ -311,6 +361,66 @@ export const answerGate = (jobId: string, body: GateAnswerRequest): Promise<JobD
 /** Permanently pauses the pending gate's auto-approve countdown. */
 export const holdGateAutoApprove = (jobId: string): Promise<JobDetail> =>
   request(`/jobs/${encodeURIComponent(jobId)}/gate-hold`, { method: "POST" });
+
+/**
+ * The confirm-panel gate's coverage view, from the run's panelEvidence
+ * artifact. Answers 404 for runs pinned to bundles without it.
+ */
+export const getPanelEvidence = (jobId: string): Promise<PanelEvidenceView> =>
+  request(`/jobs/${encodeURIComponent(jobId)}/panel-evidence`);
+
+/** The optional confirm-needs gate's needs and weights, while it is pending. */
+export const getNeedsGate = (jobId: string): Promise<NeedsGateView> =>
+  request(`/jobs/${encodeURIComponent(jobId)}/needs`);
+
+/** Answers the confirm-needs gate: approve, or edit with the edited embeddingInput. */
+export const answerNeedsGate = (jobId: string, body: NeedsGateAnswer): Promise<JobDetail> =>
+  request(`/jobs/${encodeURIComponent(jobId)}/gate`, jsonInit("POST", body));
+
+/** Every panel composition param with the pinned bundle's default and the stored overrides. */
+export const getPanelComposition = (): Promise<PanelCompositionView> =>
+  request("/panel-composition");
+
+/** Which text encoders this host can run for the panel composition. */
+export const getEncoderReadiness = (): Promise<EncoderReadinessView> =>
+  request("/readiness/encoders");
+
+/** The tool availability table and the derived per-purpose priority orders. */
+export const getAvailability = (): Promise<AvailabilityReport> =>
+  request("/availability");
+
+/**
+ * Probes the named tools (or all when omitted) and answers with the updated
+ * table. Synchronous up to 20 s; longer probes keep running on the server and
+ * the table shows them as probing.
+ */
+export const probeAvailability = (
+  tools?: readonly string[],
+): Promise<AvailabilityReport> =>
+  request(
+    "/availability/probe",
+    jsonInit("POST", tools !== undefined ? { tools } : {}),
+  );
+
+/**
+ * The dashboard stream's "availability" announcements. The event is declared
+ * beside ServerEvent rather than in its union, so the stream hook hands it to
+ * these listeners (the "Tools and providers" view) instead of the batch
+ * handler. Returns the unsubscribe function.
+ */
+const availabilityListeners = new Set<(report: AvailabilityReport) => void>();
+export function onAvailability(listener: (report: AvailabilityReport) => void): () => void {
+  availabilityListeners.add(listener);
+  return () => {
+    availabilityListeners.delete(listener);
+  };
+}
+
+function isAvailabilityEvent(value: unknown): value is AvailabilityServerEvent {
+  if (typeof value !== "object" || value === null) return false;
+  const event = value as { readonly type?: unknown; readonly availability?: unknown };
+  return event.type === "availability" && typeof event.availability === "object" && event.availability !== null;
+}
 
 /**
  * Dismisses one panel seat mid-run. The server stops the worker and resumes the
@@ -402,7 +512,7 @@ const MAX_BACKOFF_MS = 15_000;
  * Subscribe to a server event stream. Auto-reconnects with capped exponential
  * backoff and returns the connection state for the "reconnecting…" line.
  */
-export function useServerEvents(url: string, onEvent: (ev: ServerEvent) => void): boolean {
+export function useServerEvents(url: string, onEvent: (ev: ServerEvent) => void, enabled = true): boolean {
   // Optimistic so the reconnect line never flashes during the initial connect.
   const [connected, setConnected] = useState(true);
   const handlerRef = useRef(onEvent);
@@ -411,10 +521,20 @@ export function useServerEvents(url: string, onEvent: (ev: ServerEvent) => void)
   });
 
   useEffect(() => {
+    if (!enabled) return;
     let source: EventSource | null = null;
     let timer: number | undefined;
     let attempt = 0;
     let disposed = false;
+    let delivery: number | undefined;
+    let pending: ServerEvent[] = [];
+    let pendingBytes = 0;
+    const flush = () => {
+      if (delivery !== undefined) window.clearTimeout(delivery);
+      delivery = undefined;
+      const batch = compactEvents(pending); pending = []; pendingBytes = 0;
+      if (!disposed) for (const event of batch) handlerRef.current(event);
+    };
 
     const connect = () => {
       if (disposed) return;
@@ -425,13 +545,26 @@ export function useServerEvents(url: string, onEvent: (ev: ServerEvent) => void)
       };
       source.onmessage = (msg: MessageEvent<string>) => {
         attempt = 0;
+        let event: unknown;
         try {
-          handlerRef.current(JSON.parse(msg.data) as ServerEvent);
+          event = JSON.parse(msg.data);
         } catch {
           // malformed frame; ignore
+          return;
         }
+        if (isAvailabilityEvent(event)) {
+          for (const listener of availabilityListeners) listener(event.availability);
+          return;
+        }
+        if (!isServerEvent(event)) return;
+        if (event.type === 'job' && event.job) detailWeights.set(event.job, msg.data.length * 2);
+        pending.push(event); pendingBytes += msg.data.length * 2;
+        // Cap latency and queued memory even when background timers are throttled.
+        if (pending.length >= 64 || pendingBytes >= 2 * 1024 * 1024) flush();
+        else if (delivery === undefined) delivery = window.setTimeout(flush, 50);
       };
       source.onerror = () => {
+        flush();
         setConnected(false);
         source?.close();
         const delay = Math.min(1000 * 2 ** attempt, MAX_BACKOFF_MS);
@@ -445,8 +578,10 @@ export function useServerEvents(url: string, onEvent: (ev: ServerEvent) => void)
       disposed = true;
       source?.close();
       if (timer !== undefined) window.clearTimeout(timer);
+      if (delivery !== undefined) window.clearTimeout(delivery);
+      pending = [];
     };
-  }, [url]);
+  }, [url, enabled]);
 
   return connected;
 }

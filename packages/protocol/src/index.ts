@@ -10,6 +10,7 @@
 // change tracker's diff and its text projection (see each module's header).
 export * from "./diff-inline.js";
 export * from "./output-sections.js";
+export * from "./gpu.js";
 
 /* ------------------------------------------------------------------ stages */
 
@@ -76,7 +77,9 @@ export type ActivityCapability =
   | "attachment-access"
   | "code-execution"
   | "web-search"
-  | "taxonomy-access";
+  | "taxonomy-access"
+  | "notes-access"
+  | "fact-table";
 
 /**
  * The operational detail of one logged tool call: the file path read, the
@@ -196,7 +199,7 @@ export interface StageBase {
    * paging backwards anchors joins here, not at the array's first element.
    */
   readonly activityFloor?: string;
-  /** Total token spend of the stage's agent tasks (all fan-out branches). */
+  /** Total token spend of the stage's agent tasks (all fan-out branches), with the fact-table verifications they requested and, for the review stage, the reconsideration tasks of fact updates. */
   readonly usage?: TokenUsageView;
 }
 
@@ -643,6 +646,12 @@ export interface CommentView {
   readonly flaws?: readonly FlawEntryView[];
   /** What this commentor's task spent producing the comment. */
   readonly usage?: TokenUsageView;
+  /**
+   * True when the commentor revised this comment in a reconsideration after
+   * the fact table deleted a badge it cited: the view shows the merged
+   * comment, the one the judge (or its re-decision) read.
+   */
+  readonly revisedAfterFactUpdate?: boolean;
 }
 
 /** One confirmed problem in the judge's repair signal, pinned to a step. */
@@ -683,6 +692,10 @@ export interface ReviewRoundView {
   /** The chain-of-thought step exactly as it stood under this round's review. */
   readonly cot?: CotStepView;
   readonly comments: readonly CommentView[];
+  /** Probability reports are kept distinct from legacy categorical comments. */
+  readonly gameCritiques?: readonly GameCritiqueView[];
+  readonly gameChair?: GameChairDecisionView;
+  readonly gameSettlement?: GameSettlementView;
   readonly decision?: JudgeDecisionView;
   /** Present when this round ended in a redevelopment: the runtime-computed change-set. */
   readonly revision?: {
@@ -705,9 +718,140 @@ export interface ReviewRoundView {
       readonly thoughts?: string;
     }[];
   };
+  /**
+   * The critics whose report (game) or comment (standard review) of this round
+   * was withdrawn in a reconsideration after the fact table deleted a badge it
+   * cited, each with the deleted badge ids its withdrawal answered. A withdrawn
+   * report is neither assessed again nor settled; its view stays in the round.
+   */
+  readonly withdrawnAfterFactUpdate?: readonly {
+    readonly criticId: string;
+    readonly deleted: readonly string[];
+  }[];
+  /**
+   * True when the committee chair (game) or the judge (standard review)
+   * assessed this round again because a report or comment it already had was
+   * revised or withdrawn after a fact-table deletion. `gameChair` / `decision`
+   * then hold the re-assessment and `firstAssessment` the first one.
+   */
+  readonly reassessed?: boolean;
+  /** The chair's or judge's first assessment of a re-assessed round. */
+  readonly firstAssessment?: {
+    readonly gameChair?: GameChairDecisionView;
+    readonly decision?: JudgeDecisionView;
+  };
 }
 
-export type ReviewStepOutcome = "pending" | "under-review" | "passed" | "force-passed";
+export interface GameCritiqueView {
+  readonly criticId: string;
+  readonly criticLabel: string;
+  readonly q: number;
+  readonly justification: string;
+  readonly usage?: TokenUsageView;
+  /**
+   * True when the critic revised this report in a reconsideration after the
+   * fact table deleted a badge it cited: the view shows the merged report, the
+   * one the committee chair (or its re-assessment) read and settlement scored.
+   */
+  readonly revisedAfterFactUpdate?: boolean;
+}
+
+/** How a game round's label y is decided (scoring v3). */
+export type GameDecisionRule = "committee-mean" | "chair-decisive";
+
+/** The committee chair's decisiveness label for one admitted argument (scoring v3). */
+export type GameReportLabel = "decisive" | "not-decisive" | "invalid";
+
+/** New-run policy; an omitted points value starts each confirmed seat at 100 × panel size. */
+export interface GameReviewSettings {
+  readonly threshold: number;
+  readonly initialPoints?: number;
+  /** Absent on records written before scoring v3; such runs used the committee mean. */
+  readonly decisionRule?: GameDecisionRule;
+  /** Under committee-mean, score each critic against the label the OTHER admitted reports produce. Ignored under chair-decisive. */
+  readonly leaveOneOut?: boolean;
+}
+
+export interface GameChairDecisionView {
+  readonly reports: Readonly<Record<string, {
+    readonly admissible: boolean;
+    readonly reason: string;
+    /** Scoring v3 chairs label every assessed report; absent on earlier chairs. */
+    readonly label?: GameReportLabel;
+    readonly factChecks?: readonly { readonly factId: string; readonly verifiedFactId?: string; readonly badgeHash?: string; readonly approvalId?: string; readonly conditions: string; readonly supportsConclusion: boolean; readonly reason: string }[];
+  }>>;
+  /** Only historical v1 chairs supplied a label. Current labels are host-computed. */
+  readonly y?: 0 | 1 | null;
+  readonly reason: string;
+  readonly issues: readonly JudgeIssueView[];
+}
+
+export interface GameScoreRowView {
+  readonly criticId: string;
+  readonly q: number;
+  readonly admissible: boolean;
+  readonly reason: string;
+  readonly brierLoss: number | null;
+  readonly baseScore: number | null;
+  readonly peerMeanBaseScore: number | null;
+  readonly score: number | null;
+  readonly balanceBefore?: number;
+  readonly balanceAfter?: number;
+  /** Latched exclusion from future critic work only; the thinker's work continues. */
+  readonly excluded?: boolean;
+  /** Scoring v3: the chair's label; null when the report was inadmissible or the chair gave none. */
+  readonly label?: GameReportLabel | null;
+  /** Scoring v3: the label this row was scored against (y, or the leave-one-out label); null = unscored. */
+  readonly scoringLabel?: 0 | 1 | null;
+  /**
+   * Scoring v3 badge penalty: the report cited a badge never issued in the
+   * run's fact table ("invented-badge"), or one deleted from it before the
+   * report was requested ("deleted-badge"), so it was rejected and records the
+   * floor score (-175) once. A report citing both kinds is "invented-badge".
+   */
+  readonly penalty?: "invented-badge" | "deleted-badge";
+  /** The invented badge ids ("F:n"), unique and string-sorted; present exactly when `penalty` is "invented-badge". */
+  readonly inventedBadges?: readonly string[];
+  /** The deleted badge ids ("F:n") cited after their deletion, unique and string-sorted; present on a penalty row whose report cited any. */
+  readonly deletedBadges?: readonly string[];
+}
+
+export interface GameSettlementView {
+  readonly ruleVersion: string;
+  readonly version: string;
+  readonly y: 0 | 1 | null;
+  readonly status: "settled" | "no-valid-reports";
+  readonly admittedCount: number;
+  readonly rows: readonly GameScoreRowView[];
+  /** V2 records these inputs/results; absent on historical observational v1 scores. */
+  readonly meanQ?: number | null;
+  readonly threshold?: number;
+  readonly initialPoints?: number;
+  readonly ledgerSequence?: number;
+  readonly settlementId?: string;
+  readonly criticIds?: readonly string[];
+  readonly repairArguments?: readonly string[];
+  /** Scoring v3 records the rule the round was decided and scored under. */
+  readonly decisionRule?: GameDecisionRule;
+  readonly leaveOneOut?: boolean;
+  /** Scoring v3: true when the run enabled the invented-badge penalty (workflow param gameInventedBadgePenalty); absent otherwise. */
+  readonly inventedBadgePenalty?: boolean;
+  /** Scoring v3: true when the run's fact table deletes refuted and revoked badges and the badge penalty also fines a badge deleted before the report was requested; absent otherwise. */
+  readonly deletedBadgePenalty?: boolean;
+}
+
+export interface GameLedgerView {
+  readonly initialPoints: number;
+  readonly ledgerSequence: number;
+  readonly critics: readonly {
+    readonly criticId: string;
+    readonly balance: number;
+    readonly excluded: boolean;
+    readonly eligible: boolean;
+  }[];
+}
+
+export type ReviewStepOutcome = "pending" | "under-review" | "passed" | "force-passed" | "unresolved";
 
 export interface ReviewStepView {
   /** 1-based chain-of-thought step index. */
@@ -724,6 +868,17 @@ export interface ReviewStepView {
    * on the rewrite that produced them (see revision.rewritten).
    */
   readonly thoughts?: string;
+  /**
+   * Present when a reconsideration after a fact-table deletion rewrote this
+   * step after the walk had passed it: one item per notice the rewrite
+   * answered. Such a step is not reviewed again.
+   */
+  readonly revisedAfterReview?: readonly {
+    readonly notice: string;
+    readonly deleted: string;
+    readonly replacedBy?: string;
+    readonly at: number;
+  }[];
 }
 
 export interface ReviewMemberView {
@@ -735,13 +890,14 @@ export interface ReviewMemberView {
   readonly steps: readonly ReviewStepView[];
   /**
    * The member's output as the review left it: the first pass with every
-   * redevelopment applied. Once every step has passed (or force-passed) this
+   * redevelopment and every merged fact-update reconsideration applied. Once
+   * every step has passed (or force-passed) this
    * IS the member's final version — the record the integrator, the chair,
    * and the session's `final/` copies work from; while the walk is still
    * running it is the current version under review.
    */
   readonly finalIdea?: BrainIdeaView;
-  /** How many redevelopments the review applied to this member's chain. */
+  /** How many revisions the review applied to this member's chain: redevelopments and merged fact-update reconsiderations that changed it. */
   readonly revisionCount?: number;
   /** Present while this seat is actively under review. */
   readonly progress?: ReviewSeatProgress;
@@ -969,6 +1125,11 @@ export interface FirstPassStage extends StageBase {
 
 export interface ReviewStage extends StageBase {
   readonly id: "review-members";
+  /** This run's pinned mode, never the server's current preference. */
+  readonly gamifiedReview?: boolean;
+  readonly gameReview?: GameReviewSettings;
+  /** Authoritative journaled balances; absent until the confirmed roster is initialized. */
+  readonly gameLedger?: GameLedgerView;
   /**
    * The run's review round budget, read from the workflow param the run pinned
    * — never assumed by the client, so a run started under a different budget
@@ -988,9 +1149,97 @@ export interface ChairStage extends StageBase {
   readonly proposal?: ProposalView;
 }
 
+/** Human-facing shared fact state; never supplied as an agent prompt. */
+export interface FactUsageView {
+  readonly agentId: string;
+  readonly agentLabel?: string;
+  /** Recorded role ID, or a truthful generic role when older records omit it. */
+  readonly role: string;
+  /** The thinker being reviewed; distinct from the critic who uses the fact. */
+  readonly seatId?: string;
+  readonly seatLabel?: string;
+  readonly step?: number;
+  /** Recorded submission purpose or the actual passage citing the badge. */
+  readonly purpose?: string;
+  readonly kind: "submitted" | "cited" | "approval" | "recorded";
+  readonly taskId?: string;
+  readonly at?: number;
+  /** Only for a Supreme approval decision; a denial is not reliance. */
+  readonly approved?: boolean;
+}
+
+export interface FactEntryView {
+  readonly id: string;
+  /** Absent on legacy journals which predate content-hashed badges. */
+  readonly badgeHash?: string;
+  readonly status: "justified" | "disputed" | "revoked" | "refuted";
+  readonly kind: "code" | "record" | "result" | "literature" | "math" | "background";
+  readonly claim: string;
+  readonly conditions: string;
+  readonly method: "re-executed" | "source-quoted" | "record-match" | "judgement-only" | "none";
+  readonly evidence: string;
+  /** Supreme's original issuance or refutation rationale, when recorded. */
+  readonly reason?: string;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+  readonly supersededBy?: string;
+  /** Human attribution only. A recorded interaction alone does not prove reliance. */
+  readonly uses?: readonly FactUsageView[];
+  readonly history: readonly {
+    readonly at: number;
+    readonly event: "issued" | "relied" | "upheld" | "narrowed" | "revoked" | "disputed" | "refuted";
+    readonly by?: string;
+    readonly detail?: string;
+  }[];
+}
+
+/** A badge the supreme judge deleted from the shared table; its claim and reason are not kept. */
+export interface FactDeletionView {
+  readonly id: string;
+  readonly at: number;
+  /** The badge the same ruling issued in its place, when there is one. */
+  readonly replacedBy?: string;
+}
+
+/** One subscriber of a fact-update notice and how its reconsideration stands. */
+export interface FactUpdateSubscriberView {
+  /** chain:<seat>, game-report:<seat>:<step>:<round>:<critic>, comment:<seat>:<step>:<round>:<critic> or none:<role>:<agent>. */
+  readonly key: string;
+  readonly kind: "chain" | "game-report" | "comment" | "none";
+  /** The seat (chain), the critic (report or comment) or the agent (none). */
+  readonly agentId: string;
+  /** The seat whose chain, report or comment is reconsidered. */
+  readonly seatId?: string;
+  readonly step?: number;
+  readonly round?: number;
+  readonly state: "running" | "applied" | "unchanged" | "withdrawn" | "discarded" | "failed" | "no-task";
+}
+
+/** One deletion notice and its subscribers; the notice text itself is never shown. */
+export interface FactUpdateView {
+  readonly notice: string;
+  readonly deleted: string;
+  readonly replacedBy?: string;
+  readonly at: number;
+  readonly subscribers: readonly FactUpdateSubscriberView[];
+}
+
+export interface FactTableView {
+  /** Latest committed shared entries, ordered by badge number. */
+  readonly entries: readonly FactEntryView[];
+  /** A read failed; entries retain the last successfully read committed state. */
+  readonly error?: string;
+  /** Badges deleted from the shared table, in deletion order; absent when none was deleted. */
+  readonly deleted?: readonly FactDeletionView[];
+  /** The deletion notices and their reconsiderations, in notice order; absent when there is none. */
+  readonly updates?: readonly FactUpdateView[];
+}
+
 export interface DoneStage extends StageBase {
   readonly id: "done";
   readonly summary?: RunSummaryView;
+  /** Absent when no journal was recorded; an empty table has entries: []. */
+  readonly factTable?: FactTableView;
 }
 
 export type StageView =
@@ -1079,6 +1328,9 @@ export interface JobSummary {
   readonly attachments?: readonly string[];
   readonly status: JobStatus;
   readonly runner: RunnerKind;
+  /** Snapshotted for the run; absent on legacy records means off. */
+  readonly gamifiedReview?: boolean;
+  readonly gameReview?: GameReviewSettings;
   readonly createdAt: number;
   readonly updatedAt: number;
   readonly slurmJobId?: string;
@@ -1234,6 +1486,9 @@ export interface ClaudeAgentSettings {
  *   searches route to. Keys for these only raise rate limits.
  * - `cacheEnabled` turns on the cross-run keyword cache (per-workspace,
  *   TTL-bounded); every cache hit is still logged in the run's search log.
+ * - `mode` "agent" hands search to the agent backends' own tools instead of
+ *   the host web tools; `braveFallback` adds the paid Brave Search API as
+ *   the last source on every route; `routePreset` orders the sources.
  *
  * Provider API keys are write-only exactly like the LLM credentials; the
  * server returns only the `…Configured` flags.
@@ -1250,6 +1505,32 @@ export interface WebSearchSettings {
   readonly cacheTtlHours?: number;
   /** Polite-pool contact for OpenAlex/Crossref (recommended, not secret). */
   readonly contactEmail?: string;
+  /**
+   * "host" (default): the host web tools — web_search, news_search,
+   * paper_search, paper_details, web_fetch — coordinated across all agents
+   * of a run and logged. "agent": search is handed to the agent backends'
+   * own tools (Claude's WebSearch/WebFetch, Cursor's webSearch/webFetch, the
+   * Messages API's web_search with the host's plain web_fetch); the other
+   * search settings then do not apply and runs keep no search log.
+   */
+  readonly mode?: "host" | "agent";
+  /**
+   * The paid Brave Search API as the LAST source on every route, used only
+   * after the free sources failed; needs the Brave key. Paid requests are
+   * capped per run and per calendar month (UTC) and counted on this machine.
+   */
+  readonly braveFallback?: {
+    readonly enabled: boolean;
+    /** Default 300. */
+    readonly maxRequestsPerRun?: number;
+    /** Default 1000. */
+    readonly maxRequestsPerMonth?: number;
+  };
+  /**
+   * Source order: "searxng-first" (default) asks SearXNG and the scholarly
+   * indexes before the paid fallback; "api-first" asks the paid API first.
+   */
+  readonly routePreset?: "searxng-first" | "api-first";
   /** Public status only; the keys themselves are never returned. */
   readonly tavilyKeyConfigured?: boolean;
   readonly braveKeyConfigured?: boolean;
@@ -1304,6 +1585,10 @@ export interface ServerSettings {
    * already passed one gate and has not yet reached the next.
    */
   readonly gateAutoApprove?: boolean;
+  /** Probability-based review for NEW runs only. Absent defaults to false. */
+  readonly gamifiedReview?: boolean;
+  /** Frozen for each new run; absent defaults to threshold 0.5 and automatic points. */
+  readonly gameReview?: GameReviewSettings;
   /**
    * Review-round budget for NEW runs: one chain step may take at most
    * `maxRounds` rounds (the first review plus revisions). Absent = the
@@ -1391,6 +1676,13 @@ export interface ServerSettings {
   };
   /** The host-owned web layer's provider configuration. */
   readonly webSearch?: WebSearchSettings;
+  /**
+   * The tool availability service: whether degraded tools are moved behind
+   * every available one in the derived per-purpose orders (default true),
+   * and how often every tool is re-probed while the server is up, in
+   * minutes (default 30).
+   */
+  readonly availability?: { readonly demoteDegraded?: boolean; readonly periodicMinutes?: number };
   /**
    * Per-run capability overrides, snapshotted into the job's execution
    * settings at submit time. Keys are capability ids from the content
@@ -1504,6 +1796,10 @@ export interface ServerSettingsUpdate {
   readonly panelConfirmation?: "manual" | "auto";
   /** Absent = keep the stored gate countdown policy. */
   readonly gateAutoApprove?: boolean;
+  /** Absent keeps the stored preference; false selects legacy review. */
+  readonly gamifiedReview?: boolean;
+  /** Absent keeps the section; omitting initialPoints in a supplied section restores automatic points. */
+  readonly gameReview?: GameReviewSettings;
   /**
    * Absent = keep the stored review policy. `{}` = follow the bundle's
    * default again. `{ maxRounds: n }` = override the budget for new runs.
@@ -1584,6 +1880,9 @@ export interface ServerSettingsUpdate {
     readonly cacheEnabled?: boolean;
     readonly cacheTtlHours?: number;
     readonly contactEmail?: string;
+    readonly mode?: WebSearchSettings["mode"];
+    readonly braveFallback?: WebSearchSettings["braveFallback"];
+    readonly routePreset?: WebSearchSettings["routePreset"];
     readonly tavilyApiKey?: string;
     readonly clearTavilyApiKey?: boolean;
     readonly braveApiKey?: string;
@@ -1593,6 +1892,8 @@ export interface ServerSettingsUpdate {
     readonly openAlexApiKey?: string;
     readonly clearOpenAlexApiKey?: boolean;
   };
+  /** The availability service's settings (see ServerSettings); absent keeps the stored values. */
+  readonly availability?: { readonly demoteDegraded?: boolean; readonly periodicMinutes?: number };
 }
 
 export interface SubmitJobRequest {
@@ -2028,6 +2329,96 @@ export interface ReadinessDiagnoseRequest {
   readonly check: ReadinessCheckId;
 }
 
+/* ------------------------------------------------------------ availability */
+
+/**
+ * Tool availability: whether every provider and tool the pipeline may use
+ * (scholarly sources, web search, SearXNG engines, the chat model, the
+ * embedding models, the registry, code and Slurm) is reachable from this
+ * deployment, and the per-purpose tool orders derived from those states.
+ * Probed at server start, after a relevant settings change, on request from
+ * the UI, and periodically; new runs receive the derived orders as their
+ * route lists.
+ */
+export type ToolState = "available" | "degraded" | "unreachable" | "blocked" | "needs-key" | "disabled" | "unchecked";
+
+/** One line of the log a probe produced (request summary, status, counts, timing, error); never carries a key. */
+export interface ToolProbeLogLine {
+  readonly at: number;
+  readonly level: "info" | "warn" | "error";
+  readonly text: string;
+}
+
+export interface ToolAvailability {
+  /** Stable id: "searxng", "brave", "openalex", "llm", "openrouter-embeddings", "encoder:<id>", "registry", "searxng-local", "code", "slurm", ... */
+  readonly id: string;
+  readonly label: string;
+  readonly group: "search" | "papers" | "models" | "infrastructure";
+  readonly state: ToolState;
+  readonly keyPresent?: boolean;
+  readonly latencyMs?: number;
+  /** One line: what answered, or what failed. */
+  readonly detail?: string;
+  /** Epoch ms of the last probe. */
+  readonly checkedAt?: number;
+  /** Epoch ms until which an unreachable or blocked tool stays in cool-down. */
+  readonly until?: number;
+  /** True while a probe of this tool is running. */
+  readonly probing?: boolean;
+  readonly log: readonly ToolProbeLogLine[];
+  /** Sub-rows (a metasearch provider's engines). */
+  readonly children?: readonly ToolAvailability[];
+}
+
+export type ToolPurpose = "web" | "news" | "paper-lookup" | "paper-topic" | "paper-details" | "citation-hop" | "embedding";
+
+export const TOOL_PURPOSES: readonly ToolPurpose[] = [
+  "web",
+  "news",
+  "paper-lookup",
+  "paper-topic",
+  "paper-details",
+  "citation-hop",
+  "embedding",
+];
+
+/** How one configured tool fared in the derived order, and why. */
+export interface PurposeOrderEntry {
+  readonly id: string;
+  readonly action: "kept" | "moved" | "dropped";
+  readonly reason?: string;
+}
+
+export interface PurposeOrder {
+  readonly purpose: ToolPurpose;
+  /** The configured (or preset) order. */
+  readonly configured: readonly string[];
+  /** The order new runs receive: disabled, needs-key, unreachable and blocked dropped; degraded moved behind every available one. */
+  readonly effective: readonly string[];
+  readonly entries: readonly PurposeOrderEntry[];
+}
+
+/** GET /api/availability; persisted at <workspace>/availability.json. */
+export interface AvailabilityReport {
+  readonly version: 1;
+  readonly updatedAt: number;
+  readonly tools: readonly ToolAvailability[];
+  readonly purposes: readonly PurposeOrder[];
+  /** Whether degraded tools are demoted automatically (settings.availability.demoteDegraded). */
+  readonly demoteDegraded: boolean;
+}
+
+/** POST /api/availability/probe request body; omit `tools` to probe all. */
+export interface AvailabilityProbeRequest {
+  readonly tools?: readonly string[];
+}
+
+/** The dashboard stream's announcement of an updated availability table (type "availability"). */
+export interface AvailabilityServerEvent {
+  readonly type: "availability";
+  readonly availability: AvailabilityReport;
+}
+
 /**
  * Body of the 409 returned by POST /api/jobs while a required readiness
  * check is failing: the submission is held client-side until `ready`.
@@ -2092,6 +2483,7 @@ export type ServerEvent =
   | { readonly type: "jobs"; readonly jobs: readonly JobSummary[] }
   | { readonly type: "job"; readonly job: JobDetail }
   | { readonly type: "readiness"; readonly readiness: ReadinessReport }
+  | AvailabilityServerEvent
   | { readonly type: "error"; readonly message: string }
   | {
       /**
@@ -2181,6 +2573,8 @@ export interface ToolUsageReport {
  *   GET  /api/readiness                       -> ReadinessReport
  *   POST /api/readiness/check                 -> ReadinessReport     (body: ReadinessCheckRequest; re-runs checks asynchronously)
  *   POST /api/readiness/diagnose              -> ReadinessReport     (body: ReadinessDiagnoseRequest; asks the LLM advisor about a failed check)
+ *   GET  /api/availability                    -> AvailabilityReport  (every tool's probed state and the derived per-purpose orders)
+ *   POST /api/availability/probe              -> AvailabilityReport  (body: AvailabilityProbeRequest; probes the named tools, or all, synchronously up to 20 s)
  *   GET  /api/jobs/trash                      -> JobSummary[]       (view-only trash, newest first)
  *   GET  /api/jobs/:jobId                     -> JobDetail
  *   POST /api/jobs/:jobId/cancel              -> CancelJobResponse

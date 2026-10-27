@@ -1,0 +1,86 @@
+/* Compact menus share the application's type, spacing and touch target scale. */
+.quick-controls-positioner { z-index: 55; outline: none; }
+.quick-controls-popup {
+  box-sizing: border-box;
+  width: 320px;
+  max-width: calc(100vw - 24px);
+  max-height: min(640px, var(--available-height, calc(100dvh - 24px)));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  padding: calc(var(--ui-space-2) + 1px);
+  color: var(--text);
+  background: var(--surface);
+  border: 0;
+  border-radius: var(--ui-radius-lg);
+  box-shadow: var(--ui-float-shadow);
+  outline: none;
+  transform-origin: var(--transform-origin);
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+.quick-controls-popup[data-starting-style], .quick-controls-popup[data-ending-style] { opacity: 0; transform: scale(.98); }
+.quick-controls-heading { padding: var(--ui-space-2) var(--ui-space-3); color: var(--text-dim); font-size: var(--ui-font-caption); line-height: 18px; }
+.quick-controls-context { padding: 0 var(--ui-space-3) var(--ui-space-2); color: var(--text-dim); font-size: var(--ui-font-xs); line-height: 16px; }
+.quick-control-row {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: var(--ui-space-2);
+  min-height: var(--ui-control-height);
+  padding: var(--ui-space-2) var(--ui-space-3);
+  border-radius: var(--ui-radius-md);
+  font-size: var(--ui-font-control);
+  line-height: 20px;
+  cursor: pointer;
+  outline: none;
+  user-select: none;
+}
+.quick-control-row[data-popup-open] { background: var(--ui-control-fill); }
+.quick-control-row[data-highlighted], .quick-control-row:focus-visible { outline: none; box-shadow: none; background: var(--ui-focus-fill); color: var(--ui-focus-text); }
+.quick-control-row:is([data-highlighted], :focus-visible) :is(.quick-control-description, .quick-control-scope, .quick-control-value, .quick-control-chevron, .quick-control-icon, .quick-control-spinner) { color: inherit; }
+.quick-control-row[data-disabled] { color: var(--text-dim); cursor: default; }
+.quick-control-copy { display: flex; flex: 1; flex-direction: column; min-width: 0; }
+.quick-control-label { overflow-wrap: anywhere; }
+.quick-control-description, .quick-control-scope { color: var(--text-dim); font-size: var(--ui-font-xs); line-height: 16px; }
+.quick-control-scope { margin-top: 2px; }
+.quick-control-error { color: #bb4858; font-size: var(--ui-font-caption); line-height: 18px; }
+:root[data-theme='dark'] .quick-control-error { color: #ffa2ae; }
+.quick-control-value { max-width: 98px; color: var(--text-dim); font-size: var(--ui-font-caption); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.quick-control-icon { display: flex; align-items: center; color: var(--text-dim); }
+.quick-control-icon svg, .quick-control-chevron, .quick-control-spinner { width: var(--ui-icon-md); height: var(--ui-icon-md); flex-shrink: 0; stroke-width: var(--ui-icon-stroke); }
+.quick-control-chevron { color: var(--text-dim); }
+.quick-control-choice { display: grid; place-items: center; width: 18px; height: 18px; flex-shrink: 0; }
+.quick-control-choice[data-selected] > span { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+.quick-control-spinner { animation: quick-control-spin 900ms linear infinite; color: var(--text-dim); }
+.quick-controls-separator { height: 0; margin: var(--ui-space-2) var(--ui-space-3); border: 0; }
+.quick-controls-notice { display: flex; align-items: center; gap: var(--ui-space-2); padding: var(--ui-space-2) var(--ui-space-3); font-size: var(--ui-font-caption); color: var(--text-dim); }
+.quick-controls-navigation { position: sticky; top: calc(-1 * (var(--ui-space-2) + 1px)); z-index: 1; background: var(--surface); display: flex; align-items: center; gap: var(--ui-space-2); margin-bottom: var(--ui-space-1); padding: 0 var(--ui-space-3) var(--ui-space-1) 0; border-bottom: 0; font-size: var(--ui-font-caption); color: var(--text-dim); }
+.quick-controls-navigation > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.quick-controls-back { display: flex; gap: var(--ui-space-1); align-items: center; flex-shrink: 0; min-height: var(--ui-control-height); padding: var(--ui-space-2) var(--ui-space-3); border-radius: var(--ui-radius-md); color: var(--text); outline: none; cursor: pointer; }
+.quick-controls-back svg { width: var(--ui-icon-md); height: var(--ui-icon-md); }
+.quick-controls-back[data-highlighted], .quick-controls-back:focus-visible { outline: none; box-shadow: none; color: var(--ui-focus-text); background: var(--ui-focus-fill); }
+/* Pointer previews highlight visually without moving the typing focus. */
+@media (hover: hover) {
+  .quick-control-row:not([data-disabled]):hover, .quick-controls-back:not([data-disabled]):hover { background: var(--ui-focus-fill); color: var(--ui-focus-text); }
+  .quick-control-row:not([data-disabled]):hover :is(.quick-control-description, .quick-control-scope, .quick-control-value, .quick-control-chevron, .quick-control-icon, .quick-control-spinner) { color: inherit; }
+}
+@keyframes quick-control-spin { to { transform: rotate(360deg); } }
+@media (pointer: coarse), (max-width: 640px) {
+  .quick-control-row, .quick-controls-back { min-height: var(--ui-touch-target); }
+  .quick-controls-popup { max-height: min(640px, var(--available-height, calc(100dvh - 96px))); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .quick-controls-popup { transition: none; }
+  .quick-control-spinner { animation: none; }
+}
+
+@media (forced-colors: active) {
+  .quick-control-row:is([data-highlighted], :focus-visible), .quick-controls-back:is([data-highlighted], :focus-visible) { forced-color-adjust: none; background: Highlight; color: HighlightText; }
+  .quick-control-row:is([data-highlighted], :focus-visible) :is(.quick-control-description, .quick-control-scope, .quick-control-value, .quick-control-chevron, .quick-control-icon, .quick-control-spinner, .quick-control-error) { color: inherit; }
+  .quick-control-choice[data-selected] > span { forced-color-adjust: none; background: Highlight; }
+  .quick-control-row:is([data-highlighted], :focus-visible) .quick-control-choice[data-selected] > span { background: HighlightText; }
+}
+@media (forced-colors: active) and (hover: hover) {
+  .quick-control-row:not([data-disabled]):hover, .quick-controls-back:not([data-disabled]):hover { forced-color-adjust: none; background: Highlight; color: HighlightText; }
+  .quick-control-row:not([data-disabled]):hover .quick-control-choice[data-selected] > span { background: HighlightText; }
+}

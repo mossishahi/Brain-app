@@ -1,0 +1,5004 @@
+{
+ "decisions": [
+  {
+   "pid": "P0004",
+   "onTopic": true,
+   "reason": "Applies message passing neural networks, informing the MPNN method facet."
+  },
+  {
+   "pid": "P0014",
+   "onTopic": true,
+   "reason": "Applies probabilistic graphical models, informing the PGM theory facet."
+  },
+  {
+   "pid": "P0016",
+   "onTopic": true,
+   "reason": "Tutorial on PGM inference/learning directly informs the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P0028",
+   "onTopic": true,
+   "reason": "Exponential random graph models inform the random graph models / Bernoulli adjacency facet."
+  },
+  {
+   "pid": "P0034",
+   "onTopic": true,
+   "reason": "Equivariant message passing neural network architecture informs the MPNN facet."
+  },
+  {
+   "pid": "P0038",
+   "onTopic": true,
+   "reason": "Studies message-passing neural network architecture limitations, informing the MPNN facet."
+  },
+  {
+   "pid": "P0039",
+   "onTopic": true,
+   "reason": "Theoretical study of message passing neural networks informs the MPNN facet."
+  },
+  {
+   "pid": "P0045",
+   "onTopic": true,
+   "reason": "Exact moment propagation of distributions informs the uncertainty propagation facet."
+  },
+  {
+   "pid": "P0046",
+   "onTopic": true,
+   "reason": "Propagating uncertainty through neural network layers informs the uncertainty propagation facet."
+  },
+  {
+   "pid": "P0048",
+   "onTopic": true,
+   "reason": "Analyzes MPNNs on random graphs, informing both the MPNN and random graph models facets."
+  },
+  {
+   "pid": "P0049",
+   "onTopic": true,
+   "reason": "Latent variable model with variational inference informs the variational inference facet."
+  },
+  {
+   "pid": "P0052",
+   "onTopic": true,
+   "reason": "Survey of PGM and variational inference informs those two facets."
+  },
+  {
+   "pid": "P0053",
+   "onTopic": true,
+   "reason": "Combines graph attention message passing with variational encoding, informing MPNN/VI facets."
+  },
+  {
+   "pid": "P0056",
+   "onTopic": true,
+   "reason": "Graph-based generative modeling for design informs the graph generative modeling facet."
+  },
+  {
+   "pid": "P0058",
+   "onTopic": true,
+   "reason": "Message passing neural networks on molecular graphs inform the MPNN facet."
+  },
+  {
+   "pid": "P0059",
+   "onTopic": true,
+   "reason": "Directed message passing neural network architecture informs the MPNN facet."
+  },
+  {
+   "pid": "P0061",
+   "onTopic": true,
+   "reason": "Verification method for message-passing neural networks informs the MPNN facet."
+  },
+  {
+   "pid": "P0065",
+   "onTopic": true,
+   "reason": "Calibrated probabilistic output from message passing neural networks informs the MPNN facet."
+  },
+  {
+   "pid": "P0066",
+   "onTopic": true,
+   "reason": "Diagnostics for exponential random graph models inform the random graph models facet."
+  },
+  {
+   "pid": "P0068",
+   "onTopic": true,
+   "reason": "Sparse Gaussian graphical models inform the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P0069",
+   "onTopic": true,
+   "reason": "Theory and application of probabilistic graphical models informs that facet directly."
+  },
+  {
+   "pid": "P0070",
+   "onTopic": true,
+   "reason": "Message passing neural network extension for property prediction informs the MPNN facet."
+  },
+  {
+   "pid": "P0072",
+   "onTopic": false,
+   "reason": "Erdos-Renyi graphs appear only as a spectral-bound computation example, not as a random graph model."
+  },
+  {
+   "pid": "P0073",
+   "onTopic": true,
+   "reason": "Graph generative modeling scheme informs the graph generative modeling facet."
+  },
+  {
+   "pid": "P0074",
+   "onTopic": true,
+   "reason": "Deep probabilistic graphical models with variational inference inform those two facets."
+  },
+  {
+   "pid": "P0077",
+   "onTopic": true,
+   "reason": "Latent space graph generative model informs the graph generative modeling facet."
+  },
+  {
+   "pid": "P0079",
+   "onTopic": true,
+   "reason": "Bayesian uncertainty propagation approach informs the uncertainty propagation facet."
+  },
+  {
+   "pid": "P0080",
+   "onTopic": true,
+   "reason": "Moment propagation for variational Bayes informs the uncertainty propagation / variational inference facets."
+  },
+  {
+   "pid": "P0081",
+   "onTopic": false,
+   "reason": "Uses 'moment propagation' for quantum electron dynamics, an unrelated sense of the term."
+  },
+  {
+   "pid": "P0082",
+   "onTopic": true,
+   "reason": "Dynamic stochastic block model informs the random graph models facet."
+  },
+  {
+   "pid": "P0083",
+   "onTopic": true,
+   "reason": "Estimating Erdos-Renyi graph parameters informs the random graph models facet."
+  },
+  {
+   "pid": "P0084",
+   "onTopic": true,
+   "reason": "Propagating Gaussian statistical moments through dynamics informs the uncertainty propagation facet."
+  },
+  {
+   "pid": "P0085",
+   "onTopic": true,
+   "reason": "New graph neural network architectures inform the message passing neural networks facet."
+  },
+  {
+   "pid": "P0086",
+   "onTopic": false,
+   "reason": "Knowledge-graph-based tuning of generative models is a different sense of 'graph generative modeling'."
+  },
+  {
+   "pid": "P0088",
+   "onTopic": true,
+   "reason": "Uncertainty propagation through feed-forward networks informs the uncertainty propagation facet."
+  },
+  {
+   "pid": "P0091",
+   "onTopic": true,
+   "reason": "Graph-based molecular generation informs the graph generative modeling facet."
+  },
+  {
+   "pid": "P0092",
+   "onTopic": true,
+   "reason": "Flow-matching framework for graph generation informs the graph generative modeling facet."
+  },
+  {
+   "pid": "P0093",
+   "onTopic": true,
+   "reason": "Amortised variational inference with graph convolutions informs the variational inference facet."
+  },
+  {
+   "pid": "P0094",
+   "onTopic": true,
+   "reason": "Composes graphical models with neural networks and variational inference, informing both facets."
+  },
+  {
+   "pid": "P0095",
+   "onTopic": true,
+   "reason": "Distributional neural network outputting parametric distributions informs the uncertainty propagation facet."
+  },
+  {
+   "pid": "P0096",
+   "onTopic": true,
+   "reason": "Analyzes message-passing GNNs through a probabilistic graphical model lens, informing the PGM/message passing facets."
+  },
+  {
+   "pid": "P0098",
+   "onTopic": false,
+   "reason": "Bernoulli-Gaussian message passing here is for sparse signal recovery, not graph node/edge distributions."
+  },
+  {
+   "pid": "P0099",
+   "onTopic": false,
+   "reason": "Studies epidemic rewiring dynamics on Erdos-Renyi networks, not stochastic adjacency generative modeling."
+  },
+  {
+   "pid": "P0100",
+   "onTopic": false,
+   "reason": "Connects optimal transport to PGMs, unrelated to message passing or graph generation."
+  },
+  {
+   "pid": "P0101",
+   "onTopic": true,
+   "reason": "Score-based generative model jointly modeling node and edge distributions for graph generation, matching the core problem."
+  },
+  {
+   "pid": "P0103",
+   "onTopic": false,
+   "reason": "Moment propagation here concerns Becker-Döring chemical kinetics equations, unrelated to graphs."
+  },
+  {
+   "pid": "P0104",
+   "onTopic": true,
+   "reason": "Bayesian inference for exponential random graph models informs the random graph models facet."
+  },
+  {
+   "pid": "P0109",
+   "onTopic": true,
+   "reason": "Survey of deep generative models for graph generation, directly informing the graph generative modeling facet."
+  },
+  {
+   "pid": "P0110",
+   "onTopic": false,
+   "reason": "Uncertainty propagation concerns GRN benchmarking rank stability, not node-distribution message passing."
+  },
+  {
+   "pid": "P0112",
+   "onTopic": false,
+   "reason": "Variational inference applied to Bayesian panel VAR econometrics, unrelated to graphs."
+  },
+  {
+   "pid": "P0115",
+   "onTopic": true,
+   "reason": "Propagates Bayesian uncertainty through GNN message passing, matching uncertainty propagation facet."
+  },
+  {
+   "pid": "P0116",
+   "onTopic": false,
+   "reason": "Applies graph theory and generative AI to structural engineering damage modeling, unrelated domain."
+  },
+  {
+   "pid": "P0121",
+   "onTopic": true,
+   "reason": "Gaussian belief propagation convergence directly informs the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P0123",
+   "onTopic": true,
+   "reason": "Structured VAEs combining PGM priors with neural networks inform variational inference and PGM facets."
+  },
+  {
+   "pid": "P0124",
+   "onTopic": true,
+   "reason": "Studies edge-independent (Bernoulli) random graph generative models, matching random graph models facet."
+  },
+  {
+   "pid": "P0125",
+   "onTopic": true,
+   "reason": "Learns a distribution over graph structures via GNNs, matching graph generative modeling facet."
+  },
+  {
+   "pid": "P0127",
+   "onTopic": true,
+   "reason": "Analyzes edge-dependent vs independent graph generative models, matching graph generative modeling facet."
+  },
+  {
+   "pid": "P0128",
+   "onTopic": true,
+   "reason": "Proposes generative models learning distributions over graphs, matching graph generative modeling facet."
+  },
+  {
+   "pid": "P0130",
+   "onTopic": true,
+   "reason": "Gaussian belief propagation solvers inform the probabilistic graphical models/message passing facet."
+  },
+  {
+   "pid": "P0134",
+   "onTopic": true,
+   "reason": "Uses message-passing GNNs for molecular graph generation, matching core problem."
+  },
+  {
+   "pid": "P0136",
+   "onTopic": false,
+   "reason": "Uses PGM entropy decomposition for submodular optimization, unrelated to message passing or graph generation."
+  },
+  {
+   "pid": "P0137",
+   "onTopic": true,
+   "reason": "Approximate Gaussian message passing on factor graphs matches the PGM/Gaussian propagation facet."
+  },
+  {
+   "pid": "P0139",
+   "onTopic": false,
+   "reason": "Concerns graph-to-text generation, a different task from generating new graphs."
+  },
+  {
+   "pid": "P0141",
+   "onTopic": true,
+   "reason": "Score-based permutation invariant graph generation directly matches graph generative modeling facet."
+  },
+  {
+   "pid": "P0142",
+   "onTopic": true,
+   "reason": "Connects spectral node reordering to random graph model likelihoods, matching random graph models facet."
+  },
+  {
+   "pid": "P0143",
+   "onTopic": true,
+   "reason": "Proposes a scalable message passing neural network architecture, matching message passing facet."
+  },
+  {
+   "pid": "P0145",
+   "onTopic": true,
+   "reason": "Studies formal verification limits of message-passing neural networks, matching message passing facet."
+  },
+  {
+   "pid": "P0148",
+   "onTopic": false,
+   "reason": "Applies PGMs to genetic linkage disequilibrium, unrelated to message passing or graph generation."
+  },
+  {
+   "pid": "P0149",
+   "onTopic": true,
+   "reason": "Graph VAE for molecular generation matches graph generative modeling facet."
+  },
+  {
+   "pid": "P0151",
+   "onTopic": true,
+   "reason": "Survey on exponential random graph models matches the random graph models facet."
+  },
+  {
+   "pid": "P0152",
+   "onTopic": true,
+   "reason": "Neural enhanced belief propagation on factor graphs matches PGM/message passing facets."
+  },
+  {
+   "pid": "P0155",
+   "onTopic": true,
+   "reason": "Convergence verification for Gaussian belief propagation matches the PGM facet."
+  },
+  {
+   "pid": "P0160",
+   "onTopic": true,
+   "reason": "Uses variational graph autoencoders, an equivalent problem to the generative graph modeling task."
+  },
+  {
+   "pid": "P0164",
+   "onTopic": true,
+   "reason": "Uses message-passing neural networks over relational graphs, matching the message passing facet."
+  },
+  {
+   "pid": "P0165",
+   "onTopic": true,
+   "reason": "Generative model of graphs that adds new nodes and relationships, matching graph generative modeling facet."
+  },
+  {
+   "pid": "P0166",
+   "onTopic": true,
+   "reason": "Iterative generative modeling of graphs via VAEs and GNNs matches graph generative modeling facet."
+  },
+  {
+   "pid": "P0168",
+   "onTopic": true,
+   "reason": "Exponential random graph models with dyadic independence match the random graph models facet."
+  },
+  {
+   "pid": "P0173",
+   "onTopic": true,
+   "reason": "Variational graph autoencoders for link prediction match the graph generative modeling facet."
+  },
+  {
+   "pid": "P0176",
+   "onTopic": true,
+   "reason": "Studies fluctuations in dense random graph models, matching the random graph models facet."
+  },
+  {
+   "pid": "P0177",
+   "onTopic": true,
+   "reason": "Uses GNNs for inference in probabilistic graphical models, matching the message passing/PGM facets."
+  },
+  {
+   "pid": "P0180",
+   "onTopic": true,
+   "reason": "Graph generative model producing new graphs with tunable features, matching graph generative modeling facet."
+  },
+  {
+   "pid": "P0181",
+   "onTopic": true,
+   "reason": "Variational autoencoder generating new molecular graphs, informs graph generative modeling facet."
+  },
+  {
+   "pid": "P0182",
+   "onTopic": true,
+   "reason": "Defines neural message passing on graphs, core method facet."
+  },
+  {
+   "pid": "P0185",
+   "onTopic": true,
+   "reason": "Relates neural network forward propagation to probabilistic graphical model inference, informs PGM theory facet."
+  },
+  {
+   "pid": "P0187",
+   "onTopic": true,
+   "reason": "Introduces probabilistic graphical models and inference algorithms, matches PGM theory facet."
+  },
+  {
+   "pid": "P0189",
+   "onTopic": true,
+   "reason": "Equivariant message-passing neural network architecture, informs message passing facet."
+  },
+  {
+   "pid": "P0194",
+   "onTopic": true,
+   "reason": "Applies moment propagation technique for parameter uncertainty, informs uncertainty propagation facet."
+  },
+  {
+   "pid": "P0195",
+   "onTopic": true,
+   "reason": "Message-passing neural network with varied propagation steps, informs message passing facet."
+  },
+  {
+   "pid": "P0199",
+   "onTopic": false,
+   "reason": "Uses 'factor graph' for CSP structural combinatorics, a different sense than probabilistic graphical model factor graphs."
+  },
+  {
+   "pid": "P0200",
+   "onTopic": true,
+   "reason": "Software for uncertainty propagation of correlated quantities, matches uncertainty propagation facet."
+  },
+  {
+   "pid": "P0201",
+   "onTopic": true,
+   "reason": "Model selection for stochastic block models, informs random graph models facet."
+  },
+  {
+   "pid": "P0203",
+   "onTopic": true,
+   "reason": "Deep generative model of graph structure and attributes via GNN message passing, directly matches both core facets."
+  },
+  {
+   "pid": "P0204",
+   "onTopic": true,
+   "reason": "Extends neural message passing with edge updates, informs message passing facet."
+  },
+  {
+   "pid": "P0205",
+   "onTopic": true,
+   "reason": "Variational inference for exponential random graph models, matches both VI and random graph facets."
+  },
+  {
+   "pid": "P0206",
+   "onTopic": true,
+   "reason": "Variational graph autoencoder learning latent distributions to generate graphs, matches graph generative modeling facet."
+  },
+  {
+   "pid": "P0207",
+   "onTopic": false,
+   "reason": "Generic interpretability/evaluation framework for node embeddings, not tied to message passing, generation, or probabilistic facets."
+  },
+  {
+   "pid": "P0208",
+   "onTopic": false,
+   "reason": "Broad healthcare ML review mentioning probabilistic models only in passing, not tied to any specific facet."
+  },
+  {
+   "pid": "P0209",
+   "onTopic": true,
+   "reason": "Graph scattering variational autoencoder for molecular generation, matches graph generative modeling facet."
+  },
+  {
+   "pid": "P0210",
+   "onTopic": true,
+   "reason": "Discrete flow model for generating molecular graphs, matches graph generative modeling facet."
+  },
+  {
+   "pid": "P0211",
+   "onTopic": false,
+   "reason": "General normalizing flow base-distribution method unrelated to graphs or the listed facets."
+  },
+  {
+   "pid": "P0212",
+   "onTopic": true,
+   "reason": "Scene graph generation via message passing and mean-field variational inference, matches message passing and VI facets."
+  },
+  {
+   "pid": "P0213",
+   "onTopic": false,
+   "reason": "Generic discussion of evaluation methodology for generative models, not tied to graphs or the listed facets."
+  },
+  {
+   "pid": "P0214",
+   "onTopic": true,
+   "reason": "Convergence analysis of black-box variational inference, matches variational inference facet."
+  },
+  {
+   "pid": "P0215",
+   "onTopic": true,
+   "reason": "Scalable approximate Bayesian inference framework, matches variational/approximate Bayesian inference facet."
+  },
+  {
+   "pid": "P0216",
+   "onTopic": false,
+   "reason": "Survey of video diffusion models, unrelated to graphs, message passing, or probabilistic graph facets."
+  },
+  {
+   "pid": "P0217",
+   "onTopic": true,
+   "reason": "Generative adversarial model using graph neural networks for structure generation, matches graph generative modeling facet."
+  },
+  {
+   "pid": "P0219",
+   "onTopic": true,
+   "reason": "Shows Transformers as message-passing GNNs, matches message passing neural networks facet."
+  },
+  {
+   "pid": "P0220",
+   "onTopic": false,
+   "reason": "Variational autoencoder for mutational signature extraction, unrelated to graph structure or the listed facets."
+  },
+  {
+   "pid": "P0221",
+   "onTopic": true,
+   "reason": "Amortized variational inference method, matches variational inference facet."
+  },
+  {
+   "pid": "P0222",
+   "onTopic": true,
+   "reason": "Studies expressive counting power of message passing neural networks, matches message passing facet."
+  },
+  {
+   "pid": "P0223",
+   "onTopic": true,
+   "reason": "Applies graph message-passing neural networks for traffic prediction, matches message passing facet."
+  },
+  {
+   "pid": "P0224",
+   "onTopic": false,
+   "reason": "Uses 'message passing' in a parallel-computing/cellular-automaton sense, unrelated to neural or probabilistic message passing."
+  },
+  {
+   "pid": "P0233",
+   "onTopic": true,
+   "reason": "Molecular representation learning using graph neural network message passing, matches message passing facet."
+  },
+  {
+   "pid": "P0234",
+   "onTopic": false,
+   "reason": "Pure combinatorial graph theory on path-factors, unrelated to message passing, generation, or probabilistic facets."
+  },
+  {
+   "pid": "P0235",
+   "onTopic": true,
+   "reason": "Neural belief propagation decoding on graphs, matches probabilistic graphical models/belief propagation facet."
+  },
+  {
+   "pid": "P0236",
+   "onTopic": false,
+   "reason": "Generic survey of community detection methods, not tied to generative modeling, message passing, or Bernoulli edge facets."
+  },
+  {
+   "pid": "P0238",
+   "onTopic": false,
+   "reason": "Self-supervised speech representation learning, unrelated to graphs or any listed facet."
+  },
+  {
+   "pid": "P0240",
+   "onTopic": true,
+   "reason": "Asymptotics of sparse exponential random graph models, matches random graph models facet."
+  },
+  {
+   "pid": "P0241",
+   "onTopic": true,
+   "reason": "Introductory overview of probabilistic graphical models, matches PGM theory facet."
+  },
+  {
+   "pid": "P0244",
+   "onTopic": true,
+   "reason": "Graph variational autoencoder for molecular design, matches graph generative modeling facet."
+  },
+  {
+   "pid": "P0248",
+   "onTopic": false,
+   "reason": "Discusses BNN black-box explainability, not distributional propagation of node states or graph message passing."
+  },
+  {
+   "pid": "P0252",
+   "onTopic": false,
+   "reason": "Uncertainty propagation for rigid-body dynamics on SO(3), unrelated object to graph node distributions or message passing."
+  },
+  {
+   "pid": "P0253",
+   "onTopic": true,
+   "reason": "Studies theoretical properties of undirected probabilistic graphical models, informing the PGM theory facet."
+  },
+  {
+   "pid": "P0254",
+   "onTopic": false,
+   "reason": "Generic probabilistic ML software package, no connection to graphs, message passing, or Bernoulli edges."
+  },
+  {
+   "pid": "P0255",
+   "onTopic": true,
+   "reason": "Variable elimination on factor graphs informs the probabilistic graphical models / belief propagation facet."
+  },
+  {
+   "pid": "P0256",
+   "onTopic": true,
+   "reason": "Graph generative model, directly informs the graph generative modeling facet."
+  },
+  {
+   "pid": "P0257",
+   "onTopic": true,
+   "reason": "Erdos-Renyi random graph theory matches the random graph models facet."
+  },
+  {
+   "pid": "P0258",
+   "onTopic": false,
+   "reason": "Cross-domain sentiment analysis representation learning, unrelated to graphs or distributional message passing."
+  },
+  {
+   "pid": "P0259",
+   "onTopic": true,
+   "reason": "Error bounds for variational inference posterior approximations informs the variational inference facet."
+  },
+  {
+   "pid": "P0260",
+   "onTopic": true,
+   "reason": "Deep graph neural network architecture informs the message passing neural networks facet."
+  },
+  {
+   "pid": "P0261",
+   "onTopic": true,
+   "reason": "Graph variational autoencoder with message passing decoder matches the graph generative modeling facet."
+  },
+  {
+   "pid": "P0262",
+   "onTopic": false,
+   "reason": "Nodes here are physical compute nodes in distributed inference, not graph-structured data nodes."
+  },
+  {
+   "pid": "P0263",
+   "onTopic": true,
+   "reason": "Compression of Bernoulli processes and Erdos-Renyi graphs matches the random graph models facet."
+  },
+  {
+   "pid": "P0264",
+   "onTopic": true,
+   "reason": "Neural message passing architecture, informs the message passing neural networks facet in another domain."
+  },
+  {
+   "pid": "P0265",
+   "onTopic": true,
+   "reason": "Probabilistic graph generative model over node sequences matches the graph generative modeling facet."
+  },
+  {
+   "pid": "P0266",
+   "onTopic": true,
+   "reason": "Message passing with mean-field variational Bayesian objective informs message passing and variational inference facets."
+  },
+  {
+   "pid": "P0267",
+   "onTopic": true,
+   "reason": "Connects belief propagation and backpropagation, matching the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P0268",
+   "onTopic": false,
+   "reason": "Visual relationship detection task in images, a different sense of 'graph generation' from generative graph modeling."
+  },
+  {
+   "pid": "P0269",
+   "onTopic": true,
+   "reason": "Diffusion-based molecular graph generative model matches the graph generative modeling facet."
+  },
+  {
+   "pid": "P0270",
+   "onTopic": true,
+   "reason": "Deterministic uncertainty propagation method closely parallels the uncertainty propagation facet."
+  },
+  {
+   "pid": "P0271",
+   "onTopic": true,
+   "reason": "Compares graph neural network message passing architectures, informing the message passing neural networks facet."
+  },
+  {
+   "pid": "P0272",
+   "onTopic": false,
+   "reason": "Evaluation metrics for tabular data generative models, unrelated to graph structure or node distributions."
+  },
+  {
+   "pid": "P0273",
+   "onTopic": false,
+   "reason": "Normalizing flow model for high-resolution image synthesis, unrelated to graphs or Bernoulli edges."
+  },
+  {
+   "pid": "P0274",
+   "onTopic": true,
+   "reason": "Variational inference for random dot product graph latent positions matches random graph models and variational inference facets."
+  },
+  {
+   "pid": "P0275",
+   "onTopic": true,
+   "reason": "Variational graph autoencoders for synthetic graph generation directly matches an equivalent problem."
+  },
+  {
+   "pid": "P0276",
+   "onTopic": true,
+   "reason": "Rethinks message passing neural network aggregation, matching the message passing neural networks facet."
+  },
+  {
+   "pid": "P0277",
+   "onTopic": true,
+   "reason": "Gaussian belief propagation network directly matches the Gaussian belief propagation equivalent problem."
+  },
+  {
+   "pid": "P0278",
+   "onTopic": true,
+   "reason": "Neuro-symbolic graph generative modeling matches the graph generative modeling facet."
+  },
+  {
+   "pid": "P0279",
+   "onTopic": false,
+   "reason": "Model retraining policy framed as Bayesian inference, unrelated to graphs or node/edge distributions."
+  },
+  {
+   "pid": "P0280",
+   "onTopic": true,
+   "reason": "KL divergence between Gaussians for VAE objective informs the variational inference facet's Gaussian parameterization."
+  },
+  {
+   "pid": "P0286",
+   "onTopic": true,
+   "reason": "Introduces probabilistic regression and Bayes nets, touching the probabilistic graphical models theory facet."
+  },
+  {
+   "pid": "P0288",
+   "onTopic": false,
+   "reason": "Contrastive visual representation learning, unrelated to graph message passing or probabilistic graphs."
+  },
+  {
+   "pid": "P0289",
+   "onTopic": true,
+   "reason": "Signed message passing scheme in GNNs matches the message passing neural networks facet."
+  },
+  {
+   "pid": "P0291",
+   "onTopic": false,
+   "reason": "Survey of text-to-image diffusion generation, unrelated to graph-structured generative modeling."
+  },
+  {
+   "pid": "P0296",
+   "onTopic": true,
+   "reason": "Multivariate Bernoulli distribution for graph edge structure directly matches the random graph models facet."
+  },
+  {
+   "pid": "P0298",
+   "onTopic": true,
+   "reason": "Structural entropy of stochastic block models matches the random graph models facet."
+  },
+  {
+   "pid": "P0299",
+   "onTopic": true,
+   "reason": "Variational moment propagation for uncertainty matches the uncertainty propagation facet."
+  },
+  {
+   "pid": "P0300",
+   "onTopic": true,
+   "reason": "Dynamical variational autoencoders with Gaussian latents inform the variational inference method facet."
+  },
+  {
+   "pid": "P0303",
+   "onTopic": true,
+   "reason": "Stochastic variational inference convergence in Bayesian networks matches the variational inference and PGM facets."
+  },
+  {
+   "pid": "P0304",
+   "onTopic": true,
+   "reason": "Message passing inference in graphical models matches the probabilistic graphical models / belief propagation facet."
+  },
+  {
+   "pid": "P0305",
+   "onTopic": true,
+   "reason": "Studies stochastic block models, informing the random graph models facet."
+  },
+  {
+   "pid": "P0306",
+   "onTopic": true,
+   "reason": "Propagates distributional (spike-and-slab/Gaussian) states through network layers, informing uncertainty propagation."
+  },
+  {
+   "pid": "P0307",
+   "onTopic": false,
+   "reason": "Generic variational surrogate modeling for stochastic systems; no graph, node, or edge structure involved."
+  },
+  {
+   "pid": "P0308",
+   "onTopic": false,
+   "reason": "Derives a multi-modal VAE ELBO with no connection to graphs, nodes, or edges."
+  },
+  {
+   "pid": "P0309",
+   "onTopic": true,
+   "reason": "Proposes a generative framework for graph-structured semi-supervised data, informing graph generative modeling."
+  },
+  {
+   "pid": "P0310",
+   "onTopic": false,
+   "reason": "Benchmarks approximate Bayesian inference for DNNs generally; unrelated to graphs or message passing."
+  },
+  {
+   "pid": "P0311",
+   "onTopic": true,
+   "reason": "Generates molecular graphs for a target objective, informing graph generative modeling."
+  },
+  {
+   "pid": "P0312",
+   "onTopic": true,
+   "reason": "Uses message-passing neural network variational Bayes for scene graph generation, informing message passing facet."
+  },
+  {
+   "pid": "P0313",
+   "onTopic": false,
+   "reason": "Focuses on noisy-label correction training strategy for scene graphs, not on distributional message passing or generation."
+  },
+  {
+   "pid": "P0314",
+   "onTopic": true,
+   "reason": "Proposes a neural message passing algorithm over an interaction graph, informing message passing neural networks."
+  },
+  {
+   "pid": "P0315",
+   "onTopic": false,
+   "reason": "Normalizing-flow based experiment design for failure probability; no graph or node/edge distribution involved."
+  },
+  {
+   "pid": "P0316",
+   "onTopic": false,
+   "reason": "A software framework surveying existing graph embedding models, not studying distributional message passing or generation."
+  },
+  {
+   "pid": "P0317",
+   "onTopic": false,
+   "reason": "Token-based transformer for node classification scalability, unrelated to distributional nodes/edges or generation."
+  },
+  {
+   "pid": "P0318",
+   "onTopic": false,
+   "reason": "Latent diffusion model for panoramic RGBD VR content; no graph, node, or edge structure."
+  },
+  {
+   "pid": "P0319",
+   "onTopic": true,
+   "reason": "Analyzes variational inference approximations in probabilistic graphical models, informing that facet."
+  },
+  {
+   "pid": "P0320",
+   "onTopic": false,
+   "reason": "Survey of generative models for reinforcement-learning decision making, unrelated to graphs or message passing."
+  },
+  {
+   "pid": "P0321",
+   "onTopic": false,
+   "reason": "Belief-propagation channel analysis of quantum correlations; shares term but is quantum many-body physics, not graphs."
+  },
+  {
+   "pid": "P0322",
+   "onTopic": false,
+   "reason": "Multi-modal molecular representation fusion method, not about distributional message passing or graph generation."
+  },
+  {
+   "pid": "P0323",
+   "onTopic": false,
+   "reason": "Hail risk database using distributional neural networks; unrelated meteorology domain, term match only."
+  },
+  {
+   "pid": "P0324",
+   "onTopic": false,
+   "reason": "General UQ framework for Gaussian process latent variable models, not tied to graphs or message passing steps."
+  },
+  {
+   "pid": "P0329",
+   "onTopic": false,
+   "reason": "Introductory NLP representation learning overview, unrelated to graphs or distributional message passing."
+  },
+  {
+   "pid": "P0330",
+   "onTopic": false,
+   "reason": "Moment propagation in a plasma-physics PDE system; shares term but unrelated domain and method."
+  },
+  {
+   "pid": "P0339",
+   "onTopic": false,
+   "reason": "Evaluates GNNs versus greedy algorithms on combinatorial optimization, not generative or distributional modeling."
+  },
+  {
+   "pid": "P0341",
+   "onTopic": true,
+   "reason": "Sampling method for exponential family random graph models, informing random graph models facet."
+  },
+  {
+   "pid": "P0342",
+   "onTopic": false,
+   "reason": "General overview of generative models for feature vectors, with no graph structure discussed."
+  },
+  {
+   "pid": "P0343",
+   "onTopic": true,
+   "reason": "Studies random walks on Erdos-Renyi graphs, informing the random graph models facet."
+  },
+  {
+   "pid": "P0345",
+   "onTopic": true,
+   "reason": "Examines marginal probabilities and belief propagation uncertainty in graphical models, informing PGM facet."
+  },
+  {
+   "pid": "P0347",
+   "onTopic": false,
+   "reason": "Siamese network image representation learning, unrelated to graphs or distributional modeling."
+  },
+  {
+   "pid": "P0349",
+   "onTopic": true,
+   "reason": "Applies Gaussian belief propagation directly, matching the equivalent-problem Gaussian belief propagation."
+  },
+  {
+   "pid": "P0353",
+   "onTopic": true,
+   "reason": "Combines CNNs with probabilistic graphical models, informing the PGM facet."
+  },
+  {
+   "pid": "P0354",
+   "onTopic": true,
+   "reason": "Studies normal factor graphs, an alias of the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P0355",
+   "onTopic": true,
+   "reason": "Investigates variational graph autoencoders, matching the VGAE equivalent problem."
+  },
+  {
+   "pid": "P0356",
+   "onTopic": true,
+   "reason": "Derives variational message passing update equations, directly informing message passing neural networks facet."
+  },
+  {
+   "pid": "P0359",
+   "onTopic": false,
+   "reason": "Variational inference with ensemble Kalman filter for sequential time-series VAEs, not graph-related."
+  },
+  {
+   "pid": "P0361",
+   "onTopic": true,
+   "reason": "Models edge connections as Bernoulli-parameterized stochastic block models, informing random graph models facet."
+  },
+  {
+   "pid": "P0363",
+   "onTopic": true,
+   "reason": "Proposes a new generative probability model over graph configurations, informing graph generative modeling."
+  },
+  {
+   "pid": "P0364",
+   "onTopic": true,
+   "reason": "Spectral analysis of sparse stochastic block models, informing the random graph models facet."
+  },
+  {
+   "pid": "P0365",
+   "onTopic": false,
+   "reason": "Generic Gaussian process latent variable model inference with kernels, unrelated to graph nodes or edges."
+  },
+  {
+   "pid": "P0366",
+   "onTopic": false,
+   "reason": "Graph-based embedding for EHR entities with no generative or distributional node/edge modeling."
+  },
+  {
+   "pid": "P0367",
+   "onTopic": false,
+   "reason": "Density deconvolution with normalizing flows for noisy samples, unrelated to graphs or message passing."
+  },
+  {
+   "pid": "P0368",
+   "onTopic": false,
+   "reason": "PCGML level generation with BSP/VAE for game domains; unrelated to graph message passing or distributions."
+  },
+  {
+   "pid": "P0369",
+   "onTopic": true,
+   "reason": "Instance of the message passing neural network method informing the MPNN facet."
+  },
+  {
+   "pid": "P0370",
+   "onTopic": false,
+   "reason": "Bayesian image reconstruction via GAN priors; not about graphs, message passing, or graph generation."
+  },
+  {
+   "pid": "P0371",
+   "onTopic": false,
+   "reason": "Studies GNN scaling/parallelism performance, not message passing semantics or distributions."
+  },
+  {
+   "pid": "P0372",
+   "onTopic": false,
+   "reason": "Approximate Bayesian inference via adaptive quadrature; unrelated technique, not variational Gaussian inference."
+  },
+  {
+   "pid": "P0373",
+   "onTopic": true,
+   "reason": "Energy-based molecular graph generation informs the graph generative modeling facet."
+  },
+  {
+   "pid": "P0374",
+   "onTopic": false,
+   "reason": "Vision-language representation learning from noisy text; unrelated to graphs or message passing."
+  },
+  {
+   "pid": "P0375",
+   "onTopic": true,
+   "reason": "New belief propagation algorithms inform the probabilistic graphical models / belief propagation facet."
+  },
+  {
+   "pid": "P0376",
+   "onTopic": true,
+   "reason": "Direct treatment of Gaussian belief propagation, the equivalent problem for Gaussian node message passing."
+  },
+  {
+   "pid": "P0377",
+   "onTopic": true,
+   "reason": "Variational graph autoencoders inform the graph generative modeling / VGAE equivalent problem."
+  },
+  {
+   "pid": "P0378",
+   "onTopic": true,
+   "reason": "Factor graphs and belief propagation generalizations inform the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P0379",
+   "onTopic": false,
+   "reason": "Tokenized graph transformer for node classification; not message passing with distributions or graph generation."
+  },
+  {
+   "pid": "P0380",
+   "onTopic": true,
+   "reason": "Moment propagation in Bayesian neural networks informs the uncertainty propagation facet."
+  },
+  {
+   "pid": "P0381",
+   "onTopic": true,
+   "reason": "Relation-aware message passing neural network directly informs the MPNN facet."
+  },
+  {
+   "pid": "P0382",
+   "onTopic": true,
+   "reason": "Evaluation method for graph generative models informs the graph generative modeling facet."
+  },
+  {
+   "pid": "P0383",
+   "onTopic": true,
+   "reason": "Propagating mean/covariance through transformations informs the uncertainty/moment propagation facet."
+  },
+  {
+   "pid": "P0384",
+   "onTopic": false,
+   "reason": "Scene graph label finetuning for classification bias; 'generation' here is a prediction task, not generative graph modeling."
+  },
+  {
+   "pid": "P0385",
+   "onTopic": true,
+   "reason": "Edge uncertainty and propagation dynamics in GNNs inform the message passing neural networks facet."
+  },
+  {
+   "pid": "P0386",
+   "onTopic": false,
+   "reason": "Graph-to-sequence molecular tokenizer for representation learning; not message passing distributions or generation."
+  },
+  {
+   "pid": "P0387",
+   "onTopic": true,
+   "reason": "Erdos-Renyi connectivity asymptotics inform the random graph models facet."
+  },
+  {
+   "pid": "P0388",
+   "onTopic": false,
+   "reason": "Antithetic noise analysis in diffusion models; not graph-specific and unrelated to message passing."
+  },
+  {
+   "pid": "P0389",
+   "onTopic": false,
+   "reason": "Distributed neural network hardware for wearables; 'nodes' here means devices, unrelated to graph nodes."
+  },
+  {
+   "pid": "P0390",
+   "onTopic": true,
+   "reason": "Review of probabilistic graphical models informs the PGM/belief propagation theory facet."
+  },
+  {
+   "pid": "P0396",
+   "onTopic": true,
+   "reason": "Exponential random graph models applied to trade networks inform the random graph models facet."
+  },
+  {
+   "pid": "P0397",
+   "onTopic": true,
+   "reason": "Message passing with transition probabilities directly informs the MPNN facet."
+  },
+  {
+   "pid": "P0398",
+   "onTopic": true,
+   "reason": "Variational message passing over probabilistic graphical models directly matches multiple facets."
+  },
+  {
+   "pid": "P0401",
+   "onTopic": true,
+   "reason": "Variational inference as approximate posterior method informs the variational inference facet."
+  },
+  {
+   "pid": "P0403",
+   "onTopic": true,
+   "reason": "Random graph models for DAGs inform the random graph models facet."
+  },
+  {
+   "pid": "P0404",
+   "onTopic": true,
+   "reason": "Graph-to-graphs generative modeling for future graph prediction informs the graph generative modeling facet."
+  },
+  {
+   "pid": "P0405",
+   "onTopic": false,
+   "reason": "Hardware accelerator circuit design; PGM mentioned only as application context, not the subject studied."
+  },
+  {
+   "pid": "P0406",
+   "onTopic": true,
+   "reason": "Variational inference for uncertainty quantification informs the variational inference facet."
+  },
+  {
+   "pid": "P0410",
+   "onTopic": true,
+   "reason": "Stochastic blockmodels embedded in graphical models inform the random graph models / PGM facets."
+  },
+  {
+   "pid": "P0414",
+   "onTopic": true,
+   "reason": "Gaussian belief propagation applied to power systems directly informs the GBP equivalent problem."
+  },
+  {
+   "pid": "P0418",
+   "onTopic": true,
+   "reason": "Structuring the latent space of variational autoencoders informs the variational inference / generative modeling facet."
+  },
+  {
+   "pid": "P0419",
+   "onTopic": true,
+   "reason": "Theory of variational inference directly informs the variational inference facet."
+  },
+  {
+   "pid": "P0420",
+   "onTopic": true,
+   "reason": "Parametrization properties of probabilistic graphical models inform the PGM theory facet."
+  },
+  {
+   "pid": "P0421",
+   "onTopic": true,
+   "reason": "Stochastic variational inference method directly informs the variational inference facet."
+  },
+  {
+   "pid": "P0422",
+   "onTopic": true,
+   "reason": "Exponential random graph model consistency results inform the random graph models facet."
+  },
+  {
+   "pid": "P0423",
+   "onTopic": false,
+   "reason": "Deep generative models for database query approximation; unrelated to graph structure or message passing."
+  },
+  {
+   "pid": "P0424",
+   "onTopic": true,
+   "reason": "Neural message passing over a label-interaction graph directly informs the MPNN facet."
+  },
+  {
+   "pid": "P0425",
+   "onTopic": true,
+   "reason": "Uses variational graph autoencoders to learn latent embeddings and generate graph structure, matching graph generative modeling facet."
+  },
+  {
+   "pid": "P0426",
+   "onTopic": false,
+   "reason": "Studies seedless graph matching/alignment between correlated graphs, a different problem than generating graphs from distributions."
+  },
+  {
+   "pid": "P0427",
+   "onTopic": false,
+   "reason": "Applies a relational GNN as a component for open-domain QA, not studying message passing or graph generation itself."
+  },
+  {
+   "pid": "P0428",
+   "onTopic": false,
+   "reason": "Generative adversarial attacks via normalizing flows on images, unrelated to graph structure or message passing."
+  },
+  {
+   "pid": "P0429",
+   "onTopic": true,
+   "reason": "Studies message passing GNN architecture scaling and expressivity, informing the message passing neural networks facet."
+  },
+  {
+   "pid": "P0430",
+   "onTopic": true,
+   "reason": "Learns differentiable belief propagation factors to maintain marginal distributions, matching the belief propagation facet."
+  },
+  {
+   "pid": "P0431",
+   "onTopic": false,
+   "reason": "Propagates pixel-value distributions for video background subtraction, unrelated to graph nodes or edges."
+  },
+  {
+   "pid": "P0432",
+   "onTopic": true,
+   "reason": "Directly addresses evaluation of graph generative models, matching the graph generative modeling facet."
+  },
+  {
+   "pid": "P0433",
+   "onTopic": false,
+   "reason": "Scene graph generation here means detecting objects/relationships in images, a different sense of graph generation."
+  },
+  {
+   "pid": "P0434",
+   "onTopic": true,
+   "reason": "Uses variational graph autoencoders for link prediction/generation, matching graph generative modeling facet."
+  },
+  {
+   "pid": "P0435",
+   "onTopic": true,
+   "reason": "Reviews factor graphs, a concept central to the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P0436",
+   "onTopic": false,
+   "reason": "Uses variational inference for adversarial robustness reasoning, unrelated to node/edge distributions in graphs."
+  },
+  {
+   "pid": "P0437",
+   "onTopic": true,
+   "reason": "Applies Gaussian belief propagation on factor graphs, matching the Gaussian belief propagation equivalent problem."
+  },
+  {
+   "pid": "P0438",
+   "onTopic": true,
+   "reason": "Analyzes message propagation mechanisms in GNNs under heterophily, informing the message passing neural networks facet."
+  },
+  {
+   "pid": "P0439",
+   "onTopic": false,
+   "reason": "Improves controllability of image diffusion models, unrelated to graph structure or node/edge distributions."
+  },
+  {
+   "pid": "P0440",
+   "onTopic": false,
+   "reason": "Uses GNNs as a component for recommendation reasoning, not studying message passing or graph generation itself."
+  },
+  {
+   "pid": "P0441",
+   "onTopic": true,
+   "reason": "Propagates uncertainty through networks via factor graphs, matching the uncertainty propagation and PGM facets."
+  },
+  {
+   "pid": "P0442",
+   "onTopic": true,
+   "reason": "Proposes a generative graph-language foundation model, relevant to the graph generative modeling facet."
+  },
+  {
+   "pid": "P0443",
+   "onTopic": false,
+   "reason": "Uses a message-passing encoder as one component of a multimodal molecular baseline, not studying MPNN or generation itself."
+  },
+  {
+   "pid": "P0444",
+   "onTopic": true,
+   "reason": "Examines message passing mechanisms and neighborhood distributions in GNNs, matching the MPNN facet."
+  },
+  {
+   "pid": "P0445",
+   "onTopic": true,
+   "reason": "Develops approximate Bayesian inference/posterior sampling methods, matching the variational inference facet."
+  },
+  {
+   "pid": "P0446",
+   "onTopic": true,
+   "reason": "Addresses molecular graph generation with mismatched continuous/discrete representations, matching graph generative modeling."
+  },
+  {
+   "pid": "P0447",
+   "onTopic": false,
+   "reason": "Bayesian regression modeling of Collatz stopping times, unrelated to graphs or message passing."
+  },
+  {
+   "pid": "P0451",
+   "onTopic": true,
+   "reason": "Graph variational autoencoder for molecular generation, matching the graph generative modeling facet."
+  },
+  {
+   "pid": "P0454",
+   "onTopic": true,
+   "reason": "Surveys message passing neural network models and applications, directly matching the MPNN facet."
+  },
+  {
+   "pid": "P0464",
+   "onTopic": true,
+   "reason": "Exponential random graph models generalize Bernoulli edge formulations, matching the random graph models facet."
+  },
+  {
+   "pid": "P0466",
+   "onTopic": true,
+   "reason": "Uses decomposable graphical models and junction trees, matching the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P0470",
+   "onTopic": true,
+   "reason": "Analyzes stochastic block models for community detection, matching the random graph models facet."
+  },
+  {
+   "pid": "P0471",
+   "onTopic": true,
+   "reason": "Introduces variational autoencoders, the generative framework underlying distributional node/edge modeling."
+  },
+  {
+   "pid": "P0472",
+   "onTopic": false,
+   "reason": "Cross-lingual language model pretraining, unrelated to graphs, distributions, or message passing."
+  },
+  {
+   "pid": "P0473",
+   "onTopic": false,
+   "reason": "Proposes set-based molecular representation as an alternative to graphs, not studying graph message passing or generation."
+  },
+  {
+   "pid": "P0474",
+   "onTopic": true,
+   "reason": "Develops stochastic block models for heterogeneous networks, matching the random graph models facet."
+  },
+  {
+   "pid": "P0475",
+   "onTopic": true,
+   "reason": "Applies Gaussian belief propagation for distributed estimation, matching the Gaussian belief propagation equivalent problem."
+  },
+  {
+   "pid": "P0476",
+   "onTopic": true,
+   "reason": "Surveys representation, inference and learning in probabilistic graphical models, matching that facet directly."
+  },
+  {
+   "pid": "P0479",
+   "onTopic": true,
+   "reason": "Models random variables on a graph via belief propagation, matching the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P0480",
+   "onTopic": true,
+   "reason": "Develops variational and MCMC methods for inference/sampling, matching the variational inference facet."
+  },
+  {
+   "pid": "P0483",
+   "onTopic": true,
+   "reason": "Approximates posteriors in undirected graphical models via Laplace approximation, matching the PGM facet."
+  },
+  {
+   "pid": "P0484",
+   "onTopic": true,
+   "reason": "Studies symmetry-based lifted inference in probabilistic graphical models, matching that facet."
+  },
+  {
+   "pid": "P0485",
+   "onTopic": true,
+   "reason": "Reviews Gaussian-approximation variational Laplace inference, matching the variational inference facet."
+  },
+  {
+   "pid": "P0486",
+   "onTopic": true,
+   "reason": "Introduces a new variational inference method via optimal transport, matching the variational inference facet."
+  },
+  {
+   "pid": "P0487",
+   "onTopic": true,
+   "reason": "Graph generative modeling for goal-directed molecular graph generation matches that facet directly."
+  },
+  {
+   "pid": "P0488",
+   "onTopic": false,
+   "reason": "Gossip protocols for distributed training, not graph message passing or generative modeling."
+  },
+  {
+   "pid": "P0489",
+   "onTopic": true,
+   "reason": "Estimating Erdos-Renyi/Bernoulli edge parameters matches the random graph models facet."
+  },
+  {
+   "pid": "P0490",
+   "onTopic": true,
+   "reason": "Neural message passing on a connectome informs the message passing neural networks facet."
+  },
+  {
+   "pid": "P0491",
+   "onTopic": false,
+   "reason": "Normalizing flows for time-series anomaly detection, unrelated to graphs or message passing."
+  },
+  {
+   "pid": "P0492",
+   "onTopic": true,
+   "reason": "Gaussian belief propagation is the named equivalent problem for propagating Gaussian node states."
+  },
+  {
+   "pid": "P0493",
+   "onTopic": false,
+   "reason": "Mean-field VI for spiking neural circuits, an unrelated application sharing only the VI term."
+  },
+  {
+   "pid": "P0494",
+   "onTopic": true,
+   "reason": "Graph-structured generative model producing new graph instances matches graph generative modeling."
+  },
+  {
+   "pid": "P0495",
+   "onTopic": false,
+   "reason": "Differentially private VAEs for images/time series, not graph generative modeling."
+  },
+  {
+   "pid": "P0496",
+   "onTopic": true,
+   "reason": "Improving message passing neural network expressiveness directly matches that facet."
+  },
+  {
+   "pid": "P0497",
+   "onTopic": true,
+   "reason": "Factor graphs for multi-source inference match the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P0498",
+   "onTopic": true,
+   "reason": "Stochastic block models studied here match the random graph models facet."
+  },
+  {
+   "pid": "P0499",
+   "onTopic": false,
+   "reason": "Fixed-point diffusion for image generation, no graph or message-passing content."
+  },
+  {
+   "pid": "P0500",
+   "onTopic": true,
+   "reason": "Graph generation problem with sequential generation matches graph generative modeling."
+  },
+  {
+   "pid": "P0501",
+   "onTopic": false,
+   "reason": "Link-stealing privacy attack on GNNs, not about message passing architecture or generation."
+  },
+  {
+   "pid": "P0502",
+   "onTopic": true,
+   "reason": "Exponential random graph models relate to the random graph models facet's Bernoulli-edge formalism."
+  },
+  {
+   "pid": "P0503",
+   "onTopic": false,
+   "reason": "Node2Vec embeddings for review rating prediction, unrelated to message passing or graph generation."
+  },
+  {
+   "pid": "P0504",
+   "onTopic": false,
+   "reason": "Bayesian uncertainty quantification for spectral matrix models, no graph structure involved."
+  },
+  {
+   "pid": "P0505",
+   "onTopic": false,
+   "reason": "Ensemble probabilistic ML for industrial diagnosis, no graph or message passing content."
+  },
+  {
+   "pid": "P0506",
+   "onTopic": true,
+   "reason": "Credal sets via layer-wise message passing informs the uncertainty propagation and MPNN facets."
+  },
+  {
+   "pid": "P0507",
+   "onTopic": true,
+   "reason": "Variational graph autoencoder usage matches the graph generative modeling equivalent problem."
+  },
+  {
+   "pid": "P0508",
+   "onTopic": true,
+   "reason": "Evaluates deep graph generative models against Erdos-Renyi baselines, matching graph generative modeling."
+  },
+  {
+   "pid": "P0511",
+   "onTopic": false,
+   "reason": "Diffusion model for MRI quantitative mapping, no graph or message passing involved."
+  },
+  {
+   "pid": "P0513",
+   "onTopic": true,
+   "reason": "Error propagation through implicit GNN layers matches the message passing neural networks facet."
+  },
+  {
+   "pid": "P0514",
+   "onTopic": true,
+   "reason": "Temporal exponential random graph models match the random graph models facet."
+  },
+  {
+   "pid": "P0518",
+   "onTopic": true,
+   "reason": "Addresses message passing neural network limitations, matching that facet."
+  },
+  {
+   "pid": "P0524",
+   "onTopic": true,
+   "reason": "Uses probabilistic graphical models, matching that facet directly."
+  },
+  {
+   "pid": "P0527",
+   "onTopic": true,
+   "reason": "Network-based moment propagation parallels the uncertainty/moment propagation facet."
+  },
+  {
+   "pid": "P0528",
+   "onTopic": true,
+   "reason": "Variational graph autoencoder for synthetic graph generation matches graph generative modeling."
+  },
+  {
+   "pid": "P0530",
+   "onTopic": false,
+   "reason": "Quantum walk transport physics, unrelated to message passing or graph generation."
+  },
+  {
+   "pid": "P0531",
+   "onTopic": false,
+   "reason": "Human pose estimation via CNNs, unrelated to graphs or message passing."
+  },
+  {
+   "pid": "P0536",
+   "onTopic": false,
+   "reason": "Combinatorial graph factor theory, unrelated to message passing, generation, or random graph models."
+  },
+  {
+   "pid": "P0537",
+   "onTopic": false,
+   "reason": "Quantum circuit architecture search, unrelated to the graph message passing topic."
+  },
+  {
+   "pid": "P0540",
+   "onTopic": false,
+   "reason": "Variational Bayesian inference for GNSS phase tracking, no graph structure involved."
+  },
+  {
+   "pid": "P0543",
+   "onTopic": true,
+   "reason": "Automatic variational inference algorithm matches the variational inference facet's core method."
+  },
+  {
+   "pid": "P0544",
+   "onTopic": true,
+   "reason": "Probabilistic graphical model with variational inference matches those facets."
+  },
+  {
+   "pid": "P0545",
+   "onTopic": false,
+   "reason": "Conditional normalizing flows for CT reconstruction, unrelated to graphs or message passing."
+  },
+  {
+   "pid": "P0546",
+   "onTopic": true,
+   "reason": "Learning Bayesian networks matches the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P0547",
+   "onTopic": true,
+   "reason": "Variational graph autoencoder application matches graph generative modeling."
+  },
+  {
+   "pid": "P0548",
+   "onTopic": true,
+   "reason": "Message passing algorithm with Gaussian-mixture Bayesian modeling parallels Gaussian belief propagation."
+  },
+  {
+   "pid": "P0549",
+   "onTopic": false,
+   "reason": "Distributed neural network design for sensor bandwidth constraints, unrelated to graph message passing or generation."
+  },
+  {
+   "pid": "P0550",
+   "onTopic": true,
+   "reason": "Studies stochastic block models, informing the random graph models facet on Bernoulli-style edge structure."
+  },
+  {
+   "pid": "P0551",
+   "onTopic": true,
+   "reason": "Differentiable belief propagation learning probabilistic factors, informs the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P0552",
+   "onTopic": false,
+   "reason": "Latent-space optimization for image synthesis, no graph, node, or edge distribution content."
+  },
+  {
+   "pid": "P0553",
+   "onTopic": false,
+   "reason": "Row-based table representation learning, unrelated to graphs or message passing."
+  },
+  {
+   "pid": "P0554",
+   "onTopic": true,
+   "reason": "Neural message passing framework for networks, informs the message passing neural networks facet."
+  },
+  {
+   "pid": "P0555",
+   "onTopic": false,
+   "reason": "State space vision backbone, unrelated to graphs or message passing."
+  },
+  {
+   "pid": "P0556",
+   "onTopic": true,
+   "reason": "Graph generation guided by learned distributions, informs the graph generative modeling facet."
+  },
+  {
+   "pid": "P0557",
+   "onTopic": false,
+   "reason": "Photonic hardware for probabilistic computation, unrelated to graph message passing or generation."
+  },
+  {
+   "pid": "P0558",
+   "onTopic": true,
+   "reason": "Theoretical message passing neural network framework, informs the message passing neural networks facet."
+  },
+  {
+   "pid": "P0559",
+   "onTopic": true,
+   "reason": "GNN architecture for molecular representation, informs the message passing neural networks facet."
+  },
+  {
+   "pid": "P0560",
+   "onTopic": true,
+   "reason": "GNN topology representations for grid control, informs the message passing neural networks facet."
+  },
+  {
+   "pid": "P0561",
+   "onTopic": true,
+   "reason": "Autoregressive model for molecular graph generation, informs the graph generative modeling facet."
+  },
+  {
+   "pid": "P0562",
+   "onTopic": true,
+   "reason": "Propagating probabilistic forward passes through network layers, informs the uncertainty propagation facet."
+  },
+  {
+   "pid": "P0563",
+   "onTopic": false,
+   "reason": "OSS contributor network analysis using GNNs as a tool, not studying message passing or graph generation itself."
+  },
+  {
+   "pid": "P0564",
+   "onTopic": false,
+   "reason": "General tutorial on diffusion model mathematics, no graph node or edge content."
+  },
+  {
+   "pid": "P0573",
+   "onTopic": true,
+   "reason": "Analyzes Erdos-Renyi random graphs, informing the random graph models facet."
+  },
+  {
+   "pid": "P0577",
+   "onTopic": true,
+   "reason": "Graph generative models for molecule generation, informs the graph generative modeling facet."
+  },
+  {
+   "pid": "P0582",
+   "onTopic": true,
+   "reason": "Neural message passing with learned potentials in an MRF, informs the message passing and probabilistic graphical models facets."
+  },
+  {
+   "pid": "P0583",
+   "onTopic": false,
+   "reason": "VAE for visual sequence modeling with Gaussian states, no graph or adjacency structure involved."
+  },
+  {
+   "pid": "P0584",
+   "onTopic": true,
+   "reason": "Factor graph formulation and message-based inference, informs the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P0586",
+   "onTopic": true,
+   "reason": "Message passing under uncertain/misclassified edges, informs message passing and uncertainty propagation facets."
+  },
+  {
+   "pid": "P0588",
+   "onTopic": false,
+   "reason": "Gauge-theoretic account of Bayesian inference in neuroscience, unrelated to graph message passing."
+  },
+  {
+   "pid": "P0590",
+   "onTopic": true,
+   "reason": "Temporal exponential random graph model, informs the random graph models facet on stochastic edge structure."
+  },
+  {
+   "pid": "P0593",
+   "onTopic": false,
+   "reason": "Multivariate stochastic volatility modeling in finance, unrelated to graphs or message passing."
+  },
+  {
+   "pid": "P0596",
+   "onTopic": false,
+   "reason": "Probabilistic ML for optical diagnostics, no graph, node, or edge distribution content."
+  },
+  {
+   "pid": "P0597",
+   "onTopic": true,
+   "reason": "Structure estimation for exponential-family random graph models, informs the random graph models facet."
+  },
+  {
+   "pid": "P0598",
+   "onTopic": true,
+   "reason": "Graph variational autoencoder with distributional node priors, informs graph generative modeling facet."
+  },
+  {
+   "pid": "P0599",
+   "onTopic": true,
+   "reason": "Directed message-passing neural network architecture, informs the message passing neural networks facet."
+  },
+  {
+   "pid": "P0602",
+   "onTopic": false,
+   "reason": "General thesis on geometry in generative models, no graph, node, or edge content."
+  },
+  {
+   "pid": "P0605",
+   "onTopic": false,
+   "reason": "Ladder VAE for general unsupervised learning, no graph structure or message passing."
+  },
+  {
+   "pid": "P0606",
+   "onTopic": true,
+   "reason": "Variational inference in Markov random fields, informs the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P0607",
+   "onTopic": false,
+   "reason": "Uses HMM/CRF for e-learning activity recognition, term overlap only, not studying graph message passing."
+  },
+  {
+   "pid": "P0608",
+   "onTopic": true,
+   "reason": "Variational inference method design, informs the variational inference facet underlying Gaussian node parameters."
+  },
+  {
+   "pid": "P0609",
+   "onTopic": false,
+   "reason": "Discrete latent representation learning via VQ-VAE, no graph or adjacency structure."
+  },
+  {
+   "pid": "P0610",
+   "onTopic": false,
+   "reason": "Cross-domain translation as Bayesian inference, unrelated to graphs or message passing."
+  },
+  {
+   "pid": "P0611",
+   "onTopic": true,
+   "reason": "Neural message passing over a scene graph with distributions over new nodes, informs message passing and graph generation facets."
+  },
+  {
+   "pid": "P0612",
+   "onTopic": false,
+   "reason": "Normalizing flow for speech synthesis, unrelated to graphs or message passing."
+  },
+  {
+   "pid": "P0613",
+   "onTopic": true,
+   "reason": "Grammar for generating sets of factor graphs, informs the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P0614",
+   "onTopic": false,
+   "reason": "Taxonomy of trust in probabilistic ML broadly, no graph or message passing content."
+  },
+  {
+   "pid": "P0615",
+   "onTopic": false,
+   "reason": "Contrastive learning for graph classification; no distributional nodes, Bernoulli edges, or generative message passing."
+  },
+  {
+   "pid": "P0616",
+   "onTopic": false,
+   "reason": "Generic survey on evaluating representation learning, no graph structure or message passing content."
+  },
+  {
+   "pid": "P0617",
+   "onTopic": false,
+   "reason": "Scene graph generation from images studies visual relation detection, not graph generative modeling with distributions."
+  },
+  {
+   "pid": "P0618",
+   "onTopic": true,
+   "reason": "Belief propagation study informs the probabilistic graphical models facet underlying Gaussian message passing."
+  },
+  {
+   "pid": "P0619",
+   "onTopic": true,
+   "reason": "Studies stochastic block models directly, the random graph models equivalent problem."
+  },
+  {
+   "pid": "P0620",
+   "onTopic": false,
+   "reason": "Dataset distillation into a generative model for images, unrelated to graphs or Bernoulli edges."
+  },
+  {
+   "pid": "P0621",
+   "onTopic": true,
+   "reason": "Proposes a message-passing aggregation architecture, informing the message passing neural networks facet."
+  },
+  {
+   "pid": "P0622",
+   "onTopic": false,
+   "reason": "Applies GNNs to program variable mapping, an unrelated application domain rather than the method itself."
+  },
+  {
+   "pid": "P0623",
+   "onTopic": false,
+   "reason": "'Distributional neural networks' here means spatial extremes modeling, not uncertainty propagation through layers."
+  },
+  {
+   "pid": "P0624",
+   "onTopic": false,
+   "reason": "Alignment of diffusion models for general generative modeling, not graph- or distribution-based message passing."
+  },
+  {
+   "pid": "P0625",
+   "onTopic": false,
+   "reason": "Studies Ising model mixing times on Erdos-Renyi graphs, not the random graph edge-probability modeling itself."
+  },
+  {
+   "pid": "P0626",
+   "onTopic": true,
+   "reason": "Directly evaluates graph generative models, informing the graph generative modeling facet."
+  },
+  {
+   "pid": "P0627",
+   "onTopic": false,
+   "reason": "Uncertainty propagation in autonomous vehicle motion planning, unrelated to graphs or message passing layers."
+  },
+  {
+   "pid": "P0628",
+   "onTopic": true,
+   "reason": "Molecular graph generation with uncertainty informs the graph generative modeling facet."
+  },
+  {
+   "pid": "P0629",
+   "onTopic": true,
+   "reason": "Generalizes random graph models with hidden variables affecting edge probabilities, the random graph models facet."
+  },
+  {
+   "pid": "P0632",
+   "onTopic": false,
+   "reason": "Uncertainty-aware deep learning for flood modeling, no graph or message passing structure involved."
+  },
+  {
+   "pid": "P0639",
+   "onTopic": false,
+   "reason": "'Moment propagation' here concerns quantum dynamics moments, a different sense than distributional message passing."
+  },
+  {
+   "pid": "P0642",
+   "onTopic": true,
+   "reason": "Uses Gaussian belief propagation directly, the Gaussian message passing equivalent problem."
+  },
+  {
+   "pid": "P0644",
+   "onTopic": true,
+   "reason": "Bayesian model averaging for exponential random graph models informs the random graph models facet."
+  },
+  {
+   "pid": "P0645",
+   "onTopic": true,
+   "reason": "Tutorial on graph generative modeling for drug discovery directly informs that facet."
+  },
+  {
+   "pid": "P0648",
+   "onTopic": false,
+   "reason": "Applies PGMs to identify neuroscience ensembles, an unrelated application domain rather than the method itself."
+  },
+  {
+   "pid": "P0649",
+   "onTopic": true,
+   "reason": "Belief propagation in constraint programming informs the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P0650",
+   "onTopic": true,
+   "reason": "Software for exponential-family random graph models informs the random graph models facet."
+  },
+  {
+   "pid": "P0652",
+   "onTopic": false,
+   "reason": "Generative models of business models in management theory, unrelated to graphs or distributions."
+  },
+  {
+   "pid": "P0658",
+   "onTopic": false,
+   "reason": "Astrophysical wave propagation in stars, unrelated to graph message passing or distributions."
+  },
+  {
+   "pid": "P0659",
+   "onTopic": true,
+   "reason": "Convolutional factor graphs as probabilistic models informs the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P0660",
+   "onTopic": true,
+   "reason": "Analyzes loopy belief propagation, informing the belief propagation/probabilistic graphical models facet."
+  },
+  {
+   "pid": "P0661",
+   "onTopic": true,
+   "reason": "Incremental variational inference method directly informs the variational inference facet."
+  },
+  {
+   "pid": "P0662",
+   "onTopic": true,
+   "reason": "Convergence analysis of Gaussian belief propagation, the Gaussian message passing equivalent problem."
+  },
+  {
+   "pid": "P0663",
+   "onTopic": true,
+   "reason": "Incorporates neural message passing for molecular representations, informing that facet."
+  },
+  {
+   "pid": "P0664",
+   "onTopic": false,
+   "reason": "Applies PGMs to crude oil price forecasting, an unrelated economics application rather than the method itself."
+  },
+  {
+   "pid": "P0665",
+   "onTopic": true,
+   "reason": "Approximate Bayesian inference method matches the variational inference facet's aliased concept."
+  },
+  {
+   "pid": "P0666",
+   "onTopic": true,
+   "reason": "Graph normalizing flows for generation directly informs the graph generative modeling facet."
+  },
+  {
+   "pid": "P0667",
+   "onTopic": true,
+   "reason": "Flow-based molecular graph generation informs the graph generative modeling facet."
+  },
+  {
+   "pid": "P0668",
+   "onTopic": true,
+   "reason": "Variational graph autoencoder is the explicit equivalent problem for latent graph generation."
+  },
+  {
+   "pid": "P0669",
+   "onTopic": false,
+   "reason": "Mean-field limit of Markov dynamics on Erdos-Renyi graphs studies process asymptotics, not edge-probability modeling."
+  },
+  {
+   "pid": "P0670",
+   "onTopic": true,
+   "reason": "Hierarchical neural message passing architecture directly informs the message passing neural networks facet."
+  },
+  {
+   "pid": "P0671",
+   "onTopic": true,
+   "reason": "Gaussian process VAE with Gaussian latents informs the variational inference facet."
+  },
+  {
+   "pid": "P0672",
+   "onTopic": true,
+   "reason": "Tree-decomposition-based graph generation framework informs the graph generative modeling facet."
+  },
+  {
+   "pid": "P0673",
+   "onTopic": true,
+   "reason": "Links probabilistic graphical models with tensor networks, informing the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P0674",
+   "onTopic": true,
+   "reason": "Implements geometry-aware deep message-passing, matching the message passing neural networks facet."
+  },
+  {
+   "pid": "P0675",
+   "onTopic": false,
+   "reason": "Orbit uncertainty propagation in orbital mechanics; shares 'uncertainty propagation' term but unrelated to graphs."
+  },
+  {
+   "pid": "P0676",
+   "onTopic": false,
+   "reason": "Compositional image diffusion generation; no graph, node, or edge modeling involved."
+  },
+  {
+   "pid": "P0677",
+   "onTopic": true,
+   "reason": "Variational graph autoencoder generating new links/nodes, matching graph generative modeling facet."
+  },
+  {
+   "pid": "P0678",
+   "onTopic": true,
+   "reason": "Message-passing inference of marginals in probabilistic graphical models, matching the PGM facet."
+  },
+  {
+   "pid": "P0679",
+   "onTopic": true,
+   "reason": "Enhances graph neural networks, matching the message passing neural networks facet."
+  },
+  {
+   "pid": "P0680",
+   "onTopic": true,
+   "reason": "Flow-matching generative modeling over discrete (incl. graph-structured) data, matching graph generative modeling facet."
+  },
+  {
+   "pid": "P0681",
+   "onTopic": true,
+   "reason": "Studies attention in message passing neural networks directly, matching the MPNN facet."
+  },
+  {
+   "pid": "P0682",
+   "onTopic": false,
+   "reason": "Survey on diffusion models and representation learning generally, no graph or node/edge modeling."
+  },
+  {
+   "pid": "P0683",
+   "onTopic": true,
+   "reason": "Diffusion-based graph generative model, matching graph generative modeling facet."
+  },
+  {
+   "pid": "P0684",
+   "onTopic": false,
+   "reason": "Probabilistic electricity-price forecasting; unrelated to graph message passing or generation."
+  },
+  {
+   "pid": "P0685",
+   "onTopic": false,
+   "reason": "Linear response of densities in random dynamical systems/SDE generative models; no graph connection."
+  },
+  {
+   "pid": "P0686",
+   "onTopic": false,
+   "reason": "Probabilistic ML for manufacturing dimensional control; unrelated to graphs or message passing."
+  },
+  {
+   "pid": "P0687",
+   "onTopic": false,
+   "reason": "Moment propagation in the Vlasov-Poisson PDE system; physics context unrelated to graph node distributions."
+  },
+  {
+   "pid": "P0693",
+   "onTopic": true,
+   "reason": "Gaussian graphical models for gene networks, matching the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P0694",
+   "onTopic": true,
+   "reason": "Weighted stochastic block models, matching the random graph models facet."
+  },
+  {
+   "pid": "P0697",
+   "onTopic": false,
+   "reason": "High-resolution image representation learning for vision tasks; no graph relevance."
+  },
+  {
+   "pid": "P0698",
+   "onTopic": true,
+   "reason": "Uses graph neural networks for scheduling, matching the message passing neural networks facet."
+  },
+  {
+   "pid": "P0699",
+   "onTopic": true,
+   "reason": "Message passing/belief propagation for graph similarity, matching MPNN and PGM facets."
+  },
+  {
+   "pid": "P0700",
+   "onTopic": true,
+   "reason": "Exponential random graph models, matching the random graph models facet."
+  },
+  {
+   "pid": "P0703",
+   "onTopic": true,
+   "reason": "Generalized exponential random graph models for valued edges, matching random graph models facet."
+  },
+  {
+   "pid": "P0707",
+   "onTopic": false,
+   "reason": "Approximate Bayesian inference for speech processing; unrelated domain with no graph/node connection."
+  },
+  {
+   "pid": "P0708",
+   "onTopic": false,
+   "reason": "PGM/entropy framework for geological fault interpretation; shares PGM term but different problem domain."
+  },
+  {
+   "pid": "P0710",
+   "onTopic": false,
+   "reason": "Structural-break detection via variational latent dynamics; unrelated to graphs or message passing."
+  },
+  {
+   "pid": "P0712",
+   "onTopic": true,
+   "reason": "Graph network modeling uncertainty of signal propagation, matching MPNN and uncertainty propagation facets."
+  },
+  {
+   "pid": "P0713",
+   "onTopic": false,
+   "reason": "VAE for MIMO channel feedback; wireless application unrelated to graph node/edge modeling."
+  },
+  {
+   "pid": "P0715",
+   "onTopic": true,
+   "reason": "Graph-based generative neural networks for molecular structures, matching graph generative modeling facet."
+  },
+  {
+   "pid": "P0717",
+   "onTopic": true,
+   "reason": "Tractable probabilistic graphical model inference, matching the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P0718",
+   "onTopic": true,
+   "reason": "Implicit variational inference method, matching the variational inference facet."
+  },
+  {
+   "pid": "P0719",
+   "onTopic": true,
+   "reason": "Local structure of Erdos-Renyi graphs, matching the random graph models facet directly."
+  },
+  {
+   "pid": "P0720",
+   "onTopic": false,
+   "reason": "Contrastive predictive coding for general representation learning; no graph or distributional node content."
+  },
+  {
+   "pid": "P0721",
+   "onTopic": true,
+   "reason": "Moment propagation through sequential system steps, analogous to propagating Gaussian node states through message passing."
+  },
+  {
+   "pid": "P0722",
+   "onTopic": false,
+   "reason": "Approximate Bayesian inference for reliability testing; unrelated domain with no graph connection."
+  },
+  {
+   "pid": "P0723",
+   "onTopic": true,
+   "reason": "Assortative stochastic block models, matching the random graph models facet."
+  },
+  {
+   "pid": "P0724",
+   "onTopic": true,
+   "reason": "Variational graph autoencoder reconstructing adjacency, matching graph generative modeling facet."
+  },
+  {
+   "pid": "P0725",
+   "onTopic": false,
+   "reason": "Normalizing flows on Riemannian manifolds (spheres, torii); not about graph nodes or edges."
+  },
+  {
+   "pid": "P0726",
+   "onTopic": false,
+   "reason": "Federated learning system/benchmark infrastructure for GNNs, not studying message passing itself."
+  },
+  {
+   "pid": "P0727",
+   "onTopic": true,
+   "reason": "Neural message passing on hypergraphs, directly matching the message passing neural networks facet."
+  },
+  {
+   "pid": "P0728",
+   "onTopic": true,
+   "reason": "Convergence of generalized belief propagation, matching the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P0729",
+   "onTopic": true,
+   "reason": "Graph generative model for benchmarking GNNs, matching the graph generative modeling facet."
+  },
+  {
+   "pid": "P0730",
+   "onTopic": true,
+   "reason": "Uses a transformer/GNN branch network, engaging the message passing neural networks facet."
+  },
+  {
+   "pid": "P0731",
+   "onTopic": true,
+   "reason": "Temporal ERGM models stochastic edge formation, matching the random graph models facet."
+  },
+  {
+   "pid": "P0732",
+   "onTopic": true,
+   "reason": "Novel graph generation method informs the graph generative modeling facet."
+  },
+  {
+   "pid": "P0733",
+   "onTopic": false,
+   "reason": "Generic EBM/diffusion training objective with no graph, node, or edge structure involved."
+  },
+  {
+   "pid": "P0734",
+   "onTopic": false,
+   "reason": "Causal representation learning and concept recovery, unrelated to graph message passing or generation."
+  },
+  {
+   "pid": "P0735",
+   "onTopic": false,
+   "reason": "Text-to-image bias manipulation, unrelated to graphs, nodes, or edges."
+  },
+  {
+   "pid": "P0736",
+   "onTopic": false,
+   "reason": "'Distributional' forecasting here means output density forecasts, not propagating distributions through message passing."
+  },
+  {
+   "pid": "P0737",
+   "onTopic": true,
+   "reason": "Lifting factor graphs engages the probabilistic graphical models / belief propagation facet."
+  },
+  {
+   "pid": "P0738",
+   "onTopic": true,
+   "reason": "Molecular graph generation via latent point clouds matches the graph generative modeling facet."
+  },
+  {
+   "pid": "P0739",
+   "onTopic": true,
+   "reason": "Evaluates implicit graph generative models, directly informing the graph generative modeling facet."
+  },
+  {
+   "pid": "P0740",
+   "onTopic": false,
+   "reason": "Orbital mechanics uncertainty propagation; shares only the term with the uncertainty propagation facet."
+  },
+  {
+   "pid": "P0741",
+   "onTopic": false,
+   "reason": "Studies privacy attacks on GNN outputs, not the message passing architecture itself."
+  },
+  {
+   "pid": "P0743",
+   "onTopic": true,
+   "reason": "Overview of graph representation learning directly relates to the core message passing topic."
+  },
+  {
+   "pid": "P0746",
+   "onTopic": false,
+   "reason": "Coarse-graining physical systems via probabilistic ML, unrelated to graph nodes/edges or message passing."
+  },
+  {
+   "pid": "P0747",
+   "onTopic": false,
+   "reason": "Active inference tree search for brain modeling, unrelated to graph generation or message passing."
+  },
+  {
+   "pid": "P0763",
+   "onTopic": true,
+   "reason": "Gaussian belief propagation directly matches the Gaussian belief propagation equivalent problem."
+  },
+  {
+   "pid": "P0764",
+   "onTopic": true,
+   "reason": "Exponential random graph model for partner selection matches the random graph models facet."
+  },
+  {
+   "pid": "P0767",
+   "onTopic": true,
+   "reason": "Boosting variational inference studies the variational inference method facet directly."
+  },
+  {
+   "pid": "P0768",
+   "onTopic": false,
+   "reason": "Generic manifold VAE for topology capture, not about node/edge distributions or graphs."
+  },
+  {
+   "pid": "P0770",
+   "onTopic": true,
+   "reason": "Mixture-based PGMs engage the probabilistic graphical models theory facet."
+  },
+  {
+   "pid": "P0771",
+   "onTopic": false,
+   "reason": "Uncertainty propagation used for ANN structure reduction via MINLP, a different sense than facet's moment propagation."
+  },
+  {
+   "pid": "P0773",
+   "onTopic": true,
+   "reason": "Variational inference method applied to tomography, informing the variational inference facet."
+  },
+  {
+   "pid": "P0774",
+   "onTopic": false,
+   "reason": "Normalizing flows generate molecular coordinate configurations, not graph topology or node distributions."
+  },
+  {
+   "pid": "P0777",
+   "onTopic": true,
+   "reason": "Normal factor graphs unify factor graph models, matching the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P0778",
+   "onTopic": true,
+   "reason": "Conditional graph generative model for drug design matches the graph generative modeling facet."
+  },
+  {
+   "pid": "P0779",
+   "onTopic": true,
+   "reason": "Variational message passing directly combines the message passing and variational inference facets."
+  },
+  {
+   "pid": "P0780",
+   "onTopic": true,
+   "reason": "Symmetries in probabilistic graphical models inform the probabilistic graphical models theory facet."
+  },
+  {
+   "pid": "P0781",
+   "onTopic": false,
+   "reason": "Recurrent VAE for collaborative filtering, unrelated to node/edge distributions or graph generation."
+  },
+  {
+   "pid": "P0782",
+   "onTopic": true,
+   "reason": "Library for graph neural network message passing directly supports the message passing neural networks facet."
+  },
+  {
+   "pid": "P0783",
+   "onTopic": true,
+   "reason": "Alpha belief propagation is a message passing inference method matching the PGM/belief propagation facet."
+  },
+  {
+   "pid": "P0784",
+   "onTopic": false,
+   "reason": "Information theory of wide neural network ensembles, unrelated to graphs or distributional message passing."
+  },
+  {
+   "pid": "P0785",
+   "onTopic": true,
+   "reason": "Sequential graph VAE directly matches the graph generative modeling facet."
+  },
+  {
+   "pid": "P0786",
+   "onTopic": true,
+   "reason": "Transfers information between neighboring mesh nodes, aligning with the message passing neural networks facet."
+  },
+  {
+   "pid": "P0787",
+   "onTopic": true,
+   "reason": "Erdos-Renyi random graph model matches the random graph models facet."
+  },
+  {
+   "pid": "P0788",
+   "onTopic": true,
+   "reason": "Controllable graph generation model directly matches the graph generative modeling facet."
+  },
+  {
+   "pid": "P0789",
+   "onTopic": true,
+   "reason": "Directly examines message passing necessity in GNNs, matching the message passing neural networks facet."
+  },
+  {
+   "pid": "P0790",
+   "onTopic": true,
+   "reason": "Structured variational graph autoencoder matches the variational graph autoencoders equivalent problem."
+  },
+  {
+   "pid": "P0791",
+   "onTopic": true,
+   "reason": "Survey of diffusion generative models covering molecule/graph design, informing graph generative modeling facet."
+  },
+  {
+   "pid": "P0792",
+   "onTopic": true,
+   "reason": "Diffusion model over discrete graph structures matches the graph generative modeling facet."
+  },
+  {
+   "pid": "P0793",
+   "onTopic": true,
+   "reason": "Tutorial on parametric variational inference directly informs the variational inference facet."
+  },
+  {
+   "pid": "P0794",
+   "onTopic": false,
+   "reason": "Applies standard GNNs to fatty liver disease prediction; no distributional nodes/edges or graph generation."
+  },
+  {
+   "pid": "P0795",
+   "onTopic": true,
+   "reason": "Local dependence block models inform the random graph models facet (Bernoulli/SBM edge formalism)."
+  },
+  {
+   "pid": "P0796",
+   "onTopic": true,
+   "reason": "Unified diffusion framework for neural message passing informs the message passing neural networks facet."
+  },
+  {
+   "pid": "P0797",
+   "onTopic": false,
+   "reason": "Uses MPNN+RL as a tool for transit network design, an unrelated application, not the method itself."
+  },
+  {
+   "pid": "P0798",
+   "onTopic": false,
+   "reason": "QSPR feature-importance modeling for molecular properties; unrelated to message passing or graph generation."
+  },
+  {
+   "pid": "P0799",
+   "onTopic": true,
+   "reason": "Community recovery on noisy stochastic block models informs the random graph models facet."
+  },
+  {
+   "pid": "P0800",
+   "onTopic": false,
+   "reason": "Generic normalizing-flow distillation for density learning; not graph-related generative modeling."
+  },
+  {
+   "pid": "P0801",
+   "onTopic": false,
+   "reason": "Dataset curation for molecular representation learning; unrelated to probabilistic message passing or graph generation."
+  },
+  {
+   "pid": "P0802",
+   "onTopic": false,
+   "reason": "Gaussian Process regression for drilling fluid loss; unrelated to graph message passing or generation."
+  },
+  {
+   "pid": "P0805",
+   "onTopic": false,
+   "reason": "GNN link prediction applied to analog circuits as a domain task, not studying the distributional/generative mechanism."
+  },
+  {
+   "pid": "P0806",
+   "onTopic": false,
+   "reason": "Interval-random hybrid uncertainty propagation in structural engineering reliability; different sense and context."
+  },
+  {
+   "pid": "P0810",
+   "onTopic": false,
+   "reason": "Generative models for quantum state reconstruction; not graph-structured message passing or generation."
+  },
+  {
+   "pid": "P0813",
+   "onTopic": false,
+   "reason": "Lattice Boltzmann fluid simulation 'moment propagation' refers to tracer dynamics, unrelated to the facet concept."
+  },
+  {
+   "pid": "P0815",
+   "onTopic": false,
+   "reason": "Monte Carlo uncertainty propagation in MRI tomography; domain-specific, unrelated to node/edge distributions."
+  },
+  {
+   "pid": "P0820",
+   "onTopic": false,
+   "reason": "Generative modeling for hand image synthesis; unrelated to graphs or message passing."
+  },
+  {
+   "pid": "P0823",
+   "onTopic": true,
+   "reason": "Belief propagation factorization in molecular modeling informs the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P0824",
+   "onTopic": false,
+   "reason": "Closure problem in turbulence/social systems; no connection to graph message passing or generation."
+  },
+  {
+   "pid": "P0826",
+   "onTopic": true,
+   "reason": "Variational message passing for Bayesian inference directly informs the message passing/graphical models facets."
+  },
+  {
+   "pid": "P0828",
+   "onTopic": false,
+   "reason": "Normalizing flows for industrial anomaly detection; unrelated to graphs or distributional message passing."
+  },
+  {
+   "pid": "P0829",
+   "onTopic": true,
+   "reason": "Generative graph-based algorithm for fault networks informs the graph generative modeling facet."
+  },
+  {
+   "pid": "P0831",
+   "onTopic": false,
+   "reason": "Applies standard GNNs to supply chain network modeling, an unrelated domain application."
+  },
+  {
+   "pid": "P0835",
+   "onTopic": true,
+   "reason": "Message passing with Gaussian mixture messages closely parallels the Gaussian belief propagation equivalent problem."
+  },
+  {
+   "pid": "P0836",
+   "onTopic": true,
+   "reason": "Directly studies Gaussian belief propagation, the named equivalent problem."
+  },
+  {
+   "pid": "P0837",
+   "onTopic": true,
+   "reason": "Black box variational inference informs the variational inference facet underlying Gaussian node parameterization."
+  },
+  {
+   "pid": "P0838",
+   "onTopic": true,
+   "reason": "Bayesian model selection for stochastic block models informs the random graph models facet."
+  },
+  {
+   "pid": "P0839",
+   "onTopic": true,
+   "reason": "Lifted belief propagation extends the probabilistic graphical models / belief propagation facet."
+  },
+  {
+   "pid": "P0840",
+   "onTopic": true,
+   "reason": "GraphSAGE defines the core message passing neural network mechanism the facet is built on."
+  },
+  {
+   "pid": "P0841",
+   "onTopic": true,
+   "reason": "InfoVAE addresses amortized variational inference central to Gaussian latent node parameterization and generative modeling."
+  },
+  {
+   "pid": "P0842",
+   "onTopic": true,
+   "reason": "Sylvester normalizing flows for flexible variational posteriors inform the variational inference facet."
+  },
+  {
+   "pid": "P0843",
+   "onTopic": false,
+   "reason": "Oceanographic transport uncertainty propagation via Hessian analysis; domain-specific, unrelated to the facet concept."
+  },
+  {
+   "pid": "P0844",
+   "onTopic": true,
+   "reason": "Layered graphical models trained via variational inference inform the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P0845",
+   "onTopic": true,
+   "reason": "Sparse grid approximate Bayesian inference informs the variational/approximate Bayesian inference facet."
+  },
+  {
+   "pid": "P0846",
+   "onTopic": false,
+   "reason": "Survey of concept factorization representation learning; unrelated to message passing, edges, or graph generation."
+  },
+  {
+   "pid": "P0847",
+   "onTopic": true,
+   "reason": "Moment-based uncertainty propagation through nonlinear systems informs the moment/uncertainty propagation facet."
+  },
+  {
+   "pid": "P0848",
+   "onTopic": true,
+   "reason": "Benchmarks deep graph generative models, directly informing the graph generative modeling facet."
+  },
+  {
+   "pid": "P0849",
+   "onTopic": false,
+   "reason": "Probabilistic surrogate modeling of wind turbine wakes; unrelated to graphs or distributional message passing."
+  },
+  {
+   "pid": "P0850",
+   "onTopic": true,
+   "reason": "Moment propagation through polynomial systems informs the moment/uncertainty propagation facet."
+  },
+  {
+   "pid": "P0851",
+   "onTopic": true,
+   "reason": "Trainable unpooling layer for graph generation directly informs the graph generative modeling facet."
+  },
+  {
+   "pid": "P0852",
+   "onTopic": false,
+   "reason": "Applies GNN prompt tuning to molecular property prediction, a domain application not the generative mechanism."
+  },
+  {
+   "pid": "P0853",
+   "onTopic": false,
+   "reason": "Survey of diffusion models for time-series forecasting; unrelated to graph structure or message passing."
+  },
+  {
+   "pid": "P0854",
+   "onTopic": true,
+   "reason": "Uses neural message passing architecture over temporal graphs, informing the message passing neural networks facet."
+  },
+  {
+   "pid": "P0855",
+   "onTopic": true,
+   "reason": "Lifted inference over factor graphs informs the probabilistic graphical models / belief propagation facet."
+  },
+  {
+   "pid": "P0856",
+   "onTopic": false,
+   "reason": "Uncertainty and 'semantic graph' used for LLM hallucination detection, not graph message passing or distributions."
+  },
+  {
+   "pid": "P0857",
+   "onTopic": false,
+   "reason": "Memorization/data cartography for generative models, unrelated to graph structure or distributions."
+  },
+  {
+   "pid": "P0858",
+   "onTopic": true,
+   "reason": "Variational graph autoencoder for imputation informs the graph generative modeling / VGAE facet."
+  },
+  {
+   "pid": "P0859",
+   "onTopic": true,
+   "reason": "Molecular graph diffusion generation informs the graph generative modeling facet."
+  },
+  {
+   "pid": "P0860",
+   "onTopic": false,
+   "reason": "Studies poisoning-attack robustness of LLM-enhanced GNNs, not message passing distributions or graph generation."
+  },
+  {
+   "pid": "P0861",
+   "onTopic": true,
+   "reason": "Fragment-based molecular graph VAE informs graph generative modeling facet."
+  },
+  {
+   "pid": "P0864",
+   "onTopic": true,
+   "reason": "Deep graph generator for learning graph distributions informs graph generative modeling facet."
+  },
+  {
+   "pid": "P0865",
+   "onTopic": true,
+   "reason": "Verification framework capturing uncertainty over node and edge features parallels Gaussian nodes/Bernoulli edges."
+  },
+  {
+   "pid": "P0866",
+   "onTopic": false,
+   "reason": "General NLP representation learning survey, no connection to graphs, distributions, or message passing."
+  },
+  {
+   "pid": "P0868",
+   "onTopic": true,
+   "reason": "Erdos-Renyi graph percolation informs the random graph models facet."
+  },
+  {
+   "pid": "P0872",
+   "onTopic": true,
+   "reason": "Equivariant message passing GNN for electron density informs the message passing neural networks facet."
+  },
+  {
+   "pid": "P0874",
+   "onTopic": false,
+   "reason": "Uncertainty propagation in ocean acoustic PINNs, unrelated to graphs or message passing."
+  },
+  {
+   "pid": "P0877",
+   "onTopic": false,
+   "reason": "Uncertainty quantification for electricity price forecasting, not graph-based or message passing related."
+  },
+  {
+   "pid": "P0880",
+   "onTopic": true,
+   "reason": "Message-passing neural network study of network topology informs the MPNN facet."
+  },
+  {
+   "pid": "P0881",
+   "onTopic": true,
+   "reason": "Factor graph optimization informs the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P0884",
+   "onTopic": true,
+   "reason": "Knowledge-graph generative framework informs the graph generative modeling facet."
+  },
+  {
+   "pid": "P0889",
+   "onTopic": false,
+   "reason": "Mixtures of normalizing flows for density estimation, unrelated to graphs or adjacency structure."
+  },
+  {
+   "pid": "P0891",
+   "onTopic": true,
+   "reason": "Variational graph autoencoder for drug repositioning informs the VGAE facet."
+  },
+  {
+   "pid": "P0895",
+   "onTopic": true,
+   "reason": "Belief propagation method informs the probabilistic graphical models / Gaussian belief propagation facet."
+  },
+  {
+   "pid": "P0896",
+   "onTopic": true,
+   "reason": "Semi-implicit variational inference informs the variational inference facet."
+  },
+  {
+   "pid": "P0897",
+   "onTopic": true,
+   "reason": "Combines probabilistic graphical models (MLNs) with GNNs, informing the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P0898",
+   "onTopic": true,
+   "reason": "Relational variational graph autoencoder informs the VGAE facet."
+  },
+  {
+   "pid": "P0899",
+   "onTopic": true,
+   "reason": "New message passing neural network variant informs the MPNN facet."
+  },
+  {
+   "pid": "P0900",
+   "onTopic": true,
+   "reason": "Neural message passing over 3D scene graphs informs the message passing neural networks facet."
+  },
+  {
+   "pid": "P0901",
+   "onTopic": false,
+   "reason": "'Scene graph generation' here means vision object-relation detection, a different sense of graph generation."
+  },
+  {
+   "pid": "P0902",
+   "onTopic": false,
+   "reason": "Vision-language representation learning (ALBEF), unrelated to graph message passing or generation."
+  },
+  {
+   "pid": "P0903",
+   "onTopic": true,
+   "reason": "Shotgun assembly of Erdos-Renyi graphs informs the random graph models facet."
+  },
+  {
+   "pid": "P0904",
+   "onTopic": false,
+   "reason": "Quantum generative model advantage metrics, unrelated to graph structure or node/edge distributions."
+  },
+  {
+   "pid": "P0905",
+   "onTopic": true,
+   "reason": "Exponential random graph model MLE existence informs the random graph models facet."
+  },
+  {
+   "pid": "P0906",
+   "onTopic": false,
+   "reason": "Optimal-transport uncertainty sets for robust optimization, unrelated to graph message passing."
+  },
+  {
+   "pid": "P0907",
+   "onTopic": true,
+   "reason": "Evaluation of graph generative models informs the graph generative modeling facet."
+  },
+  {
+   "pid": "P0908",
+   "onTopic": true,
+   "reason": "Survey of graph-based molecular representation learning informs the message passing neural networks facet."
+  },
+  {
+   "pid": "P0909",
+   "onTopic": true,
+   "reason": "Survey of temporal graph generative modeling informs the graph generative modeling facet."
+  },
+  {
+   "pid": "P0910",
+   "onTopic": false,
+   "reason": "Diffusion-based causal inference on a fixed causal graph, not graph generation with stochastic topology."
+  },
+  {
+   "pid": "P0911",
+   "onTopic": true,
+   "reason": "Goodness-of-fit for attributed probabilistic graph generative models informs the graph generative modeling facet."
+  },
+  {
+   "pid": "P0912",
+   "onTopic": true,
+   "reason": "Spectral properties of stochastic block models inform the random graph models facet."
+  },
+  {
+   "pid": "P0913",
+   "onTopic": false,
+   "reason": "Entropy model resilience in distributed neural networks, unrelated to graphs or distributions."
+  },
+  {
+   "pid": "P0914",
+   "onTopic": true,
+   "reason": "Hodge-Laplacian graph attention network is a graph neural network architecture informing the MPNN facet."
+  },
+  {
+   "pid": "P0915",
+   "onTopic": false,
+   "reason": "Compares GNN training system engineering, not probabilistic node/edge message passing or generation."
+  },
+  {
+   "pid": "P0916",
+   "onTopic": false,
+   "reason": "Reviews approximate Bayesian inference for epidemiology, unrelated to graph message passing or generation."
+  },
+  {
+   "pid": "P0917",
+   "onTopic": false,
+   "reason": "Multi-modal CLIP representation learning, unrelated to graphs or message passing."
+  },
+  {
+   "pid": "P0918",
+   "onTopic": false,
+   "reason": "Probabilistic weather prediction energy spectra analysis, unrelated to the submission's needs."
+  },
+  {
+   "pid": "P0920",
+   "onTopic": true,
+   "reason": "Studies random graph models with local dependence, informing the random graph models facet."
+  },
+  {
+   "pid": "P0921",
+   "onTopic": true,
+   "reason": "Graph generation via message passing GNNs informs the graph generative modeling facet."
+  },
+  {
+   "pid": "P0924",
+   "onTopic": false,
+   "reason": "Unifies normalizing flows/VAEs generically; no graph structure, nodes, or edges involved."
+  },
+  {
+   "pid": "P0926",
+   "onTopic": true,
+   "reason": "Discusses cluster variation method in probabilistic graphical models, informing that theory facet."
+  },
+  {
+   "pid": "P0928",
+   "onTopic": false,
+   "reason": "Approximate Bayesian inference for particle tracking, unrelated application with no graph/message-passing link."
+  },
+  {
+   "pid": "P0929",
+   "onTopic": false,
+   "reason": "Solid-state physics orbital transport symmetry, unrelated to any need."
+  },
+  {
+   "pid": "P0930",
+   "onTopic": true,
+   "reason": "Applies Gaussian belief propagation, the named equivalent problem for Gaussian message propagation."
+  },
+  {
+   "pid": "P0932",
+   "onTopic": false,
+   "reason": "Uses 'random graph' as an architecture name for battery RUL prediction, only a term match."
+  },
+  {
+   "pid": "P0933",
+   "onTopic": true,
+   "reason": "Compares cluster graphs and factor graphs, informing the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P0936",
+   "onTopic": true,
+   "reason": "Builds message passing neural networks with attention/edge schemes, directly on the core method facet."
+  },
+  {
+   "pid": "P0940",
+   "onTopic": true,
+   "reason": "Conditional molecular graph diffusion generation informs the graph generative modeling facet."
+  },
+  {
+   "pid": "P0941",
+   "onTopic": false,
+   "reason": "Applies probabilistic graphical model inference to genomic privacy attacks, an unrelated object/problem."
+  },
+  {
+   "pid": "P0945",
+   "onTopic": true,
+   "reason": "Uses Gaussian belief propagation algorithm, matching the Gaussian belief propagation equivalent problem."
+  },
+  {
+   "pid": "P0948",
+   "onTopic": false,
+   "reason": "GAN/GNN framework for glacier ice volume estimation, unrelated to probabilistic message passing or graph generation."
+  },
+  {
+   "pid": "P0949",
+   "onTopic": false,
+   "reason": "Retrieval-augmented generation for dialogue, unrelated to graphs or distributional message passing."
+  },
+  {
+   "pid": "P0950",
+   "onTopic": true,
+   "reason": "Studies belief propagation methods on graphs, informing the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P0951",
+   "onTopic": true,
+   "reason": "Develops uncertainty propagation methodology across system levels, matching the uncertainty propagation facet."
+  },
+  {
+   "pid": "P0954",
+   "onTopic": true,
+   "reason": "Studies Erdos-Renyi random graphs with Bernoulli edge probabilities, matching the random graph models facet."
+  },
+  {
+   "pid": "P0955",
+   "onTopic": true,
+   "reason": "Trains variational autoencoders with expressive Gaussian inference, informing the variational inference facet."
+  },
+  {
+   "pid": "P0956",
+   "onTopic": true,
+   "reason": "Proposes a method for Gaussian variational inference, matching the variational inference facet."
+  },
+  {
+   "pid": "P0957",
+   "onTopic": true,
+   "reason": "Generative model producing molecular graphs directly informs the graph generative modeling facet."
+  },
+  {
+   "pid": "P0958",
+   "onTopic": false,
+   "reason": "Neural network decoder for quantum error correction codes, unrelated to the submission's needs."
+  },
+  {
+   "pid": "P0959",
+   "onTopic": true,
+   "reason": "Develops uncertainty propagation method for distributions through pipeline stages, matching that facet."
+  },
+  {
+   "pid": "P0960",
+   "onTopic": true,
+   "reason": "Connects Gaussian Markov random fields with neural networks, informing the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P0961",
+   "onTopic": false,
+   "reason": "Molecular language model representation learning, not about graph structure or distributional message passing."
+  },
+  {
+   "pid": "P0962",
+   "onTopic": true,
+   "reason": "Studies stochastic block model reconstruction, matching the random graph models facet."
+  },
+  {
+   "pid": "P0963",
+   "onTopic": true,
+   "reason": "Directly surveys deep graph generation, the core graph generative modeling facet."
+  },
+  {
+   "pid": "P0964",
+   "onTopic": false,
+   "reason": "Probabilistic ML for climate parameterization, unrelated to graph message passing or generation."
+  },
+  {
+   "pid": "P0965",
+   "onTopic": false,
+   "reason": "Causal representation learning identifiability, unrelated to graph generation or distributional nodes."
+  },
+  {
+   "pid": "P0966",
+   "onTopic": true,
+   "reason": "Variational graph autoencoder for heterogeneous networks matches the VGAE equivalent problem."
+  },
+  {
+   "pid": "P0967",
+   "onTopic": true,
+   "reason": "Extends message passing GNNs with edge-level encodings, matching the core method facet."
+  },
+  {
+   "pid": "P0968",
+   "onTopic": true,
+   "reason": "Gaussian variational inference with moment propagation for BNN uncertainties, matching two facets."
+  },
+  {
+   "pid": "P0969",
+   "onTopic": true,
+   "reason": "Iterative belief propagation algorithm, informing the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P0970",
+   "onTopic": true,
+   "reason": "Graph diffusion model for molecular generation informs the graph generative modeling facet."
+  },
+  {
+   "pid": "P0971",
+   "onTopic": true,
+   "reason": "Diffusion/flow generative models for molecular graphs match the graph generative modeling facet."
+  },
+  {
+   "pid": "P0972",
+   "onTopic": true,
+   "reason": "Hierarchical Gaussian filters with precision-weighted message-like updates relate to Gaussian belief propagation."
+  },
+  {
+   "pid": "P0973",
+   "onTopic": false,
+   "reason": "Pixel-space text-to-image diffusion training has no graph, message passing, or distributional node/edge content."
+  },
+  {
+   "pid": "P0979",
+   "onTopic": false,
+   "reason": "Spectral-element wave propagation simulation is unrelated physics/numerics, not graph message passing."
+  },
+  {
+   "pid": "P0980",
+   "onTopic": false,
+   "reason": "Surrogate-model uncertainty propagation in structural engineering shares a term only, not distributional network propagation."
+  },
+  {
+   "pid": "P0981",
+   "onTopic": true,
+   "reason": "Uses neural message passing for uncertainty quantification, informing the message passing neural networks facet."
+  },
+  {
+   "pid": "P0983",
+   "onTopic": true,
+   "reason": "Reviews probabilistic graphical model algorithms, informing the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P0986",
+   "onTopic": true,
+   "reason": "Graph neural network deep generative model informs graph generative modeling facet."
+  },
+  {
+   "pid": "P0987",
+   "onTopic": false,
+   "reason": "Normalizing flows for lattice field theory sign problem has no graph structure or message passing relevance."
+  },
+  {
+   "pid": "P0990",
+   "onTopic": false,
+   "reason": "Incremental classifier learning (iCaRL) is unrelated to graph message passing or probabilistic graph generation."
+  },
+  {
+   "pid": "P0991",
+   "onTopic": true,
+   "reason": "GNN messages inspired by Gaussian belief propagation directly inform message passing and Gaussian BP facets."
+  },
+  {
+   "pid": "P0992",
+   "onTopic": true,
+   "reason": "Gaussian belief propagation for multi-robot planning matches the Gaussian belief propagation equivalent problem."
+  },
+  {
+   "pid": "P0995",
+   "onTopic": true,
+   "reason": "Message passing neural networks for data association directly informs the message passing facet."
+  },
+  {
+   "pid": "P0997",
+   "onTopic": true,
+   "reason": "Graph neural network based multi-robot planning method informs the message passing neural networks facet."
+  },
+  {
+   "pid": "P0998",
+   "onTopic": true,
+   "reason": "High-dimensional variational inference update method informs the variational inference facet."
+  },
+  {
+   "pid": "P1000",
+   "onTopic": true,
+   "reason": "Graph neural network model for molecular screening informs the message passing neural networks facet."
+  },
+  {
+   "pid": "P1001",
+   "onTopic": true,
+   "reason": "Approximate Bayesian inference for latent Gaussian models relates to the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P1003",
+   "onTopic": true,
+   "reason": "Molecular graph diffusion generation model directly informs graph generative modeling facet."
+  },
+  {
+   "pid": "P1004",
+   "onTopic": false,
+   "reason": "Normalizing-flow Bayesian estimation for agent-based models has no graph or message passing content."
+  },
+  {
+   "pid": "P1005",
+   "onTopic": false,
+   "reason": "Speech enhancement via repeated network passes shares only the word 'propagation', not distributional graph messages."
+  },
+  {
+   "pid": "P1006",
+   "onTopic": true,
+   "reason": "Bayesian inference with probabilistic graphical models for navigation informs the PGM facet."
+  },
+  {
+   "pid": "P1007",
+   "onTopic": true,
+   "reason": "Probabilistic message passing framework for grid control directly informs the message passing facet."
+  },
+  {
+   "pid": "P1008",
+   "onTopic": false,
+   "reason": "Generative models for protein sequences lack graph structure or message passing; term overlap only."
+  },
+  {
+   "pid": "P1009",
+   "onTopic": true,
+   "reason": "Quantum factor graphs and belief propagation inform the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P1010",
+   "onTopic": true,
+   "reason": "Stochastic block model decomposition directly informs the random graph models facet."
+  },
+  {
+   "pid": "P1011",
+   "onTopic": true,
+   "reason": "Exact belief propagation algorithm informs the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P1012",
+   "onTopic": true,
+   "reason": "Stochastic variational inference method directly informs the variational inference facet."
+  },
+  {
+   "pid": "P1013",
+   "onTopic": false,
+   "reason": "Deep generative model for human pose/appearance has no graph or message passing relevance."
+  },
+  {
+   "pid": "P1014",
+   "onTopic": false,
+   "reason": "Computability semantics for probabilistic programs is unrelated to graph message passing or generation."
+  },
+  {
+   "pid": "P1015",
+   "onTopic": true,
+   "reason": "Convergence of Gaussian belief propagation directly informs the Gaussian belief propagation equivalent problem."
+  },
+  {
+   "pid": "P1016",
+   "onTopic": false,
+   "reason": "Generic sequential Monte Carlo tutorial does not address graph message passing or distributional edges."
+  },
+  {
+   "pid": "P1017",
+   "onTopic": true,
+   "reason": "Moment-based uncertainty propagation through operators informs the uncertainty propagation facet."
+  },
+  {
+   "pid": "P1018",
+   "onTopic": true,
+   "reason": "Neural message passing over higher-order graph paths directly informs the message passing facet."
+  },
+  {
+   "pid": "P1019",
+   "onTopic": false,
+   "reason": "Contrastive representation learning analysis is unrelated to graph message passing or generation."
+  },
+  {
+   "pid": "P1020",
+   "onTopic": false,
+   "reason": "Implicit normalizing flows for general distributions have no graph or message passing content."
+  },
+  {
+   "pid": "P1021",
+   "onTopic": true,
+   "reason": "Deep graph neural network for molecular property prediction informs the message passing facet."
+  },
+  {
+   "pid": "P1022",
+   "onTopic": false,
+   "reason": "Crowdsourced language representation learning is unrelated to graph message passing or generation."
+  },
+  {
+   "pid": "P1023",
+   "onTopic": true,
+   "reason": "Evaluation metrics for graph generative models directly inform the graph generative modeling facet."
+  },
+  {
+   "pid": "P1024",
+   "onTopic": true,
+   "reason": "Survey of variational autoencoders informs the variational inference and generative modeling facets."
+  },
+  {
+   "pid": "P1025",
+   "onTopic": true,
+   "reason": "Molecular graph generation method directly informs the graph generative modeling facet."
+  },
+  {
+   "pid": "P1026",
+   "onTopic": false,
+   "reason": "Adversarial robustness of split-computing DNNs is unrelated to graph message passing or generation."
+  },
+  {
+   "pid": "P1027",
+   "onTopic": true,
+   "reason": "Variational graph autoencoder with Gaussian latent cell representations matches graph generative modeling facet."
+  },
+  {
+   "pid": "P1028",
+   "onTopic": false,
+   "reason": "Applies standard atom-level message passing to metabolic stability prediction, not distributional nodes or generation."
+  },
+  {
+   "pid": "P1029",
+   "onTopic": false,
+   "reason": "Federated learning infrastructure for GNN embeddings, unrelated to distributional messages or stochastic edges."
+  },
+  {
+   "pid": "P1030",
+   "onTopic": false,
+   "reason": "GNN applied to medical image patch classification, unrelated to distributional nodes or graph generation."
+  },
+  {
+   "pid": "P1031",
+   "onTopic": false,
+   "reason": "Probabilistic ML for Arctic precipitation forecasting, no message passing or graph structure involved."
+  },
+  {
+   "pid": "P1032",
+   "onTopic": false,
+   "reason": "Diffusion model for image illumination control, no graph message passing or Bernoulli adjacency."
+  },
+  {
+   "pid": "P1033",
+   "onTopic": false,
+   "reason": "Maintenance/block-replacement scheduling model, unrelated to graphs, message passing, or distributions over edges."
+  },
+  {
+   "pid": "P1038",
+   "onTopic": false,
+   "reason": "Uncertainty propagation in asteroid orbital dynamics, unrelated domain and method to distributional message passing."
+  },
+  {
+   "pid": "P1040",
+   "onTopic": true,
+   "reason": "Exponential random graph models inform the random graph models facet on stochastic adjacency."
+  },
+  {
+   "pid": "P1045",
+   "onTopic": true,
+   "reason": "Biased-net network models with approximate Bayesian inference inform the random graph models facet."
+  },
+  {
+   "pid": "P1046",
+   "onTopic": false,
+   "reason": "Normalizing flows for DNA structure, unrelated to graph message passing or stochastic adjacency."
+  },
+  {
+   "pid": "P1047",
+   "onTopic": true,
+   "reason": "Gaussian-scaled belief propagation over a graph matches the Gaussian belief propagation equivalent problem."
+  },
+  {
+   "pid": "P1048",
+   "onTopic": false,
+   "reason": "Spectral analysis of Erdos-Renyi random matrices is a different problem from modeling Bernoulli edges for generation."
+  },
+  {
+   "pid": "P1052",
+   "onTopic": false,
+   "reason": "Lattice Boltzmann moment propagation pattern is a fluid-simulation technique, unrelated to graph message passing."
+  },
+  {
+   "pid": "P1054",
+   "onTopic": false,
+   "reason": "GNN explainability under structural perturbations, unrelated to distributional nodes or generative modeling."
+  },
+  {
+   "pid": "P1057",
+   "onTopic": true,
+   "reason": "LLM-based graph generative models inform the graph generative modeling facet."
+  },
+  {
+   "pid": "P1059",
+   "onTopic": false,
+   "reason": "Distributional treatment effects via neural networks have no graph or message passing component."
+  },
+  {
+   "pid": "P1062",
+   "onTopic": true,
+   "reason": "VAE mixtures with Gaussian latent variables inform the variational inference facet."
+  },
+  {
+   "pid": "P1063",
+   "onTopic": true,
+   "reason": "Resource-rational approximate Bayesian inference matches the variational inference facet's alias directly."
+  },
+  {
+   "pid": "P1064",
+   "onTopic": false,
+   "reason": "Standard message-passing GNN for retention time prediction, unrelated to distributional nodes or generation."
+  },
+  {
+   "pid": "P1065",
+   "onTopic": true,
+   "reason": "Probabilistic message passing with marginal densities informs the message passing/belief propagation facets."
+  },
+  {
+   "pid": "P1066",
+   "onTopic": false,
+   "reason": "Non-intrusive uncertainty propagation for multi-physics PDEs is a different domain/method from layer-wise moment propagation."
+  },
+  {
+   "pid": "P1067",
+   "onTopic": false,
+   "reason": "DCGAN unsupervised image generation, unrelated to graphs or distributional message passing."
+  },
+  {
+   "pid": "P1068",
+   "onTopic": true,
+   "reason": "Boosting variational inference studies the variational inference facet directly."
+  },
+  {
+   "pid": "P1069",
+   "onTopic": true,
+   "reason": "Message passing Stein variational gradient descent combines message passing and variational inference facets."
+  },
+  {
+   "pid": "P1070",
+   "onTopic": true,
+   "reason": "Hierarchical stochastic block model inference informs the random graph models facet."
+  },
+  {
+   "pid": "P1071",
+   "onTopic": true,
+   "reason": "Probabilistic, stochastic message passing for graph inference directly matches the message passing facet."
+  },
+  {
+   "pid": "P1072",
+   "onTopic": true,
+   "reason": "Graph residual flow for molecular graph generation informs the graph generative modeling facet."
+  },
+  {
+   "pid": "P1073",
+   "onTopic": true,
+   "reason": "Nonidentifiability in latent position random graph models informs the random graph models facet."
+  },
+  {
+   "pid": "P1074",
+   "onTopic": true,
+   "reason": "Inference on probabilistic graphical models matches the probabilistic graphical models/belief propagation facet."
+  },
+  {
+   "pid": "P1075",
+   "onTopic": false,
+   "reason": "Normalizing flows from optimal transport potentials, no graph or message passing connection."
+  },
+  {
+   "pid": "P1076",
+   "onTopic": true,
+   "reason": "Visualization of deep graph generative models informs the graph generative modeling facet."
+  },
+  {
+   "pid": "P1077",
+   "onTopic": true,
+   "reason": "Approximate Bayesian inference via GP-emulated MCMC matches the variational inference facet's alias."
+  },
+  {
+   "pid": "P1078",
+   "onTopic": false,
+   "reason": "VAE dimension reduction for time series (ECG), unrelated to graphs or distributional adjacency."
+  },
+  {
+   "pid": "P1079",
+   "onTopic": true,
+   "reason": "Moment propagation through network layers matches the uncertainty propagation facet and equivalent problem."
+  },
+  {
+   "pid": "P1080",
+   "onTopic": true,
+   "reason": "Comparison of graph generative models (GRAN, GraphRNN) informs the graph generative modeling facet."
+  },
+  {
+   "pid": "P1081",
+   "onTopic": true,
+   "reason": "Probabilistically rewired message-passing GNNs directly match stochastic adjacency with message passing."
+  },
+  {
+   "pid": "P1082",
+   "onTopic": true,
+   "reason": "Second-order approximation of exponential random graph models informs the random graph models facet."
+  },
+  {
+   "pid": "P1083",
+   "onTopic": false,
+   "reason": "Diffusion-model robustness for classification, unrelated to graphs or distributional message passing."
+  },
+  {
+   "pid": "P1084",
+   "onTopic": true,
+   "reason": "LLMs for graph generation informs the graph generative modeling facet."
+  },
+  {
+   "pid": "P1085",
+   "onTopic": false,
+   "reason": "GNN surrogate for travel demand modeling is a standard application unrelated to distributional nodes or generation."
+  },
+  {
+   "pid": "P1086",
+   "onTopic": false,
+   "reason": "LLM molecular embedding decomposition; no message passing, graphs, or distributional nodes/edges involved."
+  },
+  {
+   "pid": "P1087",
+   "onTopic": true,
+   "reason": "Lifted inference over causal factor graphs informs the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P1088",
+   "onTopic": true,
+   "reason": "Node failure probabilities on Erdos-Renyi graphs informs the random graph models facet."
+  },
+  {
+   "pid": "P1089",
+   "onTopic": false,
+   "reason": "Self-supervised distribution matching for representations; no graph structure, message passing, or VI."
+  },
+  {
+   "pid": "P1090",
+   "onTopic": true,
+   "reason": "Causal spatiotemporal GNN uses message passing neural network propagation, informing that facet."
+  },
+  {
+   "pid": "P1091",
+   "onTopic": true,
+   "reason": "Implements Gaussian belief propagation directly, the core equivalent-problem method."
+  },
+  {
+   "pid": "P1092",
+   "onTopic": true,
+   "reason": "Improves propagation in message passing neural networks, directly informing that facet."
+  },
+  {
+   "pid": "P1093",
+   "onTopic": true,
+   "reason": "Variational graph autoencoder with node attribute uncertainty informs the VGAE/graph generative facet."
+  },
+  {
+   "pid": "P1096",
+   "onTopic": false,
+   "reason": "Markovian queueing decomposition via cutpoints; unrelated to message passing, VI, or stochastic graphs."
+  },
+  {
+   "pid": "P1099",
+   "onTopic": false,
+   "reason": "Evaluates synthetic medical image quality metrics; no relation to graphs, message passing, or distributions."
+  },
+  {
+   "pid": "P1101",
+   "onTopic": false,
+   "reason": "Generic constrained probabilistic ML for coarse-graining; no graph, message passing, or VI specifics shown."
+  },
+  {
+   "pid": "P1102",
+   "onTopic": true,
+   "reason": "Message passing among neuronal populations for Bayesian inference parallels the PGM/belief propagation facet."
+  },
+  {
+   "pid": "P1104",
+   "onTopic": true,
+   "reason": "Moment-based uncertainty propagation via Gaussian integrals matches the uncertainty propagation facet."
+  },
+  {
+   "pid": "P1106",
+   "onTopic": true,
+   "reason": "Invertible graph generative model producing new molecules informs graph generative modeling."
+  },
+  {
+   "pid": "P1108",
+   "onTopic": true,
+   "reason": "Applies variational inference for Bayesian posterior approximation, informing the VI method facet."
+  },
+  {
+   "pid": "P1110",
+   "onTopic": true,
+   "reason": "Moment propagation and temporal GNNs jointly match uncertainty propagation and message passing facets."
+  },
+  {
+   "pid": "P1113",
+   "onTopic": false,
+   "reason": "Distributed optimization over a robot mesh network; not graph message passing or distributional nodes."
+  },
+  {
+   "pid": "P1114",
+   "onTopic": true,
+   "reason": "Sigma point belief propagation on factor graphs informs the Gaussian belief propagation equivalent problem."
+  },
+  {
+   "pid": "P1117",
+   "onTopic": true,
+   "reason": "Simulating multiply-sectioned Bayesian networks informs the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P1118",
+   "onTopic": true,
+   "reason": "Shared stochastic block models across graphs directly informs the random graph models facet."
+  },
+  {
+   "pid": "P1119",
+   "onTopic": true,
+   "reason": "Variational-inference-based classification head informs the variational inference method facet."
+  },
+  {
+   "pid": "P1121",
+   "onTopic": true,
+   "reason": "Function-space variational inference for RUL prediction informs the variational inference facet."
+  },
+  {
+   "pid": "P1122",
+   "onTopic": true,
+   "reason": "Graph-based latent flow generation of molecular conformations informs graph generative modeling."
+  },
+  {
+   "pid": "P1124",
+   "onTopic": true,
+   "reason": "Combines GNNs with uncertainty-aware topology modeling, informing message passing neural networks."
+  },
+  {
+   "pid": "P1125",
+   "onTopic": true,
+   "reason": "Iterative belief propagation decoding on Tanner graphs informs the belief propagation facet."
+  },
+  {
+   "pid": "P1130",
+   "onTopic": true,
+   "reason": "Gaussian belief propagation for linear systems is the direct equivalent-problem method."
+  },
+  {
+   "pid": "P1131",
+   "onTopic": true,
+   "reason": "Analyzes hierarchy depth in Erdos-Renyi random graphs, informing the random graph models facet."
+  },
+  {
+   "pid": "P1132",
+   "onTopic": true,
+   "reason": "Studies exponential random graph model asymptotics, a closely related random graph theory."
+  },
+  {
+   "pid": "P1133",
+   "onTopic": true,
+   "reason": "Uses random graph generation models for edge analysis, informing the random graph models facet."
+  },
+  {
+   "pid": "P1134",
+   "onTopic": false,
+   "reason": "Distributed neural network training via online distillation; no graph structure or message passing."
+  },
+  {
+   "pid": "P1135",
+   "onTopic": true,
+   "reason": "Graph Recurrent Attention Networks generate new graphs, directly informing graph generative modeling."
+  },
+  {
+   "pid": "P1136",
+   "onTopic": true,
+   "reason": "Frames categorical encoding as variational inference, informing the variational inference facet."
+  },
+  {
+   "pid": "P1137",
+   "onTopic": true,
+   "reason": "Generalizes belief propagation via alpha-divergence, directly informing the belief propagation facet."
+  },
+  {
+   "pid": "P1138",
+   "onTopic": true,
+   "reason": "Learns a message passing graph over networks, directly informing message passing neural networks."
+  },
+  {
+   "pid": "P1139",
+   "onTopic": true,
+   "reason": "Variational graph autoencoder for multiview data informs the graph generative modeling facet."
+  },
+  {
+   "pid": "P1140",
+   "onTopic": true,
+   "reason": "Factor graphs for decentralized Bayesian fusion informs the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P1141",
+   "onTopic": true,
+   "reason": "Combines message passing with node embeddings, directly informing message passing neural networks."
+  },
+  {
+   "pid": "P1142",
+   "onTopic": true,
+   "reason": "Inference on factor and cluster graphs informs the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P1143",
+   "onTopic": true,
+   "reason": "Interpretable molecular graph generation informs the graph generative modeling facet."
+  },
+  {
+   "pid": "P1144",
+   "onTopic": true,
+   "reason": "Benchmarks uncertainty quantification for message passing neural networks, informing two facets."
+  },
+  {
+   "pid": "P1145",
+   "onTopic": false,
+   "reason": "Studies fairness in discrete latent variable PGMs; PGM term matches but message-passing/graph-generation focus is absent."
+  },
+  {
+   "pid": "P1146",
+   "onTopic": false,
+   "reason": "Predicts a scene graph from an image (discriminative task), not generative modeling of graphs with distributional nodes/edges."
+  },
+  {
+   "pid": "P1147",
+   "onTopic": false,
+   "reason": "Variational inference for econometric GARCH models, unrelated to graphs or node/edge distributions."
+  },
+  {
+   "pid": "P1148",
+   "onTopic": false,
+   "reason": "Self-supervised molecular representation learning via persistent homology, unrelated to message passing or graph generation."
+  },
+  {
+   "pid": "P1149",
+   "onTopic": true,
+   "reason": "Analytic moment/covariance propagation through networks informs the uncertainty propagation facet."
+  },
+  {
+   "pid": "P1150",
+   "onTopic": true,
+   "reason": "Studies a graph neural network propagation scheme, informing the message passing neural networks facet."
+  },
+  {
+   "pid": "P1151",
+   "onTopic": false,
+   "reason": "3D brain segmentation via diffusion models, unrelated to graphs or message passing."
+  },
+  {
+   "pid": "P1152",
+   "onTopic": false,
+   "reason": "Battery capacity fade prediction with probabilistic ML, unrelated to graph message passing or generation."
+  },
+  {
+   "pid": "P1153",
+   "onTopic": false,
+   "reason": "Robustifies node features/graph structure via LLMs and GSLMs; denoising task, not distributional message passing or generation."
+  },
+  {
+   "pid": "P1154",
+   "onTopic": true,
+   "reason": "Tutorial on VAEs with Gaussian-parameterized latent spaces informs the variational inference facet."
+  },
+  {
+   "pid": "P1155",
+   "onTopic": false,
+   "reason": "Spatio-temporal graph attention network for accident severity prediction, unrelated to distributional node/edge modeling."
+  },
+  {
+   "pid": "P1156",
+   "onTopic": false,
+   "reason": "Approximate Bayesian inference for robot data association, unrelated to graph message passing or generation."
+  },
+  {
+   "pid": "P1157",
+   "onTopic": false,
+   "reason": "Deep generative models for synthetic financial time series, not graph-structured data."
+  },
+  {
+   "pid": "P1158",
+   "onTopic": false,
+   "reason": "Uncertainty propagation in cislunar orbital dynamics, a different sense of 'uncertainty propagation' unrelated to neural message passing."
+  },
+  {
+   "pid": "P1167",
+   "onTopic": true,
+   "reason": "Graph-based generative model producing new truss graph structures informs the graph generative modeling facet."
+  },
+  {
+   "pid": "P1169",
+   "onTopic": true,
+   "reason": "Exponential random graph models directly inform the random graph models facet on stochastic adjacency."
+  },
+  {
+   "pid": "P1174",
+   "onTopic": false,
+   "reason": "General review of representation learning, too generic and not tied to message passing, graphs, or distributional nodes/edges."
+  },
+  {
+   "pid": "P1176",
+   "onTopic": false,
+   "reason": "Uses PGMs for semantic data-source modeling, an unrelated application sharing only the PGM term."
+  },
+  {
+   "pid": "P1177",
+   "onTopic": false,
+   "reason": "Rule-based temporal fact generation/propagation in knowledge graphs, unrelated to message passing or distributional graph generation."
+  },
+  {
+   "pid": "P1178",
+   "onTopic": true,
+   "reason": "Goodness-of-fit test for stochastic block models informs the random graph models facet."
+  },
+  {
+   "pid": "P1184",
+   "onTopic": true,
+   "reason": "Constrained graph VAEs generating novel molecular graphs informs the graph generative modeling facet."
+  },
+  {
+   "pid": "P1185",
+   "onTopic": true,
+   "reason": "Text-guided molecular graph generation informs the graph generative modeling facet."
+  },
+  {
+   "pid": "P1186",
+   "onTopic": true,
+   "reason": "Uses stochastic block models for network structure estimation, informing the random graph models facet."
+  },
+  {
+   "pid": "P1189",
+   "onTopic": true,
+   "reason": "Belief propagation on factor graph models directly informs the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P1195",
+   "onTopic": true,
+   "reason": "Gaussian belief propagation solver directly matches the Gaussian belief propagation equivalent problem."
+  },
+  {
+   "pid": "P1196",
+   "onTopic": false,
+   "reason": "Distributed architecture for deep reinforcement learning, unrelated to graph message passing or generation."
+  },
+  {
+   "pid": "P1197",
+   "onTopic": false,
+   "reason": "Stochastic collapsed variational inference for HMMs on sequential data, sharing only the VI term with no graph/Gaussian-node connection."
+  },
+  {
+   "pid": "P1198",
+   "onTopic": true,
+   "reason": "Factor graph message passing for cyber-physical networks informs the message passing/probabilistic graphical models facets."
+  },
+  {
+   "pid": "P1199",
+   "onTopic": false,
+   "reason": "InfoGAN disentangled representation learning via GANs, unrelated to graph structure or message passing."
+  },
+  {
+   "pid": "P1200",
+   "onTopic": true,
+   "reason": "Junction tree VAE with graph message passing network for molecular graph generation informs graph generative modeling facet."
+  },
+  {
+   "pid": "P1201",
+   "onTopic": true,
+   "reason": "Kalman-filter-based uncertainty propagation through DNNs informs the uncertainty propagation facet."
+  },
+  {
+   "pid": "P1202",
+   "onTopic": false,
+   "reason": "Syntax-aware VAE for text modeling, unrelated to graph nodes/edges or message passing."
+  },
+  {
+   "pid": "P1203",
+   "onTopic": false,
+   "reason": "Temporal normalizing flows for density estimation, unrelated to graphs or message passing."
+  },
+  {
+   "pid": "P1204",
+   "onTopic": false,
+   "reason": "Quantum optimization algorithm parameters for MAX-CUT, unrelated to distributional message passing or graph generation."
+  },
+  {
+   "pid": "P1205",
+   "onTopic": false,
+   "reason": "Probabilistic ML for turbulence modeling, unrelated to graph structures or message passing."
+  },
+  {
+   "pid": "P1206",
+   "onTopic": false,
+   "reason": "Analytical theory of image diffusion generation, unrelated to graph-structured data."
+  },
+  {
+   "pid": "P1207",
+   "onTopic": false,
+   "reason": "Scaling laws for molecular representation learning data, unrelated to distributional message passing or graph generation."
+  },
+  {
+   "pid": "P1208",
+   "onTopic": false,
+   "reason": "Representation learning for wearable sensor data, unrelated to graphs or message passing."
+  },
+  {
+   "pid": "P1209",
+   "onTopic": true,
+   "reason": "Fair synthetic graph generation directly informs the graph generative modeling facet."
+  },
+  {
+   "pid": "P1210",
+   "onTopic": true,
+   "reason": "Quantum implementations of message passing GNN architectures inform the message passing neural networks facet."
+  },
+  {
+   "pid": "P1211",
+   "onTopic": false,
+   "reason": "About planning-as-inference duality in RL; shares 'variational framework' phrasing but not graphs or node/edge distributions."
+  },
+  {
+   "pid": "P1212",
+   "onTopic": true,
+   "reason": "Develops belief propagation itself, the facet underlying propagating Gaussian beliefs between nodes."
+  },
+  {
+   "pid": "P1213",
+   "onTopic": true,
+   "reason": "Learns distribution-to-distribution mappings for Bayesian inference, informing uncertainty/distribution propagation facet."
+  },
+  {
+   "pid": "P1214",
+   "onTopic": true,
+   "reason": "Directly concerns evaluating graph generative models, the facet's core problem."
+  },
+  {
+   "pid": "P1215",
+   "onTopic": true,
+   "reason": "Uses variational graph autoencoders, an equivalent-problem generative graph modeling approach."
+  },
+  {
+   "pid": "P1216",
+   "onTopic": false,
+   "reason": "State transition tensor uncertainty quantification for dynamics, unrelated to graphs or message passing."
+  },
+  {
+   "pid": "P1217",
+   "onTopic": true,
+   "reason": "Bayesian exponential random graph models inform the random graph models / stochastic edge probability theory facet."
+  },
+  {
+   "pid": "P1222",
+   "onTopic": false,
+   "reason": "Word representation learning for NLP, unrelated to graph nodes/edges or message passing."
+  },
+  {
+   "pid": "P1225",
+   "onTopic": true,
+   "reason": "Mixed-membership stochastic block models for attributed hypergraphs match the random graph/SBM facet."
+  },
+  {
+   "pid": "P1226",
+   "onTopic": false,
+   "reason": "Normalizing flow architecture for generic deep generative models, no graph structure or stochastic adjacency involved."
+  },
+  {
+   "pid": "P1227",
+   "onTopic": true,
+   "reason": "Exponential random graph models applied to networks inform the random graph models theory facet."
+  },
+  {
+   "pid": "P1230",
+   "onTopic": true,
+   "reason": "Applies a message passing neural network, the core method facet, to molecular property prediction."
+  },
+  {
+   "pid": "P1232",
+   "onTopic": false,
+   "reason": "Incorporates pathway topology into GWAS gene prioritization; shares 'graphical' term but not message-passing/PGM inference."
+  },
+  {
+   "pid": "P1233",
+   "onTopic": true,
+   "reason": "Uses variational inference as its core method, matching the variational inference facet."
+  },
+  {
+   "pid": "P1235",
+   "onTopic": true,
+   "reason": "Uses a graph generative sparse coding model, matching the graph generative modeling facet's method."
+  },
+  {
+   "pid": "P1236",
+   "onTopic": true,
+   "reason": "Belief propagation on factor graphs directly informs the probabilistic graphical models / belief propagation facet."
+  },
+  {
+   "pid": "P1237",
+   "onTopic": true,
+   "reason": "Concerns graph neural network inference, matching the message passing neural networks facet."
+  },
+  {
+   "pid": "P1240",
+   "onTopic": true,
+   "reason": "Stochastic block models for attributed hypergraphs inform the random graph models theory facet."
+  },
+  {
+   "pid": "P1244",
+   "onTopic": true,
+   "reason": "Proposes an adaptive neural message passing scheme, directly the message passing neural networks facet."
+  },
+  {
+   "pid": "P1245",
+   "onTopic": true,
+   "reason": "Gaussian belief propagation is an explicit equivalent problem to propagating Gaussian node states."
+  },
+  {
+   "pid": "P1246",
+   "onTopic": true,
+   "reason": "Bridges model and parameter uncertainty via variational inference, matching Bayesian uncertainty propagation facet."
+  },
+  {
+   "pid": "P1248",
+   "onTopic": true,
+   "reason": "Algebraic framework for Bayesian/Markov graphical model transformations matches the PGM theory facet."
+  },
+  {
+   "pid": "P1251",
+   "onTopic": true,
+   "reason": "Develops EM and variational Bayes inference methods, matching the variational inference facet."
+  },
+  {
+   "pid": "P1252",
+   "onTopic": false,
+   "reason": "Unsupervised image representation learning via rotation prediction, unrelated to graphs or distributions."
+  },
+  {
+   "pid": "P1253",
+   "onTopic": false,
+   "reason": "Physics PDE analysis of the Boltzmann equation; 'moment propagation' here is a physics term, not distributional node updates."
+  },
+  {
+   "pid": "P1254",
+   "onTopic": true,
+   "reason": "Analyzes graph neural network architecture choices, matching the message passing neural networks facet."
+  },
+  {
+   "pid": "P1255",
+   "onTopic": true,
+   "reason": "Proposes a new variational inference algorithm for ELBO optimization, matching the variational inference facet."
+  },
+  {
+   "pid": "P1256",
+   "onTopic": false,
+   "reason": "Contrastive representation learning for fashion images, unrelated to graphs or node/edge distributions."
+  },
+  {
+   "pid": "P1257",
+   "onTopic": false,
+   "reason": "Scene graph generation here means detecting visual relationships in images, not generative sampling of new graphs."
+  },
+  {
+   "pid": "P1258",
+   "onTopic": false,
+   "reason": "Mixture-of-Gaussians VAE for image clustering; Gaussian priors used but no graph structure or edge modeling."
+  },
+  {
+   "pid": "P1259",
+   "onTopic": true,
+   "reason": "Equivariant inference networks for factor graphs match the probabilistic graphical models theory facet."
+  },
+  {
+   "pid": "P1260",
+   "onTopic": true,
+   "reason": "Robust recovery in stochastic block models directly matches the random graph models theory facet."
+  },
+  {
+   "pid": "P1261",
+   "onTopic": false,
+   "reason": "Distributed control of cyber-physical systems, unrelated to graph generation or message passing over distributions."
+  },
+  {
+   "pid": "P1262",
+   "onTopic": true,
+   "reason": "Flow-based generative model for molecular graphs directly matches the graph generative modeling facet."
+  },
+  {
+   "pid": "P1263",
+   "onTopic": true,
+   "reason": "Uses message passing networks on a graph domain for tracking, matching the message passing neural networks facet."
+  },
+  {
+   "pid": "P1264",
+   "onTopic": false,
+   "reason": "Normalizing flows for causal density estimation, no graph or node/edge distribution modeling involved."
+  },
+  {
+   "pid": "P1265",
+   "onTopic": true,
+   "reason": "Variational graph autoencoder for node representation matches the equivalent-problem VGAE generative approach."
+  },
+  {
+   "pid": "P1266",
+   "onTopic": true,
+   "reason": "Max-product belief propagation for Bayesian networks matches the belief propagation / PGM theory facet."
+  },
+  {
+   "pid": "P1267",
+   "onTopic": false,
+   "reason": "Interpretability probing of latent diffusion model scene representations, unrelated to graph message passing."
+  },
+  {
+   "pid": "P1268",
+   "onTopic": true,
+   "reason": "Equivariant hypergraph neural network for molecules matches the message passing neural networks facet."
+  },
+  {
+   "pid": "P1269",
+   "onTopic": true,
+   "reason": "Applies Gaussian belief propagation, the equivalent-problem method for Gaussian message passing."
+  },
+  {
+   "pid": "P1270",
+   "onTopic": true,
+   "reason": "Generalized approximate Bayesian inference framework informs the variational/approximate inference facet."
+  },
+  {
+   "pid": "P1271",
+   "onTopic": true,
+   "reason": "Graph generative model that samples new graphs, informing the graph generative modeling facet."
+  },
+  {
+   "pid": "P1272",
+   "onTopic": false,
+   "reason": "Uncertainty propagation here means XAI explanation variance, not distributional node states, so only the term matches."
+  },
+  {
+   "pid": "P1273",
+   "onTopic": true,
+   "reason": "GCN-based message passing architecture informs the message passing neural networks facet."
+  },
+  {
+   "pid": "P1274",
+   "onTopic": false,
+   "reason": "Message passing here is concurrent-programming channel communication, unrelated to graph message passing."
+  },
+  {
+   "pid": "P1278",
+   "onTopic": true,
+   "reason": "Belief propagation algorithm for marginals informs the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P1281",
+   "onTopic": false,
+   "reason": "Generative model of medical images, unrelated to graphs or distributional node/edge generation."
+  },
+  {
+   "pid": "P1282",
+   "onTopic": false,
+   "reason": "Biological signal propagation through gap junctions, unrelated to message passing or graph models."
+  },
+  {
+   "pid": "P1283",
+   "onTopic": true,
+   "reason": "Studies dynamics on Erdos-Renyi random graphs, informing the random graph models facet."
+  },
+  {
+   "pid": "P1287",
+   "onTopic": true,
+   "reason": "Bayesian inference for exponential random graph models informs the random graph models facet."
+  },
+  {
+   "pid": "P1290",
+   "onTopic": true,
+   "reason": "Uncertainty-aware GNN with evidence fusion informs the message passing and uncertainty propagation facets."
+  },
+  {
+   "pid": "P1292",
+   "onTopic": false,
+   "reason": "Uses Gaussian processes for scheduling tuning, unrelated to graph nodes or distributional message passing."
+  },
+  {
+   "pid": "P1293",
+   "onTopic": true,
+   "reason": "Deep generative model producing new graph instances, informing graph generative modeling."
+  },
+  {
+   "pid": "P1294",
+   "onTopic": true,
+   "reason": "Configuration random graph null models inform the random graph models facet."
+  },
+  {
+   "pid": "P1295",
+   "onTopic": false,
+   "reason": "Generative diffusion model of urban flow data, not graph-structured node/edge generation."
+  },
+  {
+   "pid": "P1297",
+   "onTopic": true,
+   "reason": "Scalable molecular graph generation informs the graph generative modeling facet."
+  },
+  {
+   "pid": "P1302",
+   "onTopic": false,
+   "reason": "'Network' refers to a monitoring well network and 'back-propagation' to training, not graph/message passing."
+  },
+  {
+   "pid": "P1303",
+   "onTopic": true,
+   "reason": "Normalizing flows for high-dimensional variational inference informs the variational inference facet."
+  },
+  {
+   "pid": "P1304",
+   "onTopic": true,
+   "reason": "Approximate variational inference over a social network model informs variational inference and network facets."
+  },
+  {
+   "pid": "P1305",
+   "onTopic": false,
+   "reason": "Belief propagation here is trader belief dynamics in markets, not graphical-model message passing."
+  },
+  {
+   "pid": "P1306",
+   "onTopic": true,
+   "reason": "Variational Bayesian inference confidence intervals inform the variational inference facet."
+  },
+  {
+   "pid": "P1307",
+   "onTopic": false,
+   "reason": "'Distributional' refers to word embedding semantics, not probability distributions over graph nodes."
+  },
+  {
+   "pid": "P1308",
+   "onTopic": false,
+   "reason": "VAE applied to robotic language learning, unrelated to graphs or node/edge distributions."
+  },
+  {
+   "pid": "P1309",
+   "onTopic": false,
+   "reason": "Uncertainty propagation in geological exhumation modeling, unrelated object and method to the facet."
+  },
+  {
+   "pid": "P1311",
+   "onTopic": true,
+   "reason": "Direct treatment of Gaussian belief propagation, the key equivalent-problem method."
+  },
+  {
+   "pid": "P1312",
+   "onTopic": true,
+   "reason": "Uses probabilistic graphical models for optimization, informing the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P1313",
+   "onTopic": true,
+   "reason": "Black-box variational inference method informs the variational inference facet."
+  },
+  {
+   "pid": "P1314",
+   "onTopic": true,
+   "reason": "Large deviations for random graph models, including Erdos-Renyi graphs, informs random graph models facet."
+  },
+  {
+   "pid": "P1315",
+   "onTopic": true,
+   "reason": "Stochastic block model with Gaussian node attributes directly matches random graph models and Gaussian node facets."
+  },
+  {
+   "pid": "P1316",
+   "onTopic": true,
+   "reason": "Differentiable graph pooling for GNN representation learning informs message passing neural networks facet."
+  },
+  {
+   "pid": "P1317",
+   "onTopic": true,
+   "reason": "Neural message passing on hypergraphs informs the message passing neural networks facet."
+  },
+  {
+   "pid": "P1318",
+   "onTopic": false,
+   "reason": "Scene graph generation predicts image relationships, not sampling new graphs from a learned distribution."
+  },
+  {
+   "pid": "P1319",
+   "onTopic": true,
+   "reason": "Propagating probability distributions through computational models informs the uncertainty propagation facet."
+  },
+  {
+   "pid": "P1320",
+   "onTopic": true,
+   "reason": "Connects normalizing flows with probabilistic graphical models, informing PGM and generative modeling facets."
+  },
+  {
+   "pid": "P1321",
+   "onTopic": true,
+   "reason": "Hierarchical graph generative model of HD maps informs the graph generative modeling facet."
+  },
+  {
+   "pid": "P1322",
+   "onTopic": true,
+   "reason": "Variational message passing for inference informs both message passing and variational inference facets."
+  },
+  {
+   "pid": "P1323",
+   "onTopic": false,
+   "reason": "Generative modeling of 3D meshes, not a graph-structured node/edge generative model."
+  },
+  {
+   "pid": "P1324",
+   "onTopic": false,
+   "reason": "Molecular graph pretraining for property prediction, not message passing architecture or graph generation."
+  },
+  {
+   "pid": "P1325",
+   "onTopic": true,
+   "reason": "Attention-based message passing in GNNs informs the message passing neural networks facet."
+  },
+  {
+   "pid": "P1326",
+   "onTopic": false,
+   "reason": "LLM uncertainty via entailment graphs is unrelated to Gaussian node message passing or stochastic adjacency."
+  },
+  {
+   "pid": "P1327",
+   "onTopic": false,
+   "reason": "Boltzmann equation moment estimates for gases, unrelated to graph message passing or generation."
+  },
+  {
+   "pid": "P1328",
+   "onTopic": false,
+   "reason": "VAE for Bayesian inverse problems, no graph structure or node/edge message passing involved."
+  },
+  {
+   "pid": "P1329",
+   "onTopic": false,
+   "reason": "Probabilistic dust extinction inference is unrelated to graph message passing or generation."
+  },
+  {
+   "pid": "P1330",
+   "onTopic": false,
+   "reason": "Gaussian-output neural network for wind speed, no graph structure or adjacency involved."
+  },
+  {
+   "pid": "P1331",
+   "onTopic": true,
+   "reason": "Informs graph generative modeling facet: jointly generating node and topology for molecular graphs."
+  },
+  {
+   "pid": "P1332",
+   "onTopic": false,
+   "reason": "General theory of deep representation learning, not about graph message passing or generation."
+  },
+  {
+   "pid": "P1334",
+   "onTopic": true,
+   "reason": "Informs graph generative modeling facet via graph GAN for molecule generation."
+  },
+  {
+   "pid": "P1336",
+   "onTopic": true,
+   "reason": "Studies expressive power of message-passing neural networks, informing that facet directly."
+  },
+  {
+   "pid": "P1339",
+   "onTopic": false,
+   "reason": "Spatial disaggregation inference is unrelated to graph message passing or stochastic adjacency."
+  },
+  {
+   "pid": "P1343",
+   "onTopic": false,
+   "reason": "Optical implementation of diffusion generative models, unrelated to graph structure or message passing."
+  },
+  {
+   "pid": "P1344",
+   "onTopic": true,
+   "reason": "Belief propagation on graphs informs the probabilistic graphical models facet underlying this idea."
+  },
+  {
+   "pid": "P1346",
+   "onTopic": true,
+   "reason": "Bayesian exponential random graph models inform the random graph / Bernoulli edge facet."
+  },
+  {
+   "pid": "P1347",
+   "onTopic": false,
+   "reason": "Diffusion denoising of renders, unrelated to graphs or message passing."
+  },
+  {
+   "pid": "P1351",
+   "onTopic": true,
+   "reason": "Non-Gaussian inference over factor graphs relates to the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P1353",
+   "onTopic": false,
+   "reason": "Earthquake rupture seismology, unrelated to graph message passing or generation."
+  },
+  {
+   "pid": "P1357",
+   "onTopic": true,
+   "reason": "Variational inference on a probabilistic graphical model informs the variational inference facet."
+  },
+  {
+   "pid": "P1365",
+   "onTopic": false,
+   "reason": "General GAN challenges chapter, not specific to graph structures or message passing."
+  },
+  {
+   "pid": "P1371",
+   "onTopic": true,
+   "reason": "Erdos-Renyi random graphs directly inform the random graph models facet."
+  },
+  {
+   "pid": "P1372",
+   "onTopic": true,
+   "reason": "Stochastic optimization for variational inference informs the variational inference facet."
+  },
+  {
+   "pid": "P1373",
+   "onTopic": true,
+   "reason": "Connection between neural networks and probabilistic graphical models informs the PGM facet."
+  },
+  {
+   "pid": "P1374",
+   "onTopic": true,
+   "reason": "Variational inference over graph-structured latent paths informs graph generative/PGM facets."
+  },
+  {
+   "pid": "P1375",
+   "onTopic": false,
+   "reason": "Bayesian generative model for CNN images, no graph structure or node/edge distributions."
+  },
+  {
+   "pid": "P1376",
+   "onTopic": false,
+   "reason": "Approximate Bayesian inference for flood frequency, unrelated to graphs or message passing."
+  },
+  {
+   "pid": "P1377",
+   "onTopic": true,
+   "reason": "Edge-aware GNN aggregation informs the message passing neural networks facet."
+  },
+  {
+   "pid": "P1378",
+   "onTopic": false,
+   "reason": "Triplet-loss image classification, unrelated to graph message passing or stochastic edges."
+  },
+  {
+   "pid": "P1379",
+   "onTopic": false,
+   "reason": "Uses factor graphs for motion planning optimization, not for distributional message passing or generation."
+  },
+  {
+   "pid": "P1380",
+   "onTopic": false,
+   "reason": "VAE for recommendation with user/item vectors, not graph-structured node/edge distributions."
+  },
+  {
+   "pid": "P1381",
+   "onTopic": false,
+   "reason": "Error mitigation in quantum eigensolvers, unrelated to graphs or message passing."
+  },
+  {
+   "pid": "P1382",
+   "onTopic": true,
+   "reason": "Review of graph neural networks informs the message passing neural networks facet."
+  },
+  {
+   "pid": "P1383",
+   "onTopic": false,
+   "reason": "Scene graph parsing from images is a detection task, not generative modeling of stochastic graph structure."
+  },
+  {
+   "pid": "P1384",
+   "onTopic": false,
+   "reason": "Focuses on distributed systems scalability for GNN training, not on message passing over distributions."
+  },
+  {
+   "pid": "P1385",
+   "onTopic": true,
+   "reason": "Conditional graph generation with multi-dimensional node features informs graph generative modeling facet."
+  },
+  {
+   "pid": "P1386",
+   "onTopic": true,
+   "reason": "Variational graph autoencoder with edge probabilities informs graph generative modeling facet."
+  },
+  {
+   "pid": "P1387",
+   "onTopic": false,
+   "reason": "Normalizing flows for tail distributions, no graph structure or adjacency modeling."
+  },
+  {
+   "pid": "P1388",
+   "onTopic": true,
+   "reason": "Gaussian belief propagation framework directly parallels propagating Gaussian node messages."
+  },
+  {
+   "pid": "P1389",
+   "onTopic": false,
+   "reason": "Diffusion models for wireless channel estimation, unrelated to graph structure or edges."
+  },
+  {
+   "pid": "P1390",
+   "onTopic": true,
+   "reason": "Flow matching for molecular graph generation informs the graph generative modeling facet."
+  },
+  {
+   "pid": "P1391",
+   "onTopic": true,
+   "reason": "Edge-based temporal message passing in graphs informs the message passing neural networks facet."
+  },
+  {
+   "pid": "P1392",
+   "onTopic": false,
+   "reason": "Gaussian mixture splitting for orbital uncertainty, unrelated to graph nodes or stochastic adjacency."
+  },
+  {
+   "pid": "P1393",
+   "onTopic": false,
+   "reason": "Moment propagation in stochastic hybrid control systems, unrelated to graph nodes or message passing."
+  },
+  {
+   "pid": "P1394",
+   "onTopic": true,
+   "reason": "Studies the stochastic block model, informing the random graph models facet on Bernoulli-style edge probabilities."
+  },
+  {
+   "pid": "P1395",
+   "onTopic": false,
+   "reason": "Motif-based multimodal molecular representation learning, unrelated to distributional nodes or stochastic edges."
+  },
+  {
+   "pid": "P1401",
+   "onTopic": true,
+   "reason": "Applies the Bernoulli exponential random graph model, matching the random graph models facet directly."
+  },
+  {
+   "pid": "P1402",
+   "onTopic": false,
+   "reason": "Uses message passing only as a prediction tool for toxicology; studies bioconcentration, not the architecture itself."
+  },
+  {
+   "pid": "P1410",
+   "onTopic": false,
+   "reason": "Applies standard message passing GNNs to polymer property screening, unrelated to distributional nodes or edges."
+  },
+  {
+   "pid": "P1412",
+   "onTopic": true,
+   "reason": "Studies spatial random graph models, informing the random graph models theory facet."
+  },
+  {
+   "pid": "P1413",
+   "onTopic": true,
+   "reason": "Exponential random graph model study, aligning with the random graph models facet."
+  },
+  {
+   "pid": "P1414",
+   "onTopic": true,
+   "reason": "Connects probabilistic graphical models to tensor networks, informing the PGM/belief propagation facet."
+  },
+  {
+   "pid": "P1422",
+   "onTopic": true,
+   "reason": "Proposes a graph generative model, informing the graph generative modeling facet."
+  },
+  {
+   "pid": "P1427",
+   "onTopic": true,
+   "reason": "Belief propagation algorithm study, matching the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P1430",
+   "onTopic": true,
+   "reason": "Deep generative model for sparse graphs, directly matching graph generative modeling facet."
+  },
+  {
+   "pid": "P1436",
+   "onTopic": true,
+   "reason": "Studies spectral theory of Erdos-Renyi and related random graphs, matching the random graph models facet."
+  },
+  {
+   "pid": "P1437",
+   "onTopic": true,
+   "reason": "Learns factor graphs, matching the probabilistic graphical models facet (factor graphs alias)."
+  },
+  {
+   "pid": "P1438",
+   "onTopic": true,
+   "reason": "Probabilistic programming platform built on graphical-model inference ideas, informing the PGM facet."
+  },
+  {
+   "pid": "P1439",
+   "onTopic": true,
+   "reason": "Extends variational approximations in deep generative models, matching the variational inference facet."
+  },
+  {
+   "pid": "P1440",
+   "onTopic": true,
+   "reason": "Vector-valued Gaussian belief propagation, a direct match to the Gaussian belief propagation equivalent problem."
+  },
+  {
+   "pid": "P1441",
+   "onTopic": true,
+   "reason": "Analytic variance/moment propagation through network layers, matching the uncertainty propagation facet."
+  },
+  {
+   "pid": "P1442",
+   "onTopic": false,
+   "reason": "Bayesian uncertainty quantification for seismic basin modeling, unrelated to graphs or message passing."
+  },
+  {
+   "pid": "P1443",
+   "onTopic": false,
+   "reason": "General normalizing-flow sampling method for densities, not tied to graph structure or node/edge distributions."
+  },
+  {
+   "pid": "P1444",
+   "onTopic": true,
+   "reason": "Studies variational inference combined with MCMC, matching the variational inference facet."
+  },
+  {
+   "pid": "P1445",
+   "onTopic": true,
+   "reason": "Graph generative model for detector simulation, matching the graph generative modeling facet."
+  },
+  {
+   "pid": "P1446",
+   "onTopic": false,
+   "reason": "Applies message passing architectures to PDE solving, unrelated to distributional nodes or stochastic edges."
+  },
+  {
+   "pid": "P1447",
+   "onTopic": true,
+   "reason": "Spatiotemporal graph generative model, matching the graph generative modeling facet."
+  },
+  {
+   "pid": "P1448",
+   "onTopic": false,
+   "reason": "Knowledge distillation for speech representation learning, unrelated to graphs or message passing."
+  },
+  {
+   "pid": "P1449",
+   "onTopic": true,
+   "reason": "Hierarchical normalizing flow for molecular graph generation, matching graph generative modeling facet."
+  },
+  {
+   "pid": "P1450",
+   "onTopic": false,
+   "reason": "Conditional VAE for Ising/XY order parameters, unrelated to graph nodes or stochastic adjacency."
+  },
+  {
+   "pid": "P1451",
+   "onTopic": true,
+   "reason": "Accelerates uncertainty propagation computations, matching the uncertainty propagation facet."
+  },
+  {
+   "pid": "P1452",
+   "onTopic": false,
+   "reason": "Motif extraction for molecular representation learning, unrelated to distributional nodes or Bernoulli edges."
+  },
+  {
+   "pid": "P1453",
+   "onTopic": true,
+   "reason": "Maps subgraph densities to stochastic block model parameters, matching the random graph models facet."
+  },
+  {
+   "pid": "P1454",
+   "onTopic": false,
+   "reason": "Distributed-training engineering for scaling MPNNs, not about distributional nodes or generative graphs."
+  },
+  {
+   "pid": "P1455",
+   "onTopic": true,
+   "reason": "Benchmarks synthetic graph generation algorithms, matching the graph generative modeling facet."
+  },
+  {
+   "pid": "P1456",
+   "onTopic": false,
+   "reason": "Parallelized probabilistic ML/UQ platform for energy simulations, unrelated to graphs or message passing."
+  },
+  {
+   "pid": "P1457",
+   "onTopic": true,
+   "reason": "Message passing backbone for discrete graph generation, directly matching both core facets."
+  },
+  {
+   "pid": "P1458",
+   "onTopic": false,
+   "reason": "Diffusion model for derivative pricing, unrelated to graphs or message passing."
+  },
+  {
+   "pid": "P1459",
+   "onTopic": false,
+   "reason": "Uncertainty propagation across LLM software pipelines, a different sense of the term unrelated to distributional graph nodes."
+  },
+  {
+   "pid": "P1460",
+   "onTopic": true,
+   "reason": "Bayesian regularization for exponential random graph models, matching the random graph models facet."
+  },
+  {
+   "pid": "P1471",
+   "onTopic": true,
+   "reason": "Variational graph autoencoder framework, matching the explicit variational graph autoencoders equivalent problem."
+  },
+  {
+   "pid": "P1474",
+   "onTopic": true,
+   "reason": "Studies GCNs distinguishing random graph models, matching both the message passing and random graph facets."
+  },
+  {
+   "pid": "P1477",
+   "onTopic": false,
+   "reason": "3D shape generative modeling via multi-chart GANs, unrelated to graph nodes, edges, or message passing."
+  },
+  {
+   "pid": "P1478",
+   "onTopic": true,
+   "reason": "Surveys graph neural networks, informing the message passing neural networks facet."
+  },
+  {
+   "pid": "P1483",
+   "onTopic": false,
+   "reason": "Homomorphic encryption for fingerprint authentication; unrelated to graphs or message passing."
+  },
+  {
+   "pid": "P1484",
+   "onTopic": true,
+   "reason": "Uses variational graph autoencoder for generation, matching the graph generative modeling facet."
+  },
+  {
+   "pid": "P1486",
+   "onTopic": false,
+   "reason": "Normalizing flows for power system harmonic risk; no graph structure or message passing involved."
+  },
+  {
+   "pid": "P1487",
+   "onTopic": false,
+   "reason": "Cross-lingual speech representation learning; unrelated to graphs or message passing."
+  },
+  {
+   "pid": "P1488",
+   "onTopic": true,
+   "reason": "Applies belief propagation, informing the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P1489",
+   "onTopic": true,
+   "reason": "Graph-structured generative model for molecules, matching graph generative modeling facet."
+  },
+  {
+   "pid": "P1491",
+   "onTopic": false,
+   "reason": "Rough/soft hypergraph uncertainty framework differs from probabilistic Bernoulli edge modeling; surface match only."
+  },
+  {
+   "pid": "P1493",
+   "onTopic": false,
+   "reason": "Graph-to-text generation task, not modeling distributions over node attributes or edges."
+  },
+  {
+   "pid": "P1494",
+   "onTopic": true,
+   "reason": "EM as message passing with Gaussian messages directly matches the message passing with Gaussian states facet."
+  },
+  {
+   "pid": "P1495",
+   "onTopic": true,
+   "reason": "Introduces VAEs, underlying the variational inference method used for Gaussian node states."
+  },
+  {
+   "pid": "P1496",
+   "onTopic": true,
+   "reason": "Neighborhood aggregation message passing architecture, matching the message passing neural networks facet."
+  },
+  {
+   "pid": "P1497",
+   "onTopic": true,
+   "reason": "Discusses variational inference with elliptical distributions, matching the variational inference facet."
+  },
+  {
+   "pid": "P1498",
+   "onTopic": true,
+   "reason": "Approximate Bayesian inference for latent Gaussian models, matching probabilistic graphical models/variational inference facets."
+  },
+  {
+   "pid": "P1499",
+   "onTopic": true,
+   "reason": "Moment-based propagation of Gaussian-like state distributions, matching the uncertainty propagation facet."
+  },
+  {
+   "pid": "P1500",
+   "onTopic": false,
+   "reason": "Generic normalizing flow generative model unrelated to graphs, Gaussian nodes, or Bernoulli edges."
+  },
+  {
+   "pid": "P1501",
+   "onTopic": true,
+   "reason": "Feature-message passing GNN architecture, matching the message passing neural networks facet."
+  },
+  {
+   "pid": "P1502",
+   "onTopic": false,
+   "reason": "Simulates spiking neuron gap junctions; 'neural network' here is computational-neuroscience, unrelated to message passing GNNs."
+  },
+  {
+   "pid": "P1503",
+   "onTopic": true,
+   "reason": "Graph generative models for molecule design, matching the graph generative modeling facet."
+  },
+  {
+   "pid": "P1504",
+   "onTopic": true,
+   "reason": "Variational message passing derivation, matching message passing and variational inference facets."
+  },
+  {
+   "pid": "P1505",
+   "onTopic": false,
+   "reason": "Scene graph generation from images is a detection task, not generative modeling of node/edge distributions."
+  },
+  {
+   "pid": "P1506",
+   "onTopic": true,
+   "reason": "Survey of spatio-temporal GNNs, matching the message passing neural networks facet."
+  },
+  {
+   "pid": "P1507",
+   "onTopic": false,
+   "reason": "Image augmentation study for Siamese learning on X-rays; unrelated to graphs or message passing."
+  },
+  {
+   "pid": "P1508",
+   "onTopic": true,
+   "reason": "Equivariant message passing network for crystal generation, matching message passing and generative modeling facets."
+  },
+  {
+   "pid": "P1509",
+   "onTopic": false,
+   "reason": "Text-to-speech synthesis system; unrelated to graphs or message passing."
+  },
+  {
+   "pid": "P1510",
+   "onTopic": true,
+   "reason": "Studies Erdos-Renyi random graphs, matching the random graph models facet."
+  },
+  {
+   "pid": "P1511",
+   "onTopic": true,
+   "reason": "Quantum belief propagation parallels the belief propagation concept in the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P1512",
+   "onTopic": false,
+   "reason": "Graph clustering via coarsening, a different task from generative modeling of Gaussian/Bernoulli distributions."
+  },
+  {
+   "pid": "P1513",
+   "onTopic": true,
+   "reason": "Diffusion-based molecular graph generation, matching the graph generative modeling facet."
+  },
+  {
+   "pid": "P1514",
+   "onTopic": true,
+   "reason": "Stochastic block models for multilayer networks, matching the random graph models facet."
+  },
+  {
+   "pid": "P1515",
+   "onTopic": true,
+   "reason": "Belief propagation for uncertainty propagation, matching both the uncertainty propagation and belief propagation facets."
+  },
+  {
+   "pid": "P1516",
+   "onTopic": false,
+   "reason": "NMR dataset for molecular representation learning; unrelated to graph generation or message passing distributions."
+  },
+  {
+   "pid": "P1517",
+   "onTopic": true,
+   "reason": "Exponential random graph models relate to Bernoulli-parameterized edges, matching the random graph models facet."
+  },
+  {
+   "pid": "P1518",
+   "onTopic": true,
+   "reason": "Generative modeling of graph signals with graph-aware dynamics, matching the graph generative modeling facet."
+  },
+  {
+   "pid": "P1523",
+   "onTopic": false,
+   "reason": "Probabilistic constitutive modeling in solid mechanics; unrelated to graphs or message passing."
+  },
+  {
+   "pid": "P1527",
+   "onTopic": true,
+   "reason": "General framework for propagating probability distributions through systems, matching the uncertainty propagation facet."
+  },
+  {
+   "pid": "P1529",
+   "onTopic": true,
+   "reason": "Variational graph autoencoder-based molecular generation, matching the graph generative modeling facet."
+  },
+  {
+   "pid": "P1535",
+   "onTopic": false,
+   "reason": "Optimal transport generative model for images; no graph structure, Gaussian nodes, or Bernoulli edges."
+  },
+  {
+   "pid": "P1537",
+   "onTopic": true,
+   "reason": "Applies message passing neural networks, matching the message passing neural networks facet."
+  },
+  {
+   "pid": "P1540",
+   "onTopic": true,
+   "reason": "Parallelized inference and learning for probabilistic graphical models, matching that facet."
+  },
+  {
+   "pid": "P1541",
+   "onTopic": true,
+   "reason": "Applies Gaussian belief propagation message passing, matching the probabilistic graphical models facet."
+  },
+  {
+   "pid": "P1547",
+   "onTopic": false,
+   "reason": "Normalizing-flow option pricing; no graph, message passing, or node/edge distributions involved."
+  },
+  {
+   "pid": "P1550",
+   "onTopic": true,
+   "reason": "Tool for building and evaluating probabilistic graphical models with belief-style inference, matching the PGM facet."
+  },
+  {
+   "pid": "P1552",
+   "onTopic": true,
+   "reason": "Develops divergence-minimization methods for variational inference, matching the variational inference facet."
+  },
+  {
+   "pid": "P1554",
+   "onTopic": true,
+   "reason": "Parallel belief propagation algorithm, matching the probabilistic graphical models/belief propagation facet."
+  },
+  {
+   "pid": "P1555",
+   "onTopic": true,
+   "reason": "Studies Erdos-Renyi-type random graphs, matching the random graph models equivalent problem."
+  },
+  {
+   "pid": "P1556",
+   "onTopic": true,
+   "reason": "General variational inference method, matching the variational inference facet."
+  },
+  {
+   "pid": "P1557",
+   "onTopic": false,
+   "reason": "Uses PGMs only as one classifier for sentiment analysis; not about message passing or graph structure."
+  },
+  {
+   "pid": "P1558",
+   "onTopic": true,
+   "reason": "Formulates stochastic neural networks for uncertainty quantification, matching the uncertainty propagation facet."
+  },
+  {
+   "pid": "P1559",
+   "onTopic": false,
+   "reason": "Uncertainty quantification for ocean/climate models via PCE and PINNs, unrelated to graph message passing."
+  },
+  {
+   "pid": "P1560",
+   "onTopic": false,
+   "reason": "Variational autoencoders for DDoS detection; unrelated to graph generation or node/edge distributions."
+  },
+  {
+   "pid": "P1561",
+   "onTopic": false,
+   "reason": "Self-supervised representation learning for atmospheric fields; no graph or message passing relevance."
+  },
+  {
+   "pid": "P1562",
+   "onTopic": false,
+   "reason": "Normalizing flows for dependent data generally, not graph-structured attributes or topology."
+  },
+  {
+   "pid": "P1563",
+   "onTopic": false,
+   "reason": "Language-model-based molecular representation learning; unrelated to distributional message passing."
+  },
+  {
+   "pid": "P1564",
+   "onTopic": true,
+   "reason": "Proposes a generative model for graphs, matching the graph generative modeling facet."
+  },
+  {
+   "pid": "P1565",
+   "onTopic": false,
+   "reason": "Function-space Bayesian classification regularization; unrelated to graphs or message passing."
+  },
+  {
+   "pid": "P1566",
+   "onTopic": false,
+   "reason": "Dynamic sensor selection via Gumbel-Softmax in sensor networks; no graph message passing content."
+  },
+  {
+   "pid": "P1567",
+   "onTopic": true,
+   "reason": "Improves a deep generative model for large graphs, matching the graph generative modeling facet."
+  },
+  {
+   "pid": "P1568",
+   "onTopic": true,
+   "reason": "Message passing architecture for (hyper)graph node representations, matching the message passing facet."
+  },
+  {
+   "pid": "P1569",
+   "onTopic": true,
+   "reason": "Studies stochastic block model recovery, matching the random graph models facet."
+  },
+  {
+   "pid": "P1570",
+   "onTopic": false,
+   "reason": "Generative models survey for industrial time series; unrelated to graphs or message passing."
+  },
+  {
+   "pid": "P1571",
+   "onTopic": true,
+   "reason": "Structured variational inference in a probabilistic graphical model, matching PGM and VI facets."
+  },
+  {
+   "pid": "P1572",
+   "onTopic": true,
+   "reason": "Graph neural network framework combining structural and functional connectivity, matching the message passing facet."
+  },
+  {
+   "pid": "P1573",
+   "onTopic": true,
+   "reason": "Uses Gaussian belief propagation with factor-graph message passing, matching the PGM facet directly."
+  },
+  {
+   "pid": "P1574",
+   "onTopic": true,
+   "reason": "Joint discrete topology and continuous attribute graph generation, matching the graph generative modeling facet."
+  },
+  {
+   "pid": "P1575",
+   "onTopic": true,
+   "reason": "Neural message passing framework on hypergraphs, matching the message passing facet."
+  },
+  {
+   "pid": "P1576",
+   "onTopic": false,
+   "reason": "Language diffusion models as associative memories; no graph structure or distributional message passing."
+  },
+  {
+   "pid": "P1577",
+   "onTopic": false,
+   "reason": "Applies a PGM to student misconception data; unrelated to message passing or graph generation."
+  },
+  {
+   "pid": "P1581",
+   "onTopic": true,
+   "reason": "Extends exponential random graph models, matching the random graph models facet."
+  },
+  {
+   "pid": "P1582",
+   "onTopic": true,
+   "reason": "Evaluates optimizers for message-passing neural networks, matching the message passing facet."
+  },
+  {
+   "pid": "P1584",
+   "onTopic": false,
+   "reason": "Generative modeling for chemical reaction conditions; unrelated to graph topology/node distribution generation."
+  },
+  {
+   "pid": "P1589",
+   "onTopic": false,
+   "reason": "Chance-constrained trajectory planning with Gaussian disturbances; unrelated to graphs or message passing."
+  },
+  {
+   "pid": "P1590",
+   "onTopic": false,
+   "reason": "Review of causal representation learning; not about message passing or graph generative modeling."
+  },
+  {
+   "pid": "P1592",
+   "onTopic": true,
+   "reason": "Message passing neural network architecture, matching the message passing facet."
+  },
+  {
+   "pid": "P1594",
+   "onTopic": true,
+   "reason": "Conditional deep generative model for graphs, matching the graph generative modeling facet."
+  },
+  {
+   "pid": "P1599",
+   "onTopic": true,
+   "reason": "Variational estimation for stochastic block models, matching random graph and variational inference facets."
+  },
+  {
+   "pid": "P1600",
+   "onTopic": true,
+   "reason": "Graph attention network with neighbor information propagation, matching the message passing facet."
+  },
+  {
+   "pid": "P1607",
+   "onTopic": true,
+   "reason": "Inference on random factor graphs including stochastic block models, matching PGM and random graph facets."
+  },
+  {
+   "pid": "P1610",
+   "onTopic": true,
+   "reason": "Proposes a message passing operator for GNNs, matching the message passing facet."
+  },
+  {
+   "pid": "P1614",
+   "onTopic": true,
+   "reason": "Bayesian model selection for exponential random graph models, matching the random graph models facet."
+  }
+ ]
+}

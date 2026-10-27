@@ -9,6 +9,7 @@ import {
   type BindValue,
   type ConditionExpr,
   type ContentBundle,
+  type FactTableCatalog,
   type ForEachNode as ContentForEachNode,
   type HumanGateNode as ContentHumanGateNode,
   type RepeatUntilNode as ContentRepeatUntilNode,
@@ -30,17 +31,21 @@ import {
   terminal,
   workflow,
   cacheBoundaryTextBlock,
+  factCitationsOf,
   resolveCapabilityPlan,
   textBlock,
+  type AgentTask,
   type ArtifactRef,
   type BrokerInput,
   type CapabilityDeclaration,
   type ContentBlock,
+  type FactScope,
   type FunctionContext,
   type HostToolManifest,
   type JsonArray,
   type JsonObject,
   type JsonValue,
+  type NotesScope,
   type ProviderNativeOffer,
   type ResolvedCapabilityPlan,
   type ScopeReader,
@@ -59,7 +64,24 @@ import {
   writeDataReference,
 } from "./data-ref.js";
 import { BrainstormRuntimeError } from "./errors.js";
+import {
+  chainBase,
+  chainSubscriberKey,
+  emptyFactUpdateMerge,
+  FACT_MERGE_HANDLERS,
+  FACT_UPDATES_RULE,
+  FactUpdateIndex,
+  isFactMergeHandler,
+  parseSubscriberKey,
+  reportBase,
+  reportSubscriberKey,
+  type FactMergeHandler,
+  type FactNotice,
+  type FactUpdateCoordinator,
+} from "./fact-updates.js";
 import { applyGateDecision, autoApproveDecision, type HumanGateMode } from "./gates.js";
+import { gameChairContextIssues, gameReviewVersion, settleGameReview } from "./game-review.js";
+import { committeeContextIssues, committeeFactView, factIdsInValue, GameReviewLedger, type ReadGameFacts, type ReadGameEvidence } from "./game-ledger.js";
 import { artifactSchemaToJsonSchema } from "./json-schema.js";
 import { selectPanel, weavePanel } from "./panel.js";
 import { compileSkillPrompt, type PayloadEntry } from "./prompts.js";
@@ -70,7 +92,9 @@ import {
   type CapabilityToolResolver,
 } from "./routes.js";
 import {
+  applyChainReconsideration,
   applyRedevelopment,
+  applyReportReconsiderations,
   applyThoughts,
   BRAINSTORM_STATE,
   createInitialState,
@@ -95,6 +119,8 @@ export type DeterministicActivityHandler = (
 ) => JsonValue | Promise<JsonValue>;
 
 export interface CompileContentWorkflowOptions {
+  readonly readGameFacts?: ReadGameFacts;
+  readonly readGameEvidence?: ReadGameEvidence;
   readonly bundle: ContentBundle;
   readonly workflow?: string | ContentWorkflowDefinition;
   readonly routeResolver?: BrainstormRouteResolver;
@@ -143,6 +169,12 @@ export interface CompileContentWorkflowOptions {
    * from the journal without re-running the handler.
    */
   readonly interdisciplinarySeat?: boolean;
+  /**
+   * The run's fact-table deletion epoch (fact updates, design 6.6), read at
+   * each game critic dispatch and journaled with its snapshot. Read only when
+   * the bundle's fact-table control declares `updates`.
+   */
+  readonly factEpoch?: () => number | Promise<number>;
 }
 
 export interface ResolvedRole {
@@ -183,6 +215,9 @@ class BundleSkillResolver implements SkillResolver {
 }
 
 export interface CompiledContentWorkflow {
+  readonly gameReviewLedger: GameReviewLedger;
+  readonly isGameLedgerActivity: (name: string) => boolean;
+  readonly isGameCriticExcluded: (nodeId: string, scope: ScopeReader, runId: string) => boolean;
   readonly content: ContentWorkflowDefinition;
   readonly definition: WorkflowDefinition;
   readonly functions: WorkflowFunctions;
@@ -198,6 +233,74 @@ export interface CompiledContentWorkflow {
    * single journal key. Absent when nothing is dismissed.
    */
   readonly isAgentDismissed?: (nodeId: string, scope: ScopeReader) => boolean;
+  /** A submitted game report stays in its frozen cohort after manual dismissal. */
+  readonly canReplayDismissedAgent?: (nodeId: string, scope: ScopeReader) => boolean;
+  /** Builds the supreme judge's task for one fact-table submission (control catalog/fact-table.json). */
+  readonly factVerificationTask?: (request: FactVerificationTaskRequest) => Promise<AgentTask>;
+  readonly factConsultationTask?: (request: FactConsultationTaskRequest) => Promise<AgentTask>;
+  /**
+   * Fact updates (control `updates`): the run-global subscriber index, kept
+   * current by the deterministic folds only (design 3.2).
+   */
+  readonly factUpdateIndex?: FactUpdateIndex;
+  /** Attaches the worker's spawner, which the merge points wait on live (design 6.1). */
+  readonly attachFactUpdates?: (coordinator: FactUpdateCoordinator) => void;
+  /**
+   * Binds the attached spawner's reconsideration tasks to one run
+   * invocation's abort signal, so that a cancelled or failed run aborts them
+   * (decision D16). BrainstormRuntime calls it as each run or resume starts.
+   */
+  readonly bindFactUpdateRun?: (signal: AbortSignal) => void;
+  /** Builds one subscriber's reconsideration task, with the hashes of what it saw (design 5, 6.1). */
+  readonly factReconsiderationTask?: (request: FactReconsiderationTaskRequest) => Promise<FactReconsiderationTask>;
+}
+
+/**
+ * One fact-table submission as the worker hands it to the verifier: the task
+ * id it runs under and the role's per-call bindings. The case, method and
+ * resolution definitions are bound from the control itself.
+ */
+export interface FactVerificationTaskRequest {
+  /** Unique per submission, e.g. "fact-verification:S:12". */
+  readonly taskId: string;
+  readonly bindings: {
+    readonly input: JsonValue;
+    readonly files: JsonValue;
+    readonly request: JsonObject;
+    readonly related: JsonValue;
+  };
+}
+
+export interface FactConsultationTaskRequest {
+  readonly taskId: string;
+  readonly bindings: { readonly input: JsonValue; readonly files: JsonValue; readonly request: JsonObject; readonly entries: JsonValue };
+}
+
+/**
+ * One fact-update reconsideration as the worker's spawner asks for it (design
+ * 5, 6.2): the run, the subscriber key, the notices the task covers, each with
+ * this subscriber's `citedAt`, and the task id, "fact-update:<key>:<attempt>".
+ */
+export interface FactReconsiderationTaskRequest {
+  readonly runId: string;
+  readonly taskId: string;
+  readonly key: string;
+  readonly notices: readonly FactNotice[];
+}
+
+/** A reconsideration task and the hashes of exactly what it saw (design 6.1 `base`). */
+export interface FactReconsiderationTask {
+  readonly task: AgentTask;
+  readonly base: JsonObject;
+}
+
+/** The node id a reconsideration task's metadata carries. */
+const FACT_UPDATE_NODE = "fact-update";
+
+/** A fact scope's `cited`: the badges a chain cites, step by step, when it cites any. */
+function citedScope(chain: JsonValue | undefined): JsonObject {
+  const cited = factCitationsOf(chain);
+  return cited.length > 0 ? { cited: cited.map((citation) => ({ step: citation.step, ids: [...citation.ids] })) } : {};
 }
 
 const STATE_SELECTOR = "brainstorm.runtime.state";
@@ -411,6 +514,13 @@ async function writeValidatedOutput(
 ): Promise<JsonObject> {
   const state = stateFrom(scope);
   const parsed = validateArtifact(schemaName, nodeId, raw);
+  if (schemaName === "gameChairDecision" || schemaName === "gameCommitteeDecision") {
+    const critiques = resolveDataReference("reviews[member.id].current.gameCritiques", scope, state, { required: true });
+    const step = resolveDataReference("stepIndex", scope, state, { required: true });
+    const issues = schemaName === "gameCommitteeDecision" ? committeeContextIssues(parsed, critiques)
+      : gameChairContextIssues(parsed, critiques, typeof step === "number" ? step : undefined);
+    if (issues.length > 0) throw new BrainstormRuntimeError(issues.join("; "), "INVALID_GAME_REVIEW");
+  }
   if (schemaName === "processorOutput") {
     // The submission types are data (catalog/input-types.json), so the static
     // schema cannot enumerate them; membership is enforced here instead.
@@ -611,6 +721,14 @@ async function writeValidatedOutput(
         : parsed;
   const write = writeDataReference(state, target, stored, scope, roots);
   let next = write.state;
+  if (schemaName === "gameSettlement") {
+    // The immutable score effect is journaled before repair. Rebuild its
+    // compatibility control signal on every replay without re-scoring.
+    next = writeDataReference(
+      next, "reviews[member.id].current.decision",
+      asObject(parsed, "game settlement").decision!, scope, roots,
+    ).state;
+  }
   if (
     schemaName === "redevelopment" ||
     schemaName === "redevelopmentPatch" ||
@@ -848,6 +966,19 @@ function pinned(
     );
   }
   return patched;
+}
+
+/** The per-report schema of a chair task: the record's value schema. */
+function chairReportSchema(schema: JsonObject): JsonValue {
+  const property = isJsonRecord(schema.properties) ? schema.properties.reports : undefined;
+  return (isJsonRecord(property) ? property.additionalProperties : undefined) ?? {};
+}
+
+/** The report schema with `label` required, or undefined when it declares no `label` property. */
+function requireLabel(report: JsonValue): JsonObject | undefined {
+  if (!isJsonRecord(report) || !isJsonRecord(report.properties) || !isJsonRecord(report.properties.label)) return undefined;
+  const required = Array.isArray(report.required) ? report.required : [];
+  return { ...report, required: required.includes("label") ? required : [...required, "label"] };
 }
 
 function patchSchemaProperty(
@@ -1305,6 +1436,7 @@ function builtinActivities(options: {
   readonly interdisciplinarySeat?: boolean;
 }): Readonly<Record<string, DeterministicActivityHandler>> {
   return {
+    "review.gameSettle": (input) => settleGameReview(input),
     "attachments.useful": (input) =>
       partitionAnnotatedFiles(
         "attachments.useful",
@@ -1469,12 +1601,35 @@ class ContentCompiler {
   private readonly loopVars: string[] = [];
   /** Enclosing loop vars per compiled agent node id, for the executor override. */
   private readonly agentLoopVars = new Map<string, readonly string[]>();
+  private readonly gameCriticNodes = new Set<string>();
+  /** The distinct `input` bindings of the game critic nodes: what each critic receives as its task input. */
+  private readonly gameCriticInputBindings = new Map<string, BindValue>();
+  private readonly gameReviewLedger = new GameReviewLedger();
+  private readonly gameLedgerActivities = new Set<string>();
+  private readonly gameDispatchKeys = new Map<string, string>();
+  private readonly readGameFacts: ReadGameFacts;
+  private readonly readGameEvidence: ReadGameEvidence;
+  /** Fact updates (control `updates`); false for every bundle that does not declare them. */
+  private readonly factUpdates: boolean;
+  /** The run-global subscriber index (design 3.2), written by folds only. */
+  private readonly factUpdateIndex: FactUpdateIndex;
+  /** The worker's spawner, attached after compile; absent offline. */
+  private factCoordinator: FactUpdateCoordinator | undefined;
+  /** The run's deletion epoch, from the compile options (design 6.6, D17). */
+  private readonly factEpoch: (() => number | Promise<number>) | undefined;
+  /** Chain-writer and critic task ids built in this process (detection path 2, design 3.4). */
+  private readonly liveTaskIds = new Set<string>();
 
   constructor(
     private readonly bundle: ContentBundle,
     private readonly content: ContentWorkflowDefinition,
     options: CompileContentWorkflowOptions,
   ) {
+    this.readGameFacts = options.readGameFacts ?? (async () => []);
+    this.readGameEvidence = options.readGameEvidence ?? (async () => ({ facts: [], approvals: [] }));
+    this.factUpdates = this.bundle.factTable?.updates === FACT_UPDATES_RULE;
+    this.factUpdateIndex = new FactUpdateIndex(new Set(options.dismissedMembers ?? []));
+    this.factEpoch = options.factEpoch;
     this.routeResolver = options.routeResolver ?? new ExecutorOwnedRouteResolver();
     this.capabilityTools = options.capabilityTools ?? new LogicalCapabilityToolResolver();
     this.activityHandlers = {
@@ -1483,6 +1638,22 @@ class ContentCompiler {
           ? { interdisciplinarySeat: options.interdisciplinarySeat }
           : {}),
       }),
+      "review.committeeSettle": async (input, context) => {
+        const mediated = this.bundle.factTable?.accessMode === "supreme-mediated/v1";
+        // With fact updates the evidence is read in both access modes: the
+        // settlement is bound the run's deletions (design 6.6, section 7).
+        const evidence = mediated || this.factUpdates ? await this.readGameEvidence() : undefined;
+        const settleInput = this.factUpdates
+          ? { ...input, deletions: structuredClone(evidence?.deletions ?? []) as unknown as JsonValue }
+          : input;
+        return this.gameReviewLedger.settle(context.runId, `${context.runId}:${context.nodePath}`, settleInput,
+          mediated ? evidence!.facts : await this.readGameFacts(), mediated ? evidence : undefined);
+      },
+      // The fact-update merge points (design 6.3): live, each waits on the
+      // worker's spawner; with none attached (offline, or a bundle without
+      // fact updates) each returns the empty merge.
+      ...Object.fromEntries(Object.keys(FACT_MERGE_HANDLERS).map((name): [string, DeterministicActivityHandler] =>
+        [name, (input, context) => this.runFactMerge(name as FactMergeHandler, input, context)])),
       ...(options.activities ?? {}),
     };
     this.providerOffers = options.providerOffers ?? [];
@@ -1510,20 +1681,56 @@ class ContentCompiler {
 
   compile(): CompiledContentWorkflow {
     const root = this.compileNode(this.content.root);
+    const factTable = this.bundle.factTable;
     return {
+      gameReviewLedger: this.gameReviewLedger,
+      isGameLedgerActivity: (name: string) => this.gameLedgerActivities.has(name),
+      isGameCriticExcluded: (nodeId: string, scope: ScopeReader, runId: string) => {
+        const key = this.gameDispatchKeys.get(nodeId);
+        const snapshot = key !== undefined ? scope.get(key) : undefined;
+        return isJsonRecord(snapshot) && (snapshot.eligible !== true ||
+          (typeof snapshot.criticId === "string" && this.gameReviewLedger.isExcluded(runId, snapshot.criticId)));
+      },
       content: this.content,
       definition: workflow(this.content.name, root, {
         version: this.content.version,
         description: this.content.description,
       }),
       functions: this.functions,
-      createInput: (submission, params = {}) => ({
-        [BRAINSTORM_STATE]: createInitialState(this.content, submission, params),
-      }),
+      createInput: (submission, params = {}) => {
+        const state = createInitialState(this.content, submission, params);
+        if (this.journalFormat === 1 && this.content.params.gameDecisionThreshold !== undefined &&
+            asObject(state.params, "workflow params").gamifiedReview === true) {
+          throw new WorkflowConfigError("committee balances require the current effect-only journal format");
+        }
+        return { [BRAINSTORM_STATE]: state };
+      },
       ...(this.dismissal !== undefined
         ? {
             isAgentDismissed: (nodeId: string, scope: ScopeReader) =>
               this.dismissedHere(scope, this.agentLoopVars.get(nodeId) ?? []),
+            canReplayDismissedAgent: (nodeId: string, scope: ScopeReader) =>
+              this.gameCriticNodes.has(nodeId) && !this.dismissedHere(scope, ["member"]),
+          }
+        : {}),
+      ...(factTable !== undefined
+        ? {
+            factVerificationTask: (request: FactVerificationTaskRequest) =>
+              this.factVerificationTask(factTable, request),
+            ...(factTable.accessMode === "supreme-mediated/v1" ? {
+              factConsultationTask: (request: FactConsultationTaskRequest) => this.factVerificationTask(factTable, request, true),
+            } : {}),
+            ...(this.factUpdates ? {
+              factUpdateIndex: this.factUpdateIndex,
+              attachFactUpdates: (coordinator: FactUpdateCoordinator) => {
+                this.factCoordinator = coordinator;
+              },
+              bindFactUpdateRun: (signal: AbortSignal) => {
+                this.factCoordinator?.bindRun?.(signal);
+              },
+              factReconsiderationTask: (request: FactReconsiderationTaskRequest) =>
+                this.factReconsiderationTask(factTable, request),
+            } : {}),
           }
         : {}),
     };
@@ -1536,6 +1743,73 @@ class ContentCompiler {
    */
   private dismissedHere(scope: ScopeReader, vars: readonly string[]): boolean {
     return this.dismissal?.taints(scope, vars) ?? false;
+  }
+
+  /**
+   * The notes scope of a review task: the node's `thinkerNotes` references
+   * resolved against the task's scope. `seat` must name a panel member id
+   * and `through` a 1-based chain position — the loop's own `stepIndex`
+   * under a 1-based sequential walk, so "through k" means steps 1..k, the
+   * same slice the chain binding shows the reviewer.
+   */
+  private notesScopeFor(
+    node: Extract<ContentWorkflowNode, { kind: "agent" }>,
+    scope: ScopeReader,
+  ): NotesScope {
+    const spec = node.thinkerNotes!;
+    const state = stateFrom(scope);
+    const seat = resolveDataReference(spec.seat, scope, state, { required: true });
+    const through = resolveDataReference(spec.through, scope, state, { required: true });
+    if (typeof seat !== "string" || seat === "") {
+      throw new BrainstormRuntimeError(
+        `agent "${node.id}": thinkerNotes.seat "${spec.seat}" must resolve to a member id`,
+        "INVALID_NOTES_SCOPE",
+      );
+    }
+    if (typeof through !== "number" || !Number.isSafeInteger(through) || through < 1) {
+      throw new BrainstormRuntimeError(
+        `agent "${node.id}": thinkerNotes.through "${spec.through}" must resolve to a chain position (1-based)`,
+        "INVALID_NOTES_SCOPE",
+      );
+    }
+    return { seat, throughStep: through };
+  }
+
+  /**
+   * The fact scope of a task whose role declares `fact-table` — core's
+   * FactScope, as the task metadata carries it: the role, exactly the agent
+   * id the task gets, the seat (`member.id`) and the chain position
+   * (`stepIndex`) when the task's scope resolves them, and the `[F:n]`
+   * badges cited in the chain it was shown, step by step, when it cites any.
+   */
+  private factScopeFor(
+    node: Extract<ContentWorkflowNode, { kind: "agent" }>,
+    scope: ScopeReader,
+    agent: string,
+    seat: JsonValue | undefined,
+    chain: JsonValue | undefined,
+  ): JsonObject {
+    const step = resolveDataReference("stepIndex", scope, stateFrom(scope), { required: false });
+    const cited = factCitationsOf(chain);
+    let blindReview: string | undefined;
+    if (node.output.schema === "gameCritique") {
+      const round = resolveDataReference("reviews[member.id].round", scope, stateFrom(scope), { required: true });
+      if (typeof seat !== "string" || typeof step !== "number" || !Array.isArray(chain) || chain.length !== step ||
+          typeof round !== "number" || !Number.isSafeInteger(round) || round < 1) {
+        throw new BrainstormRuntimeError("game critic needs an exact seat, round, and reviewed prefix", "INVALID_GAME_REVIEW");
+      }
+      blindReview = JSON.stringify([seat, step, round, gameReviewVersion(chain, step)]);
+    }
+    return {
+      role: node.skill,
+      agent,
+      ...(blindReview !== undefined ? { blindReview } : {}),
+      ...(typeof seat === "string" && seat !== "" ? { seat } : {}),
+      ...(typeof step === "number" && Number.isSafeInteger(step) && step >= 1 ? { step } : {}),
+      ...(cited.length > 0
+        ? { cited: cited.map((citation) => ({ step: citation.step, ids: [...citation.ids] })) }
+        : {}),
+    } satisfies FactScope;
   }
 
   /** Compiles `body` with `itemVar` added to the enclosing loop variables. */
@@ -1613,14 +1887,40 @@ class ContentCompiler {
     // (see dismissal.ts), and for the store fold below, which must then not
     // insist on an output that was deliberately never produced.
     const enclosing = [...this.loopVars];
+    const committeeCritic = node.output.schema === "gameCritique" && this.content.params.gameDecisionThreshold !== undefined;
+    const dispatchKey = this.temp(node.id, "dispatch");
+    const dispatchName = this.functionName(node.id, "dispatch");
+    if (committeeCritic) {
+      this.gameDispatchKeys.set(`${node.id}-execute`, dispatchKey);
+      this.gameLedgerActivities.add(dispatchName);
+      this.functions.registerActivity(dispatchName, async (_input, scope, context) => {
+        if (this.dismissedHere(scope, enclosing)) return null;
+        const state = stateFrom(scope);
+        const criticId = resolveDataReference("commentor.id", scope, state, { required: true });
+        // Fact updates (design 6.6): the deletion epoch at dispatch is the
+        // report's request time, journaled with the snapshot.
+        const factEpoch = this.factUpdates && this.factEpoch !== undefined ? await this.factEpoch() : undefined;
+        return this.gameReviewLedger.dispatch(context.runId, `${context.runId}:${context.nodePath}`, String(criticId),
+          state.panel, asObject(state.params, "workflow params").gameInitialPoints, factEpoch);
+      });
+    }
     this.agentLoopVars.set(`${node.id}-execute`, enclosing);
+    if (node.output.schema === "gameCritique") this.gameCriticNodes.add(`${node.id}-execute`);
+    const criticInput = node.output.schema === "gameCritique" ? node.bind?.input : undefined;
+    if (criticInput !== undefined) this.gameCriticInputBindings.set(JSON.stringify(criticInput), criticInput);
     const routeDefinition = this.bundle.routes.routes[node.route];
     if (!this.skillResolver.hasRole(node.skill) || !routeDefinition) {
       throw new WorkflowConfigError(`agent node "${node.id}" has unresolved skill or route`);
     }
     const jsonSchema = this.jsonSchema(node.output.schema);
 
-    this.functions.registerTaskBuilder(builderName, async (scope) => {
+    this.functions.registerTaskBuilder(builderName, async (scope, _params, context) => {
+      // Detection path 2 of fact updates (design 3.4): a chain or report whose
+      // task is built here runs in this process, so its store may report it.
+      if (this.factUpdates && (THOUGHT_SCHEMAS.has(node.output.schema) ||
+          node.output.schema === "gameCritique" || node.output.schema === "commentParts")) {
+        this.liveTaskIds.add(`${context.runId}:${context.nodePath}`);
+      }
       const { role, techniques } =
         await this.skillResolver.resolveRole(node.skill);
       const skillIssues = validateResolvedRole(
@@ -1645,6 +1945,8 @@ class ContentCompiler {
       }
       const declaredVars = new Set(role.meta.vars);
       const boundVars = new Set(Object.keys(node.bind ?? {}));
+      if (node.output.schema === "gameCritique" && declaredVars.has("criticState")) boundVars.add("criticState");
+      if (node.output.schema === "gameCommitteeDecision" && declaredVars.has("verifiedFacts")) boundVars.add("verifiedFacts");
       const missingVars = [...declaredVars].filter((name) => !boundVars.has(name));
       const extraVars = [...boundVars].filter((name) => !declaredVars.has(name));
       if (missingVars.length > 0 || extraVars.length > 0) {
@@ -1659,9 +1961,33 @@ class ContentCompiler {
       // comment set a judge weighs. Applied to AGENT bindings only —
       // deterministic activity handlers keep their journaled inputs untouched.
       const bindings = resolveBindings(node.bind, scope, this.roots, this.dismissal);
+      if ((node.output.schema === "gameChairDecision" || node.output.schema === "gameCommitteeDecision") && node.bind?.comments !== undefined) {
+        // Manual dismissal stops new critic work. Reports already submitted
+        // belong to this round's immutable cohort, including when a chair
+        // has not yet run. Never rewrite that cohort during a resume.
+        (bindings as Record<string, JsonValue>).comments = resolveBindValue(
+          node.bind.comments, scope, stateFrom(scope), this.roots,
+        );
+      }
+      if (node.output.schema === "gameCommitteeDecision" && this.bundle.factTable?.accessMode !== "supreme-mediated/v1") {
+        (bindings as Record<string, JsonValue>).verifiedFacts = committeeFactView(asObject(bindings.comments, "committee reports"), await this.readGameFacts());
+      }
+      if (committeeCritic && declaredVars.has("criticState")) {
+        const dispatch = asObject(scope.get(dispatchKey), "critic dispatch snapshot");
+        (bindings as Record<string, JsonValue>).criticState = {
+          initialPoints: dispatch.initialPoints!, balance: dispatch.balance!, excluded: dispatch.excluded!, history: dispatch.history!,
+        };
+      }
+      if (node.output.schema === "gameCritique") {
+        const forbidden = ["comments", "history", "record", "feedback", "scores", "gameSettlement", "gameChair", "decision", "verdictOptions"];
+        if (forbidden.some((key) => bindings[key] !== undefined)) {
+          throw new BrainstormRuntimeError("a blind game critic cannot receive reports, prior review history, or scores", "INVALID_GAME_REVIEW");
+        }
+      }
       if (
         (node.output.schema === "judgeDecision" ||
-          node.output.schema === "judgeDecisionParts") &&
+          node.output.schema === "judgeDecisionParts" ||
+          node.output.schema === "gameChairDecision" || node.output.schema === "gameCommitteeDecision") &&
         isJsonRecord(bindings.comments)
       ) {
         // The merged comments object arrives in panel seating order every
@@ -1740,6 +2066,27 @@ class ContentCompiler {
         }
       }
       let taskJsonSchema = jsonSchema;
+      if ((node.output.schema === "gameChairDecision" || node.output.schema === "gameCommitteeDecision") && isJsonRecord(bindings.comments)) {
+        const ids = Object.keys(bindings.comments);
+        // A bundle that declares the decision rule hands its chair the
+        // labelled report shape: `label` is optional in the artifact schema so
+        // pinned legacy outputs still parse, and REQUIRED in this task so a
+        // constrained model cannot leave a report unlabelled.
+        const labelled = node.output.schema === "gameCommitteeDecision" && this.content.params.gameDecisionRule !== undefined;
+        const report = chairReportSchema(taskJsonSchema);
+        const entry = labelled ? requireLabel(report) : report;
+        if (entry === undefined) {
+          throw new WorkflowConfigError(
+            `node "${node.id}" could not pin the chair's report label into its task schema; the artifact schema shape changed and the model would be left unconstrained`,
+          );
+        }
+        taskJsonSchema = pinned(patchSchemaProperty(taskJsonSchema, ["reports"], (reports) => ({
+          ...reports,
+          properties: Object.fromEntries(ids.map((id) => [id, entry])),
+          required: ids,
+          additionalProperties: false,
+        })), node.id, "the submitted critic identities");
+      }
       if (REVIEW_SCHEMAS.has(node.output.schema)) {
         // The round's allowed verdicts, however this bundle carries them:
         // names alone, or names zipped with their descriptions.
@@ -1761,7 +2108,7 @@ class ContentCompiler {
       // task knows: narrow the schema maxima so a constrained model cannot
       // emit a step the review has not reached.
       if (
-        REVIEW_SCHEMAS.has(node.output.schema) &&
+        (REVIEW_SCHEMAS.has(node.output.schema) || node.output.schema === "gameChairDecision") &&
         typeof bindings.currentStep === "number" &&
         Number.isSafeInteger(bindings.currentStep) &&
         bindings.currentStep >= 1
@@ -1933,55 +2280,7 @@ class ContentCompiler {
         node.output.schema === "redevelopmentPatch" ||
         node.output.schema === "redevelopmentPatchParts"
       ) {
-        const shape = typeof bindings.shape === "string" ? bindings.shape : undefined;
-        const asks = requestedOutputsOf(bindings.input);
-        const label = typeof bindings.type === "string" ? bindings.type : undefined;
-        taskJsonSchema = pinned(
-          patchSchemaProperty(taskJsonSchema, ["outputPatch"], (patch) => {
-            const properties = isJsonRecord(patch.properties) ? patch.properties : undefined;
-            if (properties === undefined) return patch;
-            const unusedShapes = new Set<string>(
-              OUTPUT_SHAPES.filter((candidate) => candidate !== shape),
-            );
-            const slimmed: Record<string, JsonValue> = {};
-            for (const [key, value] of Object.entries(properties)) {
-              if (unusedShapes.has(key)) continue;
-              if (key === "requested" && asks.length === 0) continue;
-              slimmed[key] = value;
-            }
-            // A reviser rewrites sections against the same contract the first
-            // pass wrote them to, so the patch body's fields carry the same
-            // catalog outline descriptions the full envelope's do.
-            if (shape !== undefined && label !== undefined) {
-              const described = describeShapeFields(
-                slimmed[shape],
-                this.bundle.catalogs.inputTypes.outlines[label],
-              );
-              if (described !== undefined) slimmed[shape] = described;
-            }
-            if (asks.length > 0 && isJsonRecord(slimmed.requested)) {
-              const requestedProperty = slimmed.requested;
-              const items = isJsonRecord(requestedProperty.items) ? requestedProperty.items : {};
-              const itemProperties = isJsonRecord(items.properties) ? items.properties : {};
-              const titleProperty = isJsonRecord(itemProperties.title) ? itemProperties.title : {};
-              slimmed.requested = {
-                ...requestedProperty,
-                minItems: asks.length,
-                maxItems: asks.length,
-                items: {
-                  ...items,
-                  properties: {
-                    ...itemProperties,
-                    title: { ...titleProperty, enum: asks.map((ask) => ask.title) },
-                  },
-                },
-              };
-            }
-            return { ...patch, properties: slimmed };
-          }),
-          node.id,
-          "the revision patch's shape body",
-        );
+        taskJsonSchema = this.slimRevisionPatch(taskJsonSchema, bindings, node.id);
       }
       if (
         node.output.schema === "processorOutput" &&
@@ -2087,6 +2386,13 @@ class ContentCompiler {
         taskJsonSchema = removeSchemaProperties(taskJsonSchema, stepwise.removed);
       }
       const prompt = compileSkillPrompt(role, techniques, bindings);
+      if (node.output.schema === "gameCritique" &&
+          (node.thinkerNotes !== undefined || prompt.capabilities.includes("notes-access"))) {
+        // Redevelopment reasoning can quote earlier peer feedback. A blind
+        // critic must not recover that history through the notes tool even
+        // when its explicit task bindings contain no reports or scores.
+        throw new BrainstormRuntimeError("a blind game critic cannot access thinker notes or notes-access", "INVALID_GAME_REVIEW");
+      }
       for (const capability of prompt.capabilities) {
         if (!this.bundle.capabilities.capabilities[capability]) {
           throw new WorkflowConfigError(`unknown capability "${capability}"`);
@@ -2253,6 +2559,32 @@ class ContentCompiler {
           : undefined;
       const member = resolveDataReference("member.id", scope, stateFrom(scope), { required: false });
       const commentor = resolveDataReference("commentor.id", scope, stateFrom(scope), { required: false });
+      // The thinker notes this task may search: the SCOPE only (which seat,
+      // how far along the chain) — the notes themselves never enter the
+      // request; the host's notes tool reads them from the run's artifacts.
+      const notesScope = node.thinkerNotes !== undefined ? this.notesScopeFor(node, scope) : undefined;
+      // The fact table this task may consult: the SCOPE only (who asks, the
+      // seat and position it works at, the badges its chain cites) — the
+      // table never enters the request; the host's fact tool reads it from
+      // the run's record. Stamped only when the role declares the capability,
+      // so every other task is built exactly as before.
+      const factScope = prompt.capabilities.includes("fact-table")
+        ? this.factScopeFor(
+            node,
+            scope,
+            // The agent id the task gets, below.
+            typeof commentor === "string"
+              ? commentor
+              : typeof member === "string"
+                ? member
+                : node.skill,
+            member,
+            bindings.chain,
+          )
+        : undefined;
+      // A re-assessment of a round (fact updates, D12): the round's earlier
+      // chair tasks, whose approvals the re-assessment may obtain again.
+      const earlierChairTaskIds = node.output.schema === "gameCommitteeDecision" ? this.chairTaskIdsOf(scope) : [];
       return {
         kind: `brainstorm.${node.skill}`,
         agentId:
@@ -2286,6 +2618,11 @@ class ContentCompiler {
           ...(stepwise !== undefined ? { stepwise: stepwise.spec } : {}),
           ...(resolved.providerId !== undefined ? { providerId: resolved.providerId } : {}),
           ...(fastPass !== undefined ? { fastPass } : {}),
+          ...(notesScope !== undefined
+            ? { notesScope: { seat: notesScope.seat, throughStep: notesScope.throughStep } }
+            : {}),
+          ...(factScope !== undefined ? { factScope } : {}),
+          ...(earlierChairTaskIds.length > 0 ? { factReview: { earlierChairTaskIds } } : {}),
         },
       };
     });
@@ -2295,9 +2632,10 @@ class ContentCompiler {
       // output to store, and nothing further is written under that seat's
       // paths — which is what leaves its history exactly as the dismissal
       // found it.
-      if (raw === undefined && this.dismissedHere(scope, enclosing)) return stateFrom(scope);
+      if (raw === undefined && (this.dismissedHere(scope, enclosing) ||
+          (committeeCritic && isJsonRecord(scope.get(dispatchKey))))) return stateFrom(scope);
       if (raw === undefined) throw new BrainstormRuntimeError(`agent "${node.id}" produced no output`, "MISSING_OUTPUT");
-      const written = await writeValidatedOutput(
+      let written = await writeValidatedOutput(
         scope,
         node.output.key,
         node.output.schema,
@@ -2306,6 +2644,19 @@ class ContentCompiler {
         context,
         this.roots,
       );
+      if (node.output.schema === "gameCommitteeDecision" && this.bundle.factTable?.accessMode === "supreme-mediated/v1") {
+        // A re-assessment (fact updates, D12) keeps the round's earlier chair
+        // task ids aside: settlement still accepts their receipts.
+        const earlier = this.chairTaskIdsOf(scope, written);
+        if (earlier.length > 0) {
+          written = writeDataReference(written, "reviews[member.id].current.gameChairEarlierTaskIds", earlier, scope, this.roots).state;
+        }
+        written = writeDataReference(written, "reviews[member.id].current.gameChairTaskId",
+          `${context.runId}:${context.nodePath.slice(0, -`${node.id}-store`.length)}${node.id}-execute`, scope, this.roots).state;
+      }
+      if (this.factUpdates) {
+        written = this.noteFactOutput(node, scope, written, context, committeeCritic ? scope.get(dispatchKey) : undefined);
+      }
       // AFTER the validated write on purpose: a redevelopment's touched
       // change-set is stashed by applyRedevelopment inside that write, and
       // it is what decides which steps' thoughts the reviser now owns.
@@ -2316,6 +2667,7 @@ class ContentCompiler {
 
     return sequence(
       [
+        ...(committeeCritic ? [activity(dispatchName, { id: `${node.id}-dispatch`, resultKey: dispatchKey })] : []),
         // A declared review phase is stamped on the seat before the task runs,
         // inside the sequence this node already compiles to — so no journal
         // path changes and the dashboard sees the live phase while the (long)
@@ -2346,6 +2698,685 @@ class ContentCompiler {
     );
   }
 
+  /**
+   * The supreme judge's task for one fact-table submission (see
+   * CompiledContentWorkflow.factVerificationTask). Built the way an agent
+   * node's task is — lazy role validation, the role's prompt, the route, the
+   * capability plan, the same tool selection and required-capability guard —
+   * from the control's verifier instead of a workflow node: the worker's
+   * bindings plus the control's case, method and resolution definitions,
+   * answered in the verifier's output schema. It carries no fact scope, and
+   * a role that would reach the table is refused: the verifier never
+   * consults the table it serves.
+   */
+  private async factVerificationTask(
+    factTable: FactTableCatalog,
+    request: FactVerificationTaskRequest | FactConsultationTaskRequest,
+    consultation = false,
+  ): Promise<AgentTask> {
+    const declaration = consultation ? factTable.consultation : factTable.verifier;
+    if (declaration === undefined) throw new WorkflowConfigError("this bundle declares no Supreme consultation role");
+    return this.controlRoleTask({
+      declaration,
+      label: "the fact table's verifier",
+      taskId: request.taskId,
+      bindings: {
+        ...request.bindings,
+        ...(!consultation ? { caseCatalog: factTable.cases, methodCatalog: factTable.methods, resolutionCatalog: factTable.resolutions } : {}),
+      },
+      nodeId: consultation ? "fact-consultation" : "fact-verification",
+    });
+  }
+
+  /**
+   * A task for a role the fact-table control declares instead of a workflow
+   * node: the supreme judge's verification and consultation (see
+   * factVerificationTask) and the fact-update reconsiderations (see
+   * factReconsiderationTask). Lazy role validation, the role's prompt, the
+   * route, the capability plan, the same tool selection and
+   * required-capability guard as an agent node. A role that would reach the
+   * table is refused, except a reconsideration, whose task carries the fact
+   * scope that capability needs.
+   */
+  private async controlRoleTask(spec: {
+    readonly declaration: { readonly skill: string; readonly route: string; readonly output: string };
+    /** How errors name the role, e.g. "the fact table's verifier". */
+    readonly label: string;
+    readonly taskId: string;
+    readonly bindings: JsonObject;
+    /** The node id the task's metadata carries. */
+    readonly nodeId: string;
+    /** Reconsiderations only (design section 5). */
+    readonly reconsideration?: {
+      readonly agentId: string;
+      readonly factScope: JsonObject;
+      /** The narrowing an agent node of the output schema gets. */
+      readonly narrow: (schema: JsonObject) => JsonObject;
+      readonly revisionBase?: JsonValue;
+    };
+  }): Promise<AgentTask> {
+    const { skill, route, output } = spec.declaration;
+    const label = spec.label;
+    const routeDefinition = this.bundle.routes.routes[route];
+    if (!this.skillResolver.hasRole(skill) || !routeDefinition) {
+      throw new WorkflowConfigError(
+        `${label} has unresolved skill "${skill}" or route "${route}"`,
+      );
+    }
+    const { role, techniques } = await this.skillResolver.resolveRole(skill);
+    const skillIssues = validateResolvedRole(role, techniques, this.bundle.capabilities);
+    if (skillIssues.length > 0) {
+      throw new WorkflowConfigError(
+        `role "${skill}" failed lazy validation: ` +
+          skillIssues.map((issue) => `[${issue.code}] ${issue.message}`).join("; "),
+      );
+    }
+    if (role.meta.output !== undefined && role.meta.output !== output) {
+      throw new WorkflowConfigError(
+        `${label} expects "${output}" but role "${skill}" declares "${role.meta.output}"`,
+      );
+    }
+    const bindings = spec.bindings;
+    const declaredVars = new Set(role.meta.vars);
+    const boundVars = new Set(Object.keys(bindings));
+    const missingVars = [...declaredVars].filter((name) => !boundVars.has(name));
+    const extraVars = [...boundVars].filter((name) => !declaredVars.has(name));
+    if (missingVars.length > 0 || extraVars.length > 0) {
+      throw new WorkflowConfigError(
+        `the fact table's bindings disagree with role "${skill}"` +
+          (missingVars.length > 0 ? `; missing: ${missingVars.join(", ")}` : "") +
+          (extraVars.length > 0 ? `; unexpected: ${extraVars.join(", ")}` : ""),
+      );
+    }
+    const taskJsonSchema = spec.reconsideration !== undefined
+      ? spec.reconsideration.narrow(this.jsonSchema(output))
+      : this.jsonSchema(output);
+    const prompt = compileSkillPrompt(role, techniques, bindings);
+    for (const capability of prompt.capabilities) {
+      if (!this.bundle.capabilities.capabilities[capability]) {
+        throw new WorkflowConfigError(`unknown capability "${capability}"`);
+      }
+    }
+    if (spec.reconsideration === undefined && prompt.capabilities.includes("fact-table")) {
+      throw new WorkflowConfigError(
+        `${label} "${skill}" declares the "fact-table" capability; the verifier never consults the table it serves`,
+      );
+    }
+    const resolved = await this.routeResolver.resolve({
+      logicalRoute: route,
+      traits: routeDefinition.traits,
+      skill,
+      capabilities: prompt.capabilities,
+    });
+
+    // The capability plan, the tool list and the guard exactly as for an
+    // agent node (see compileAgent).
+    const requiredCapabilities: CapabilityDeclaration[] = prompt.capabilities.map((capId) => {
+      const def = this.bundle.capabilities.capabilities[capId];
+      return {
+        capabilityId: capId,
+        operations: def?.operations ?? [],
+        whenUnavailable: def?.whenUnavailable ?? "",
+      };
+    });
+    const brokerInput: BrokerInput = {
+      requiredCapabilities,
+      providerOffers: this.providerOffers,
+      hostTools: this.hostTools,
+      enabledHostToolIds: this.enabledHostToolIds,
+      disabledCapabilityIds: this.disabledCapabilityIds,
+      vacantCapabilities: this.vacantCapabilities,
+    };
+    const capabilityPlan: ResolvedCapabilityPlan = resolveCapabilityPlan(brokerInput);
+    const planHostTools = capabilityPlan.operations
+      .filter((operation) => operation.source === "host")
+      .flatMap((operation) => operation.toolNames);
+    const disabledOrUnavailable = new Set(
+      capabilityPlan.operations
+        .filter((operation) => operation.source === "unavailable")
+        .map((operation) => operation.capabilityId),
+    );
+    const legacyTools = prompt.capabilities
+      .filter((capability) => !disabledOrUnavailable.has(capability))
+      .flatMap((capability) =>
+        this.capabilityTools.resolve({
+          capability,
+          contract: this.bundle.capabilities.capabilities[capability]!.contract,
+          skill,
+        }),
+      );
+    const tools = unique([...planHostTools, ...legacyTools, ...(resolved.tools ?? [])]);
+    const mustHave = role.meta.requiredCapabilities ?? [];
+    if (mustHave.length > 0) {
+      const verdicts = new Map(
+        capabilityPlan.capabilities.map((status) => [status.capabilityId, status]),
+      );
+      const missing = mustHave.filter((capabilityId) => {
+        const availability = verdicts.get(capabilityId)?.availability;
+        return availability === "unwired" || availability === "withheld";
+      });
+      if (missing.length > 0) {
+        const disabledByUser = missing.filter(
+          (capabilityId) => verdicts.get(capabilityId)?.availability === "withheld",
+        );
+        throw new BrainstormRuntimeError(
+          `${label} (skill "${skill}") requires ${missing
+            .map((capabilityId) => `"${capabilityId}"`)
+            .join(", ")} but the capability resolved unavailable — ` +
+            (disabledByUser.length > 0
+              ? `${disabledByUser
+                  .map((capabilityId) => `"${capabilityId}"`)
+                  .join(", ")} was disabled for this run; re-enable it and resubmit`
+              : "nothing on this deployment backs it and nothing declared its absence, so " +
+                "this run was wired wrong: enable the backing host tools in the server " +
+                "settings, or run on a backend that provides them, then resume") +
+            "; this task refuses to run degraded",
+          "REQUIRED_CAPABILITY_UNAVAILABLE",
+        );
+      }
+    }
+    const messages = [
+      {
+        role: "user" as const,
+        // No workflow node, hence no cache plan: no payload section is
+        // declared stable.
+        content: renderTaskBlocks(skill, output, prompt.payload, new Set<string>()),
+      },
+    ];
+    const system: SystemPromptSegment[] = [
+      ...prompt.system,
+      ...(capabilityPlan.unavailableInstructions
+        ? [{ text: capabilityPlan.unavailableInstructions }]
+        : []),
+    ];
+    const modelRequest = {
+      ...(resolved.modelId !== undefined ? { modelId: resolved.modelId } : {}),
+      system,
+      messages,
+      ...(resolved.toolChoice !== undefined ? { toolChoice: resolved.toolChoice } : {}),
+      ...(resolved.maxOutputTokens !== undefined
+        ? { maxOutputTokens: resolved.maxOutputTokens }
+        : {}),
+      ...(resolved.temperature !== undefined ? { temperature: resolved.temperature } : {}),
+      ...(resolved.topP !== undefined ? { topP: resolved.topP } : {}),
+      ...(resolved.stopSequences !== undefined ? { stopSequences: resolved.stopSequences } : {}),
+      responseFormat: {
+        type: "jsonSchema" as const,
+        name: output,
+        schema: taskJsonSchema,
+      },
+      ...(resolved.metadata !== undefined ? { metadata: resolved.metadata } : {}),
+      ...(resolved.providerOptions !== undefined ? { providerOptions: resolved.providerOptions } : {}),
+    };
+    const modelRequestValue = modelRequest as unknown as JsonObject;
+    const input: JsonObject = {
+      role: skill,
+      logicalRoute: route,
+      routeTraits: [...routeDefinition.traits],
+      bindings,
+      allowedCapabilities: [...prompt.capabilities],
+      allowedTools: [...tools],
+      outputSchema: { name: output, schema: taskJsonSchema },
+      modelRequest: modelRequestValue,
+    };
+    return {
+      taskId: spec.taskId,
+      kind: `brainstorm.${skill}`,
+      agentId: spec.reconsideration?.agentId ?? skill,
+      input,
+      logicalRoute: route,
+      allowedCapabilities: prompt.capabilities,
+      skills: prompt.skills,
+      tools,
+      outputSchema: { name: output, schema: taskJsonSchema },
+      modelRequest,
+      ...(resolved.requirements !== undefined ? { requirements: resolved.requirements } : {}),
+      capabilityPlan,
+      ...(spec.reconsideration?.revisionBase !== undefined ? { revisionBase: spec.reconsideration.revisionBase } : {}),
+      metadata: {
+        workflow: this.content.name,
+        nodeId: spec.nodeId,
+        schema: output,
+        logicalRoute: route,
+        ...(resolved.providerId !== undefined ? { providerId: resolved.providerId } : {}),
+        ...(spec.reconsideration !== undefined ? { factScope: spec.reconsideration.factScope } : {}),
+      },
+    };
+  }
+
+  /**
+   * A revision patch's task schema: the run's shape body only, its fields
+   * described by the catalog outline, and `requested` pinned to the run's
+   * asks (see where compileAgent applies it). Shared by the redevelopment
+   * nodes and the fact-update chain reconsideration.
+   */
+  private slimRevisionPatch(schema: JsonObject, bindings: JsonObject, nodeId: string): JsonObject {
+    const shape = typeof bindings.shape === "string" ? bindings.shape : undefined;
+    const asks = requestedOutputsOf(bindings.input);
+    const label = typeof bindings.type === "string" ? bindings.type : undefined;
+    return pinned(
+      patchSchemaProperty(schema, ["outputPatch"], (patch) => {
+        const properties = isJsonRecord(patch.properties) ? patch.properties : undefined;
+        if (properties === undefined) return patch;
+        const unusedShapes = new Set<string>(
+          OUTPUT_SHAPES.filter((candidate) => candidate !== shape),
+        );
+        const slimmed: Record<string, JsonValue> = {};
+        for (const [key, value] of Object.entries(properties)) {
+          if (unusedShapes.has(key)) continue;
+          if (key === "requested" && asks.length === 0) continue;
+          slimmed[key] = value;
+        }
+        // A reviser rewrites sections against the same contract the first
+        // pass wrote them to, so the patch body's fields carry the same
+        // catalog outline descriptions the full envelope's do.
+        if (shape !== undefined && label !== undefined) {
+          const described = describeShapeFields(
+            slimmed[shape],
+            this.bundle.catalogs.inputTypes.outlines[label],
+          );
+          if (described !== undefined) slimmed[shape] = described;
+        }
+        if (asks.length > 0 && isJsonRecord(slimmed.requested)) {
+          const requestedProperty = slimmed.requested;
+          const items = isJsonRecord(requestedProperty.items) ? requestedProperty.items : {};
+          const itemProperties = isJsonRecord(items.properties) ? items.properties : {};
+          const titleProperty = isJsonRecord(itemProperties.title) ? itemProperties.title : {};
+          slimmed.requested = {
+            ...requestedProperty,
+            minItems: asks.length,
+            maxItems: asks.length,
+            items: {
+              ...items,
+              properties: {
+                ...itemProperties,
+                title: { ...titleProperty, enum: asks.map((ask) => ask.title) },
+              },
+            },
+          };
+        }
+        return { ...patch, properties: slimmed };
+      }),
+      nodeId,
+      "the revision patch's shape body",
+    );
+  }
+
+  /**
+   * The chair tasks the current round already has (fact updates, D12): the
+   * earlier ones a re-assessment set aside, then the current one. Empty
+   * unless the bundle declares fact updates with mediated access.
+   */
+  private chairTaskIdsOf(scope: ScopeReader, state: JsonObject = stateFrom(scope)): string[] {
+    if (!this.factUpdates || this.bundle.factTable?.accessMode !== "supreme-mediated/v1") return [];
+    const earlier = resolveDataReference("reviews[member.id].current.gameChairEarlierTaskIds", scope, state, { required: false });
+    const current = resolveDataReference("reviews[member.id].current.gameChairTaskId", scope, state, { required: false });
+    return [
+      ...(Array.isArray(earlier) ? earlier.filter((id): id is string => typeof id === "string") : []),
+      ...(typeof current === "string" ? [current] : []),
+    ];
+  }
+
+  /**
+   * A merge point's live effect (design 6.3): the spawner waits for the tasks
+   * the point needs and returns its factUpdateMerge; with no spawner attached
+   * the point merges nothing. Never called on replay: the journaled output is
+   * folded instead.
+   */
+  private async runFactMerge(
+    handler: FactMergeHandler,
+    input: JsonObject,
+    context: DeterministicActivityContext,
+  ): Promise<JsonValue> {
+    const point = FACT_MERGE_HANDLERS[handler];
+    if (this.factCoordinator === undefined) return emptyFactUpdateMerge(point);
+    return this.factCoordinator.merge({
+      runId: context.runId,
+      nodePath: context.nodePath,
+      point,
+      ...(typeof input.seat === "string" ? { seat: input.seat } : {}),
+      ...(typeof input.step === "number" ? { step: input.step } : {}),
+      ...(typeof input.round === "number" ? { round: input.round } : {}),
+      signal: context.signal,
+    });
+  }
+
+  /**
+   * The fold of a merge point's journaled output (design 5.1-5.3, 6.3), after
+   * the output itself is written. A chain revision is merged with the
+   * redevelopment merge into `ideas[seat]`, validated as the run's idea,
+   * persisted under `ideas.<seat>` and handed to the index; a report or
+   * comment decision replaces or withdraws the critic's in the round record.
+   * The index records what the point consumed, the round's reports pass to
+   * the chair or judge (report merge) or close (late merge), and the last
+   * merge closes the run. Deterministic over the journaled output, so a
+   * replay rebuilds the state and the index exactly.
+   */
+  private async applyFactMerge(
+    handler: FactMergeHandler,
+    nodeId: string,
+    scope: ScopeReader,
+    state: JsonObject,
+    merge: JsonObject,
+    context: FunctionContext,
+  ): Promise<JsonObject> {
+    const point = FACT_MERGE_HANDLERS[handler];
+    const runId = context.runId;
+    const index = this.factUpdateIndex;
+    index.noteRunData(runId, state);
+    index.noteMerge(runId, merge);
+    const merged = Array.isArray(merge.merged) ? merge.merged : [];
+    let next = state;
+    if (point === "chain" || point === "ideas" || point === "close") {
+      const here = point === "chain" ? resolveDataReference("member.id", scope, state, { required: true }) : undefined;
+      for (const raw of merged) {
+        const entry = asObject(raw, "fact-update merge entry");
+        const key = typeof entry.key === "string" ? parseSubscriberKey(entry.key) : undefined;
+        if (key === undefined || key.kind !== "chain" || (here !== undefined && key.seat !== here)) {
+          throw new BrainstormRuntimeError(`fact-update merge entry "${String(entry.key)}" does not belong to this merge point`, "INVALID_FACT_UPDATE");
+        }
+        const revision = validateArtifact("chainReconsiderationParts", nodeId, entry.output!);
+        const applied = applyChainReconsideration(next, key.seat, revision, nodeId);
+        if (applied.state === next) continue;
+        next = applied.state;
+        const revisedIdea = validateArtifact("brainIdeaParts", nodeId, asObject(next.ideas, "ideas")[key.seat]!);
+        assertDevelopedOutputFitsRun(
+          asObject(asObject(revisedIdea, "revised idea").output, "revised idea output"),
+          nodeId,
+          scope,
+          next,
+          this.roots,
+        );
+        next = await persistArtifact(next, `ideas.${key.seat}`, "brainIdeaParts", nodeId, revisedIdea, context);
+        index.setIdea(runId, key.seat, asObject(revisedIdea, "revised idea"));
+      }
+      if (point === "close") index.closeRun(runId);
+      return next;
+    }
+    const kind = point === "game-reports" || point === "late-game-reports" ? "game-report" : "comment";
+    const late = point === "late-game-reports" || point === "late-comments";
+    const seat = resolveDataReference("member.id", scope, state, { required: true });
+    const step = resolveDataReference("stepIndex", scope, state, { required: true });
+    const round = resolveDataReference("reviews[member.id].round", scope, state, { required: true });
+    if (typeof seat !== "string" || typeof step !== "number" || typeof round !== "number") {
+      throw new BrainstormRuntimeError(`node "${nodeId}" needs a review round in scope`, "INVALID_REVIEW_STATE");
+    }
+    const outputSchema = kind === "game-report" ? "gameReportReconsideration" : "commentReconsideration";
+    const entries: JsonObject[] = merged.map((raw) => {
+      const entry = asObject(raw, "fact-update merge entry");
+      const key = typeof entry.key === "string" ? parseSubscriberKey(entry.key) : undefined;
+      if (key === undefined || key.kind !== kind || key.seat !== seat || key.step !== step || key.round !== round) {
+        throw new BrainstormRuntimeError(`fact-update merge entry "${String(entry.key)}" does not belong to this round`, "INVALID_REVIEW_STATE");
+      }
+      return { ...entry, output: validateArtifact(outputSchema, nodeId, entry.output!) };
+    });
+    next = applyReportReconsiderations(next, seat, kind, entries, late && merge.reassess === true,
+      kind === "comment" ? pruneEmptyFlaws : (report) => report).state;
+    for (const entry of entries) {
+      const key = String(entry.key);
+      const output = asObject(entry.output, "fact-update merge output");
+      if (output.decision === "revised") {
+        const report = kind === "game-report" ? output.report! : pruneEmptyFlaws(output.comment!);
+        index.reviseReport(runId, key, asObject(report, "revised report"), typeof entry.epoch === "number" ? entry.epoch : undefined);
+      } else if (output.decision === "withdrawn") {
+        index.withdrawReport(runId, key);
+      }
+    }
+    if (late) index.closeRound(runId, kind, seat, step, round);
+    else index.passToChair(runId, kind, seat, step, round);
+    return next;
+  }
+
+  /**
+   * A chain writer's or critic's store, with fact updates (design 3.2, 3.4,
+   * 6.6): the subscriber index takes the seat's latest idea or the open
+   * report, a game report's request epoch is copied from its dispatch
+   * snapshot into the round record, and an output whose task ran in this
+   * process is reported to the spawner.
+   */
+  private noteFactOutput(
+    node: ContentAgentNode,
+    scope: ScopeReader,
+    state: JsonObject,
+    context: FunctionContext,
+    dispatch: JsonValue | undefined,
+  ): JsonObject {
+    const schema = node.output.schema;
+    const chainWriter = THOUGHT_SCHEMAS.has(schema);
+    if (!chainWriter && schema !== "gameCritique" && schema !== "commentParts") return state;
+    const runId = context.runId;
+    const index = this.factUpdateIndex;
+    index.noteRunData(runId, state);
+    const seat = resolveDataReference("member.id", scope, state, { required: false });
+    if (typeof seat !== "string") return state;
+    const live = this.liveTaskIds.delete(
+      `${runId}:${context.nodePath.slice(0, -`${node.id}-store`.length)}${node.id}-execute`,
+    );
+    let next = state;
+    let key: string;
+    if (chainWriter) {
+      const idea = resolveDataReference("ideas[member.id]", scope, state, { required: false });
+      if (!isJsonRecord(idea)) return state;
+      index.setIdea(runId, seat, idea);
+      key = chainSubscriberKey(seat);
+    } else {
+      const critic = resolveDataReference("commentor.id", scope, state, { required: false });
+      const step = resolveDataReference("stepIndex", scope, state, { required: false });
+      const round = resolveDataReference("reviews[member.id].round", scope, state, { required: false });
+      const report = resolveDataReference(node.output.key, scope, state, { required: false });
+      if (typeof critic !== "string" || typeof step !== "number" || typeof round !== "number" || !isJsonRecord(report)) {
+        return state;
+      }
+      const kind = schema === "gameCritique" ? "game-report" : "comment";
+      const epoch = isJsonRecord(dispatch) && typeof dispatch.factEpoch === "number" ? dispatch.factEpoch : undefined;
+      if (epoch !== undefined) {
+        next = writeDataReference(next, "reviews[member.id].current.gameReportEpochs[commentor.id]", epoch, scope, this.roots).state;
+      }
+      const prefix = node.bind?.chain !== undefined ? resolveBindValue(node.bind.chain, scope, state, this.roots) : undefined;
+      const allowed = kind === "comment"
+        ? resolveDataReference("reviews[member.id].allowedVerdicts", scope, state, { required: false })
+        : undefined;
+      key = reportSubscriberKey(kind, seat, step, round, critic);
+      index.openReport(runId, {
+        key,
+        kind,
+        seat,
+        step,
+        round,
+        critic,
+        report,
+        prefix: Array.isArray(prefix) ? prefix : [],
+        ...(epoch !== undefined ? { epoch } : {}),
+        ...(Array.isArray(allowed) ? { allowedVerdicts: allowed.filter((name): name is string => typeof name === "string") } : {}),
+      });
+    }
+    if (live) this.factCoordinator?.stored({ runId, key });
+    return next;
+  }
+
+  /**
+   * One fact-update reconsideration task (design section 5): the control's
+   * role for the subscriber's kind, bound from the subscriber index the way
+   * the workflow binds the output's own writer (5.1-5.3), with the schema
+   * narrowing an agent node of that output gets and the fact scope its
+   * `fact-table` capability needs. Returns the task and the hashes of exactly
+   * what it saw (design 6.1 `base`).
+   */
+  private async factReconsiderationTask(
+    factTable: FactTableCatalog,
+    request: FactReconsiderationTaskRequest,
+  ): Promise<FactReconsiderationTask> {
+    const subscriber = parseSubscriberKey(request.key);
+    const roles = factTable.reconsideration;
+    if (subscriber === undefined || roles === undefined) {
+      throw new BrainstormRuntimeError(`"${request.key}" is not a fact-update subscriber`, "INVALID_FACT_UPDATE");
+    }
+    const index = this.factUpdateIndex;
+    const data = index.runData(request.runId);
+    const input = isJsonRecord(data.input) ? data.input : {};
+    const type = typeof input.type === "string" ? input.type : undefined;
+    const inputTypes = this.bundle.catalogs.inputTypes;
+    const strip = (value: JsonValue): JsonValue => (this.dismissal === undefined ? value : this.dismissal.strip(value));
+    const members = strip(isJsonRecord(data.panel) && Array.isArray(data.panel.members) ? data.panel.members : []);
+    const seated = (Array.isArray(members) ? members : []).filter(isJsonRecord);
+    const memberOf = (id: string): JsonObject => {
+      const found = seated.find((member) => member.id === id);
+      if (found === undefined) {
+        throw new BrainstormRuntimeError(`"${id}" is not a seated panel member`, "INVALID_FACT_UPDATE");
+      }
+      return found;
+    };
+    const omitted = (names: readonly string[]): JsonObject =>
+      Object.fromEntries(Object.entries(input).filter(([name]) => !names.includes(name)));
+    const stripped = (bindings: JsonObject): JsonObject =>
+      Object.fromEntries(Object.entries(bindings).map(([name, value]) => [name, strip(value)]));
+    const notices = structuredClone(request.notices) as unknown as JsonValue;
+    const files = data.files ?? null;
+    const shape = type !== undefined ? inputTypes.shapes[type] ?? null : null;
+    if (subscriber.kind === "chain") {
+      const idea = index.idea(request.runId, subscriber.seat);
+      if (idea === undefined) {
+        throw new BrainstormRuntimeError(`seat "${subscriber.seat}" has no chain to reconsider`, "INVALID_FACT_UPDATE");
+      }
+      const member = memberOf(subscriber.seat);
+      // The rest of the board as prose, exactly as an agent node's `board`
+      // bind delivers it to the seat's own writer (see compileAgent).
+      const board = seated
+        .filter((entry) => entry.id !== subscriber.seat && typeof entry.umbrella === "string" && entry.umbrella.length > 0)
+        .map((entry) => {
+          const subfields = Array.isArray(entry.subfields)
+            ? entry.subfields.filter((subfield): subfield is string => typeof subfield === "string")
+            : [];
+          return `- ${String(entry.umbrella)}${subfields.length > 0 ? `, ${subfields.join(", ")}` : ""}`;
+        })
+        .join("\n");
+      const totalSteps = input.cotSteps ?? null;
+      const bindings: JsonObject = {
+        ...stripped({
+          input: omitted(["files"]),
+          files,
+          department: member.department ?? null,
+          umbrella: member.umbrella ?? null,
+          subfields: member.subfields ?? null,
+          chain: idea.cot ?? null,
+          previousOutput: idea.output ?? null,
+          factUpdates: notices,
+          totalSteps,
+          type: type ?? null,
+          shape,
+          shapeGuide: type !== undefined ? inputTypes.shapeGuides[type] ?? null : null,
+        }),
+        board,
+      };
+      const task = await this.controlRoleTask({
+        declaration: roles.chain,
+        label: "the fact table's chain reconsideration role",
+        taskId: request.taskId,
+        bindings,
+        nodeId: FACT_UPDATE_NODE,
+        reconsideration: {
+          agentId: subscriber.seat,
+          factScope: { role: roles.chain.skill, agent: subscriber.seat, seat: subscriber.seat, ...citedScope(idea.cot) },
+          narrow: (schema) => {
+            let narrowed = this.slimRevisionPatch(schema, bindings, FACT_UPDATE_NODE);
+            if (typeof totalSteps === "number" && Number.isSafeInteger(totalSteps) && totalSteps >= 1) {
+              // Chain length is fixed: a rewritten step names a position the
+              // chain has, and there are at most as many as the chain's steps.
+              narrowed = pinned(patchArrayItemProperty(narrowed, "steps", "index", (stepIndex) => ({
+                ...stepIndex,
+                maximum: totalSteps,
+              })), FACT_UPDATE_NODE, "the reviewed step bound");
+              narrowed = pinned(patchSchemaProperty(narrowed, ["steps"], (steps) => ({
+                ...steps,
+                maxItems: totalSteps,
+              })), FACT_UPDATE_NODE, "the reviewed step bound");
+            }
+            return narrowed;
+          },
+          revisionBase: idea,
+        },
+      });
+      return { task, base: chainBase(idea) };
+    }
+    const report = index.report(request.runId, request.key);
+    if (report === undefined) {
+      throw new BrainstormRuntimeError(`"${request.key}" has no unsettled report to reconsider`, "INVALID_FACT_UPDATE");
+    }
+    const critic = memberOf(report.critic);
+    const common: JsonObject = {
+      input: omitted(["files", "cotSteps"]),
+      files,
+      department: critic.department ?? null,
+      umbrella: critic.umbrella ?? null,
+      subfields: critic.subfields ?? null,
+      shape,
+      chain: [...report.prefix],
+      currentStep: report.step,
+      type: type ?? null,
+    };
+    const prefixScope = { seat: report.seat, step: report.step, ...citedScope([...report.prefix]) };
+    if (subscriber.kind === "game-report") {
+      const task = await this.controlRoleTask({
+        declaration: roles.gameReport,
+        label: "the fact table's game-report reconsideration role",
+        taskId: request.taskId,
+        bindings: stripped({ ...common, report: report.report, factUpdates: notices }),
+        nodeId: FACT_UPDATE_NODE,
+        reconsideration: {
+          agentId: report.critic,
+          // The round's review group (see factScopeFor): the task gets its own
+          // private view of the round's frozen snapshot, minus deleted ids.
+          factScope: {
+            role: roles.gameReport.skill,
+            agent: report.critic,
+            blindReview: JSON.stringify([report.seat, report.step, report.round, gameReviewVersion([...report.prefix], report.step)]),
+            ...prefixScope,
+          },
+          narrow: (schema) => schema,
+        },
+      });
+      return { task, base: reportBase(report.report) };
+    }
+    const allowed = [...(report.allowedVerdicts ?? [])];
+    const task = await this.controlRoleTask({
+      declaration: roles.comment,
+      label: "the fact table's comment reconsideration role",
+      taskId: request.taskId,
+      bindings: stripped({
+        ...common,
+        comment: report.report,
+        factUpdates: notices,
+        verdictOptions: allowed,
+        verdictCatalog: structuredClone(this.bundle.catalogs.verdicts.verdicts) as unknown as JsonValue,
+      }),
+      nodeId: FACT_UPDATE_NODE,
+      reconsideration: {
+        agentId: report.critic,
+        factScope: { role: roles.comment.skill, agent: report.critic, ...prefixScope },
+        // The revised comment is narrowed exactly as the round's comment-step
+        // output: the round's verdicts, and steps the walk has shown.
+        narrow: (schema) => pinned(patchSchemaProperty(schema, ["comment"], (comment) => {
+          let narrowed = comment;
+          if (allowed.length > 0) {
+            narrowed = pinned(patchSchemaProperty(narrowed, ["verdict"], (verdict) => ({
+              ...verdict,
+              enum: allowed,
+            })), FACT_UPDATE_NODE, "the allowed verdicts");
+          }
+          narrowed = pinned(patchArrayItemProperty(narrowed, "flaws", "step", (step) => ({
+            ...step,
+            maximum: report.step,
+          })), FACT_UPDATE_NODE, "the reviewed step bound");
+          return pinned(patchSchemaProperty(narrowed, ["flaws"], (flaws) => ({
+            ...flaws,
+            maxItems: report.step,
+          })), FACT_UPDATE_NODE, "the flaw-draft length");
+        }), FACT_UPDATE_NODE, "the allowed verdicts"),
+      },
+    });
+    return { task, base: reportBase(report.report) };
+  }
+
   /** Registers (once per node) the activity that stamps a seat's review phase. */
   private reviewPhaseActivity(nodeId: string, phase: ReviewPhase): string {
     const name = this.functionName(nodeId, "phase");
@@ -2361,17 +3392,66 @@ class ContentCompiler {
     if (!handler || !declaration) {
       throw new WorkflowConfigError(`activity node "${node.id}" has no deterministic handler "${node.handler}"`);
     }
+    const enclosing = [...this.loopVars];
+    const skipDismissedGame = (scope: ScopeReader): boolean =>
+      (node.handler === "review.gameSettle" || node.handler === "review.committeeSettle" || isFactMergeHandler(node.handler)) &&
+      this.dismissedHere(scope, enclosing);
     const runHandler = async (
       scope: ScopeReader,
       context: FunctionContext,
     ): Promise<JsonValue> => {
-      const bindings = resolveBindings(node.bind, scope, this.roots);
+      if (skipDismissedGame(scope)) return null;
+      let bindings = resolveBindings(node.bind, scope, this.roots);
+      if (node.handler === "review.committeeSettle") {
+        const state = stateFrom(scope);
+        const params = asObject(state.params, "workflow params");
+        // A bundle that declares no decision-rule params runs the legacy
+        // settlement exactly: committee mean, every report scored against y.
+        bindings = { ...bindings, threshold: params.gameDecisionThreshold!, initialPoints: params.gameInitialPoints!, panel: state.panel!,
+          decisionRule: params.gameDecisionRule ?? "committee-mean", leaveOneOut: params.gameLeaveOneOut ?? false,
+          ...(this.bundle.factTable?.accessMode === "supreme-mediated/v1" ? {
+            factAccessMode: "supreme-mediated/v1",
+            chairTaskId: resolveDataReference("reviews[member.id].current.gameChairTaskId", scope, state, { required: true })!,
+          } : {}),
+          // The invented-badge penalty applies only to a run that enables it in a
+          // bundle with a fact table. Bind just the badge ids quoted in what each
+          // critic received as `input`; the ledger adds those of the reviewed chain.
+          ...(params.gameInventedBadgePenalty === true && this.bundle.factTable !== undefined ? {
+            inventedBadgePenalty: true,
+            badgeSourceIds: factIdsInValue([...this.gameCriticInputBindings.values()].map((binding) => resolveBindValue(binding, scope, state, this.roots))),
+          } : {}),
+          // Fact updates (design 6.6, section 7): each report's request epoch,
+          // the task-input badge ids, the fine for a badge deleted before its
+          // report was requested when the invented-badge penalty is on, and
+          // every chair task of the round (D12). The handler adds the deletions.
+          ...(this.factUpdates ? {
+            reportEpochs: resolveDataReference("reviews[member.id].current.gameReportEpochs", scope, state, { required: false }) ?? {},
+            badgeSourceIds: factIdsInValue([...this.gameCriticInputBindings.values()].map((binding) => resolveBindValue(binding, scope, state, this.roots))),
+            ...(params.gameInventedBadgePenalty === true ? { deletionPenalty: true } : {}),
+            ...(this.bundle.factTable?.accessMode === "supreme-mediated/v1" ? { chairTaskIds: this.chairTaskIdsOf(scope, state) } : {}),
+          } : {}),
+        };
+      }
+      if (isFactMergeHandler(node.handler)) {
+        // The merge point's place in the walk: its seat and, inside a review
+        // round, its step and round, so the spawner knows which tasks it needs.
+        const state = stateFrom(scope);
+        const seat = resolveDataReference("member.id", scope, state, { required: false });
+        if (typeof seat === "string") {
+          const step = resolveDataReference("stepIndex", scope, state, { required: false });
+          const round = resolveDataReference("reviews[member.id].round", scope, state, { required: false });
+          bindings = { ...bindings, seat, ...(typeof step === "number" ? { step } : {}), ...(typeof round === "number" ? { round } : {}) };
+        }
+      }
       const output = await handler(bindings, {
         runId: context.runId,
         nodePath: context.nodePath,
         signal: context.signal,
       });
       const parsed = validateArtifact(node.output.schema, node.id, output);
+      // A handler without a declared bound (a retrieval or evidence record)
+      // has no input-sized collection to check.
+      if (declaration.bounds === undefined) return parsed;
       const boundedBy = bindings[declaration.bounds.maxItemsFromInput];
       const boundedOutput =
         typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
@@ -2390,20 +3470,21 @@ class ContentCompiler {
       return parsed;
     };
 
+    // A fact-update merge point folds its output into the run state after
+    // the plain write (design 6.3); every other handler only writes its output.
+    const writeOutput = async (scope: ScopeReader, parsed: JsonValue, context: FunctionContext): Promise<JsonObject> => {
+      const written = await writeValidatedOutput(scope, node.output.key, node.output.schema, node.id, parsed, context, this.roots);
+      return isFactMergeHandler(node.handler)
+        ? this.applyFactMerge(node.handler, node.id, scope, written, asObject(parsed, "fact-update merge"), context)
+        : written;
+    };
+
     if (this.journalFormat === 1) {
       // Legacy layout: one journaled node whose recorded value is the full
       // post-apply state. Kept byte-compatible with old journals.
       const functionName = this.functionName(node.id, "activity");
       this.functions.registerActivity(functionName, async (_input, scope, context) =>
-        writeValidatedOutput(
-          scope,
-          node.output.key,
-          node.output.schema,
-          node.id,
-          await runHandler(scope, context),
-          context,
-          this.roots,
-        ),
+        skipDismissedGame(scope) ? stateFrom(scope) : writeOutput(scope, await runHandler(scope, context), context),
       );
       return activity(functionName, {
         id: node.id,
@@ -2415,11 +3496,13 @@ class ContentCompiler {
     // Format 2: the handler's bounded output is the journaled effect; the
     // write into the run state is a deterministic fold recomputed on replay.
     const runName = this.functionName(node.id, "run");
+    if (node.handler === "review.committeeSettle") this.gameLedgerActivities.add(runName);
     const applyName = this.functionName(node.id, "apply");
     const outputKey = this.temp(node.id, "output");
     this.functions
       .registerActivity(runName, async (_input, scope, context) => runHandler(scope, context))
       .registerActivity(applyName, async (_input, scope, context) => {
+        if (skipDismissedGame(scope)) return stateFrom(scope);
         const parsed = scope.get(outputKey);
         if (parsed === undefined) {
           throw new BrainstormRuntimeError(
@@ -2427,15 +3510,7 @@ class ContentCompiler {
             "MISSING_OUTPUT",
           );
         }
-        return writeValidatedOutput(
-          scope,
-          node.output.key,
-          node.output.schema,
-          node.id,
-          parsed,
-          context,
-          this.roots,
-        );
+        return writeOutput(scope, parsed, context);
       });
     return sequence(
       [

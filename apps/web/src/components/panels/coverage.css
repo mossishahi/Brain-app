@@ -1,0 +1,203 @@
+/* The confirm-panel gate's coverage view (CoverageView.tsx). */
+.cov {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin: 0.75rem 0;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.cov-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem 1rem;
+}
+
+.cov-title {
+  font-weight: 600;
+}
+
+.cov-matrix-wrap {
+  overflow-x: auto;
+}
+
+.cov-matrix {
+  border-collapse: collapse;
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.cov-matrix th,
+.cov-matrix td {
+  padding: 0.2rem 0.35rem;
+  border-bottom: 1px solid var(--border);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.cov-matrix .cov-need,
+.cov-matrix .cov-need-col {
+  text-align: left;
+  max-width: 16rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cov-matrix .cov-need .chip {
+  margin-left: 0.35rem;
+}
+
+.cov-seat {
+  vertical-align: bottom;
+}
+
+.cov-seat-no {
+  display: block;
+  font-weight: 600;
+}
+
+.cov-seat-name {
+  display: block;
+  max-width: 7rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 400;
+  color: var(--text-dim);
+}
+
+.cov-seat-mark {
+  display: block;
+  font-size: 0.7rem;
+  color: var(--accent);
+}
+
+.cov-unchecked,
+.cov-not-seated {
+  opacity: 0.45;
+}
+
+.cov-added {
+  outline: 1px dashed var(--accent);
+  outline-offset: -2px;
+}
+
+.cov-at-kstar {
+  border-right: 2px solid var(--accent);
+}
+
+.cov-critical .cov-need {
+  font-weight: 600;
+}
+
+.cov-total,
+.cov-total-col {
+  border-left: 1px solid var(--border);
+  font-weight: 600;
+}
+
+.cov-below {
+  color: var(--warn);
+}
+
+.cov-legend {
+  margin: 0;
+}
+
+.cov-add {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+}
+
+.cov-curve {
+  margin: 0;
+}
+
+.cov-curve svg {
+  width: 100%;
+  max-width: 22rem;
+  height: auto;
+}
+
+.cov-axis {
+  stroke: var(--border);
+}
+
+.cov-gain {
+  fill: color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+.cov-line {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+
+.cov-dot {
+  fill: var(--accent);
+}
+
+.cov-kstar,
+.cov-kcov {
+  stroke: var(--text);
+  stroke-width: 1.5;
+}
+
+.cov-kcov {
+  stroke-dasharray: 3 3;
+}
+
+.cov-tick {
+  fill: var(--text-dim);
+  font-size: 9px;
+  text-anchor: middle;
+}
+
+.cov-curve-table {
+  margin-top: 0.35rem;
+  border-collapse: collapse;
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.cov-curve-table th,
+.cov-curve-table td {
+  padding: 0.15rem 0.4rem;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+
+.cov-row-kstar td {
+  font-weight: 600;
+}
+
+.cov-flags {
+  margin: 0;
+  padding-left: 1.1rem;
+  font-size: 0.8rem;
+}
+
+.cov-flag-warn {
+  color: var(--warn);
+}
+
+.cov-exemplars {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr));
+  gap: 0.5rem 1rem;
+  font-size: 0.8rem;
+}
+
+.cov-exemplar-head {
+  font-weight: 600;
+}
+
+.cov-exemplar-list {
+  margin: 0.2rem 0 0;
+  padding-left: 1.1rem;
+}

@@ -1,9 +1,12 @@
 # Brain webapp — design specification
 
-The webapp is the user interface of the `brain` server. It has exactly two views plus a settings
-drawer. It is deliberately minimal: generous whitespace, one accent color, subtle hairline borders,
-no gradients, no shadows, no decorative icons. System font stack. Every color comes from a token so
-light and dark themes are complete, not approximate.
+The webapp is the real HTTP/SSE client of the `brain` server. Its persistent canvas shell has a
+compact navigation rail, a floating research library, a central research composer, and nested quick
+controls. A centered settings window remains available for configuration that needs a larger form.
+History and trash open beside the current workspace, without replacing it. On phones the rail moves
+to the bottom. Existing research stage deep links remain stable.
+The visual direction uses pale animated light, rounded surfaces, generous whitespace, and indigo
+accents. Light and dark appearances support a plain or custom background.
 
 **Nothing is set in capitals, anywhere.** Labels, section heads, column titles, badges and detail
 labels are sentence case: a small-caps run reads as shouting at every size this app uses, and the
@@ -11,43 +14,105 @@ tracking that has to accompany it makes lowercase text look loose when the trans
 Hierarchy comes from size, weight and colour only. (Nine rules carried `text-transform: uppercase`
 and were removed together; a DOM sweep asserts nothing renders transformed.)
 
-## Design tokens
+## Design tokens and extension points
 
-```
---bg          page background            light #fafafa   dark #121212
---surface     cards, drawers            light #ffffff   dark #1b1b1b
---border      hairlines                 light #e4e4e4   dark #2c2c2c
---border-1..3 nested panel strokes: each nesting level (stage > card > inner box > nested box)
-              steps 10% away from its parent's stroke so the hierarchy reads at a glance —
-              lighter per level in dark theme, darker per level in light theme.
---text        primary text              light #1a1a1a   dark #ececec
---text-dim    secondary text            light #6b6b6b   dark #9a9a9a
---accent      single accent             light #2f6fed   dark #6ea0ff
---ok          completed                 #2e9e6b
---warn        Build / suspended         #d99a2b
---bad         Interrupt / failed        #d5484d
-```
+`src/canvas.css` supplies shell tokens and aliases for existing research panels; feature CSS stays
+scoped to its owning surface. Colors use `--bg`, `--surface`, `--text`, `--text-dim`, and `--accent`.
+Interface surfaces and controls are borderless: use `--ui-field-bg`, `--ui-control-fill`, spacing,
+and `--ui-float-shadow` for separation. New features use these tokens rather than literal colors
+or global button rules. Icons and diagram connections keep their meaningful linework.
+`src/shell/navigation.ts` declares library rail controls; `src/shell/routes.ts` separates the main
+view from its optional library panel. Settings navigation and section membership
+are declared in `src/components/settings/catalog.ts`. `src/components/quick-controls/WorkspaceControls.tsx`
+binds those categories to quick actions; `QuickControls.tsx` handles menu presentation independently
+of settings transport. On/off controls share the pill-shaped `SettingsToggle`/`ToggleMark` components
+in `src/components/settings/`; do not introduce square checkboxes for settings.
 
-Theme: `data-theme="light|dark"` on `<html>`, default follows `prefers-color-scheme`, toggle
-persists to localStorage. Radius 8px. Spacing scale 4/8/12/16/24/32. Transitions 120ms opacity and
-color only.
+### Sizing and density
 
-## View 1 — Landing
+`src/sizing.css` is the shared sizing source for the shell, research library, composer, menus,
+and settings. Feature styles consume semantic custom properties, including portaled controls.
+Do not reduce the document's zoom or transform-scale a feature to change its density.
 
-An empty page. Nothing else competes with the chat box.
+| Role | Fine pointer | Coarse pointer |
+| --- | --- | --- |
+| Field and action control | 32px | 44px |
+| Compact icon control | 28px | 44px |
+| Inline clear control | 24px | 44px |
+| Category navigation | 36px | 44px |
+| Rail target | 40px | 44px |
+| Utility / navigation glyph | 16px / 18px | 16px / 18px |
+| Text entry | 13–14px | 16px |
+| Empty composer | 56px minimum | Content-driven with 44px controls |
 
-- Top right corner, fixed: theme toggle (sun/moon glyph) and a gear icon. Both are 32px ghost
-  buttons.
-- Vertically and horizontally centered: a chat box, max-width 640px. One multiline textarea.
-  The whole composer is exactly 264px at rest (1.5× the original 176px) and grows with input to
-  528px (3× the original) before the textarea scrolls; its text region is 182–446px. A paste
-  longer than the cap anchors the
-  VIEW to the first line while the caret stays after the last word — the start of the prompt is
-  always the thing on screen. Enter submits, Shift+Enter newlines. The footer strip (attach dial,
-  model chip, brain + environment status icons, send button) sits snug under the last text line
-  with a tiny 4px gap. Nothing else — no logo, no title, no marketing copy.
-- On submit: POST /api/jobs, clear the textarea immediately (the prompt stays free for the next
-  idea), and a job card appears under the chat box.
+These are CSS pixels; screenshot pixels vary with device scale and zoom. The spacing scale uses
+4/8/12/16/20/24/32px steps. Border compensation and optical centering may use intermediate values
+when needed to meet a control's outer height. Radii are 6/8/12/16px, with 20px reserved for the
+composer and larger surfaces. Icons have explicit width/height and never inherit text size.
+Visible glyph size is independent of the clickable target.
+
+Text fields retain their height when a clear button appears. Focus uses a distinct solid fill
+(`--ui-focus-fill` with `--ui-focus-text`) rather than a border, outline, or shadow ring. The composer
+and search field highlight their containing surface while the text input remains transparent;
+their inner buttons have their own focus fills. High-contrast mode uses system highlight colors.
+The composer responds to viewport width and content. Opening the floating library leaves its
+column width unchanged, so it never squeezes the text entry between tool controls.
+Multiline input, longer labels, and touch interaction can increase height rather than clip content.
+Existing technical displays keep their own measured row-height/virtualization contracts.
+
+The target decisions use [WCAG 2.2 minimum target guidance](https://www.w3.org/WAI/WCAG22/Understanding/target-size-minimum)
+and the [44px enhanced target guidance](https://www.w3.org/WAI/WCAG22/Understanding/target-size-enhanced)
+as references. This is a product sizing system, not a claim of whole-application WCAG conformance.
+
+Appearance is a versioned, validated local preference: system/light/dark theme, background, motion,
+and quality. The shared external store resolves system theme changes and migrates `brain-theme`.
+Background renderers are lazy modules with explicit mount/update/dispose lifecycles. See
+[backgrounds.md](../../../docs/backgrounds.md) for adding a custom animation, its budgets, and failure isolation.
+
+## Home and research library
+
+The home page centers a rounded composer with attachment, model, capability, and submit controls.
+It expands for multiline input and attachments; Enter submits and Shift+Enter adds a line.
+Readiness remains visible beneath it. Submission uses the real server, then opens the returned run.
+An unfinished composer remains mounted when opening a run, while its background polls and floating
+menus stop. Its per-tab session draft survives reloads when browser storage is available; validated
+attachments are rechecked before submission.
+
+Separate History and Trash rail icons open a floating library panel over the current composer or run.
+The panel starts with the search field, without a visible heading, duplicate section buttons, or close
+button; its accessible name remains available to screen readers. Search/counts
+stay pinned above an independently scrolling list. Each section retains its search and page while
+switching or collapsing. Opening or switching library sections preserves the main view's DOM,
+selections, draft, and position. Selecting a research item changes the main view and closes the panel.
+
+The panel is 336px wide, bounded by the available viewport on narrow screens. Its width cannot be
+resized and is not saved in browser storage. It remains non-modal at every viewport size, with no
+backdrop or change to the workspace's layout. Clicking outside, pressing Escape, choosing New
+research, or selecting a run dismisses it. Repeated rail clicks toggle the
+current section, while choosing the other library section switches the content without closing it.
+Nested action menus remain part of the panel for dismissal and focus handling. An outside click can
+both dismiss the panel and activate a workspace control; focus stays with that newly selected control.
+When focus remains inside the closing panel, it returns to the relevant rail trigger.
+
+The mounted panel preserves its list state through a 180ms transform/opacity transition; reduced
+motion disables that animation. Viewport changes adjust its bounds without replacing its content.
+Transient workspace menus close on main-view/stage navigation or when the library opens or switches
+sections. A panel-only closure leaves a workspace menu opened by the same click intact.
+
+The rail and Ctrl/Cmd+K open History. URLs encode both independent surfaces, for example
+`#/jobs/run-42/stage/review-members?panel=history`. Back/Forward restores both. Legacy `#/history`
+and `#/trash` links still work and preserve the currently open main view when followed in the app.
+
+Search matches titles, prompts, IDs, and statuses using a deferred query. Rendering is capped at
+50 rows per page. Full run records load when opened in the main workspace. Pause, resume, retry,
+redo, trace-download, and trash actions retain their server semantics; destructive actions require
+inline confirmation. Trash is searchable and read-only. Loading failures expose retry controls.
+A changing result count clamps the selected page safely.
+
+`src/features/library/WorkspaceOverview.tsx` owns one shared overview SSE connection and initial
+reads. Jobs, readiness, and connection state use independent subscriptions, so list updates do not
+rerender the composer or dashboard. Collapsed library consumers stop subscribing. The list and
+its action controls are lazy-loaded, with an error boundary separate from the main workspace.
 
 ### Environment status icons (next to the brain icon)
 
@@ -61,6 +126,34 @@ icon with the local runner, no LLM/internet icons with the offline provider. Cli
 opens a popover with the outcome, the technical detail (command, stderr), the fix advice — written
 by the configured LLM (thinking mode; max effort on the Agent SDK) when one is connected,
 otherwise a built-in hint — plus "Re-run check" and "Ask AI for help" actions.
+
+### GPU discovery and approval
+
+A GPU control sits immediately after the model connection icon. GPU setup is optional and does
+not hold ordinary research submissions. After a verified model credential becomes available,
+the server discovers the host and scheduler; mounting the browser control only reads its report.
+The icon shows discovery progress, pending approval, probe activity, readiness, or a failure.
+One shared poller reads the report every 1.5 seconds during discovery/probing and every 15 seconds
+otherwise, stopping when no GPU surface is mounted.
+
+The control opens a Base UI dialog with the discovered host architecture and Slurm catalog.
+Partition, account, QOS and GPU type are selections drawn from discovery. Account changes restrict
+QOS choices; reservation-only QOS requires a reservation. Resource counts, memory, time and nice
+use bounded fields. A multiline environment setup field supports module or conda activation.
+These edits remain a draft until the user saves them; the server then regenerates the exact probe
+script. Saving a changed draft disables the previous GPU configuration pending another probe.
+
+The reviewed script carries a revision and review token. Only the explicit **Approve and run
+probe** action submits it; discovery, opening the dialog, and saving a draft submit no GPU job.
+The probe is capped at two minutes and checks CUDA driver access and a GPU memory transfer without
+installing packages. It does not verify an application's framework dependencies. Success enables
+GPU execution for roles with the relevant capability. Queue status and logs remain visible;
+cancellation failures require retrying cleanup before editing or submitting again.
+
+Settings → Execution and the quick execution menu lead to this same dialog rather than directly
+editing an executable template. Stale approval is rejected, unsaved edits survive a close attempt,
+and the dialog returns focus to its trigger. API-mocked browser tests cover the approval boundary,
+resource selections, cancellation, stale drafts, and narrow-screen review.
 
 ### Provider onboarding overlay
 
@@ -89,34 +182,62 @@ automatically the moment the readiness report turns ready. The server enforces t
 (POST /api/jobs answers 409 with the readiness report while a required check is failed), so the
 gate holds even for API callers.
 
-### Job cards (under the chat box)
+### Research rows
 
-One rectangle per job, newest first, same 640px column. The list streams live from
-`GET /api/stream`. Each card, 64px tall:
+Rows show a two-line title, live status, and date. Selecting the title opens the research and
+closes the floating library. The selected run is highlighted with `aria-current`.
+A More menu groups actions according to run status. Stop and Move to trash use inline confirmation.
+Completed and cancelled records stay available; trashed records can be read from the Trash section.
+Download saves the server's trace zip using a native download link.
 
-- Left: two lines — topic (truncated, primary text) and a status line
-  ("processing input…", "review · member 2/5 · step 3/6 · round 2", "waiting for your panel
-  confirmation", "completed", "failed", "cancelled") in `--text-dim`, colored dot before it
-  matching status (accent pulse while running, `--warn` when suspended, `--ok`/`--bad` terminal).
-- Right: an X button. Clicking asks "Are you sure you want to cancel this job?" (inline
-  confirm/deny buttons replacing the X, not a browser alert). Confirm calls POST cancel.
-- The whole card (except the X) is clickable and navigates to `#/jobs/<jobId>`.
-- Completed/cancelled cards stay listed (history is loaded from the server on refresh).
-- An export control (download glyph, `GET /api/jobs/:id/trace.zip`) saves the run's whole
-  record as one zip — the checkpoint journal dealt into named stage/seat files, the full
-  thinking traces as prose, the event and search logs, and the readable final outputs —
-  packaged to fit the attachment rules (400 files, 25 MB per file), so a finished run can be
-  re-attached to a new run and traced by its board. An anchor with `download`, not a handler;
-  hidden while the run is queued with nothing recorded yet.
+## Quick controls and settings
 
-## Settings drawer (gear icon)
+The Settings rail menu opens the seven categories as submenus, without opening the full settings
+window. Toggles change on/off values in place and keep the menu open; exclusive choices show a
+selected dot. Rows show pending or failed saves beside the affected control. Unavailable controls
+explain their prerequisite, and unconfigured services offer setup instead of claiming to be enabled.
 
-A right-side drawer, 420px, `--surface`, hairline left border. It slides in, and out again on
-Escape, on a backdrop click, or on the close button; sections fold with an animated height (a
-grid row travelling 0fr→1fr, since a native `<details>` cannot animate) and every animation is
-dropped under `prefers-reduced-motion`.
+Desktop menus use Base UI nesting and collision handling. On narrow or coarse-pointer screens,
+each tier replaces the contents of one floating menu, with a sticky Back control. Escape returns
+one tier at a time; clicking outside dismisses the menu and lets the selected workspace control
+receive focus. The main workspace and its draft remain in place. Menu dimensions and touch targets
+come from `src/sizing.css`, with scrolling for long tiers and reduced-motion support.
 
-**Each section saves itself.** There is no drawer-wide Save button: a select or checkbox saves the
+The category describes its common scope once. Most server choices establish defaults for new
+research; the approval countdown explicitly affects active runs immediately, and recovery controls
+apply to existing interrupted or credit-blocked runs. Appearance is a browser preference. Composer
+capability switches apply to that submission, while model-by-task choices save defaults for new runs.
+
+Actions ending in an ellipsis open an editor. Models, task limits, paid-search limits, contact email,
+recovery buffer, and version details use compact anchored editors loaded on demand.
+These editors use Apply/Cancel for editable values. Closing a pending editor cancels its opening,
+so a delayed module cannot reopen over later work. An editor boundary contains loading/rendering
+failures in a dismissible popover with an explicit Settings fallback; an optional chunk failure
+does not reload the app. Connection credentials, multiline execution
+scripts, and recovery parser configuration open the relevant Settings form; All settings remains
+an optional overview.
+
+`settings-commands.ts` defines validated field operations. `settings-store.ts` shares confirmed
+settings, pending changes, and per-control errors rather than maintaining separate state per menu.
+Quick changes build their patch against fresh settings after earlier writes complete in the shared
+API queue, preserving sibling fields and tool lists. Failed writes restore confirmed state and keep
+an actionable error; closing a menu does not cancel a write already sent. Model-routing saves use
+the same browser queue, and both server settings endpoints share server write ordering.
+
+### Settings window
+
+Base UI handles the menu and modal interaction: keyboard navigation, focus containment, dismissal,
+and focus return. The desktop settings window is 1120×620 px, capped by viewport size. It has a
+category rail, an independently scrolling form area, and a persistent footer. On narrow screens,
+categories scroll horizontally and fields become a single column. Short landscape viewports retain
+scrollable content and reachable close controls.
+
+Categories are Models & connections, Research, Tools & sources, Execution, Recovery, App updates,
+and Appearance. Only active sections mount; their editable values stay at dialog scope so switching
+categories retains drafts. Closing waits for pending saves and shows a choice if values failed to
+save or credentials remain unsaved. It never silently discards those drafts.
+
+**Each section saves itself.** There is no drawer-wide Save button: a select or toggle saves the
 moment it changes, a typed value saves shortly after the last keystroke, and a template textarea
 saves when focus leaves it (an intermediate keystroke would fail the tag check on every character).
 Each section shows its own outcome next to its title — a spinning ring while the save is away, a
@@ -152,14 +273,17 @@ Sections:
    Saving makes a small live request through the selected backend first; invalid credentials/model
    leave the previous settings and secrets untouched. Secrets are write-only — the browser receives
    only `apiKeyConfigured` / `setupTokenConfigured`, never their values.
-3. **Panel confirmation** — radio: `Ask me on the dashboard` (default) / `Approve automatically`,
-   plus **If I do not answer**: `Continue on my behalf after a short countdown` (default on). Both
+3. **Panel confirmation** — `Ask me before approval` switch (default on): on stores manual
+   confirmation; off stores automatic approval for new research. The same direct switch appears
+   in the Research quick menu and full Settings, with no extra submenu. It remains changeable
+   when the separate `Continue after countdown` switch (default on) is off. Both
    gates — the reading of the submission and the panel — count down about 30s and then proceed with
    what the pipeline proposed, so an unattended run never stalls. Switching it off makes every gate
    wait indefinitely, **applies immediately to runs already in progress** (including one that has
    passed the first gate and not yet reached the second), and stops any countdown already on
-   screen. While it is off it also overrides `Approve automatically`, and the card says so rather
-   than disabling the choice.
+   screen. While it is off it also overrides automatic approval for new research; the control
+   explains that automatic approval is paused. Changing the preference never switches the live
+   countdown on implicitly. It cannot restore gates already skipped by an automatic worker.
 4. **Review rounds** — select: `Bundle default` (follows the published workflow) or 1–10. The
    budget one chain step may take during review: the first review plus up to N−1 revisions.
    Applies to every NEW run — the value is snapshotted into the job at submit, so resumes replay
@@ -168,10 +292,11 @@ Sections:
 5. **Credit recovery** — auto-resume toggle (default on), safety-buffer seconds, OpenRouter parser
    model (`openrouter/free`), and optional write-only OpenRouter API key. Known reset messages are
    parsed locally; the free router is used only for unknown formats.
-6. **Web search** — the host-owned web layer's providers. Every agent's web search runs through
-   the app's OWN unified pipeline (one manager: routing by query kind, parallel dispatch under
-   caps, failover, optional cross-run keyword cache, and a verbatim per-call log) — a model
-   provider's built-in search is never offered, on any backend. The section holds: the general
+6. **Web search** — choose app-managed or agent-native search. App-managed search uses one
+   pipeline for routing by query kind, parallel dispatch under caps, failover, optional cross-run
+   keyword caching, and a verbatim per-call log. Agent-native mode delegates search to the model
+   backend; the host-provider/index/cache controls and app search log do not apply. The section
+   holds the mode choice and, for app-managed search, the general
    provider select (`None (scholarly indexes only)` default / `SearXNG — launched by the app on
    this machine` / Tavily / Brave / `SearXNG (your own instance)`), the selected provider's
    write-only API key with its own Save button (verified with one real one-result search before
@@ -219,11 +344,11 @@ A horizontal SVG graph, full width, ~120px tall, nine nodes joined by 1px connec
 
 Process → Decompose → Panel → Confirm → First pass → Review → Audit → Proposal → Done
 
-- Node: rounded rect, 96×44, label under it. Fill `--surface`, border `--border`.
-- Status ring: pending = dim border; active = accent border + an implicit dark-grey pulse
+- Node: borderless rounded rect, 96×44, label under it. Fill `--surface`.
+- Status: pending = muted fill; active = accent-tinted fill + an implicit dark-grey pulse
   (#565656 at low opacity, both themes — the blink hints at activity without a signal color);
   suspended =
-  `--warn` border; completed = `--ok` check glyph top-right; failed = `--bad`.
+  `--warn`-tinted fill; completed = `--ok` check glyph top-right; failed = `--bad`.
 - The Review node is wider (140px) and shows a live sub-line while active:
   "m 2/5 · s 3/6 · r 2" from the cursor.
 - Clicking a node scrolls to / selects that stage's panel below. The active stage is selected by
@@ -277,7 +402,7 @@ frame shorter than what is displayed. A backlog past ~1200 characters — a tab 
 window, where animation frames stop — is skipped to within the bound rather than typed out after the
 model has moved on.
 
-It is **not** the chain of thought and is styled so it cannot be mistaken for one — dashed border,
+It is **not** the chain of thought and is styled so it cannot be mistaken for one — a muted surface,
 dim monospace, sentence-case labels (nothing shouted), and a header that says "live, replaced by the
 result". The moment the task's real
 output exists the thread is DELETED and the output takes its place: the first-pass card switches to
@@ -399,13 +524,13 @@ rewritten.
   seconds from first observing the suspension (restart-safe, works with the browser closed) and
   then approves the panel as seated. While pending, the card's top shows a thin `--warn`
   progress bar filling toward the deadline ("auto-approves in Ns — click anywhere to pause")
-  with a small pause button. ANY click inside the card — a checkbox, the pause control, the
+  with a small pause button. ANY click inside the card — a seat toggle, the pause control, the
   builder — permanently holds the countdown (POST /api/jobs/:id/gate-hold); the bar is replaced
   by "auto-approve paused — take your time".
-- *Custom seats:* next to the suggested seat cards sits one dashed ghost card — empty
-  placeholders for **Department** and **Field**, plus a dashed rectangle with a + at its middle
+- *Custom seats:* next to the suggested seat cards sits one softly filled card — empty
+  placeholders for **Department** and **Field**, plus a filled control with a + at its middle
   that adds subfield inputs (at least 1, at most 3). "Add seat" materializes it as an
-  accent-bordered custom card (removable) and the primary button gains "+ N custom". The answer
+  accent-tinted custom card (removable) and the primary button gains "+ N custom". The answer
   carries them as `addedMembers`; the runtime assigns ids (`member-user-N`), appends them to the
   panel (kept + added must stay within 2–12 seats), and they flow through first pass, review,
   audit, and synthesis like any selected seat.
@@ -457,7 +582,7 @@ Shared tabs on every card:
 - Chain: numbered steps 1..N, each one paragraph; the numbers become the anchor the review stage
   refers back to. What a "step" is follows the shape (reasoning step, proof step,
   evidence-gathering step, …).
-- Novelty: single callout paragraph, accent left border. Present only for the shapes positioned
+- Novelty: single callout paragraph on an accent-tinted surface. Present only for the shapes positioned
   against a literature map (`paper`, `resolution`, `survey`); the tab is hidden otherwise.
 - Papers: the literature table (title, year, venue, one-line relation; title links out when a URL
   exists). Tab hidden when the member returned no literature.
@@ -568,7 +693,7 @@ activity feed, fold), and the *walk inspector* sits below in its own panel.
   deck for no decision it helped anyone make.
 - **Every version card carries a grey brain icon beside its copy icon** when the run recorded the
   thinking behind that version. Hovering it (or focusing) opens a scrollable window — dressed like
-  the live thread (dashed border, dim mono), never like an artifact — holding the recorded
+  the live thread (muted surface, dim mono), never like an artifact — holding the recorded
   per-step slice of the author's native-thinking stream: the SAME words the panel streamed live
   while that version was being written, kept now as the task's captured trace. The "Original
   thought" card shows the first-pass slice; a round's own card shows the redeveloper's slice for
@@ -722,7 +847,7 @@ prose.
 
 ### Failure & cancellation
 
-A failed stage shows the error string in a `--bad` bordered box inside its panel; downstream
+A failed stage shows the error string in a `--bad`-tinted box inside its panel; downstream
 stages stay pending. A failed job additionally shows a "Failed" banner with a **Retry from
 checkpoint** button (`POST /api/jobs/:id/retry`): task failures are never journaled, so the
 retry resubmits the same deterministic resume command, replays the completed work, and re-runs
@@ -771,9 +896,36 @@ The rules that keep the transition smooth:
 
 The dashboard subscribes to `GET /api/jobs/:id/stream` (SSE, full `JobDetail` snapshots,
 throttled server-side). Reconnect with backoff; while disconnected show a thin `--warn` line
-"reconnecting…" under the header. The landing page subscribes to `/api/stream` the same way.
+"reconnecting…" under the header. The shared workspace overview subscribes to `/api/stream` while the home or History is visible.
 
 ## Non-goals (v1)
 
-No auth, no multi-user, no editing artifacts from the UI, no mobile-specific layouts beyond the
-grid collapsing to one column.
+No auth, no multi-user, and no editing generated artifacts from the UI.
+
+## Performance boundaries and validation
+
+The shell lazy-loads the research library, run dashboard, full settings, compact quick editors,
+file browser, and background renderers. Quick settings load when the rail menu opens; model options
+and registry details load only when their editor needs them. Decoration pauses while a research dashboard is open. Hover prefetch is deduplicated and limited to two requests. Retained detail
+snapshots have an LRU limit of six entries, five minutes, and 16 MiB of decoded response-text weight
+(the budget is a proxy, not a measurement of JavaScript heap size). Oversized active jobs still work
+but are not retained in that cache.
+
+SSE frames are delivered in bounded batches with up to 50 ms added latency. Full snapshots may
+supersede earlier ones; ordered live text append/reset/end events are preserved. Settings writes
+from all editors share one ordered queue; concurrent reads share transport and retry if a write
+supersedes their response. Failed writes do not block later edits.
+
+These controls bound frontend rendering and retained detail data. The current server still sends
+all history summaries and full active-job snapshots; very large archives can require server-side
+pagination, indexing, and smaller snapshot contracts. This change does not claim unlimited data
+capacity or measured end-to-end latency at production scale.
+
+`npm run test -w brainstorm-agentic-web` covers build and pure behavior. Browser regressions run
+with `npm run test:e2e -w brainstorm-agentic-web`: API writes are mocked, so tests cannot start
+real research, alter credentials, or submit SLURM jobs. Browser coverage includes landscape/portrait
+layouts, nested quick menus, pill toggles, compact editor focus/dismissal, settings save and close
+behavior, submission contracts, bounded history rendering,
+background lifecycle, floating-panel dismissal and keyboard access, narrow-screen bounds, and exact
+main-view/draft preservation across library navigation. Large-list tests use 10,000 mocked summaries
+and verify bounded DOM rendering without bulk detail requests.

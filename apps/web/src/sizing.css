@@ -1,0 +1,49 @@
+/* Shared interface dimensions. Visual glyphs and interactive targets are separate.
+   Adopt these tokens in feature styles; do not scale the document or research output. */
+:root {
+  --ui-space-1: 4px;
+  --ui-space-2: 8px;
+  --ui-space-3: 12px;
+  --ui-space-4: 16px;
+  --ui-space-5: 20px;
+  --ui-space-6: 24px;
+  --ui-space-8: 32px;
+
+  --ui-font-xs: .6875rem;
+  --ui-font-caption: .75rem;
+  --ui-font-control: .8125rem;
+  --ui-font-body: .875rem;
+  --ui-font-input: .875rem;
+  --ui-font-input-touch: 1rem;
+
+  --ui-icon-sm: 14px;
+  --ui-icon-md: 16px;
+  --ui-icon-lg: 18px;
+  --ui-icon-brand: 24px;
+  --ui-icon-stroke: 1.75;
+  --ui-control-height: 32px;
+  --ui-nav-height: 36px;
+  --ui-compact-target: 28px;
+  --ui-inline-target: 24px;
+  --ui-rail-target: 40px;
+  --ui-touch-target: 44px;
+  --ui-composer-height: 56px;
+
+  --ui-radius-sm: 6px;
+  --ui-radius-md: 8px;
+  --ui-radius-lg: 12px;
+  --ui-radius-xl: 16px;
+  --ui-radius-composer: 20px;
+  /* Focus uses the theme's --ui-focus-fill / --ui-focus-text, not an outline. */
+}
+
+/* Increase the target, not the glyph. Every portaled surface inherits these too. */
+@media (pointer: coarse) {
+  :root {
+    --ui-control-height: var(--ui-touch-target);
+    --ui-nav-height: var(--ui-touch-target);
+    --ui-compact-target: var(--ui-touch-target);
+    --ui-inline-target: var(--ui-touch-target);
+    --ui-rail-target: var(--ui-touch-target);
+  }
+}

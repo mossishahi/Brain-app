@@ -30,6 +30,14 @@ export const WEB_SEARCH_KINDS: readonly WebSearchKind[] = [
   "news",
 ];
 
+/**
+ * How the run's search coordinator schedules one call: the ROUTE picks the
+ * provider list that answers it. "web" and "news" come from web_search and
+ * news_search; the paper routes from paper_search (a known paper by its
+ * title, or papers about a topic) and paper_details (lookup by identifier).
+ */
+export type WebSearchRoute = "web" | "news" | "paper-lookup" | "paper-topic" | "paper-details";
+
 export interface WebSearchQuery {
   /** The query text, verbatim from the model. */
   readonly query: string;
@@ -41,6 +49,23 @@ export interface WebSearchQuery {
   readonly recency?: "day" | "week" | "month" | "year";
   /** Restrict results to these registrable domains, where supported. */
   readonly domains?: readonly string[];
+  /** 1-based results page, where the provider pages. */
+  readonly page?: number;
+  /**
+   * Inclusive publication window, YYYY-MM-DD. Exact where the provider
+   * filters by date; otherwise the nearest recency window is used and dated
+   * results outside the window are dropped.
+   */
+  readonly dateFrom?: string;
+  readonly dateTo?: string;
+  /** Drop results from these registrable domains. */
+  readonly excludeDomains?: readonly string[];
+  /** Content language, ISO 639-1 (e.g. "en"). */
+  readonly language?: string;
+  /** Country for regional ranking, ISO 3166-1 alpha-2 (e.g. "DE"). */
+  readonly country?: string;
+  /** Restrict results to one file type (e.g. "pdf"). */
+  readonly fileType?: string;
 }
 
 /** One search result, normalized across every provider. */
@@ -54,6 +79,8 @@ export interface WebSearchHit {
   readonly source: string;
   /** Provider-reported relevance, when one exists. Never invented. */
   readonly score?: number;
+  /** Metasearch only: the engines that returned this hit. */
+  readonly engines?: readonly string[];
   /** Scholarly enrichment, when the provider carries it. */
   readonly doi?: string;
   readonly authors?: readonly string[];
@@ -89,6 +116,203 @@ export interface WebSearchAnswer {
    * from fewer sources — and therefore the log, verbatim.
    */
   readonly engineFailures?: readonly WebSearchEngineFailure[];
+  /** The coordinator's route for this call. */
+  readonly route?: WebSearchRoute;
+  /** What the coordinator could not honour exactly, in plain words. */
+  readonly notes?: readonly string[];
+}
+
+/* ------------------------------------------------------------------------ */
+/* Papers: search, details, availability                                     */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * Scholarly indexes a search can name; "web" is the general web search.
+ * "europepmc", "core" and "opencitations" serve the host's own literature
+ * retrieval (the agents' paper_search tool does not offer them).
+ */
+export type PaperSource =
+  | "arxiv"
+  | "openalex"
+  | "crossref"
+  | "semantic-scholar"
+  | "web"
+  | "europepmc"
+  | "core"
+  | "opencitations";
+
+export const PAPER_SOURCES: readonly PaperSource[] = [
+  "arxiv",
+  "openalex",
+  "crossref",
+  "semantic-scholar",
+  "web",
+  "europepmc",
+  "core",
+  "opencitations",
+];
+
+export type PaperSort = "relevance" | "newest" | "oldest" | "most-cited";
+
+export const PAPER_SORTS: readonly PaperSort[] = ["relevance", "newest", "oldest", "most-cited"];
+
+/** A provider-neutral publication type; each index maps it to its own vocabulary. */
+export type PaperType =
+  | "journal-article"
+  | "conference-paper"
+  | "preprint"
+  | "review"
+  | "book"
+  | "book-chapter"
+  | "dataset"
+  | "thesis";
+
+export const PAPER_TYPES: readonly PaperType[] = [
+  "journal-article",
+  "conference-paper",
+  "preprint",
+  "review",
+  "book",
+  "book-chapter",
+  "dataset",
+  "thesis",
+];
+
+export interface PaperSearchQuery {
+  /** Topic, method, question, or a paper's title — verbatim from the model. */
+  readonly query: string;
+  /** "lookup": one known paper by its title; "topic": papers about something. */
+  readonly mode?: "auto" | "topic" | "lookup";
+  /** Words or quoted phrases that must all appear in the title. */
+  readonly titleContains?: readonly string[];
+  /** Words or quoted phrases that must all appear in the abstract. */
+  readonly abstractContains?: readonly string[];
+  readonly authors?: readonly string[];
+  /** Inclusive publication window, YYYY-MM-DD. */
+  readonly dateFrom?: string;
+  readonly dateTo?: string;
+  /** Search only these indexes; several are searched together and merged. */
+  readonly sources?: readonly PaperSource[];
+  /** arXiv subject classes, e.g. "cs.LG" (arXiv only). */
+  readonly arxivCategories?: readonly string[];
+  /** Semantic Scholar fields of study, e.g. "Computer Science". */
+  readonly fieldsOfStudy?: readonly string[];
+  readonly venues?: readonly string[];
+  readonly types?: readonly PaperType[];
+  readonly openAccessOnly?: boolean;
+  readonly minCitations?: number;
+  readonly sort?: PaperSort;
+  readonly maxResults?: number;
+  readonly page?: number;
+  /** A query in one index's own syntax, passed through unchanged. */
+  readonly native?: { readonly source: Exclude<PaperSource, "web">; readonly query: string };
+}
+
+/** One paper, normalized across indexes: only what the index reported. */
+export interface PaperRecord {
+  readonly title: string;
+  readonly url: string;
+  readonly authors?: readonly string[];
+  readonly year?: number;
+  /** Publication (or first-submission) date, ISO. */
+  readonly date?: string;
+  readonly venue?: string;
+  readonly doi?: string;
+  readonly arxivId?: string;
+  readonly pmid?: string;
+  readonly pmcid?: string;
+  readonly semanticScholarId?: string;
+  readonly openAlexId?: string;
+  /** CORE work id (core.ac.uk). */
+  readonly coreId?: string;
+  readonly pdfUrl?: string;
+  readonly openAccess?: boolean;
+  readonly citations?: number;
+  /** The index's own type label, verbatim. */
+  readonly type?: string;
+  readonly categories?: readonly string[];
+  /** The abstract (possibly shortened); for a web hit, its snippet. */
+  readonly abstract?: string;
+  /** The index (or web provider) that produced this record. */
+  readonly source: string;
+}
+
+export interface PaperSearchAnswer {
+  readonly query: string;
+  readonly mode: "topic" | "lookup";
+  readonly route: WebSearchRoute;
+  /** The index(es) whose records are listed, in the order they answered. */
+  readonly providers: readonly string[];
+  readonly papers: readonly PaperRecord[];
+  readonly total?: number;
+  readonly cached?: boolean;
+  /** Per index: the requested options it applied. */
+  readonly applied?: Readonly<Record<string, readonly string[]>>;
+  /** Requested options no answering index could apply, with the reason. */
+  readonly notApplied?: readonly string[];
+  readonly notes?: readonly string[];
+  readonly engineFailures?: readonly WebSearchEngineFailure[];
+}
+
+export type PaperDetailPart = "abstract" | "references" | "citations" | "related";
+
+export const PAPER_DETAIL_PARTS: readonly PaperDetailPart[] = [
+  "abstract",
+  "references",
+  "citations",
+  "related",
+];
+
+export interface PaperDetailsQuery {
+  /** DOIs, arXiv IDs, PMID:/PMCID:, Semantic Scholar or OpenAlex IDs, or doi.org/arxiv.org URLs. */
+  readonly ids: readonly string[];
+  readonly include?: readonly PaperDetailPart[];
+  /** Ceiling per list (references, citations, related). */
+  readonly limit?: number;
+  /**
+   * Resolve through exactly these indexes, in this order (the host's own
+   * literature retrieval). Absent: the deployment's paper-details route.
+   */
+  readonly sources?: readonly Exclude<PaperSource, "web">[];
+}
+
+export interface PaperDetailsEntry extends PaperRecord {
+  /** The identifier exactly as the model gave it. */
+  readonly requested: string;
+  readonly references?: readonly PaperRecord[];
+  readonly citedBy?: readonly PaperRecord[];
+  readonly related?: readonly PaperRecord[];
+}
+
+export interface PaperDetailsAnswer {
+  readonly papers: readonly PaperDetailsEntry[];
+  /** Requested identifiers no index could resolve. */
+  readonly notFound: readonly string[];
+  readonly providers: readonly string[];
+  readonly cached?: boolean;
+  readonly notes?: readonly string[];
+}
+
+/** What the launch check (or live traffic) concluded about one source. */
+export type WebSourceState =
+  | "available"
+  | "degraded"
+  | "blocked"
+  | "unreachable"
+  | "needs-key"
+  | "not-configured"
+  | "unchecked";
+
+export interface WebSourceStatus {
+  readonly id: string;
+  readonly state: WebSourceState;
+  readonly detail?: string;
+  /** Epoch ms of the last check. */
+  readonly checkedAt?: number;
+  /** Epoch ms until which a blocked source stays in cool-down. */
+  readonly until?: number;
+  /** For a metasearch provider: the state of each engine. */
+  readonly engines?: readonly WebSourceStatus[];
 }
 
 export interface WebFetchQuery {
@@ -138,7 +362,13 @@ export interface WebAccessLogRecord {
   readonly id: string;
   /** Epoch ms when the call entered the manager. */
   readonly at: number;
-  readonly tool: "web_search" | "web_fetch";
+  readonly tool:
+    | "web_search"
+    | "news_search"
+    | "paper_search"
+    | "paper_details"
+    | "web_fetch"
+    | "web_check";
   /**
    * How the call was answered:
    * - "ok"        — a provider answered;
@@ -161,6 +391,17 @@ export interface WebAccessLogRecord {
   readonly coalescedWith?: string;
   /** The manager's cache key for this call, for cross-run correlation. */
   readonly cacheKey?: string;
+  /** The coordinator's route for a search call. */
+  readonly route?: WebSearchRoute;
+  /** Metasearch calls: the engines the coordinator asked. */
+  readonly engines?: readonly string[];
+  /**
+   * True when the answering provider's terms forbid keeping its results:
+   * `response` then holds only the result count and one SHA-256 per URL.
+   */
+  readonly redacted?: boolean;
+  /** Metered cost of this call in USD (paid providers only). */
+  readonly costUsd?: number;
   /** Attribution, when the caller supplied one. */
   readonly taskId?: string;
   readonly agentId?: string;
@@ -184,4 +425,12 @@ export interface WebAccess {
    * provider — outbound HTTP is its own backing.
    */
   backedKinds(): readonly WebSearchKind[];
+  /** Papers by title or topic, over the scholarly indexes (and the web). */
+  searchPapers?(query: PaperSearchQuery, context?: WebAccessCallContext): Promise<PaperSearchAnswer>;
+  /** Metadata, and optionally references, citations and related papers, by identifier. */
+  paperDetails?(query: PaperDetailsQuery, context?: WebAccessCallContext): Promise<PaperDetailsAnswer>;
+  /** The current availability of every configured source, for tools and readiness. */
+  status?(): readonly WebSourceStatus[];
+  /** Whether a scholarly index backs paper_search and paper_details. */
+  backsPapers?(): boolean;
 }

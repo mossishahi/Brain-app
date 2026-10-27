@@ -8,6 +8,7 @@ import {
   thoughtsFileUrl,
 } from "../api";
 import { BrainIcon } from "./Icons";
+import { ToggleMark } from "./settings/SettingsToggle";
 import { revealStep } from "./live-threads";
 import type { CSSProperties, ReactNode } from "react";
 import type {
@@ -222,6 +223,24 @@ function CapabilityGlyph({
           <circle cx="8" cy="2.6" r="1.3" />
           <circle cx="3.5" cy="11" r="1.6" />
           <circle cx="12.5" cy="11" r="1.6" />
+        </svg>
+      );
+    case "notes-access":
+      // A notebook page with a magnifier: the thinker's notes, searched.
+      return (
+        <svg {...common}>
+          <path d="M3.2 1.8h7.2a.8.8 0 0 1 .8.8v4.2M3.2 1.8a.8.8 0 0 0-.8.8v10.8a.8.8 0 0 0 .8.8h4.6M5 5h4.2M5 7.6h3" />
+          <circle cx="11" cy="10.6" r="2.4" />
+          <path d="m12.8 12.4 1.8 1.8" />
+        </svg>
+      );
+    case "fact-table":
+      // A seal with a check and two ribbons: a fact's justification badge.
+      return (
+        <svg {...common}>
+          <circle cx="8" cy="6.4" r="4.4" />
+          <path d="m6.1 6.5 1.3 1.3 2.6-2.7" />
+          <path d="M5.4 10 4.6 14.2 8 12.6l3.4 1.6-.8-4.2" />
         </svg>
       );
   }
@@ -1060,37 +1079,36 @@ export function SeatCard({
 }) {
   const body = (
     <>
-      <div className="seat-head">
+      <span className="seat-head">
         <span className="seat-no">Seat {seat}</span>
         {removed && <span className="chip chip-dim">removed at confirmation</span>}
         {member.dismissed && <span className="chip chip-dim">dismissed</span>}
-        {checkbox && (
-          <input
-            type="checkbox"
-            checked={checkbox.checked}
-            onChange={checkbox.onToggle}
-            aria-label={`keep seat ${seat} (${member.umbrella})`}
-          />
-        )}
-      </div>
+        {checkbox && <ToggleMark checked={checkbox.checked} />}
+      </span>
       <span className="seat-dept">{member.department}</span>
       <span className="seat-umbrella">{member.umbrella}</span>
       {member.subfields.length > 0 && (
-        <div className="tag-row">
+        <span className="tag-row">
           {member.subfields.map((s) => (
             <span key={s} className="tag">
               {s}
             </span>
           ))}
-        </div>
+        </span>
       )}
     </>
   );
   if (checkbox) {
     return (
-      <label className={`seat-card seat-selectable${checkbox.checked ? "" : " seat-unchecked"}`}>
+      <button
+        type="button"
+        className={`seat-card seat-selectable settings-selection-card${checkbox.checked ? "" : " seat-unchecked"}`}
+        aria-label={`keep seat ${seat} (${member.umbrella})`}
+        aria-pressed={checkbox.checked}
+        onClick={checkbox.onToggle}
+      >
         {body}
-      </label>
+      </button>
     );
   }
   // Dismissal and gate-removal read the same way at a glance (a seat that is no

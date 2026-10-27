@@ -3,6 +3,8 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -16,9 +18,11 @@ import type {
   AgentTask,
   PromptRecord,
 } from "@brainstorm-agentic/core";
+import type { GpuRunConfig } from "@brainstorm-agentic/host-tools";
 
 import {
   ClaudeAgentExecutor,
+  normalizeClaudeSetupToken,
   salvageJsonText,
   validateClaudeSetupToken,
   type ClaudeAgentQueryFn,
@@ -505,6 +509,54 @@ test("attachment-capable tasks get the deterministic attachment MCP tools", asyn
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("GPU MCP calls preserve task ownership, the durable budget and caller cancellation", async () => {
+  const root = mkdtempSync(join(tmpdir(), "claude-gpu-context-"));
+  try {
+    const commands: string[] = [];
+    let clock = 0;
+    const ok = (stdout = "") => ({ stdout, stderr: "", exitCode: 0, durationMs: 1, timedOut: false, truncated: false });
+    const gpuRun: GpuRunConfig = {
+      template: "#!/bin/bash\n{{AGENT_COMMAND}}\n", timeLimitMinutes: 1, jobsRoot: root,
+      pollIntervalMs: 1, queuedPollIntervalMs: 0, runningPollIntervalMs: 0, queueGoneGraceMs: 0,
+      now: () => ++clock, sleep: async () => {},
+      runCommand: async (command) => {
+        commands.push(command);
+        return ok(command === "sbatch" ? "123\n" : command === "sacct" ? "123|COMPLETED|0:0\n" : "");
+      },
+    };
+    const task: AgentTask = { ...structuredTask, taskId: "gpu-owner", allowedCapabilities: ["gpu-execution"] };
+    const errors: boolean[] = [];
+    const queryFn: ClaudeAgentQueryFn = (input) => ({
+      async *[Symbol.asyncIterator]() {
+        const servers = input.options.mcpServers as Record<string, { instance: { _registeredTools: Record<string, { handler: (args: unknown, extra: unknown) => Promise<{ isError?: boolean }> }> } }>;
+        for (let i = 0; i < 3; i += 1) errors.push((await servers.gpu!.instance._registeredTools.gpu_run!.handler({ script: "true" }, {})).isError === true);
+        for await (const message of successQuery([])(input)) yield message;
+      },
+    });
+    await new ClaudeAgentExecutor({ token: "test-token", gpuRun, queryFn }).execute(task, { runId: "actual-run", nodePath: "root/brain" });
+    assert.deepEqual(errors, [false, false, true]);
+    assert.equal(commands.filter((command) => command === "sbatch").length, 2);
+    const records = readdirSync(root).filter((name) => name.startsWith("job-")).map((name) => JSON.parse(readFileSync(join(root, name, "job-state.json"), "utf8")));
+    assert.ok(records.every((record) => record.runId === "actual-run" && record.taskId === "gpu-owner"));
+
+    const controller = new AbortController();
+    let passedSignal: AbortSignal | undefined;
+    const aborting: GpuRunConfig = { ...gpuRun,
+      sleep: async () => { controller.abort(); const error = new Error("abort while queued"); error.name = "AbortError"; throw error; },
+      runCommand: async (command, _args, options) => {
+        commands.push(command);
+        if (command === "sbatch") passedSignal = options.signal;
+        return ok(command === "sbatch" ? "124\n" : command === "squeue" ? "RUNNING\n" : "");
+      },
+    };
+    await assert.rejects(new ClaudeAgentExecutor({ token: "test-token", gpuRun: aborting, queryFn }).execute(
+      { ...task, taskId: "cancel-owner" }, { runId: "actual-run", nodePath: "root/brain", signal: controller.signal },
+    ), { name: "AbortError" });
+    assert.equal(passedSignal?.aborted, true);
+    assert.ok(commands.includes("scancel"));
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("gpu-capable tasks get the gpu_run MCP tool; tasks and deployments without it do not", async () => {
@@ -1249,11 +1301,115 @@ test("setup-token validation performs a real-shaped one-turn query", async () =>
     queryFn: successQuery(captured, "OK"),
   });
   assert.equal(captured[0]!.options.maxTurns, 1);
+  assert.equal(captured[0]!.options.effort, "low");
+  assert.deepEqual(captured[0]!.options.thinking, { type: "disabled" });
+  assert.deepEqual(captured[0]!.options.tools, []);
+  assert.deepEqual(captured[0]!.options.allowedTools, []);
+  assert.equal(captured[0]!.options.mcpServers, undefined);
   assert.equal(
     (captured[0]!.options.env as Record<string, string>)
       .CLAUDE_CODE_OAUTH_TOKEN,
     "setup-token-secret",
   );
+});
+
+test("setup tokens copied across terminal lines are normalized for validation and execution", async () => {
+  const wrapped = " \t sk-ant-oat01-synthetic\r\n\u00a0-token\n-value \u00a0";
+  const normalized = "sk-ant-oat01-synthetic-token-value";
+  assert.equal(normalizeClaudeSetupToken(wrapped), normalized);
+  const captured: ClaudeAgentQueryInput[] = [];
+  await validateClaudeSetupToken({ token: wrapped, queryFn: successQuery(captured, "OK") });
+  const executor = new ClaudeAgentExecutor({ token: wrapped, queryFn: successQuery(captured) });
+  const result = await executor.execute(structuredTask, { runId: "wrapped-token", nodePath: "root" });
+  assert.equal(result.status, "ok");
+  for (const input of captured) {
+    assert.equal((input.options.env as NodeJS.ProcessEnv).CLAUDE_CODE_OAUTH_TOKEN, normalized);
+  }
+  assert.throws(() => new ClaudeAgentExecutor({ token: "\r\n\u00a0 " }), /must not be empty/);
+});
+
+test("setup-token validation times out even when the SDK iterator and cleanup never settle", async () => {
+  let captured: ClaudeAgentQueryInput | undefined;
+  let interrupted = false;
+  let returned = false;
+  let release!: (result: IteratorResult<unknown>) => void;
+  const blocked = new Promise<IteratorResult<unknown>>((resolve) => { release = resolve; });
+  // Let the old implementation exit eventually, so a regression fails the
+  // test rather than leaving a fifteen-minute watchdog alive in the suite.
+  const fallback = setTimeout(() => release({ done: true, value: undefined }), 500);
+  const start = Date.now();
+  try {
+    await assert.rejects(validateClaudeSetupToken({
+      token: "synthetic-token", timeoutMs: 20,
+      queryFn: (input) => {
+        captured = input;
+        return {
+          [Symbol.asyncIterator]: () => ({
+            next: () => blocked,
+            return: () => { returned = true; return new Promise<never>(() => undefined); },
+          }),
+          interrupt: () => { interrupted = true; return new Promise<never>(() => undefined); },
+        };
+      },
+    }), { name: "AbortError", message: "connection validation timed out" });
+    assert.ok(Date.now() - start < 400, "the request deadline must not wait for SDK completion");
+    assert.equal((captured!.options.abortController as AbortController).signal.aborted, true);
+    assert.equal(interrupted, true);
+    assert.equal(returned, true);
+    assert.equal(existsSync(captured!.options.cwd as string), false, "temporary workspace is cleaned up");
+  } finally {
+    clearTimeout(fallback);
+    release({ done: true, value: undefined });
+  }
+});
+
+test("concurrent setup-token checks use independent disposable workspaces", async () => {
+  const paths: string[] = [];
+  let bothStarted!: () => void;
+  const together = new Promise<void>((resolve) => { bothStarted = resolve; });
+  let release!: () => void;
+  const proceed = new Promise<void>((resolve) => { release = resolve; });
+  const queryFn: ClaudeAgentQueryFn = (input) => ({
+    async *[Symbol.asyncIterator]() {
+      const cwd = input.options.cwd as string;
+      paths.push(cwd);
+      writeFileSync(join(cwd, `validation-${paths.length}`), "present");
+      if (paths.length === 2) bothStarted();
+      await proceed;
+      yield { type: "result", subtype: "success", is_error: false, result: "OK" };
+    },
+  });
+  const checks = Promise.all([
+    validateClaudeSetupToken({ token: "synthetic-token", queryFn }),
+    validateClaudeSetupToken({ token: "synthetic-token", queryFn }),
+  ]);
+  try {
+    await together;
+    assert.notEqual(paths[0], paths[1]);
+    assert.equal(existsSync(join(paths[0]!, "validation-1")), true);
+    assert.equal(existsSync(join(paths[1]!, "validation-2")), true);
+  } finally {
+    release();
+    await checks;
+  }
+  assert.ok(paths.every((path) => !existsSync(path)));
+});
+
+test("setup-token validation preserves an upstream authentication rejection without retrying", async () => {
+  let calls = 0;
+  await assert.rejects(validateClaudeSetupToken({
+    token: "synthetic-invalid-token", timeoutMs: 1_000,
+    queryFn: () => ({
+      async *[Symbol.asyncIterator]() {
+        calls += 1;
+        yield {
+          type: "result", subtype: "error_during_execution", is_error: true,
+          errors: ["Failed to authenticate. API Error: 401 OAuth access token is invalid."],
+        };
+      },
+    }),
+  }), /401 OAuth access token is invalid/);
+  assert.equal(calls, 1);
 });
 
 

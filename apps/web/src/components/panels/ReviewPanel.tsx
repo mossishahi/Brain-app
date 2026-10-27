@@ -1,5 +1,5 @@
 /**
- * Stage 6 — Review: the progress matrix (member × chain step) above the
+ * Stage 6 — Review: the committee table above the
  * seat-paged walk inspector.
  *
  * The inspector is a three-level card system:
@@ -59,6 +59,19 @@ import { BackIcon, CopyIcon, DownloadIcon, ForwardIcon } from "../Icons";
 import { outputChangesUrl } from "../../api";
 import { copyText } from "../../clipboard";
 import { IdeaTabs } from "./FirstPassPanel";
+import { GameChair, GameReport, GameScoreboard } from "./GameReview";
+import {
+  FIRST_ASSESSMENT_LABEL,
+  gameRoundText,
+  REASSESSED_BADGE,
+  reassessedText,
+  REVISED_AFTER_REVIEW_BADGE,
+  revisedAfterReviewText,
+  WITHDRAWN_BADGE,
+  withdrawnBadges,
+  withdrawnText,
+} from "./game-review-model";
+import { CommitteeTable } from "../committee/CommitteeTable";
 import {
   crossEntryKey,
   deckEntries,
@@ -71,45 +84,6 @@ import {
   type RoundComputedView,
   type SeatTimeline,
 } from "./review-diff";
-
-function redevCount(step: ReviewStepView): number {
-  return step.rounds.filter((r) => r.revision !== undefined).length;
-}
-
-/** A step a dismissed seat will never finish: it stopped where it stood. */
-function unreached(step: ReviewStepView): boolean {
-  return step.outcome === "pending" || step.outcome === "under-review";
-}
-
-function cellClass(step: ReviewStepView, dismissed = false): string {
-  // A dismissed seat is not working, so the step it stopped on must stop
-  // pulsing: a blinking cell on a seat that has left says work is in flight
-  // when none is. Everything it never finished is marked instead.
-  if (dismissed && unreached(step)) return "cell-dismissed";
-  switch (step.outcome) {
-    case "under-review":
-      return "cell-under-review pulse";
-    case "passed":
-      return "cell-passed";
-    case "force-passed":
-      return "cell-force-passed";
-    case "pending":
-      return "";
-  }
-}
-
-function cellLabel(member: ReviewMemberView, step: ReviewStepView): string {
-  const k = redevCount(step);
-  const outcome =
-    member.dismissed !== undefined && unreached(step)
-      ? "never reviewed — the seat was dismissed"
-      : step.outcome === "force-passed"
-        ? "force-passed at the round cap"
-        : step.outcome === "passed" && k > 0
-          ? `passed after ${k} redevelopment${k === 1 ? "" : "s"}`
-          : step.outcome;
-  return `${member.label}, step ${step.index}: ${outcome}`;
-}
 
 /**
  * What a step's rounds add up to, in words.
@@ -128,7 +102,7 @@ function settledRounds(step: ReviewStepView): number {
  * shapes — a total, then a settled count, then the edit round in flight — and
  * every one of them invited the reader to compare it with the deck's own
  * numbering an inch below. The cards say which round each version is; that a
- * round is RUNNING is already said by the pulsing cell in the matrix, by the
+ * round is RUNNING is already said by the active LED at the table, by the
  * activity feed, and by the seat's own state chip.
  */
 
@@ -137,16 +111,16 @@ function seatStateLabel(member: ReviewMemberView): string {
   if (member.dismissed !== undefined) return "dismissed";
   if (member.error !== undefined) return "failed";
   if (member.progress !== undefined) return "under review";
+  if (walkComplete(member) && member.steps.some((step) => step.outcome === "unresolved")) return "review complete · unresolved steps";
   return walkComplete(member) ? "done with thinking" : "waiting";
 }
 
 /**
- * The seat's own control, reached by hovering (or focusing) its name in the
- * matrix — the one place every seat is visible at once, so stopping one reads as
- * an act on the panel rather than a button buried in a card.
+ * The selected seat's control, reached by hovering (or focusing) its name
+ * underneath the table, before any review cards have arrived.
  *
  * The popover is position:fixed and a DOM CHILD of the name, so moving the
- * pointer from the name into the popover keeps it open (the matrix scrolls, and
+ * pointer from the name into the popover keeps it open (the page scrolls, and
  * an anchored child would be clipped). It asks before acting: a dismissal cannot
  * be undone, and the question says what it costs.
  */
@@ -187,10 +161,26 @@ function SeatStopPopover({
       onMouseEnter={(event) => open(event.currentTarget)}
       onMouseLeave={close}
       onFocus={(event) => open(event.currentTarget)}
-      onBlur={close}
-      tabIndex={0}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) close();
+      }}
+      onKeyDown={(event) => {
+        if (event.key === "Escape") {
+          event.stopPropagation();
+          close();
+        }
+      }}
     >
-      {member.label}
+      <button
+        type="button"
+        className="ghost-btn"
+        aria-label={`Manage ${member.label}`}
+        aria-haspopup="dialog"
+        aria-expanded={pop !== null}
+        onClick={(event) => open(event.currentTarget)}
+      >
+        {member.label}
+      </button>
       {pop && (
         <span className="seat-stop-pop" style={pop} role="dialog">
           <span className="seat-stop-head">
@@ -266,7 +256,7 @@ function walkComplete(member: ReviewMemberView): boolean {
   return (
     member.steps.length > 0 &&
     member.steps.every(
-      (step) => step.outcome === "passed" || step.outcome === "force-passed",
+      (step) => step.outcome === "passed" || step.outcome === "force-passed" || step.outcome === "unresolved",
     )
   );
 }
@@ -279,6 +269,7 @@ function stepTitleClass(step: ReviewStepView): string {
     case "passed":
       return "step-title-ok";
     case "force-passed":
+    case "unresolved":
       return "step-title-warn";
     case "pending":
       return "step-title-dim";
@@ -457,10 +448,23 @@ function JudgeContent({
   );
 }
 
-function CommentContent({ comment }: { comment: CommentView }) {
+function CommentContent({
+  comment,
+  withdrawn,
+}: {
+  comment: CommentView;
+  /** The deleted badges answered when the commentor withdrew this comment after a fact-table update. */
+  withdrawn?: readonly string[];
+}) {
   // No verdict chip here: the colored name on the summary row IS the verdict.
   return (
     <div className="comment-content">
+      {withdrawn !== undefined && (
+        <div className="assessment-row">
+          <span className="badge">{WITHDRAWN_BADGE}</span>
+          {withdrawn.length > 0 && <span>{withdrawnText(withdrawn)}</span>}
+        </div>
+      )}
       {(comment.step !== undefined || comment.usage !== undefined) && (
         <div className="assessment-row">
           {comment.step !== undefined && (
@@ -506,6 +510,7 @@ function flawLines(flaws: readonly FlawEntryView[]): readonly string[] {
 }
 
 function commentCopyText(selected: "judge" | string, round: ReviewRoundView): string {
+  if (round.gameCritiques || round.gameChair || round.gameSettlement) return gameRoundText(round);
   if (selected === "judge") {
     const d = round.decision;
     if (!d) return `round ${round.round}: the chair is waiting for comments of others`;
@@ -583,19 +588,22 @@ function CommentsPanel({
   onSelect: (tag: string) => void;
 }) {
   const comments = round?.comments ?? [];
+  const gameReports = round?.gameCritiques ?? [];
+  const isGame = gameReports.length > 0 || round?.gameChair !== undefined || round?.gameSettlement !== undefined || live?.some(thread => thread.role === "Committee chair") === true;
   const labelOf = (commentorId: string): string =>
-    comments.find((c) => c.commentorId === commentorId)?.commentorLabel ?? commentorId;
+    comments.find((c) => c.commentorId === commentorId)?.commentorLabel ?? gameReports.find((c) => c.criticId === commentorId)?.criticLabel ?? commentorId;
   // A reviewer whose comment has landed is shown by its comment; only the ones
   // still writing need a live tab, and the judge has its own.
-  const liveJudge = (live ?? []).find((thread) => thread.role === "Judge");
+  const liveJudge = (live ?? []).find((thread) => (thread.role === "Judge" || thread.role === "Committee chair"));
   const liveReviewers = pendingReviewers(
-    comments.map((c) => c.commentorLabel),
+    [...comments.map((c) => c.commentorLabel), ...gameReports.map((c) => c.criticLabel)],
     live ?? [],
   );
   const liveTag = (thread: LiveReviewThread): string => `live:${thread.actor ?? "agent"}`;
   const tags = new Set<string>([
     "judge",
     ...comments.map((c) => c.commentorId),
+    ...gameReports.map((c) => c.criticId),
     ...liveReviewers.map(liveTag),
   ]);
   // The first view, when the reader has not picked one: the judge — its
@@ -628,18 +636,18 @@ function CommentsPanel({
       >
         {/* No round number: the panel sits on the version that round read, so
             the number restated the card's own position in the deck. */}
-        <span className="review-fold-name">Comments &amp; judgement</span>
+        <span className="review-fold-name">{isGame ? "Reports & committee" : "Comments & judgement"}</span>
         <span className="reviewer-names" role="tablist" aria-label="reviewer">
           <button
             type="button"
             role="tab"
             aria-selected={open && active === "judge"}
-            className={`reviewer-name ${verdictClass(round?.decision?.verdict)}${
+            className={`reviewer-name ${verdictClass(isGame ? (round?.gameSettlement?.y === 0 ? "Pass" : round?.gameSettlement?.y === 1 ? "Interrupt" : undefined) : round?.decision?.verdict)}${
               open && active === "judge" ? " reviewer-name-selected" : ""
             }`}
             onClick={() => pick("judge")}
           >
-            Judge
+            {isGame ? "Committee chair" : "Judge"}
             {liveJudge !== undefined && round?.decision === undefined && (
               <span className="dot dot-accent pulse reviewer-live" aria-label="writing now" />
             )}
@@ -657,6 +665,12 @@ function CommentsPanel({
             >
               {comment.commentorLabel}
             </button>
+          ))}
+          {gameReports.map((report) => (
+            <button key={report.criticId} type="button" role="tab"
+              aria-selected={open && active === report.criticId}
+              className={`reviewer-name${open && active === report.criticId ? " reviewer-name-selected" : ""}`}
+              onClick={() => pick(report.criticId)}>{report.criticLabel} · q={report.q}</button>
           ))}
           {/* Still writing: the same row, the same place its comment will take. */}
           {liveReviewers.map((thread) => (
@@ -685,18 +699,39 @@ function CommentsPanel({
       {open && (
         <div className="review-fold-body">
           {active === "judge" ? (
-            round?.decision ? (
-              <JudgeContent decision={round.decision} labelOf={labelOf} />
+            round?.gameChair ? (
+              <GameChair round={round} labelOf={labelOf} />
+            ) : round?.decision ? (
+              <>
+                {round.reassessed && (
+                  <div className="assessment-row">
+                    <span className="badge">{REASSESSED_BADGE}</span>
+                    <span>{reassessedText(false)}</span>
+                  </div>
+                )}
+                <JudgeContent decision={round.decision} labelOf={labelOf} />
+                {round.firstAssessment?.decision && (
+                  <details>
+                    <summary>{FIRST_ASSESSMENT_LABEL}</summary>
+                    <JudgeContent decision={round.firstAssessment.decision} labelOf={labelOf} />
+                  </details>
+                )}
+              </>
             ) : liveJudge ? (
               // The judgement is being written; this is where it will appear.
-              <LiveThread text={liveJudge.text} label="Judge" />
+              <LiveThread text={liveJudge.text} label={isGame ? "Committee chair" : "Judge"} />
             ) : (
               <p className="dim small">the chair is waiting for comments of others…</p>
             )
           ) : (
             (() => {
+              const report = gameReports.find((c) => c.criticId === active);
+              if (report && round) return <GameReport report={report} round={round} />;
               const comment = comments.find((c) => c.commentorId === active);
-              if (comment) return <CommentContent comment={comment} />;
+              if (comment) {
+                const withdrawn = round ? withdrawnBadges(round, comment.commentorId) : undefined;
+                return <CommentContent comment={comment} {...(withdrawn !== undefined ? { withdrawn } : {})} />;
+              }
               const thread = liveReviewers.find((t) => liveTag(t) === active);
               return thread ? (
                 <LiveThread text={thread.text} label={thread.actor ?? "reviewer"} />
@@ -717,6 +752,7 @@ function bugReportText(
   const head = `${member.label}${member.umbrella ? ` (${member.umbrella})` : ""} — step ${step.index}`;
   if (!computed) return `${head}: not yet reviewed`;
   const round = computed.round;
+  if (round.gameCritiques || round.gameChair || round.gameSettlement) return `${head}\n${gameRoundText(round)}`;
   const lines = [
     `${head}, round ${round.round}`,
     `verdict: ${round.decision?.verdict ?? "in progress"}`,
@@ -1145,16 +1181,15 @@ function RoundDeck({
 }
 
 /**
- * The review stage renders as TWO detached panels with the page background
- * visible between them: the progress grid rides inside the stage frame (the
- * `frame` callback wraps it, so the stage header/activity stay with the
- * grid), and the walk inspector sits below in its own panel. Both share one
- * component so a grid-cell click can drive the inspector's seat.
+ * The committee table sits beside the review stage's frame. The frame keeps
+ * the stage header, activity, controls, and walk inspector together; shared
+ * selection lets a table LED open the corresponding inspector step.
  */
 export function ReviewStagePanels({
   jobId,
   stage,
   firstPass,
+  plannedStepCount,
   frame,
   expanded,
   topic,
@@ -1165,9 +1200,11 @@ export function ReviewStagePanels({
   jobId: string;
   stage: ReviewStage;
   firstPass?: FirstPassStage;
-  /** Wraps the grid panel in the stage frame (header, fold, activity). */
-  frame: (gridPanel: ReactNode) => ReactNode;
-  /** The stage frame's fold state — the walk panel folds with it. */
+  /** The classifier's chain length, used before a seat has recorded its steps. */
+  plannedStepCount?: number;
+  /** Wraps the review details in the stage frame (header, fold, activity). */
+  frame: (contents: ReactNode) => ReactNode;
+  /** The table follows the review frame's fold state. */
   expanded: boolean;
   /** The run's submission topic; titles the seat's LaTeX export. */
   topic?: string;
@@ -1227,7 +1264,7 @@ export function ReviewStagePanels({
     [],
   );
 
-  // A grid-cell click on ANOTHER seat must wait for that seat's cards to
+  // An LED click on ANOTHER seat must wait for that seat's cards to
   // mount before it can scroll to the step; the effect below fires after the
   // commit and performs the deferred scroll exactly once.
   const pendingScroll = useRef<string | undefined>(undefined);
@@ -1237,14 +1274,14 @@ export function ReviewStagePanels({
       block: "nearest",
     });
   };
-  const onCellClick = (member: ReviewMemberView, step: ReviewStepView): void => {
-    const key = `${member.memberId}:${step.index}`;
-    if (seat?.memberId === member.memberId) {
+  const onSelectStep = (memberId: string, stepIndex: number): void => {
+    const key = `${memberId}:${stepIndex}`;
+    if (seat?.memberId === memberId) {
       scrollToStep(key);
       return;
     }
     pendingScroll.current = key;
-    selectSeat(member.memberId);
+    selectSeat(memberId);
   };
   useEffect(() => {
     const key = pendingScroll.current;
@@ -1291,96 +1328,35 @@ export function ReviewStagePanels({
 
   const anyReviewed = members.some((member) => member.steps.some(reviewable));
 
-  const gridPanel = (
-    <div>
+  const reviewControls = (
+    <>
+      {stage.gamifiedReview && <GameScoreboard stage={stage} />}
       {stage.status === "active" && cursor && (
         <p className="cursor-line">
           Reviewing member {cursor.member}/{cursor.memberCount} · step {cursor.step}/
           {cursor.stepCount} · round {cursor.round} of ≤{cursor.maxRounds}
         </p>
       )}
-      <div className="matrix">
-        {members.map((member) => {
-          const expertise = expertiseOf(member);
-          return (
-            <div key={member.memberId} className="matrix-row">
-              <span
-                className={`matrix-label${
-                  member.dismissed !== undefined
-                    ? " matrix-label-dismissed"
-                    : member.error !== undefined
-                      ? " matrix-label-bad"
-                      : ""
-                }`}
-                title={
-                  member.dismissed !== undefined
-                    ? `${member.label} was dismissed — what it recorded before then is kept` +
-                      (member.error !== undefined
-                        ? `; it had failed here, and a dismissed seat is not retried`
-                        : "")
-                    : member.error !== undefined
-                      ? `${member.label} failed: ${member.error}`
-                      : expertise || member.label
-                }
-              >
-                {/* The seat's name IS the control: hovering it opens the seat's
-                    own popover, which is where a seat can be stopped. */}
-                {onDismiss ? (
-                  <SeatStopPopover
-                    member={member}
-                    seatState={seatStateLabel(member)}
-                    expertise={expertise}
-                    onDismiss={onDismiss}
-                  />
-                ) : (
-                  member.label
-                )}
-              </span>
-              <div className="cells">
-                {member.steps.map((step) => {
-                  const k = redevCount(step);
-                  const active = reviewable(step);
-                  const isShown = seat?.memberId === member.memberId;
-                  const stopped = member.dismissed !== undefined && unreached(step);
-                  return (
-                    <button
-                      key={step.index}
-                      type="button"
-                      className={`cell ${cellClass(step, member.dismissed !== undefined)}${isShown ? " cell-selected" : ""}`}
-                      aria-label={cellLabel(member, step)}
-                      disabled={!active}
-                      onClick={() => onCellClick(member, step)}
-                    >
-                      {stopped ? (
-                        <span className="cell-stopped" aria-hidden>
-                          ×
-                        </span>
-                      ) : (
-                        k > 0 && <span className="cell-redev">×{k}</span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-              {expertise !== "" && (
-                <span className="matrix-expertise marquee" title={expertise}>
-                  <span className="marquee-inner">{expertise}</span>
-                </span>
-              )}
-            </div>
-          );
-        })}
-      </div>
-      <p className="matrix-caption">
-        cell = one chain step · colors = how it passed · click a cell to open that seat's walk
-      </p>
-      {!anyReviewed && <p className="dim small">no review rounds recorded yet</p>}
-    </div>
+      {seat && onDismiss && (
+        <div className="committee-seat-controls">
+          <span className="dim small">Selected seat</span>
+          <SeatStopPopover
+            key={seat.memberId}
+            member={seat}
+            seatState={seatStateLabel(seat)}
+            expertise={expertiseOf(seat)}
+            onDismiss={onDismiss}
+          />
+          <span className="dim small">{seatStateLabel(seat)}</span>
+        </div>
+      )}
+      {!anyReviewed && <p className="dim small">No review rounds recorded yet.</p>}
+    </>
   );
 
   const walkPanel =
     !anyReviewed || seat === undefined ? null : (
-      <section className="stage review-walk-panel">
+      <div className="review-walk-panel">
         <div className="seat-walk">
           <div className="seat-pager">
             {/* The pager arrows hug the seat title; the seat's expertise
@@ -1414,7 +1390,7 @@ export function ReviewStagePanels({
             ) : seat.progress !== undefined ? (
               <span className="step-chip step-chip-active">under review</span>
             ) : walkComplete(seat) ? (
-              <span className="step-chip step-chip-ok">done with thinking</span>
+              <span className="step-chip step-chip-ok">{seatStateLabel(seat)}</span>
             ) : null}
             <span className="seat-pager-expertise marquee" title={expertiseOf(seat)}>
               <span className="marquee-inner">{expertiseOf(seat)}</span>
@@ -1460,7 +1436,15 @@ export function ReviewStagePanels({
                           Step {step.index}
                           <span className="dim"> / {seat.steps.length}</span>
                         </span>
+                        {/* A fact-table update rewrote this step after the walk
+                            passed it; it was not reviewed again. */}
+                        {step.revisedAfterReview !== undefined && step.revisedAfterReview.length > 0 && (
+                          <span className="badge badge-warn">{REVISED_AFTER_REVIEW_BADGE}</span>
+                        )}
                       </div>
+                      {step.revisedAfterReview !== undefined && step.revisedAfterReview.length > 0 && (
+                        <p className="dim small">{revisedAfterReviewText(step.revisedAfterReview)}</p>
+                      )}
                       <RoundDeck
                         jobId={jobId}
                         member={seat}
@@ -1515,7 +1499,7 @@ export function ReviewStagePanels({
                             <strong>{finalized ? "Final output" : "Output under review"}</strong>
                           </span>
                           {finalized ? (
-                            <span className="step-chip step-chip-ok">final version</span>
+                            <span className={`step-chip ${seat.steps.some((step) => step.outcome === "unresolved") ? "step-chip-warn" : "step-chip-ok"}`}>{seat.steps.some((step) => step.outcome === "unresolved") ? "final version · unresolved issues" : "final version"}</span>
                           ) : (
                             <span className="step-chip step-chip-active">in progress</span>
                           )}
@@ -1598,13 +1582,27 @@ export function ReviewStagePanels({
             );
           })()}
         </div>
-      </section>
+      </div>
     );
 
   return (
     <div className="review-split">
-      {frame(gridPanel)}
-      {expanded && walkPanel}
+      {expanded && (
+        <CommitteeTable
+          firstPass={firstPass?.members ?? []}
+          review={members}
+          plannedStepCount={plannedStepCount}
+          selectedMemberId={seat?.memberId}
+          onSelectMember={selectSeat}
+          onSelectStep={onSelectStep}
+        />
+      )}
+      {frame(
+        <>
+          {reviewControls}
+          {walkPanel}
+        </>,
+      )}
     </div>
   );
 }

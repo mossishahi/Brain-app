@@ -23,9 +23,11 @@ import {
   gpuRunTools,
   type GpuRunConfig,
 } from "./gpu-run.js";
+import { NOTES_MANIFESTS, NOTES_TOOL_NAMES, notesTools, type NotesScopeResolver } from "./notes-tools.js";
+import { FACT_MANIFESTS, FACT_TOOL_NAMES, factTools, type FactBindingResolver } from "./fact-tools.js";
 import { TAXONOMY_MANIFESTS, TAXONOMY_TOOL_NAMES, taxonomyTools } from "./taxonomy-tools.js";
-import { WEB_ACCESS_TOOL_NAMES, webAccessTools } from "./web/tools.js";
-import type { TaxonomyAccess, WebAccess } from "@brainstorm-agentic/core";
+import { webAccessTools, webToolNames } from "./web/tools.js";
+import type { FactAccess, NotesAccess, TaxonomyAccess, WebAccess } from "@brainstorm-agentic/core";
 
 // ---------------------------------------------------------------------------
 // Complete manifest catalog
@@ -42,6 +44,8 @@ export const ALL_HOST_TOOL_MANIFESTS: readonly HostToolManifest[] = [
   ...CODE_EXECUTION_MANIFESTS,
   ...GPU_RUN_MANIFESTS,
   ...TAXONOMY_MANIFESTS,
+  ...NOTES_MANIFESTS,
+  ...FACT_MANIFESTS,
 ];
 
 // ---------------------------------------------------------------------------
@@ -59,6 +63,10 @@ export interface HostToolRegistryConfig {
   readonly gpuRun?: GpuRunConfig;
   /** The unified web layer. Required for web_search AND web_fetch. */
   readonly web?: WebAccess;
+  /** The thinker notes of the run, with the per-task scope resolver. Required for notes_search. */
+  readonly notes?: { readonly access: NotesAccess; readonly scopeOf: NotesScopeResolver };
+  /** The run's fact table, with the per-task binding resolver. Required for fact_table. */
+  readonly facts?: { readonly access: FactAccess; readonly bindingOf: FactBindingResolver };
   /** User-enabled tool IDs. Only these are registered on the runtime registry. */
   readonly enabledToolIds: ReadonlySet<string>;
 }
@@ -115,9 +123,31 @@ export function createHostToolRegistry(
     }
   }
 
-  // Web tools: the unified layer serves BOTH when a manager is wired (that
-  // path is logged, bounded, and routed); without one, the bare hardened
-  // fetch still registers so web.fetch keeps working un-searched.
+  // Thinker notes: scoped per task by the resolver, so one registration
+  // serves every review task of the run.
+  if (config.notes) {
+    for (const tool of notesTools(config.notes.access, config.notes.scopeOf)) {
+      if (config.enabledToolIds.has(tool.definition.name)) {
+        registry.register(tool);
+        registeredNames.push(tool.definition.name);
+      }
+    }
+  }
+
+  // Fact table: one registration serves every task of the run; the binding
+  // resolver supplies each caller's scope and task data.
+  if (config.facts) {
+    for (const tool of factTools(config.facts.access, config.facts.bindingOf)) {
+      if (config.enabledToolIds.has(tool.definition.name)) {
+        registry.register(tool);
+        registeredNames.push(tool.definition.name);
+      }
+    }
+  }
+
+  // Web tools: the unified layer serves them all when a manager is wired
+  // (that path is logged, bounded, and routed); without one, the bare
+  // hardened fetch still registers so web.fetch keeps working un-searched.
   if (config.web) {
     for (const tool of webAccessTools(config.web)) {
       if (config.enabledToolIds.has(tool.definition.name)) {
@@ -147,6 +177,8 @@ export function executableHostToolIds(config: {
   codeEnvironment?: CodeRuntimeEnvironment;
   gpuRun?: GpuRunConfig;
   web?: WebAccess;
+  notes?: { readonly access: NotesAccess; readonly scopeOf: NotesScopeResolver };
+  facts?: { readonly access: FactAccess; readonly bindingOf: FactBindingResolver };
 }): ReadonlySet<string> {
   const ids = new Set<string>();
   if (config.attachmentRoots && config.attachmentRoots.length > 0) {
@@ -170,9 +202,20 @@ export function executableHostToolIds(config: {
       ids.add(name);
     }
   }
-  // web_search exists only over a wired manager with something behind it.
-  if (config.web && config.web.backedKinds().length > 0) {
-    for (const name of WEB_ACCESS_TOOL_NAMES) {
+  if (config.notes) {
+    for (const name of NOTES_TOOL_NAMES) {
+      ids.add(name);
+    }
+  }
+  if (config.facts) {
+    for (const name of FACT_TOOL_NAMES) {
+      ids.add(name);
+    }
+  }
+  // The search tools exist only over a wired manager, each only when a
+  // source on this deployment can answer it.
+  if (config.web) {
+    for (const name of webToolNames(config.web)) {
       ids.add(name);
     }
   }

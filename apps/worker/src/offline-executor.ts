@@ -5,7 +5,22 @@
  * (panel selection, review rounds, chair) can be exercised end to end.
  */
 import type { ChainPart, LoadedInputTypes } from "@brainstorm-agentic/content";
-import type { AgentExecutor, AgentResult, AgentTask, JsonObject, JsonValue } from "@brainstorm-agentic/core";
+import type { AgentExecutor, AgentResult, AgentTask, FactEntry, JsonObject, JsonValue } from "@brainstorm-agentic/core";
+
+/** Deliberately synthetic evidence, used only by the explicit offline provider. */
+export const OFFLINE_GAME_FACT: FactEntry = {
+  id: "F:1",
+  status: "justified",
+  kind: "record",
+  claim: "The deterministic offline review fixture contains no seeded blocking defect.",
+  conditions: "Only the built-in deterministic offline fixture; not evidence for a scientific submission.",
+  method: "record-match",
+  evidence: "The OfflineBrainstormExecutor emits this known fixture without making a scientific assessment.",
+  createdAt: 0,
+  updatedAt: 0,
+  history: [],
+  requesters: [],
+};
 
 function asObject(value: JsonValue | undefined): JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as JsonObject) : {};
@@ -119,6 +134,7 @@ function requestedSections(input: JsonValue | undefined, label: string): JsonVal
 }
 
 export interface OfflineExecutorOptions {
+  readonly factAccessMode?: "supreme-mediated/v1";
   /** Chain-of-thought steps the offline processor requests. Default 3. */
   readonly cotSteps?: number;
   /** The loaded input-type catalog; the executor classifies runs as its paper-shaped type. */
@@ -130,8 +146,10 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
   private readonly cotSteps: number;
   private readonly paperType: string;
   private readonly alternativeType: string;
+  private readonly mediatedFacts: boolean;
 
   constructor(options: OfflineExecutorOptions = {}) {
+    this.mediatedFacts = options.factAccessMode === "supreme-mediated/v1";
     this.cotSteps = options.cotSteps ?? 3;
     this.paperType = paperTypeOf(options.inputTypes);
     // The classifier's second option must be a different catalog type; any
@@ -181,7 +199,43 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
         turn: order + 1,
       })) as unknown as JsonValue,
     });
-    switch (role) {
+    if (schemaName === "gameCritique") {
+      output = { q: 0, justification: this.mediatedFacts
+        ? "This deterministic offline fixture exercises a pass. Treating the supplied placeholders as stipulated premises, no contradictory deduction is made here. This is directly inspectable fixture reasoning, not an assessment of a scientific submission."
+        : `[${OFFLINE_GAME_FACT.id}] ${OFFLINE_GAME_FACT.claim} Conditions: ${OFFLINE_GAME_FACT.conditions} Under those fixture conditions, there is no seeded flaw to report.` };
+    } else if (schemaName === "gameCommitteeDecision") {
+      const comments = asObject(bindings.comments);
+      output = {
+        reports: Object.fromEntries(Object.keys(comments).map((id) => [id, {
+          admissible: true,
+          reason: "The report draws a conclusion within the stated offline fixture conditions.",
+          // The fixture reports q=0 with no seeded flaw, so the chair's label
+          // is not-decisive: y=0 under chair-decisive as under the mean rule.
+          label: "not-decisive",
+          factChecks: this.mediatedFacts ? [] : [{
+            factId: OFFLINE_GAME_FACT.id,
+            conditions: OFFLINE_GAME_FACT.conditions,
+            supportsConclusion: true,
+            reason: "The reported absence of a seeded defect concerns only this deterministic fixture.",
+          }],
+        }])),
+        reason: Object.keys(comments).length > 0
+          ? "The committee chair admits the fixture reports after checking their stated scope."
+          : "No reports were submitted, so there is nothing to admit.",
+      };
+    } else if (schemaName === "gameChairDecision") {
+      const comments = asObject(bindings.comments);
+      output = {
+        reports: Object.fromEntries(Object.keys(comments).map((id) => [id, {
+          admissible: true, reason: "The submitted report addresses the supplied chain prefix.",
+        }])),
+        y: Object.keys(comments).length > 0 ? 0 : null,
+        reason: Object.keys(comments).length > 0
+          ? "The admitted reports establish no decisive flaw in this offline review."
+          : "No reports were submitted, so this round has no scientific label.",
+        issues: [],
+      };
+    } else switch (role) {
       case "processor": {
         const submission = asObject(bindings.submission as JsonValue);
         const prompt = typeof submission.prompt === "string" ? submission.prompt : "Untitled topic";
@@ -645,6 +699,7 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
         };
         break;
       }
+      case "game-redeveloper":
       case "redeveloper": {
         // Full-chain re-emission: the offline reviser rewrites the current
         // step and copies the rest of the previous chain verbatim, mirroring
@@ -725,6 +780,20 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
         };
         break;
       }
+      case "literature-screener": {
+        // Deterministic relevance screen: every bound paper is kept, in the
+        // given order, so an offline run with the screen on composes exactly
+        // the panel the screen-off path would.
+        const papers = Array.isArray(bindings.papers) ? bindings.papers : [];
+        output = {
+          decisions: papers.map((paper) => ({
+            pid: String(asObject(paper).pid ?? ""),
+            onTopic: true,
+            reason: "Offline deterministic screen: kept.",
+          })),
+        };
+        break;
+      }
       case "chair":
         output = {
           title: "Synthesized research proposal",
@@ -735,6 +804,15 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
           actionItems: [{ priority: 1, action: "Design the first experiment", rationale: "It is decisive." }],
           applications: ["What solving this unlocks elsewhere."],
         };
+        break;
+      // Fact-update reconsiderations (design 6.9): an offline run has no fact
+      // table, so every reconsideration leaves its output unchanged.
+      case "reconsider-chain":
+        output = { decision: "unchanged", reason: "Offline run: there is no fact table to reconsider against.", steps: [] };
+        break;
+      case "reconsider-game-report":
+      case "reconsider-comment":
+        output = { decision: "unchanged", reason: "Offline run: there is no fact table to reconsider against." };
         break;
       default:
         return {

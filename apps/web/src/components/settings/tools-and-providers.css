@@ -1,0 +1,237 @@
+/* "Tools and providers": availability rows, order chips and the dashboard strip. */
+.tools-and-providers {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.tp-toolbar {
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.tp-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tp-rows-children {
+  margin-top: 4px;
+  margin-left: 22px;
+  border-left: 2px solid color-mix(in srgb, var(--text) 10%, transparent);
+  padding-left: 8px;
+}
+
+.tp-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 6px;
+  border-radius: 6px;
+}
+
+.tp-row:hover {
+  background: color-mix(in srgb, var(--text) 4%, transparent);
+}
+
+.tp-row-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 26px;
+}
+
+.tp-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 16px;
+  height: 16px;
+}
+
+.tp-glyph svg {
+  display: block;
+}
+
+.tp-tone-ok {
+  color: var(--ok);
+}
+
+.tp-tone-warn {
+  color: var(--warn);
+}
+
+.tp-tone-bad {
+  color: var(--bad);
+}
+
+.tp-tone-muted {
+  color: var(--text-dim);
+}
+
+.tp-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tp-badge {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bad) 12%, transparent);
+  color: var(--bad);
+  font-size: 10.5px;
+}
+
+.tp-latency,
+.tp-checked {
+  flex: none;
+  color: var(--text-dim);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.tp-latency {
+  min-width: 5ch;
+  text-align: right;
+}
+
+.tp-checked {
+  min-width: 11ch;
+}
+
+.tp-probe,
+.tp-copy,
+.tp-expand {
+  flex: none;
+  min-width: 0;
+}
+
+.tp-probe {
+  min-width: 52px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.tp-detail {
+  margin-left: 24px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tp-fallback {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-left: 24px;
+}
+
+.tp-fallback-hide {
+  align-self: flex-start;
+}
+
+.tp-fallback-text {
+  width: 100%;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.4;
+  user-select: text;
+  resize: vertical;
+}
+
+.tp-purposes {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tp-purpose {
+  display: grid;
+  grid-template-columns: minmax(9ch, 14ch) 1fr;
+  gap: 4px 12px;
+  align-items: start;
+  padding: 4px 0;
+  border-top: 1px solid color-mix(in srgb, var(--text) 8%, transparent);
+}
+
+.tp-purpose-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  padding-top: 2px;
+}
+
+.tp-purpose-orders {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.tp-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.tp-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+  font-size: 11.5px;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.tp-chip-moved {
+  background: color-mix(in srgb, var(--warn) 18%, transparent);
+  color: var(--warn);
+}
+
+.tp-chip-dropped {
+  text-decoration: line-through;
+  color: var(--text-dim);
+  background: color-mix(in srgb, var(--text) 4%, transparent);
+}
+
+.tp-chips-configured .tp-chip {
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px dashed color-mix(in srgb, var(--text) 18%, transparent);
+}
+
+/* Dashboard strip: one icon beside the readiness icons, rows in the popover. */
+.env-icon.state-warn {
+  color: var(--warn);
+}
+
+.env-state-dot.state-warn {
+  background: var(--warn);
+}
+
+.tp-popover {
+  width: 460px;
+  max-width: 92vw;
+}
+
+.tp-strip-rows {
+  max-height: 50vh;
+  overflow: auto;
+}
+
+.tp-strip-rows .tp-detail {
+  display: none;
+}

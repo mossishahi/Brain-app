@@ -11,6 +11,28 @@ import {
   type SequenceNode,
 } from "../src/index.js";
 import { expectIssue, findActivity, findAgent, findNode, freshBundle } from "./helpers.js";
+import type { ContentBundle } from "../src/index.js";
+
+/**
+ * The nodes these tests mutate, in either workflow generation: the
+ * agent-based pool chain (select-panel seats, place-fields reads the pool
+ * matches) or the paper-based composition (seat-panel seats,
+ * screen-literature reads the literature record).
+ */
+function paperBased(bundle: ContentBundle): boolean {
+  const root = bundle.workflows["brainstorm"]!.root as SequenceNode;
+  return root.steps.some((step) => step.id === "compose-panel");
+}
+
+function seatingId(bundle: ContentBundle): string {
+  return paperBased(bundle) ? "seat-panel" : "select-panel";
+}
+
+function fieldReader(bundle: ContentBundle): { readonly id: string; readonly root: string; readonly list: string } {
+  return paperBased(bundle)
+    ? { id: "screen-literature", root: "literature", list: "screenItems" }
+    : { id: "place-fields", root: "poolMatches", list: "unmatched" };
+}
 
 test("baseline: the untouched bundle validates cleanly", () => {
   assert.deepEqual(validateBundle(freshBundle()), []);
@@ -23,8 +45,9 @@ test("rejects a bind that reads a field the produced artifact does not define", 
   // bind long after the panel had been paid for — with the half-finished
   // artifact journaled, so every resume died the same way.
   const bundle = freshBundle();
-  const placer = findAgent(bundle.workflows["brainstorm"]!.root, "place-fields");
-  placer.bind = { ...placer.bind, outline: "poolMatches.fieldFromAFutureApp" };
+  const reader = fieldReader(bundle);
+  const placer = findAgent(bundle.workflows["brainstorm"]!.root, reader.id);
+  placer.bind = { ...placer.bind, outline: `${reader.root}.fieldFromAFutureApp` };
   const issues = expectIssue(bundle, "UNKNOWN_ARTIFACT_FIELD");
   const named = issues.find((issue) => issue.code === "UNKNOWN_ARTIFACT_FIELD")!;
   assert.match(named.message, /fieldFromAFutureApp/);
@@ -76,10 +99,11 @@ test("field checking stays silent wherever it cannot be certain", () => {
   // variables, catalog projections, deeper paths into shapes that vary, and
   // seat state all pass untouched.
   const bundle = freshBundle();
-  const placer = findAgent(bundle.workflows["brainstorm"]!.root, "place-fields");
+  const reader = fieldReader(bundle);
+  const placer = findAgent(bundle.workflows["brainstorm"]!.root, reader.id);
   placer.bind = {
     ...placer.bind,
-    deeper: "poolMatches.unmatched.anythingAtAll",
+    deeper: `${reader.root}.${reader.list}.anythingAtAll`,
     catalog: "bundle.inputTypes.types",
     session: "session.submission",
   };
@@ -116,13 +140,13 @@ test("rejects a routes document whose defaultRoute does not exist", () => {
 
 test("rejects an activity whose logical handler is not registered", () => {
   const bundle = freshBundle();
-  findActivity(bundle.workflows["brainstorm"]!.root, "select-panel").handler = "panel.missing";
+  findActivity(bundle.workflows["brainstorm"]!.root, seatingId(bundle)).handler = "panel.missing";
   expectIssue(bundle, "MISSING_ACTIVITY_HANDLER");
 });
 
 test("rejects an activity missing or adding registered handler inputs", () => {
   const bundle = freshBundle();
-  const selector = findActivity(bundle.workflows["brainstorm"]!.root, "select-panel");
+  const selector = findActivity(bundle.workflows["brainstorm"]!.root, seatingId(bundle));
   delete selector.bind["panelSize"];
   selector.bind["policy"] = "params.panelSize";
   expectIssue(bundle, "ACTIVITY_INPUT_MISMATCH");
@@ -130,7 +154,7 @@ test("rejects an activity missing or adding registered handler inputs", () => {
 
 test("rejects an activity output that disagrees with its registered handler", () => {
   const bundle = freshBundle();
-  findActivity(bundle.workflows["brainstorm"]!.root, "select-panel").output.schema = "experts";
+  findActivity(bundle.workflows["brainstorm"]!.root, seatingId(bundle)).output.schema = "experts";
   expectIssue(bundle, "ACTIVITY_OUTPUT_MISMATCH");
 });
 
@@ -142,18 +166,61 @@ test("rejects a non-deterministic activity registration structurally and semanti
   expectIssue(bundle, "NONDETERMINISTIC_ACTIVITY");
 });
 
-test("rejects an activity registration without a finite output bound", () => {
+test("rejects an activity registration whose finite output bound is malformed; a handler may declare none", () => {
+  // A declared bound must name a positive-integer input of the handler.
   const bundle = freshBundle();
   const handler = bundle.activities.handlers["panel.select"]!;
-  delete (handler as Partial<typeof handler>).bounds;
+  (handler as { bounds?: { outputField: string; maxItemsFromInput: string } }).bounds = {
+    outputField: "members",
+    maxItemsFromInput: "experts",
+  };
   assert.equal(activitiesSchema.safeParse(bundle.activities).success, false);
   expectIssue(bundle, "UNBOUNDED_ACTIVITY");
+  // A handler whose output carries no input-sized collection (a retrieval or
+  // evidence record) declares no bound at all.
+  const unbounded = freshBundle();
+  const registration = unbounded.activities.handlers["panel.select"]!;
+  delete (registration as Partial<typeof registration>).bounds;
+  assert.equal(activitiesSchema.safeParse(unbounded.activities).success, true);
+  assert.deepEqual(
+    validateBundle(unbounded).filter((issue) => issue.code === "UNBOUNDED_ACTIVITY"),
+    [],
+  );
+});
+
+test("an activity may take the whole params object (kind params) and one declared param of any type (kind param)", () => {
+  const withHandler = (bind: Record<string, string>): ContentBundle => {
+    const bundle = freshBundle();
+    bundle.activities.handlers["test.params"] = {
+      description: "Echoes the panel with the params in view.",
+      deterministic: true,
+      inputs: { panel: { kind: "artifact", schema: "panel" }, config: { kind: "params" }, mode: { kind: "param" } },
+      outputSchema: "panel",
+    };
+    const root = bundle.workflows["brainstorm"]!.root as SequenceNode;
+    root.steps.splice(root.steps.length - 1, 0, {
+      kind: "activity",
+      id: "echo-panel",
+      handler: "test.params",
+      bind,
+      output: { key: "panelEcho", schema: "panel" },
+    });
+    return bundle;
+  };
+  assert.equal(
+    activitiesSchema.safeParse(withHandler({ panel: "panel", config: "params", mode: "params.panelSize" }).activities).success,
+    true,
+  );
+  assert.deepEqual(validateBundle(withHandler({ panel: "panel", config: "params", mode: "params.panelSize" })), []);
+  const wrong = validateBundle(withHandler({ panel: "panel", config: "params.panelSize", mode: "params.noSuchParam" }));
+  assert.equal(wrong.filter((issue) => issue.code === "ACTIVITY_INPUT_TYPE_MISMATCH").length, 2);
+  assert.ok(wrong.some((issue) => issue.code === "UNKNOWN_PARAM"));
 });
 
 test("rejects activity bindings with the wrong artifact or parameter type", () => {
   const bundle = freshBundle();
-  const selector = findActivity(bundle.workflows["brainstorm"]!.root, "select-panel");
-  selector.bind["experts"] = "input";
+  const selector = findActivity(bundle.workflows["brainstorm"]!.root, seatingId(bundle));
+  selector.bind[paperBased(bundle) ? "evidence" : "experts"] = "input";
   selector.bind["panelSize"] = "input.cotSteps";
   const issues = validateBundle(bundle);
   assert.equal(
@@ -181,7 +248,7 @@ test("activity schemas reject embedded implementation code and arbitrary express
   assert.equal(activitiesSchema.safeParse(activitiesWithCode).success, false);
 
   const workflowWithExpression = structuredClone(bundle.workflows["brainstorm"]!);
-  Object.assign(findActivity(workflowWithExpression.root, "select-panel"), {
+  Object.assign(findActivity(workflowWithExpression.root, seatingId(bundle)), {
     expression: "experts.flatMap(select)",
   });
   assert.equal(workflowSchema.safeParse(workflowWithExpression).success, false);
@@ -338,7 +405,7 @@ test("rejects loop bounds above the ceiling as effectively unbounded", () => {
 
 test("rejects duplicate node ids", () => {
   const bundle = freshBundle();
-  findNode(bundle.workflows["brainstorm"]!.root, "build-pool").id = "process-input";
+  findNode(bundle.workflows["brainstorm"]!.root, "partition-files-useful").id = "process-input";
   expectIssue(bundle, "DUPLICATE_NODE_ID");
 });
 
@@ -358,7 +425,7 @@ test("rejects references to data no prior step defines", () => {
 
 test("rejects references to undeclared params and unknown catalogs", () => {
   const bundle = freshBundle();
-  const selector = findActivity(bundle.workflows["brainstorm"]!.root, "select-panel");
+  const selector = findActivity(bundle.workflows["brainstorm"]!.root, seatingId(bundle));
   selector.bind["panelSize"] = "params.committeeSize";
   const processor = findAgent(bundle.workflows["brainstorm"]!.root, "process-input");
   processor.bind!["typeOptions"] = "bundle.faculties";

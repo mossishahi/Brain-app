@@ -119,8 +119,8 @@ test("an unconfigured kind is an explicit configuration error naming the backed 
     manager.search({ query: "gamma", kind: "general" }),
     (error: Error) =>
       error instanceof WebAccessError &&
-      /no general search provider is configured/.test(error.message) &&
-      /scholarly/.test(error.message),
+      /web_search has no source configured/.test(error.message) &&
+      /use paper_search instead/.test(error.message),
   );
   assert.equal(records[0]!.outcome, "error");
 });
@@ -312,22 +312,26 @@ test("a fetch refusal surfaces as a WebAccessError and is logged as what the mod
 });
 
 test("the unified tools wrap the manager and convert errors into honest tool refusals", async () => {
-  const provider = scriptedProvider({ id: "tooling", kinds: ["scholarly"] });
+  const provider = scriptedProvider({ id: "tooling", kinds: ["general"] });
   const manager = new WebAccessManager({
     providers: [provider],
-    chains: { scholarly: ["tooling"] },
+    chains: { general: ["tooling"] },
   });
   const [searchTool, fetchTool] = webAccessTools(manager);
-  const good = await searchTool!.execute(
-    { query: "iota", kind: "scholarly" },
-    { runId: "test" },
-  );
+  assert.equal(searchTool!.definition.name, "web_search");
+  const good = await searchTool!.execute({ query: "iota" }, { runId: "test" });
   assert.notEqual(good.isError, true);
-  const bad = await searchTool!.execute({ query: "iota" }, { runId: "test" });
-  assert.equal(bad.isError, true, "an unconfigured kind is a refusal, not a crash");
-  assert.match(String(bad.output), /scholarly/);
+  const bad = await searchTool!.execute({ query: "iota", recency: "7d" }, { runId: "test" });
+  assert.equal(bad.isError, true, "a malformed option is a refusal, not a crash");
+  assert.match(String(bad.output), /recency must be one of/);
   const refused = await fetchTool!.execute({ url: "" }, { runId: "test" });
   assert.equal(refused.isError, true);
+  // Without a general provider there is no web_search that could only refuse.
+  const scholarly = new WebAccessManager({
+    providers: [scriptedProvider({ id: "index", kinds: ["scholarly"] })],
+    chains: { scholarly: ["index"] },
+  });
+  assert.ok(!webAccessTools(scholarly).some((tool) => tool.definition.name === "web_search"));
 });
 
 test("buildWebAccessManager: scholarly is on by default, general needs its key, nothing configured means no manager", () => {

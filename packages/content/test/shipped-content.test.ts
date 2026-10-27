@@ -62,6 +62,14 @@ test("workflow phases appear in the canonical order", () => {
   const hasCodeAnnotation = root.steps.some((step) => step.id === "partition-files-code");
   const hasWeave = root.steps.some((step) => step.id === "weave-panel");
   const hasClassify = root.steps.some((step) => step.id === "classify-input");
+  // The paper-based panel composition (optional needs gate, retrieval,
+  // screen-or-skip, compose, seat) replaces the pool/placer/select chain;
+  // published bundles before it keep the agent-based chain.
+  const hasPaperPanel = root.steps.some((step) => step.id === "compose-panel");
+  const hasConfirmNeeds = root.steps.some((step) => step.id === "maybe-confirm-needs");
+  // Fact updates (a fact-table control declaring `updates`) merge the seats'
+  // reconsiderations after the walks and once more before the synthesis.
+  const hasFactUpdates = "updates" in (bundle.factTable ?? {});
   assert.deepEqual(
     root.steps.map((s) => s.id),
     [
@@ -69,20 +77,27 @@ test("workflow phases appear in the canonical order", () => {
       ...(hasClassify
         ? ["classify-input", "apply-classification", "confirm-classification"]
         : []),
+      ...(hasConfirmNeeds ? ["maybe-confirm-needs"] : []),
       "partition-files-useful",
       "partition-files-ignored",
       ...(hasCodeAnnotation ? ["partition-files-code", "maybe-annotate-code"] : []),
-      "build-pool",
-      "match-taxonomy",
-      "place-fields",
-      "submit-decisions",
-      "bridge-experts",
-      "select-panel",
+      ...(hasPaperPanel
+        ? ["retrieve-literature", "maybe-screen-literature", "compose-panel", "seat-panel"]
+        : [
+            "build-pool",
+            "match-taxonomy",
+            "place-fields",
+            "submit-decisions",
+            "bridge-experts",
+            "select-panel",
+          ]),
       ...(hasWeave ? ["weave-panel"] : []),
       "confirm-panel",
       "first-pass",
       "review-members",
+      ...(hasFactUpdates ? ["apply-fact-updates-after-review"] : []),
       "bridge-audit",
+      ...(hasFactUpdates ? ["apply-fact-updates-before-synthesis"] : []),
       "synthesize-proposal",
       "done",
     ],
@@ -243,6 +258,7 @@ test("the code-annotation pass is gated on code files and folds summaries into t
 test("the processor's file map is partitioned deterministically and NA files never reach later calls", () => {
   const bundle = freshBundle();
   const root = bundle.workflows["brainstorm"]!.root as SequenceNode;
+  const hasPaperPanel = root.steps.some((step) => step.id === "compose-panel");
 
   const useful = findActivity(root, "partition-files-useful");
   assert.equal(useful.handler, "attachments.useful");
@@ -266,7 +282,7 @@ test("the processor's file map is partitioned deterministically and NA files nev
   // stay valid with the file map alone omitted.
   const reviewerIds = new Set(["comment-step", "comment-step-bridge", "judge-step"]);
   for (const id of [
-    "build-pool",
+    ...(hasPaperPanel ? [] : ["build-pool"]),
     "develop-idea",
     "comment-step",
     ...(root.steps.some((step) => step.id === "weave-panel")
@@ -302,6 +318,15 @@ test("the processor's file map is partitioned deterministically and NA files nev
     );
   }
 
+  if (hasPaperPanel) {
+    // The relevance screener reads the projected input and the retrieved
+    // papers only — never a file map.
+    const screener = findAgent(root, "screen-literature");
+    assert.deepEqual(screener.bind?.["input"], { ref: "input", omit: ["files"] });
+    assert.equal(screener.bind?.["files"], undefined, "screen-literature receives no file map");
+    return;
+  }
+
   // The placer reads the shared taxonomy, not the submission's attachments:
   // it gets the projected input and the unmatched members only.
   const placer = findAgent(root, "place-fields");
@@ -312,6 +337,9 @@ test("the processor's file map is partitioned deterministically and NA files nev
 test("the decomposer split: pool with provenance, deterministic matching, placer over the live taxonomy, queued suggestions, bridge, then panel.select", () => {
   const bundle = freshBundle();
   const root = bundle.workflows["brainstorm"]!.root as SequenceNode;
+  if (root.steps.some((step) => step.id === "compose-panel")) {
+    return; // the paper-based panel composition replaced this chain (see below)
+  }
   const order = [
     "build-pool",
     "match-taxonomy",
@@ -409,6 +437,114 @@ test("the decomposer split: pool with provenance, deterministic matching, placer
     undefined,
     "leaf-product selection replaced round-robin, so no moduleSize knob exists",
   );
+});
+
+test("the paper-based panel composition: optional needs gate, retrieval, screen or skip, compose, seat", () => {
+  const bundle = freshBundle();
+  const workflow = bundle.workflows["brainstorm"]!;
+  const root = workflow.root as SequenceNode;
+  if (!root.steps.some((step) => step.id === "compose-panel")) {
+    return; // published bundles before it seat the panel through the pool chain
+  }
+  const ids = root.steps.map((step) => step.id);
+  // The optional needs gate sits right after the classification gate.
+  assert.equal(ids.indexOf("maybe-confirm-needs"), ids.indexOf("confirm-classification") + 1);
+  const needsGate = findNode(root, "maybe-confirm-needs");
+  assert.equal(needsGate.kind, "condition");
+  if (needsGate.kind !== "condition") return;
+  assert.deepEqual(needsGate.if, { ref: "params.askUserToConfirmNeeds", equals: true });
+  assert.equal(needsGate.then.kind, "humanGate");
+  if (needsGate.then.kind !== "humanGate") return;
+  assert.equal(needsGate.then.id, "confirm-needs");
+  assert.equal(needsGate.then.skippable, true);
+  assert.equal(needsGate.then.gate.show, "classification.embeddingInput");
+  const edit = needsGate.then.gate.actions.find((action) => action.editRule === "needs");
+  assert.ok(edit, "the needs gate offers an edit under editRule needs");
+  assert.equal(edit!.edits, "classification.embeddingInput");
+
+  // Retrieval, screen-or-skip, compose and seat run back to back.
+  const start = ids.indexOf("retrieve-literature");
+  assert.deepEqual(ids.slice(start, start + 4), [
+    "retrieve-literature",
+    "maybe-screen-literature",
+    "compose-panel",
+    "seat-panel",
+  ]);
+  const retrieve = findActivity(root, "retrieve-literature");
+  assert.equal(retrieve.handler, "literature.retrieve");
+  assert.deepEqual(retrieve.bind, {
+    classification: "classification",
+    input: { ref: "input", omit: ["files"] },
+    config: "params",
+  });
+  assert.deepEqual(retrieve.output, { key: "literature", schema: "literature" });
+  const screen = findNode(root, "maybe-screen-literature");
+  assert.equal(screen.kind, "condition");
+  if (screen.kind !== "condition") return;
+  assert.deepEqual(screen.if, { ref: "params.relevanceScreen", equals: true });
+  const screener = findAgent(root, "screen-literature");
+  assert.equal(screener.skill, "literature-screener");
+  assert.equal(screener.bind?.["papers"], "literature.screenItems");
+  assert.deepEqual(screener.output, { key: "literatureScreen", schema: "literatureScreen" });
+  const skip = findActivity(root, "skip-screen-literature");
+  assert.equal(skip.handler, "literature.noScreen");
+  assert.deepEqual(skip.output, { key: "literatureScreen", schema: "literatureScreen" });
+  const compose = findActivity(root, "compose-panel");
+  assert.equal(compose.handler, "panel.compose");
+  assert.deepEqual(compose.bind, { literature: "literature", screen: "literatureScreen", config: "params" });
+  assert.deepEqual(compose.output, { key: "panelEvidence", schema: "panelEvidence" });
+  const seat = findActivity(root, "seat-panel");
+  assert.equal(seat.handler, "panel.seat");
+  assert.deepEqual(seat.bind, {
+    evidence: "panelEvidence",
+    panelSize: "params.panelSize",
+    panelSizeMode: "params.panelSizeMode",
+  });
+  assert.deepEqual(seat.output, { key: "panel", schema: "panel" });
+
+  // Handler contracts: the whole params object and a string param are typed
+  // inputs; only the seating declares an input-sized output bound.
+  const handlers = bundle.activities.handlers;
+  assert.deepEqual(handlers["literature.retrieve"]!.inputs, {
+    classification: { kind: "artifact", schema: "taskClassification" },
+    input: { kind: "artifact", schema: "processorOutput" },
+    config: { kind: "params" },
+  });
+  assert.equal(handlers["literature.retrieve"]!.bounds, undefined);
+  assert.equal(handlers["panel.compose"]!.outputSchema, "panelEvidence");
+  assert.deepEqual(handlers["panel.seat"]!.inputs, {
+    evidence: { kind: "artifact", schema: "panelEvidence" },
+    panelSize: { kind: "positiveInteger" },
+    panelSizeMode: { kind: "param" },
+  });
+  assert.deepEqual(handlers["panel.seat"]!.bounds, { outputField: "members", maxItemsFromInput: "panelSize" });
+  // The old handlers stay registered for pinned runs.
+  for (const key of ["taxonomy.match", "taxonomy.suggest", "experts.bridge", "panel.select"]) {
+    assert.ok(handlers[key], `${key} stays registered`);
+  }
+  assert.equal(bundle.skills["literature-screener"]!.meta.output, "literatureScreen");
+
+  // The spec v2 knobs are workflow params with their defaults.
+  const params = workflow.params;
+  const defaults: Record<string, string | number | boolean> = {
+    panelSize: 6,
+    panelSizeMode: "auto",
+    askUserToConfirmNeeds: false,
+    relevanceScreen: false,
+    encoder: "specter2",
+    routePairs: "all",
+    seatsPerSubfield: 0,
+    seatsPerField: 0,
+    criticalCoverage: 0.75,
+    maxAffinity: 0.8,
+    sourceEuropePmc: false,
+    maxCalls: 150,
+  };
+  for (const [name, value] of Object.entries(defaults)) {
+    assert.equal(params[name]?.default, value, `param ${name} defaults to ${String(value)}`);
+  }
+  assert.ok(params["maxPoolMembers"], "maxPoolMembers stays declared");
+  assert.ok(params["maxDepartments"], "maxDepartments stays declared");
 });
 
 test("the interdisciplinary seat is woven deterministically and comments through its own skill", () => {
@@ -671,6 +807,13 @@ test("verdict catalog preserves the Pass/Build/Interrupt contract", () => {
 
 test("skills split into the expected roles and its techniques, with clean prompt bodies", () => {
   const bundle = freshBundle();
+  // The strategy declaration requires the complete role/technique set. Checking
+  // individual skill presence would silently accept an accidentally omitted role.
+  const hasGameReview = bundle.workflows["brainstorm"]!.params["gamifiedReview"] !== undefined;
+  const hasCommittee = bundle.workflows["brainstorm"]!.params["gameDecisionThreshold"] !== undefined;
+  // The reconsideration roles and their shared technique ship with the fact
+  // table's update rule (catalog/fact-table.json `reconsideration`).
+  const hasReconsideration = "reconsideration" in (bundle.factTable ?? {});
   const roles = Object.values(bundle.skills).filter((s) => s.meta.kind === "role");
   const techniques = Object.values(bundle.skills).filter((s) => s.meta.kind === "technique");
   assert.deepEqual(
@@ -685,24 +828,37 @@ test("skills split into the expected roles and its techniques, with clean prompt
       ...(bundle.skills["classifier"] ? ["classifier"] : []),
       ...(bundle.skills["code-annotator"] ? ["code-annotator"] : []),
       "commentor",
+      ...(hasCommittee ? ["committee-chair"] : []),
+      ...(hasGameReview ? ["game-commentor", "game-interdisciplinary-commentor", ...(hasCommittee ? ["game-redeveloper"] : [])] : []),
       "integrator",
       ...(bundle.skills["interdisciplinary-commentor"]
         ? ["interdisciplinary-commentor"]
         : []),
       "judge",
+      // The relevance screener ships with the paper-based panel composition.
+      ...(bundle.skills["literature-screener"] ? ["literature-screener"] : []),
       "placer",
       "pool-builder",
       "processor",
+      ...(hasReconsideration ? ["reconsider-chain", "reconsider-comment", "reconsider-game-report"] : []),
       "redeveloper",
-    ],
+      ...(hasGameReview && !hasCommittee ? ["review-chair"] : []),
+      // The fact table's verifier ships with the fact table (catalog/fact-table.json).
+      ...(bundle.skills["supreme_judge"] ? ["supreme_judge"] : []),
+      ...(bundle.factTable?.accessMode === "supreme-mediated/v1" ? ["supreme_judge_consult"] : []),
+    ].sort(),
   );
   assert.deepEqual(
     techniques.map((s) => s.meta.name).sort(),
     [
       "academic-profile-lookup",
+      ...(hasCommittee ? ["claim-evidence"] : []),
       "deep-understanding",
+      ...(hasReconsideration ? ["fact-update"] : []),
       "field-match",
       "field-placement",
+      ...(hasGameReview ? ["game-review"] : []),
+      ...(bundle.skills["gpu-verification"] ? ["gpu-verification"] : []),
       "literature-review",
       "term-unification",
       // The house style ships as a technique from 0.24.0 (bought once per
@@ -728,6 +884,20 @@ test("skills split into the expected roles and its techniques, with clean prompt
   assert.deepEqual(bundle.skills["deep-understanding"]!.meta.vars, []);
   assert.deepEqual(bundle.skills["academic-profile-lookup"]!.meta.vars, []);
   assert.deepEqual(bundle.skills["term-unification"]!.meta.vars, []);
+  if (hasGameReview) {
+    assert.equal(bundle.workflows["brainstorm"]!.params["gamifiedReview"]!.default, false);
+    assert.deepEqual(bundle.skills["game-review"]!.meta.vars, []);
+    for (const name of ["game-commentor", "game-interdisciplinary-commentor"]) {
+      const role = bundle.skills[name]!;
+      assert.equal(role.meta.output, "gameCritique");
+      assert.ok(role.meta.techniques.includes("game-review"), `${name} includes the shared game contract`);
+      assert.ok(role.meta.capabilities.includes("fact-table"), `${name} can verify supporting facts`);
+      assert.equal(role.meta.capabilities.includes("notes-access"), false, `${name} cannot read earlier reviewer feedback in thinker notes`);
+    }
+    assert.equal(bundle.skills[hasCommittee ? "committee-chair" : "review-chair"]!.meta.output, hasCommittee ? "gameCommitteeDecision" : "gameChairDecision");
+    if (hasCommittee) assert.equal(bundle.skills["game-redeveloper"]!.meta.output, "redevelopmentPatchParts");
+    assert.equal(bundle.skills["chair"]!.meta.output, "finalProposal", "the final rapporteur remains a separate role");
+  }
   // Executable needs are declared as capabilities, never prose-only:
   assert.ok(bundle.skills["commentor"]!.meta.capabilities.includes("code-execution"));
   assert.ok(bundle.skills["literature-review"]!.meta.capabilities.includes("web-search"));

@@ -12,10 +12,11 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
   readdirSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -26,6 +27,7 @@ import {
   isCotStepParts,
   SLURM_COMMAND_TAG,
   type JobDetail,
+  type GpuSetupReport,
   type JobSummary,
   type ReadinessReport,
   type ServerSettings,
@@ -53,6 +55,9 @@ import {
   type StartBrainServerOptions,
 } from "../src/index.js";
 import { startTestRegistry } from "./mcp-registry.js";
+import type { WithPanelComposition } from "../src/panel-composition.js";
+import type { PanelEvidenceView } from "../src/panel-evidence.js";
+import { compositionInputs } from "../src/stage-mapper.js";
 
 function tempRoot(prefix = "brain-server-"): string {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -123,6 +128,15 @@ function pinnedBundleVersion(): string {
       readFileSync(new URL("../../../../test-bundle.json", import.meta.url), "utf8"),
     ) as { version: string }
   ).version;
+}
+
+let workflowParameters: Readonly<Record<string, unknown>> | undefined;
+function pinnedWorkflowDeclares(name: string): boolean {
+  workflowParameters ??= (JSON.parse(readFileSync(
+    join(staticRegistryRoot, "bundles", "brainstorm", pinnedBundleVersion(), "workflows", "brainstorm.workflow.json"),
+    "utf8",
+  )) as { params?: Readonly<Record<string, unknown>> }).params ?? {};
+  return Object.hasOwn(workflowParameters, name);
 }
 
 /**
@@ -213,6 +227,10 @@ async function startTestBrainServer(
       // gate countdowns arm (shift handovers must not swallow gates); the
       // suite's countdown tests need arming within seconds.
       gateAutoApproveGraceMs: 0,
+      gpuSetup: { discover: async () => ({
+        hostname: "test", architecture: "x64", platform: "linux", scheduler: "unsupported",
+        partitions: [], qos: [], warnings: [], evidence: [], discoveredAt: new Date().toISOString(),
+      }) },
       ...options,
       contentRegistryUrl: registry.url,
       contentRegistryStatus: { running: true, url: registry.url },
@@ -248,13 +266,24 @@ async function requestJson<T>(
 
 async function putSettings(
   server: RunningBrainServer,
-  update: Partial<ServerSettingsUpdate>,
+  update: WithPanelComposition<Partial<ServerSettingsUpdate>>,
 ): Promise<ServerSettings> {
-  const current = (await requestJson<ServerSettings>(server, "/api/settings")).value;
+  const current = (await requestJson<WithPanelComposition<ServerSettings>>(server, "/api/settings")).value;
+  const next = { ...current, ...update };
+  // Offline LLM execution still builds the literature taxonomy vectors. Keep
+  // these HTTP fixtures independent of installed model files and inference
+  // hardware, without sending an unknown parameter to older pinned bundles.
+  // An explicit encoder override wins; panel sizing keeps its bundle default.
+  const offlineEncoder = next.llm.provider === "offline" && pinnedWorkflowDeclares("encoder");
   return (
     await requestJson<ServerSettings>(server, "/api/settings", {
       method: "PUT",
-      body: JSON.stringify({ ...current, ...update }),
+      body: JSON.stringify({
+        ...next,
+        ...(offlineEncoder ? {
+          panelComposition: { params: { encoder: "hash-ngram-v1", ...next.panelComposition?.params } },
+        } : {}),
+      }),
     })
   ).value;
 }
@@ -766,7 +795,7 @@ test("verified settings populate orchestration environment without exposing the 
   }
 });
 
-test("GPU run settings validate the tag, persist across updates, and reach the worker environment", async () => {
+test("GPU settings persist but reach the worker only after an approved successful probe", async () => {
   const workspace = tempRoot();
   try {
     const store = new SettingsStore(workspace, {
@@ -803,6 +832,8 @@ test("GPU run settings validate the tag, persist across updates, and reach the w
       gpu: { template, timeLimitMinutes: 90 },
     });
     assert.deepEqual(store.get().gpu, { template, timeLimitMinutes: 90 });
+    assert.equal(store.executionEnvironment({ BRAINSTORM_AGENTIC_GPU_RUN: "unapproved" }).BRAINSTORM_AGENTIC_GPU_RUN, undefined);
+    await store.installVerifiedGpu({ template, timeLimitMinutes: 90 }, "test-probe");
     const env = store.executionEnvironment({}, store.get());
     assert.deepEqual(JSON.parse(env.BRAINSTORM_AGENTIC_GPU_RUN!), {
       template,
@@ -828,6 +859,59 @@ test("GPU run settings validate the tag, persist across updates, and reach the w
   } finally {
     await removeWorkspace(workspace);
   }
+});
+
+test("GPU HTTP onboarding drafts after credential setup and only submits the exact approved revision", async () => {
+  const workspace = tempRoot("brain-gpu-http-");
+  let submitted = 0;
+  const server = await startTestBrainServer({
+    workspace, host: "127.0.0.1", port: 0,
+    validateAnthropic: async () => undefined,
+    readinessAdvisor: null,
+    readinessProbes: { llm: async () => ({}), code: async () => ({}), internet: async () => ({}), slurm: async () => ({}), capabilities: async () => ({}) },
+    gpuSetup: {
+      discover: async () => ({
+        hostname: hostname(), architecture: "x64", platform: "linux", scheduler: "slurm",
+        partitions: [{ name: "gpu_p", accounts: ["research"], qos: ["gpu_normal"], gpuTypes: [""], maxTimeMinutes: 1440 }],
+        qos: [{ name: "gpu_normal", flags: [], requiresReservation: false }], warnings: [], evidence: [], discoveredAt: new Date().toISOString(),
+      }),
+      planner: async () => ({ notes: ["Test draft"] }),
+      runProbe: async (config) => {
+        submitted += 1;
+        config.onSubmitted?.({ jobId: "123", jobDir: config.jobsRoot });
+        return { output: { jobId: "123", state: "COMPLETED", log: "BRAIN_GPU_PROBE_OK: CUDA memory verified" } };
+      },
+    },
+  });
+  const call = (path: string, method: string, body: unknown = {}) => requestJson<GpuSetupReport>(server, path, { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const phase = async (expected: string): Promise<GpuSetupReport> => {
+    for (let count = 0; count < 100; count++) {
+      const { value } = await requestJson<GpuSetupReport>(server, "/api/gpu/setup");
+      if (value.phase === expected) return value;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error(`GPU phase did not become ${expected}`);
+  };
+  try {
+    assert.equal((await call("/api/gpu/discover", "POST")).status, 400);
+    assert.equal((await call("/api/settings", "PUT", { llm: { provider: "anthropic", model: "test", apiKey: "test-key" } })).status, 200);
+    const initial = (await phase("draft")).draft!;
+    assert.equal(submitted, 0);
+    const approved = { draftId: initial.id, revision: initial.revision, reviewToken: initial.reviewToken, approved: true };
+    assert.equal((await call("/api/gpu/probe", "POST", { ...approved, approved: false })).status, 409);
+    assert.equal((await call("/api/gpu/draft", "PUT", { draftId: initial.id, revision: initial.revision, parameters: { ...initial.parameters, qos: "not-permitted" } })).status, 400);
+    const edited = await call("/api/gpu/draft", "PUT", { draftId: initial.id, revision: initial.revision, parameters: { ...initial.parameters, memoryGb: 8 } });
+    assert.equal(edited.status, 200);
+    assert.equal((await call("/api/gpu/probe", "POST", approved)).status, 409);
+    assert.equal(submitted, 0);
+    const draft = edited.value.draft!;
+    assert.match(draft.probeScript, /#SBATCH --mem=8G/);
+    assert.equal((await call("/api/gpu/probe", "POST", { draftId: draft.id, revision: draft.revision, reviewToken: draft.reviewToken, approved: true })).status, 202);
+    await phase("ready");
+    assert.equal(submitted, 1);
+    assert.ok(server.manager.settings.executionEnvironment({}).BRAINSTORM_AGENTIC_GPU_RUN);
+    assert.equal((await call("/api/gpu/probe", "POST", { draftId: draft.id, revision: draft.revision, reviewToken: draft.reviewToken, approved: true })).status, 409);
+  } finally { await server.close(); await removeWorkspace(workspace); }
 });
 
 test("web search settings verify the provider key, stay write-only, and reach the worker environment", async () => {
@@ -1007,6 +1091,84 @@ test("a diagnostic preview describes exactly what would be sent, and excludes th
       true,
       "the destination derives from the deployment registry; a healthy deployment can always send",
     );
+  } finally {
+    await server.close();
+    await removeWorkspace(workspace);
+  }
+});
+
+test("current bundle delivers game reports and scores through HTTP with the submitted mode", {
+  skip: !pinnedWorkflowDeclares("gameDecisionThreshold"),
+}, async () => {
+  const workspace = tempRoot();
+  const server = await startTestBrainServer({ workspace, port: 0 });
+  try {
+    await putSettings(server, {
+      runner: "local",
+      panelConfirmation: "auto",
+      llm: { provider: "offline" },
+      gamifiedReview: true,
+      gameReview: { threshold: 0.6, initialPoints: 0 },
+      panelComposition: { params: { maxCalls: 10 } },
+    });
+    const jobId = await submit(server, "Review a differentiable nearest-neighbor construction");
+    // A setting changed after submission applies to future runs only, including
+    // the interval before this run has written its first checkpoint.
+    await putSettings(server, { gamifiedReview: false, gameReview: { threshold: 0.1, initialPoints: 500 } });
+    const detail = await waitFor(server, jobId, "completed");
+    assert.equal(detail.gamifiedReview, true);
+    assert.deepEqual(detail.gameReview, { threshold: 0.6, initialPoints: 0 });
+    assert.equal((await requestJson<ServerSettings>(server, "/api/settings")).value.gamifiedReview, false);
+    const review = detail.stages.find((stage) => stage.id === "review-members");
+    assert.ok(review && review.id === "review-members");
+    assert.equal(review.gamifiedReview, true);
+    assert.deepEqual(review.gameReview, { threshold: 0.6, initialPoints: 0 });
+    assert.equal(review.gameLedger?.initialPoints, 0);
+    assert.ok(review.gameLedger?.critics.every(critic => critic.balance >= 0 && critic.eligible && !critic.excluded));
+    const rounds = review.members.flatMap((member) => member.steps.flatMap((step) => step.rounds));
+    assert.ok(rounds.length > 0, "the HTTP view contains recorded review rounds");
+    for (const round of rounds) {
+      assert.deepEqual(round.comments, [], "game reports never masquerade as legacy verdicts");
+      assert.ok(round.gameCritiques && round.gameCritiques.length > 0);
+      assert.ok(round.gameCritiques.every((report) => report.q === 0 && report.justification.length > 0));
+      const chair = round.gameChair;
+      assert.ok(chair);
+      assert.equal(chair.y, undefined, "the committee chair does not provide the scientific label");
+      assert.ok(chair.reason.length > 0);
+      const settlement = round.gameSettlement;
+      assert.ok(settlement, "deterministic settlement reaches the HTTP projection");
+      assert.equal(settlement.ruleVersion, "brier-peer/v2");
+      assert.equal(settlement.meanQ, 0);
+      assert.equal(settlement.threshold, 0.6);
+      assert.equal(settlement.initialPoints, 0);
+      assert.equal(settlement.status, "settled");
+      assert.equal(settlement.y, 0);
+      assert.equal(settlement.admittedCount, round.gameCritiques.length);
+      assert.equal(settlement.rows.length, round.gameCritiques.length);
+      for (const row of settlement.rows) {
+        assert.equal(chair.reports[row.criticId]?.admissible, true);
+        assert.equal(row.admissible, true);
+        assert.equal(row.brierLoss, 0);
+        assert.equal(row.baseScore, 25);
+        assert.equal(row.peerMeanBaseScore, settlement.admittedCount === 1 ? null : 25);
+        assert.equal(row.score, 25);
+        assert.equal(row.balanceAfter, row.balanceBefore! + 25);
+        assert.equal(row.excluded, false);
+      }
+    }
+    const sessionDir = join(workspace, "workspace", "sessions", jobId);
+    const params = compositionInputs(sessionDir).params as Record<string, unknown>;
+    assert.equal(params.gamifiedReview, true);
+    assert.equal(params.gameDecisionThreshold, 0.6);
+    assert.equal(params.gameInitialPoints, 0);
+    assert.equal(params.encoder, "hash-ngram-v1");
+    assert.equal(params.maxCalls, 10, "mode and encoder transport preserve composition overrides");
+    const checkpoint = JSON.parse(readFileSync(join(sessionDir, "checkpoint.json"), "utf8")) as {
+      journal: Array<{ key: string }>;
+    };
+    assert.ok(checkpoint.journal.some((entry) => /\/game-comment-step(?:-bridge)?-execute::result$/.test(entry.key)));
+    assert.ok(!checkpoint.journal.some((entry) => /\/(?:comment-step(?:-bridge)?|judge-step)-execute::result$/.test(entry.key)),
+      "game mode does not execute the legacy critics or judge");
   } finally {
     await server.close();
     await removeWorkspace(workspace);
@@ -2393,23 +2555,43 @@ test("local offline job completes with every dashboard artifact", async () => {
     assert.equal(detail.stages.length, 9);
     assert.ok(detail.stages.every((stage) => stage.status === "completed"));
     assert.ok(detail.stages[0]!.id === "process-input" && detail.stages[0].output);
-    assert.ok(detail.stages[1]!.id === "decompose-experts" && detail.stages[1].experts);
-    assert.ok(
-      !("grounding" in detail.stages[1].experts!),
-      "the tree view carries departments only; grounding is a sibling field",
-    );
-    const decomposeGrounding = detail.stages[1].grounding;
-    assert.ok(
-      decomposeGrounding &&
-        decomposeGrounding.papers.length > 0 &&
-        decomposeGrounding.scholars.length > 0,
-      "the decompose stage exposes the papers/authors/interests grounding",
-    );
-    assert.ok(
-      decomposeGrounding.scholars.some(
-        (scholar) => scholar.profile === "ok" && scholar.interests.length > 0,
-      ),
-    );
+    assert.ok(detail.stages[1]!.id === "decompose-experts");
+    const usesLiteratureComposition = pinnedWorkflowDeclares("encoder");
+    if (usesLiteratureComposition) {
+      // Current bundles expose the deterministic literature coverage artifact
+      // instead of the retired pool/placement/decomposer tree. An offline run
+      // has no retrieved papers; its coverage still records needs and seats.
+      const evidence = await requestJson<PanelEvidenceView>(server, `/api/jobs/${jobId}/panel-evidence`);
+      assert.equal(evidence.status, 200);
+      assert.equal(evidence.value.version, 1);
+      assert.ok(evidence.value.needs.length > 0);
+      assert.ok(evidence.value.seats.length > 0);
+      assert.equal(evidence.value.panelSizeMode, "auto");
+      assert.match(evidence.value.determinismSha256 ?? "", /^[a-f0-9]{64}$/);
+      assert.ok(evidence.value.seats.every((seat) => seat.exemplars.length === 0),
+        "offline composition does not invent retrieved papers");
+      const inputs = compositionInputs(join(workspace, "workspace", "sessions", jobId));
+      assert.ok(inputs.literature && inputs.panelEvidence);
+      assert.equal((inputs.params as Record<string, unknown>).encoder, "hash-ngram-v1");
+    } else {
+      assert.ok(detail.stages[1].experts);
+      assert.ok(
+        !("grounding" in detail.stages[1].experts),
+        "the tree view carries departments only; grounding is a sibling field",
+      );
+      const decomposeGrounding = detail.stages[1].grounding;
+      assert.ok(
+        decomposeGrounding &&
+          decomposeGrounding.papers.length > 0 &&
+          decomposeGrounding.scholars.length > 0,
+        "the decompose stage exposes the papers/authors/interests grounding",
+      );
+      assert.ok(
+        decomposeGrounding.scholars.some(
+          (scholar) => scholar.profile === "ok" && scholar.interests.length > 0,
+        ),
+      );
+    }
     // Review members are named by seat (umbrella terms may repeat across
     // seats), and every recorded round carries the chain-of-thought step
     // text exactly as its reviewers saw it.
@@ -2441,16 +2623,18 @@ test("local offline job completes with every dashboard artifact", async () => {
 
     // The split pipeline surfaces its sub-steps on the stage, each completed
     // and carrying a one-line result from its artifact.
-    const decomposeSteps = detail.stages[1].steps;
-    assert.ok(decomposeSteps, "the decompose stage carries the split pipeline steps");
-    assert.deepEqual(
-      decomposeSteps.map((step) => step.id),
-      ["build-pool", "match-taxonomy", "place-fields", "submit-decisions", "bridge-experts"],
-    );
-    assert.ok(decomposeSteps.every((step) => step.status === "completed"));
-    assert.match(decomposeSteps[0]!.detail ?? "", /\d+ members from \d+ papers/);
-    assert.match(decomposeSteps[1]!.detail ?? "", /\d+ matched · \d+ unmatched/);
-    assert.match(decomposeSteps[4]!.detail ?? "", /\d+ departments/);
+    if (!usesLiteratureComposition) {
+      const decomposeSteps = detail.stages[1].steps;
+      assert.ok(decomposeSteps, "the decompose stage carries the split pipeline steps");
+      assert.deepEqual(
+        decomposeSteps.map((step) => step.id),
+        ["build-pool", "match-taxonomy", "place-fields", "submit-decisions", "bridge-experts"],
+      );
+      assert.ok(decomposeSteps.every((step) => step.status === "completed"));
+      assert.match(decomposeSteps[0]!.detail ?? "", /\d+ members from \d+ papers/);
+      assert.match(decomposeSteps[1]!.detail ?? "", /\d+ matched · \d+ unmatched/);
+      assert.match(decomposeSteps[4]!.detail ?? "", /\d+ departments/);
+    }
     assert.ok(
       detail.stages[1]!.activity?.some((entry) =>
         entry.message.includes("differentiable graph construction"),
@@ -4424,6 +4608,11 @@ fs.writeFileSync(checkpointPath, JSON.stringify(checkpoint, null, 2));
       return false;
     }
   }, 5_000);
+  // Reconciliation distinguishes the resumed checkpoint from the stale failed
+  // one by its filesystem mtime. Pin that fixture input to our synthetic clock
+  // instead of depending on the filesystem clock's precision or skew.
+  const completedAt = new Date(now + 1_000);
+  utimesSync(join(sessionDir, "checkpoint.json"), completedAt, completedAt);
   assert.equal((await manager.detail(jobId)).status, "completed");
   // A finished job is no longer retryable, and a checkpoint-less failure never is.
   await assert.rejects(manager.retryFailed(jobId), /not failed/);

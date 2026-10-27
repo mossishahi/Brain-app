@@ -1,6 +1,12 @@
 import { z } from "zod";
 
-import { OUTPUT_SHAPES, type OutputShape } from "./artifacts.js";
+import {
+  FACT_VERDICT_CASES,
+  FACT_VERDICT_METHODS,
+  FACT_VERDICT_RESOLUTIONS,
+  OUTPUT_SHAPES,
+  type OutputShape,
+} from "./artifacts.js";
 
 /**
  * Schema for the declarative workflow definition, the logical model routes,
@@ -183,6 +189,14 @@ export interface AgentNode {
    * behavior.
    */
   fastPassUnanimous?: boolean;
+  /**
+   * Review nodes only: the thinker notes this task may search through the
+   * notes-access capability — the seat whose chain is under review and the
+   * chain position reached. Both are data references resolved per task; the
+   * runtime stamps the resolved scope on the task, never the notes
+   * themselves. Absent: the task gets no notes tool.
+   */
+  thinkerNotes?: { seat: string; through: string };
 }
 
 /**
@@ -279,8 +293,12 @@ export interface HumanGateNode {
        * - "classification": the decision may override the edited input's
        *   `type` (any type of the loaded catalog) and replace its
        *   `requestedOutputs` (the classification gate).
+       * - "needs": the decision may carry an edited `embeddingInput` that
+       *   only removes facets, aliases or equivalent problems and changes
+       *   relevance/confidence values within [0, 1] — no text is added or
+       *   rewritten, and at least 3 facets remain (the needs gate).
        */
-      editRule?: "removeOnly" | "classification";
+      editRule?: "removeOnly" | "classification" | "needs";
     }>;
   };
   /** When true, an unattended runtime may auto-approve and continue. */
@@ -322,6 +340,11 @@ export const workflowNodeSchema: z.ZodType<WorkflowNode> = z.lazy(() =>
          * pinned bundle without the flag never changes behavior.
          */
         fastPassUnanimous: z.boolean().optional(),
+        /**
+         * Review nodes only: the seat whose recorded thinking the task may
+         * search (notes-access), and the chain position it has reached.
+         */
+        thinkerNotes: z.object({ seat: dataRefSchema, through: dataRefSchema }).strict().optional(),
       })
       .strict(),
     z
@@ -392,7 +415,7 @@ export const workflowNodeSchema: z.ZodType<WorkflowNode> = z.lazy(() =>
                     id: identifier,
                     description: z.string().min(1),
                     edits: dataRefSchema.optional(),
-                    editRule: z.enum(["removeOnly", "classification"]).optional(),
+                    editRule: z.enum(["removeOnly", "classification", "needs"]).optional(),
                   })
                   .strict(),
               )
@@ -475,12 +498,26 @@ const activityHandlerSchema = z
     description: z.string().min(1),
     /** Only deterministic handlers are valid workflow activities. */
     deterministic: z.literal(true),
-    /** Exact typed input bindings the activity node must provide. */
+    /**
+     * Exact typed input bindings the activity node must provide:
+     * - "artifact": a produced artifact of the named schema;
+     * - "artifactCollection": a keyed collection of artifacts of the named
+     *   schema, produced one entry at a time by a forEach node;
+     * - "positiveInteger": `params.<name>` naming a positive-integer param
+     *   with finite min/default/max;
+     * - "params": the whole workflow params object, bound as the bare
+     *   reference `params` (a handler that reads many knobs);
+     * - "param": `params.<name>` naming one declared param of any primitive
+     *   type (a string or boolean switch).
+     */
     inputs: z.record(
       identifier,
       z.discriminatedUnion("kind", [
         z.object({ kind: z.literal("artifact"), schema: z.string().min(1) }).strict(),
+        z.object({ kind: z.literal("artifactCollection"), schema: z.string().min(1) }).strict(),
         z.object({ kind: z.literal("positiveInteger") }).strict(),
+        z.object({ kind: z.literal("params") }).strict(),
+        z.object({ kind: z.literal("param") }).strict(),
       ]),
     ),
     /** Artifact schema the registered handler returns. */
@@ -488,19 +525,24 @@ const activityHandlerSchema = z
     /**
      * Typed finite-output contract. The named output collection may contain
      * at most the positive integer supplied through the named activity input.
+     * Optional: a handler whose output carries no collection sized by one of
+     * its inputs (a retrieval or evidence record, sized by the run's budget
+     * params) declares none; every older handler keeps its bound.
      */
     bounds: z
       .object({
         outputField: identifier,
         maxItemsFromInput: identifier,
       })
-      .strict(),
+      .strict()
+      .optional(),
   })
   .strict()
   .superRefine((handler, ctx) => {
     if (Object.keys(handler.inputs).length === 0) {
       ctx.addIssue({ code: "custom", path: ["inputs"], message: "an activity must declare at least one input" });
     }
+    if (handler.bounds === undefined) return;
     const boundInput = handler.inputs[handler.bounds.maxItemsFromInput];
     if (!boundInput) {
       ctx.addIssue({
@@ -525,6 +567,99 @@ export const activitiesSchema = z
   .strict();
 
 export type ActivityRegistry = z.infer<typeof activitiesSchema>;
+
+// ---------------------------------------------------------------------------
+// taxonomy node texts (optional control: catalog/taxonomy-texts.json)
+// ---------------------------------------------------------------------------
+
+/**
+ * The text of every taxonomy topic as the panel-composition encoders embed
+ * it (OpenAlex snapshot description + keywords; curated definition clause +
+ * aliases), with the snapshot it came from, the recipe and a checksum. An
+ * optional control: older bundles do not carry it, and a run then embeds
+ * topic names alone.
+ */
+export const taxonomyTextsSchema = z.object({
+  version: z.literal(1),
+  snapshot: z.object({ source: z.string().min(1), date: z.string().min(1) }),
+  recipe: z.string().min(1),
+  /** sha256 of the entries array, serialised canonically by the producer. */
+  sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  entries: z.array(z.object({ id: z.string().min(1), text: z.string().min(1) })),
+});
+
+export type TaxonomyTexts = z.infer<typeof taxonomyTextsSchema>;
+
+// ---------------------------------------------------------------------------
+// fact table (optional control: catalog/fact-table.json)
+// ---------------------------------------------------------------------------
+
+/**
+ * An object whose keys are EXACTLY `names`, each defined by non-empty prose:
+ * the definitions the verifier's instructions render, so a missing, misspelt
+ * or extra key is an error rather than a silent gap in the prompt.
+ */
+function definitionsOf<Names extends readonly string[]>(names: Names) {
+  const shape = Object.fromEntries(names.map((name) => [name, z.string().min(1)])) as {
+    [Name in Names[number]]: z.ZodString;
+  };
+  return z.object(shape).strict();
+}
+
+/**
+ * The run's fact table: the verifier role behind it (a role skill ruling in
+ * the factVerdict artifact, on a logical route), the definitions of the
+ * cases, methods and resolutions a ruling uses — rendered into the
+ * verifier's instructions — and the table's budgets. An optional control:
+ * older bundles do not carry it, and their runs have no fact table.
+ */
+export const factTableCatalogSchema = z
+  .object({
+    version: semver,
+    accessMode: z.literal("supreme-mediated/v1").optional(),
+    consultation: z.object({ skill: identifier, route: identifier, output: z.literal("factConsultation") }).strict().optional(),
+    verifier: z
+      .object({
+        skill: identifier,
+        route: identifier,
+        output: z.literal("factVerdict"),
+      })
+      .strict(),
+    updates: z.literal("delete-or-replace/v1").optional(),
+    reconsideration: z
+      .object({
+        chain: z.object({ skill: identifier, route: identifier, output: z.literal("chainReconsiderationParts") }).strict(),
+        gameReport: z.object({ skill: identifier, route: identifier, output: z.literal("gameReportReconsideration") }).strict(),
+        comment: z.object({ skill: identifier, route: identifier, output: z.literal("commentReconsideration") }).strict(),
+      })
+      .strict()
+      .optional(),
+    cases: definitionsOf(FACT_VERDICT_CASES),
+    methods: definitionsOf(FACT_VERDICT_METHODS),
+    resolutions: definitionsOf(FACT_VERDICT_RESOLUTIONS),
+    limits: z
+      .object({
+        /** Submissions one task may make; lookups and status calls are free. */
+        submissionsPerTask: z.number().int().min(1).max(50),
+        /** Entries shown to the verifier as possibly the same or contradicting. */
+        relatedFacts: z.number().int().min(1).max(30),
+        /** Entries a lookup returns by default. */
+        lookupResults: z.number().int().min(1).max(10),
+        /** Wall-clock ceiling of one verification. */
+        verificationMinutes: z.number().int().min(1).max(120),
+      })
+      .strict(),
+  })
+  .strict().superRefine((control, ctx) => {
+    if ((control.accessMode !== undefined) !== (control.consultation !== undefined)) {
+      ctx.addIssue({ code: "custom", path: ["consultation"], message: "mediated access and its Supreme consultation role must be configured together" });
+    }
+    if ((control.updates !== undefined) !== (control.reconsideration !== undefined)) {
+      ctx.addIssue({ code: "custom", path: ["reconsideration"], message: "fact updates and their reconsideration roles must be configured together" });
+    }
+  });
+
+export type FactTableCatalog = z.infer<typeof factTableCatalogSchema>;
 
 // ---------------------------------------------------------------------------
 // executable capabilities (host-provided tools — NOT prompts)
@@ -795,4 +930,3 @@ export const departmentsCatalogSchema = z
   .strict();
 
 export type DepartmentsCatalog = z.infer<typeof departmentsCatalogSchema>;
-

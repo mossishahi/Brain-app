@@ -41,12 +41,6 @@
   /* The indigo lifted for contrast on dark surfaces — still clearly "the
      blue one" next to --accent's azure and --bad's red. */
   --prospective: #8a97f7;
-  --border-step-tint: #605e5e;
-  /* Dark keeps the classic ladder anchor for the seat stroke, dips the step
-     stroke back toward black, and lets the round stroke lift from there
-     (hand-tuned; --border-3 chains through the shared formula). */
-  --border-1: color-mix(in srgb, var(--border) 90%, var(--border-step-tint));
-  --border-2: color-mix(in srgb, var(--border-1) 90%, #000000);
   /* Elevation: each card level a LITTLE lighter than the one beneath it, so
      the front-most card reads lightest without washing the theme out;
      shadows need more weight on dark. */
@@ -59,20 +53,8 @@
     0 3px 10px rgba(0, 0, 0, 0.3);
 }
 
-/*
- * Nested panel stroke ladder: each nesting level (stage > card > inner box >
- * nested box) draws its border one 10% step toward the theme's tint, so the
- * hierarchy stays legible. The tints are hand-tuned per theme: light steps
- * toward near-white (#fcfcfc) so deeper strokes soften rather than harden;
- * dark steps toward a mid grey (#605e5e) so they lift without glowing.
- */
+/* Nested panels use stepped surface fills and soft elevation. */
 :root {
-  --border-step-tint: #fcfcfc;
-  /* Light anchors its ladder at near-white (hand-tuned): the strokes stay
-     whisper-thin and soften further as they nest. */
-  --border-1: color-mix(in srgb, #ffffff 90%, var(--border-step-tint));
-  --border-2: color-mix(in srgb, var(--border-1) 90%, var(--border-step-tint));
-  --border-3: color-mix(in srgb, var(--border-2) 90%, var(--border-step-tint));
   /* Card elevation, light theme: the front-most card is pure white and each
      level beneath steps slightly grey, so the layering is visible — not just
      implied by the shadows. The dark theme overrides these with surfaces
@@ -275,7 +257,7 @@ button {
   font: inherit;
   color: inherit;
   background: none;
-  border: none;
+  border: 0;
   padding: 0;
   cursor: pointer;
 }
@@ -300,8 +282,12 @@ blockquote {
 }
 
 :focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
+  outline: none;
+}
+
+:where(button, a, input, textarea, select, [role="button"], [tabindex="0"]):focus-visible {
+  background-color: var(--ui-focus-fill);
+  color: var(--ui-focus-text);
 }
 
 ::placeholder {
@@ -333,7 +319,6 @@ textarea,
   transition:
     color 120ms ease,
     background-color 120ms ease,
-    border-color 120ms ease,
     opacity 120ms ease,
     stroke 120ms ease,
     fill 120ms ease;
@@ -424,16 +409,16 @@ textarea,
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 999px;
   padding: 2px 10px;
   font-size: 12px;
   color: var(--text);
   max-width: 100%;
+  background: color-mix(in srgb, currentColor 9%, transparent);
 }
 
 .chip-accent {
-  border-color: var(--accent);
   color: var(--accent);
 }
 
@@ -441,7 +426,7 @@ textarea,
 .token-chip {
   display: inline-flex;
   align-items: center;
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 999px;
   padding: 1px 8px;
   font-size: 11px;
@@ -449,6 +434,7 @@ textarea,
   color: var(--text-dim);
   white-space: nowrap;
   cursor: default;
+  background: color-mix(in srgb, currentColor 9%, transparent);
 }
 
 .chip-dim {
@@ -457,27 +443,25 @@ textarea,
 
 /* Tone chips for act verdicts, statuses, severities, and confidence levels. */
 .chip-ok {
-  border-color: var(--ok);
   color: var(--ok);
 }
 
 .chip-warn {
-  border-color: var(--warn);
   color: var(--warn);
 }
 
 .chip-bad {
-  border-color: var(--bad);
   color: var(--bad);
 }
 
 .tag {
   display: inline-block;
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 6px;
   padding: 1px 8px;
   font-size: 12px;
   color: var(--text-dim);
+  background: color-mix(in srgb, currentColor 9%, transparent);
 }
 
 .tag-row {
@@ -507,16 +491,13 @@ textarea,
 }
 
 .btn {
-  border: 1px solid var(--border);
-  background: var(--surface);
+  border: 0;
+  background: var(--ui-control-fill);
   border-radius: var(--radius);
   padding: 6px 14px;
   font-size: 13px;
 }
 
-.btn:hover:not(:disabled) {
-  border-color: var(--text-dim);
-}
 
 .btn:disabled {
   opacity: 0.5;
@@ -524,14 +505,13 @@ textarea,
 
 .btn-primary {
   background: var(--accent);
-  border-color: var(--accent);
   color: var(--bg);
   font-weight: 600;
 }
 
 .btn-primary:hover:not(:disabled) {
-  border-color: var(--accent);
-  opacity: 0.9;
+  opacity: .9;
+  background: var(--accent);
 }
 
 .btn-ghost {
@@ -544,8 +524,7 @@ textarea,
 }
 
 .btn-danger {
-  background: transparent;
-  border-color: var(--bad);
+  background: color-mix(in srgb, var(--bad) 10%, transparent);
   color: var(--bad);
 }
 
@@ -623,9 +602,9 @@ input[type="radio"] {
 
 select {
   appearance: none;
-  background-color: var(--surface);
+  background-color: var(--ui-field-bg);
   color: var(--text);
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: var(--radius);
   padding: 6px 30px 6px 10px;
   font: inherit;
@@ -636,9 +615,6 @@ select {
   background-position: right 10px center;
 }
 
-select:hover:not(:disabled) {
-  border-color: color-mix(in srgb, var(--text) 30%, var(--border));
-}
 
 select:disabled {
   opacity: 0.55;
@@ -672,17 +648,18 @@ select:disabled {
 }
 
 .banner {
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: var(--radius);
   padding: 8px 12px;
   font-size: 13px;
   color: var(--text-dim);
   margin: 12px 0 0;
+  background: var(--ui-control-fill);
 }
 
 .banner-bad {
-  border-color: var(--bad);
   color: var(--bad);
+  background: color-mix(in srgb, var(--bad) 10%, var(--surface));
 }
 
 /*
@@ -862,7 +839,7 @@ select:disabled {
   font-size: 13px;
   line-height: 1.5;
   padding: 8px 40px 8px 10px;
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: var(--radius);
   background: color-mix(in srgb, var(--surface) 60%, transparent);
 }
@@ -933,10 +910,10 @@ select:disabled {
 }
 
 .update-toast {
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: var(--radius);
   background: var(--surface);
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+  box-shadow: var(--ui-float-shadow);
   padding: 12px 14px;
   font-size: 13px;
   color: var(--text-dim);
@@ -956,17 +933,8 @@ select:disabled {
   word-break: break-all;
 }
 
-.update-toast-actionable {
-  border-color: var(--accent);
-}
 
-.update-toast-error {
-  border-color: var(--bad);
-}
 
-.update-toast-success {
-  border-color: var(--ok);
-}
 
 .update-success-check {
   display: inline-flex;
@@ -991,7 +959,6 @@ select:disabled {
 .update-toast .btn-primary {
   background: var(--accent);
   color: #fff;
-  border-color: var(--accent);
 }
 
 .update-overlay {
@@ -1006,10 +973,10 @@ select:disabled {
 }
 
 .update-overlay-card {
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: var(--radius);
   background: var(--surface);
-  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.25);
+  box-shadow: var(--ui-float-shadow);
   padding: 24px 28px;
   max-width: 420px;
   text-align: center;
@@ -1050,9 +1017,6 @@ select:disabled {
   flex-wrap: wrap;
 }
 
-.credit-banner {
-  border-color: var(--warn);
-}
 
 /*
  * The diagnostic report affordance, inside the failed-run banner.
@@ -1074,7 +1038,7 @@ select:disabled {
   gap: 6px;
   margin-top: 8px;
   padding-top: 8px;
-  border-top: 1px solid var(--border);
+  border-top: 0;
 }
 
 .diag-lead {
@@ -1116,9 +1080,10 @@ select:disabled {
 .diag-flag {
   font-size: 12px;
   color: var(--warn);
-  border: 1px solid var(--warn);
+  border: 0;
   border-radius: var(--radius);
   padding: 0 6px;
+  background: color-mix(in srgb, currentColor 9%, transparent);
 }
 
 .diag-excluded {
@@ -1145,7 +1110,7 @@ select:disabled {
 
 .reconnect-line {
   color: var(--warn);
-  border-top: 1px solid var(--warn);
+  border-top: 0;
   font-size: 12px;
   padding-top: 4px;
   margin: 12px 0 0;
@@ -1153,7 +1118,7 @@ select:disabled {
 
 .code-block {
   background: var(--bg);
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: var(--radius);
   padding: 10px 12px;
   overflow-x: auto;
@@ -1169,9 +1134,11 @@ select:disabled {
   font-family: var(--mono);
   font-size: 12px;
   white-space: pre-wrap;
-  border-left: 2px solid var(--border);
-  padding: 4px 0 4px 12px;
+  border-left: 0;
+  padding: 10px 12px;
   margin: 8px 0 0;
+  background: var(--ui-control-fill);
+  border-radius: var(--radius);
 }
 
 .evidence-result {
@@ -1216,41 +1183,39 @@ select:disabled {
 
 .verdict {
   display: inline-block;
-  border: 1px solid;
+  border: 0;
   border-radius: 999px;
   padding: 0 8px;
   font-size: 11px;
   line-height: 18px;
+  background: color-mix(in srgb, currentColor 9%, transparent);
 }
 
 .verdict-pass {
   color: var(--ok);
-  border-color: var(--ok);
 }
 
 .verdict-build {
   color: var(--warn);
-  border-color: var(--warn);
 }
 
 .verdict-interrupt {
   color: var(--bad);
-  border-color: var(--bad);
 }
 
 .badge {
   display: inline-block;
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 999px;
   padding: 0 8px;
   font-size: 11px;
   line-height: 18px;
   color: var(--text-dim);
+  background: color-mix(in srgb, currentColor 9%, transparent);
 }
 
 .badge-accent {
   color: var(--accent);
-  border-color: var(--accent);
 }
 
 /* ----------------------------------------------------------------- landing */
@@ -1296,16 +1261,18 @@ select:disabled {
 .attach-input {
   flex: 1;
   background: var(--surface);
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 6px;
   padding: 6px 10px;
   font-size: 13px;
   color: var(--text);
+  background-color: var(--ui-field-bg);
 }
 
 .attach-input:focus {
   outline: none;
-  border-color: var(--accent);
+  background-color: var(--ui-focus-fill);
+  color: var(--ui-focus-text);
 }
 
 /* ------------------------------------------------ the attachments-so-far tray
@@ -1343,10 +1310,10 @@ select:disabled {
   width: min(440px, 80vw);
   max-height: 240px;
   overflow-y: auto;
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: var(--radius);
   background: var(--surface);
-  box-shadow: var(--card-shadow, 0 4px 16px rgba(0, 0, 0, 0.12));
+  box-shadow: var(--ui-float-shadow);
   padding: 6px;
 }
 
@@ -1467,8 +1434,9 @@ select:disabled {
   min-height: 300px;
   padding: 3px;
   overflow: hidden;
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 8px;
+  background: var(--ui-control-fill);
 }
 
 .server-directory-tree .ant-tree {
@@ -1582,9 +1550,10 @@ select:disabled {
   display: grid;
   grid-template-rows: auto auto auto minmax(180px, 1fr) auto auto;
   overflow: hidden;
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 10px;
   background: var(--surface);
+  box-shadow: var(--ui-float-shadow);
 }
 
 .server-picker-head {
@@ -1593,7 +1562,7 @@ select:disabled {
   justify-content: space-between;
   gap: 16px;
   padding: 16px 18px 12px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 0;
 }
 
 .server-picker-head strong {
@@ -1612,19 +1581,20 @@ select:disabled {
   grid-template-columns: minmax(180px, 0.7fr) minmax(280px, 1.5fr);
   gap: 8px;
   padding: 10px 14px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 0;
 }
 
 .server-picker-toolbar select,
 .server-path-form input {
   min-width: 0;
   height: 30px;
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 6px;
   background: var(--surface);
   color: var(--text);
   padding: 0 9px;
   font-size: 12px;
+  background-color: var(--ui-field-bg);
 }
 
 /* The toolbar's shared rule sets the `background` shorthand and a uniform
@@ -1652,7 +1622,7 @@ select:disabled {
   gap: 10px;
   min-height: 38px;
   padding: 7px 14px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 0;
   font-size: 11px;
 }
 
@@ -1746,7 +1716,7 @@ button.server-file-name {
   max-height: 90px;
   overflow: auto;
   padding: 7px 14px;
-  border-top: 1px solid var(--border);
+  border-top: 0;
   color: var(--bad);
   font-size: 11px;
 }
@@ -1762,7 +1732,7 @@ button.server-file-name {
   gap: 12px;
   min-height: 52px;
   padding: 9px 14px;
-  border-top: 1px solid var(--border);
+  border-top: 0;
   color: var(--text-dim);
   font-size: 11px;
 }
@@ -1798,27 +1768,24 @@ button.server-file-name {
   gap: 4px;
   min-height: 264px;
   background: var(--surface);
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 26px;
   padding: 24px 22px 12px;
   box-shadow: 0 14px 34px color-mix(in srgb, var(--text) 8%, transparent);
   transition:
     background-color 120ms ease,
-    border-color 120ms ease,
     box-shadow 120ms ease;
 }
 
 .chatbox:focus-within {
-  border-color: color-mix(in srgb, var(--text) 30%, var(--border));
   box-shadow: 0 16px 38px color-mix(in srgb, var(--text) 10%, transparent);
 }
 
-/* The PROMPT composer alone sheds the stroke and the shadow: it is the
+/* The PROMPT composer sheds the shadow: it is the
    page's centerpiece and reads better as a quiet surface. Other chatbox
    frames (the held-submission card) keep theirs. */
 .chatbox.composer,
 .chatbox.composer:focus-within {
-  border-color: transparent;
   box-shadow: none;
 }
 
@@ -1826,7 +1793,7 @@ button.server-file-name {
   display: block;
   width: 100%;
   flex: none;
-  border: none;
+  border: 0;
   background: transparent;
   resize: none;
   color: var(--text);
@@ -1954,7 +1921,7 @@ button.server-file-name {
   bottom: calc(100% + 8px);
   z-index: 30;
   padding: 5px 8px;
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 6px;
   background: var(--surface);
   box-shadow: 0 8px 24px color-mix(in srgb, var(--text) 12%, transparent);
@@ -2044,7 +2011,7 @@ button.server-file-name {
   /* min-height (not height): the card grows when its details unroll. */
   min-height: 64px;
   background: var(--surface);
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: var(--radius);
   display: flex;
   align-items: center;
@@ -2066,9 +2033,6 @@ button.server-file-name {
   z-index: 2;
 }
 
-.job-card:hover {
-  border-color: var(--text-dim);
-}
 
 .job-card-main {
   flex: 1;
@@ -2098,6 +2062,8 @@ button.server-file-name {
 .job-card-main:focus-visible {
   outline: none;
   background: color-mix(in srgb, var(--text) 6%, transparent);
+  background-color: var(--ui-focus-fill);
+  color: var(--ui-focus-text);
 }
 
 /* Open card: the header row keeps its closed-state height, so the title
@@ -2187,7 +2153,7 @@ button.server-file-name {
   width: 420px;
   max-width: 100vw;
   background: var(--surface);
-  border-left: 1px solid var(--border);
+  border-left: 0;
   z-index: 51;
   overflow-y: auto;
   padding: 24px;
@@ -2312,7 +2278,7 @@ button.server-file-name {
    so the body is a grid row that travels 0fr -> 1fr — the same fold the job
    cards use — with the chevron following the open state. */
 section.drawer-section:not(.drawer-updates) {
-  border-top: 1px solid var(--border);
+  border-top: 0;
   padding-top: 10px;
   gap: 0;
 }
@@ -2413,11 +2379,12 @@ section.drawer-section:not(.drawer-updates) {
 .drawer textarea {
   background: var(--bg);
   color: var(--text);
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: var(--radius);
   padding: 8px 10px;
   font: inherit;
   width: 100%;
+  background-color: var(--ui-field-bg);
 }
 
 /* The drawer's shared rule sets the `background` shorthand and a uniform
@@ -2501,12 +2468,13 @@ section.drawer-section:not(.drawer-updates) {
 .page-error {
   max-width: 640px;
   margin: 96px auto;
-  border: 1px solid var(--bad);
+  border: 0;
   border-radius: var(--radius);
   padding: 16px;
   display: flex;
   flex-direction: column;
   gap: 8px;
+  background: color-mix(in srgb, var(--bad) 10%, var(--surface));
 }
 
 /* ------------------------------------------------------------------- graph */
@@ -2533,33 +2501,38 @@ section.drawer-section:not(.drawer-updates) {
 }
 
 .node-rect {
-  fill: var(--surface);
-  stroke: var(--border);
+  fill: var(--ui-control-fill);
+  stroke: none;
   stroke-width: 1;
 }
 
 .node-active > .node-rect {
-  stroke: var(--accent);
+  stroke: none;
   stroke-width: 1.5;
+  fill: color-mix(in srgb, var(--accent) 15%, var(--surface));
 }
 
 .node-suspended > .node-rect {
-  stroke: var(--warn);
+  stroke: none;
   stroke-width: 1.5;
+  fill: color-mix(in srgb, var(--warn) 15%, var(--surface));
 }
 
 .node-failed > .node-rect {
-  stroke: var(--bad);
+  stroke: none;
   stroke-width: 1.5;
+  fill: color-mix(in srgb, var(--bad) 15%, var(--surface));
 }
 
 .graph-node:hover > .node-rect {
-  stroke: var(--text-dim);
+  stroke: none;
+  fill: var(--ui-focus-fill);
 }
 
 .graph-node:focus-visible > .node-rect {
-  stroke: var(--accent);
+  stroke: none;
   stroke-width: 2;
+  fill: var(--ui-focus-fill);
 }
 
 /* A deliberately implicit blink: dark grey in both themes, never a signal color. */
@@ -2618,7 +2591,8 @@ section.drawer-section:not(.drawer-updates) {
 }
 
 :root[data-theme="dark"] .node-completed > .node-rect {
-  stroke: var(--ok-dark);
+  stroke: none;
+  fill: color-mix(in srgb, var(--ok) 12%, var(--surface));
 }
 
 :root[data-theme="dark"] .connector-done {
@@ -2637,15 +2611,12 @@ section.drawer-section:not(.drawer-updates) {
 
 .stage {
   background: var(--surface);
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: var(--radius);
   padding: 16px;
   scroll-margin-top: 16px;
 }
 
-.stage-selected {
-  border-color: var(--accent);
-}
 
 .stage-collapsed {
   padding: 10px 16px;
@@ -2721,7 +2692,7 @@ section.drawer-section:not(.drawer-updates) {
 }
 
 .stage-error {
-  border: 1px solid var(--bad);
+  border: 0;
   background: color-mix(in srgb, var(--bad) 8%, transparent);
   border-radius: var(--radius);
   padding: 10px 12px;
@@ -2739,7 +2710,7 @@ section.drawer-section:not(.drawer-updates) {
 .stage-error-row + .stage-error-row {
   margin-top: 8px;
   padding-top: 8px;
-  border-top: 1px solid color-mix(in srgb, var(--bad) 25%, transparent);
+  border-top: 0;
 }
 
 .stage-error-meta {
@@ -2763,7 +2734,7 @@ section.drawer-section:not(.drawer-updates) {
 }
 
 .activity-feed {
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: var(--radius);
   background: var(--bg);
   margin-bottom: 14px;
@@ -2776,7 +2747,7 @@ section.drawer-section:not(.drawer-updates) {
   justify-content: space-between;
   align-items: center;
   padding: 7px 10px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 0;
   font-size: 11px;
   font-weight: 600;
 }
@@ -2993,8 +2964,9 @@ a.activity-entry:focus-visible > * {
 a.activity-entry:focus-visible {
   /* Inset, because the list clips at its own edge and an outline drawn outside
      the row would be scrolled away rather than seen. */
-  outline: 1px solid var(--accent);
-  outline-offset: -1px;
+  outline: none;
+  background-color: var(--ui-focus-fill);
+  color: var(--ui-focus-text);
 }
 
 .activity-tool_end .activity-marker,
@@ -3063,12 +3035,13 @@ a.activity-entry:focus-visible {
   overflow: auto;
   padding: 10px 12px;
   background: var(--surface);
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: var(--radius);
   color: var(--text);
   font-size: 12px;
   line-height: 1.45;
   cursor: auto;
+  box-shadow: var(--ui-float-shadow);
 }
 
 .cap-pop-head {
@@ -3103,7 +3076,7 @@ a.activity-entry:focus-visible {
   align-items: center;
   gap: 8px;
   padding: 6px 10px;
-  border-top: 1px solid var(--border);
+  border-top: 0;
   font-size: 12px;
   font-style: italic;
   color: var(--text-dim);
@@ -3126,10 +3099,12 @@ a.activity-entry:focus-visible {
 }
 
 .question {
-  border-left: 2px solid var(--accent);
-  padding: 2px 0 2px 12px;
+  border-left: 0;
+  padding: 10px 12px;
   margin: 0 0 12px;
   font-size: 14px;
+  background: var(--ui-control-fill);
+  border-radius: var(--radius);
 }
 
 .assumptions {
@@ -3168,10 +3143,11 @@ a.activity-entry:focus-visible {
 }
 
 .tree-col {
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: var(--radius);
   padding: 8px;
   min-height: 160px;
+  background: var(--ui-control-fill);
 }
 
 .tree-col-title {
@@ -3363,7 +3339,7 @@ a.activity-entry:focus-visible {
 }
 
 .seat-card {
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: var(--radius);
   padding: 10px 12px;
   display: flex;
@@ -3407,9 +3383,6 @@ a.activity-entry:focus-visible {
   cursor: pointer;
 }
 
-.seat-selectable:hover {
-  border-color: var(--text-dim);
-}
 
 .seat-unchecked {
   opacity: 0.55;
@@ -3428,12 +3401,13 @@ a.activity-entry:focus-visible {
 /* -------------------------------------------------------------------- gate */
 
 .gate-card {
-  border: 1px solid var(--warn);
+  border: 0;
   border-radius: var(--radius);
   padding: 16px;
   display: flex;
   flex-direction: column;
   gap: 12px;
+  background: color-mix(in srgb, var(--warn) 10%, var(--surface));
 }
 
 .gate-title {
@@ -3467,13 +3441,14 @@ a.activity-entry:focus-visible {
 }
 
 .member-card {
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: var(--radius);
   padding: 12px;
   min-width: 0;
   max-height: 420px;
   display: flex;
   flex-direction: column;
+  background: var(--ui-control-fill);
 }
 
 .idea-tabs {
@@ -3556,7 +3531,7 @@ a.activity-entry:focus-visible {
 .tab-row {
   display: flex;
   gap: 4px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 0;
   margin: 10px 0 12px;
 }
 
@@ -3564,17 +3539,19 @@ a.activity-entry:focus-visible {
   padding: 4px 10px;
   font-size: 12px;
   color: var(--text-dim);
-  border-bottom: 2px solid transparent;
-  margin-bottom: -1px;
+  border-bottom: 0;
+  margin-bottom: 0;
+  border-radius: 6px;
 }
 
 .tab:hover {
   color: var(--text);
+  background: var(--ui-control-fill);
 }
 
 .tab.active {
   color: var(--accent);
-  border-bottom-color: var(--accent);
+  background: var(--ui-focus-fill);
 }
 
 .paper-section {
@@ -3591,18 +3568,19 @@ a.activity-entry:focus-visible {
 }
 
 .callout {
-  border-left: 3px solid var(--accent);
-  padding: 4px 0 4px 12px;
+  border-left: 0;
+  padding: 8px 12px;
   font-size: 13px;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border-radius: var(--radius);
 }
 
 /* A degradation the reader has to weigh, not a footnote: an ability the agents
    were told they did not have, or calls they made and were refused. */
 .callout-warn {
-  border-left-color: var(--warn);
   background: color-mix(in srgb, var(--warn) 8%, transparent);
   padding: 8px 10px 8px 12px;
-  border-radius: 0 var(--radius) var(--radius) 0;
+  border-radius: var(--radius);
 }
 
 /* Itemized act findings: critique issues, interpretation candidates, misconceptions. */
@@ -3617,12 +3595,12 @@ a.activity-entry:focus-visible {
 }
 
 .issue-item {
-  border-top: 1px solid var(--border);
+  border-top: 0;
   padding-top: 8px;
 }
 
 .issue-item:first-child {
-  border-top: none;
+  border-top: 0;
   padding-top: 0;
 }
 
@@ -3643,13 +3621,14 @@ a.activity-entry:focus-visible {
   color: var(--text-dim);
   font-weight: 500;
   font-size: 12px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 0;
   padding: 6px 8px;
+  background: var(--ui-control-fill);
 }
 
 .paper-table td,
 .action-table td {
-  border-bottom: 1px solid var(--border);
+  border-bottom: 0;
   padding: 6px 8px;
   vertical-align: top;
 }
@@ -3666,9 +3645,10 @@ a.activity-entry:focus-visible {
   margin-top: 6px;
   max-height: 320px;
   overflow-y: auto;
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 8px;
   padding: 0 8px;
+  background: var(--ui-control-fill);
 }
 
 .file-scroll .file-table thead th {
@@ -3751,29 +3731,27 @@ a.activity-entry:focus-visible {
   width: 22px;
   height: 22px;
   border-radius: 5px;
-  border: 1px solid var(--border);
-  background: transparent;
+  border: 0;
+  background: var(--ui-control-fill);
   flex: none;
 }
 
 .cell-under-review {
-  border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 30%, transparent);
 }
 
 .cell-passed {
   background: var(--ok);
-  border-color: var(--ok);
 }
 
 .cell-force-passed {
   background: var(--warn);
-  border-color: var(--warn);
 }
 
 .cell-selected {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  outline: none;
+  transform: scale(1.14);
+  box-shadow: 0 3px 10px color-mix(in srgb, var(--text) 22%, transparent);
 }
 
 .cell-redev {
@@ -3784,9 +3762,10 @@ a.activity-entry:focus-visible {
   line-height: 1;
   padding: 2px 3px;
   background: var(--surface);
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 999px;
   color: var(--text-dim);
+  box-shadow: var(--card-shadow);
 }
 
 .matrix-caption {
@@ -3825,11 +3804,11 @@ a.activity-entry:focus-visible {
    stroke: it reads as ground, not as a card. */
 .review-walk-panel {
   background: var(--elev-0);
-  border: none;
+  border: 0;
 }
 
 .seat-walk {
-  border: 1px solid var(--border-1);
+  border: 0;
   border-radius: var(--radius);
   background: var(--elev-1);
   box-shadow: var(--card-shadow);
@@ -3839,11 +3818,6 @@ a.activity-entry:focus-visible {
   gap: 12px;
 }
 
-/* Dark theme pins the seat card's stroke to a dark grey — deliberately NOT
-   via --border-1, whose value the step stroke (--border-2) derives from. */
-:root[data-theme="dark"] .seat-walk {
-  border-color: #181818;
-}
 
 .seat-pager {
   display: flex;
@@ -3929,7 +3903,7 @@ a.activity-entry:focus-visible {
 }
 
 .review-card {
-  border: 1px solid var(--border-2);
+  border: 0;
   border-radius: var(--radius);
   background: var(--elev-2);
   box-shadow: var(--card-shadow);
@@ -3961,32 +3935,28 @@ a.activity-entry:focus-visible {
   line-height: 18px;
   padding: 0 8px;
   border-radius: 999px;
-  border: 1px solid;
+  border: 0;
+  background: color-mix(in srgb, currentColor 9%, transparent);
 }
 
 .step-chip-active {
   color: var(--accent);
-  border-color: var(--accent);
 }
 
 .step-chip-ok {
   color: var(--ok);
-  border-color: var(--ok);
 }
 
 .step-chip-warn {
   color: var(--warn);
-  border-color: var(--warn);
 }
 
 .step-chip-bad {
   color: var(--bad);
-  border-color: var(--bad);
 }
 
 .step-chip-dim {
   color: var(--text-dim);
-  border-color: var(--border);
 }
 
 /* ------------------------------------------------- dismissed panel seats
@@ -4010,13 +3980,12 @@ a.activity-entry:focus-visible {
   position: relative;
   cursor: default;
   outline: none;
-  border-bottom: 1px dotted var(--border);
+  border-bottom: 0;
 }
 
 .seat-stop:hover,
 .seat-stop:focus-visible {
   color: var(--accent);
-  border-bottom-color: var(--accent);
 }
 
 .seat-stop-pop {
@@ -4029,7 +3998,7 @@ a.activity-entry:focus-visible {
   max-width: min(360px, calc(100vw - 24px));
   padding: 10px 12px;
   background: var(--surface);
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: var(--radius);
   color: var(--text);
   font-size: 12px;
@@ -4037,6 +4006,7 @@ a.activity-entry:focus-visible {
   text-decoration: none;
   cursor: auto;
   white-space: normal;
+  box-shadow: var(--ui-float-shadow);
 }
 
 .seat-stop-head {
@@ -4051,9 +4021,8 @@ a.activity-entry:focus-visible {
 
 /* A step a dismissed seat never finished: marked, and never pulsing. */
 .cell-dismissed {
-  border-style: dashed;
-  border-color: var(--border);
-  background: transparent;
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+  opacity: .55;
 }
 
 .cell-stopped {
@@ -4095,7 +4064,7 @@ a.activity-entry:focus-visible {
 }
 
 .reviewer-name {
-  border: none;
+  border: 0;
   background: none;
   padding: 0;
   font-size: 12px;
@@ -4171,12 +4140,15 @@ a.activity-entry:focus-visible {
 }
 
 .comment-detail {
-  border-left: 2px solid var(--border);
+  border-left: 0;
   padding-left: 12px;
   font-size: 13px;
   display: flex;
   flex-direction: column;
   gap: 6px;
+  background: var(--ui-control-fill);
+  border-radius: var(--radius);
+  padding: 10px 12px;
 }
 
 .detail-label {
@@ -4195,7 +4167,7 @@ a.activity-entry:focus-visible {
 }
 
 .judge-card {
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: var(--radius);
   background: var(--bg);
   padding: 10px 12px;
@@ -4221,7 +4193,7 @@ a.activity-entry:focus-visible {
    chevrons the seat pager uses, hugging the "Round k / K" title in the card
    header. Nothing scrolls. */
 .round-card {
-  border: 1px solid var(--border-3);
+  border: 0;
   border-radius: var(--radius);
   background: var(--elev-3);
   box-shadow: var(--card-shadow);
@@ -4266,7 +4238,7 @@ a.activity-entry:focus-visible {
 /* The brain icon beside a version card's copy icon, and the window it opens:
    the recorded thinking behind exactly the version the card shows — the same
    thread the live panel streamed while it was written. Grey like every ghost
-   control; the window wears the live thread's own dress (dashed border, dim
+   control; the window uses the live thread's subdued surface (dim
    mono, scrolled inside itself) so working material can never be mistaken
    for the chain. */
 .thoughts-anchor {
@@ -4314,17 +4286,17 @@ a.activity-entry:focus-visible {
   right: 0;
   z-index: 30;
   width: min(420px, 80vw);
-  border: 1px dashed var(--border);
+  border: 0;
   border-radius: var(--radius);
   background: var(--surface);
-  box-shadow: var(--card-shadow, 0 4px 16px rgba(0, 0, 0, 0.12));
+  box-shadow: var(--ui-float-shadow);
 }
 
 .thoughts-pop-head {
   padding: 6px 10px 4px;
   font-size: 11px;
   color: var(--text-dim);
-  border-bottom: 1px dashed var(--border);
+  border-bottom: 0;
 }
 
 .thoughts-pop-body {
@@ -4459,7 +4431,7 @@ a.activity-entry:focus-visible {
    origin card's one-line note, which opens that step's own card for the same
    rewrite. Styled as text rather than as a control, like .reviewer-name. */
 .cross-jump {
-  border: none;
+  border: 0;
   background: none;
   padding: 0;
   font: inherit;
@@ -4488,12 +4460,10 @@ a.activity-entry:focus-visible {
 
 .badge-warn {
   color: var(--warn);
-  border-color: var(--warn);
 }
 
 .badge-bad {
   color: var(--bad);
-  border-color: var(--bad);
 }
 
 
@@ -4518,10 +4488,11 @@ a.activity-entry:focus-visible {
 }
 
 .band-col {
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: var(--radius);
   padding: 12px;
   min-width: 0;
+  background: var(--ui-control-fill);
 }
 
 .band-title {
@@ -4610,7 +4581,7 @@ a.activity-entry:focus-visible {
   gap: 12px;
   margin-top: 16px;
   padding-top: 12px;
-  border-top: 1px solid var(--border);
+  border-top: 0;
 }
 
 /* The matrices scroll; a callout must not, or a long list of refused tools
@@ -4638,44 +4609,6 @@ a.activity-entry:focus-visible {
   }
 }
 
-/* ------------------------------------------- nested panel stroke ladder */
-/*
- * Depth assignments for the ladder declared with the theme variables.
- * Level 0 (stage panels) keeps --border; every container below steps once.
- */
-
-/* Level 1 — cards and columns sitting directly inside a stage panel. */
-.activity-feed,
-.tree-col,
-.seat-card,
-.member-card,
-.cell,
-.seat-walk,
-.band-col {
-  border-color: var(--border-1);
-}
-
-/* Level 2 — boxes inside those cards. */
-.cell-redev,
-.judge-card,
-.review-card,
-.member-card .paper-table th,
-.member-card .paper-table td,
-.member-card .issue-item,
-.member-card .code-block,
-.seat-card .tag,
-.tree-col .tag {
-  border-color: var(--border-2);
-}
-
-/* Level 3 — evidence blocks nested one level deeper still. */
-.judge-card .code-block,
-.round-card .review-fold,
-.round-card .code-block,
-.member-card .issue-item .code-block {
-  border-color: var(--border-3);
-}
-
 /* Per-task-type model picker (submission box popover) */
 .model-picker {
   position: relative;
@@ -4689,9 +4622,9 @@ a.activity-entry:focus-visible {
   width: 330px;
   padding: 12px;
   background: var(--surface);
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 10px;
-  box-shadow: 0 8px 24px color-mix(in srgb, var(--text) 12%, transparent);
+  box-shadow: var(--ui-float-shadow);
   z-index: 40;
   display: flex;
   flex-direction: column;
@@ -4817,15 +4750,12 @@ a.activity-entry:focus-visible {
 /* ------------------------------------------------ review round redesign */
 
 .review-fold {
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: var(--radius);
   background: var(--surface);
   margin: 6px 0;
 }
 
-.review-fold-judge {
-  border-color: var(--accent);
-}
 
 .review-fold-head {
   display: flex;
@@ -4887,7 +4817,7 @@ a.activity-entry:focus-visible {
   justify-content: center;
   width: 26px;
   height: 26px;
-  border: none;
+  border: 0;
   border-radius: 6px;
   background: transparent;
   cursor: pointer;
@@ -4928,7 +4858,7 @@ a.activity-entry:focus-visible {
   z-index: 30;
   transform: translateX(-50%) translateY(2px);
   padding: 5px 8px;
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 6px;
   background: var(--surface);
   box-shadow: 0 8px 24px color-mix(in srgb, var(--text) 12%, transparent);
@@ -4960,10 +4890,10 @@ a.activity-entry:focus-visible {
   width: 340px;
   max-width: 84vw;
   padding: 14px;
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 10px;
   background: var(--surface);
-  box-shadow: 0 16px 48px color-mix(in srgb, var(--text) 14%, transparent);
+  box-shadow: var(--ui-float-shadow);
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -5034,7 +4964,7 @@ a.activity-entry:focus-visible {
   max-height: 140px;
   overflow: auto;
   padding: 8px;
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 6px;
   background: color-mix(in srgb, var(--text) 4%, transparent);
   font-size: 11px;
@@ -5048,9 +4978,9 @@ a.activity-entry:focus-visible {
   flex-direction: column;
   gap: 4px;
   padding: 8px 10px;
-  border-left: 2px solid var(--accent);
+  border-left: 0;
   background: color-mix(in srgb, var(--accent) 6%, transparent);
-  border-radius: 0 6px 6px 0;
+  border-radius: 6px;
 }
 
 .env-popover-advice p {
@@ -5068,7 +4998,7 @@ a.activity-entry:focus-visible {
 /* Waiting card: a held submission until every required check is green. */
 
 .waiting-card {
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: var(--radius);
   background: var(--surface);
   padding: 14px 16px;
@@ -5163,7 +5093,7 @@ a.activity-entry:focus-visible {
   bottom: calc(100% + 6px);
   z-index: 30;
   padding: 4px 8px;
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 6px;
   background: var(--surface);
   box-shadow: 0 8px 24px color-mix(in srgb, var(--text) 12%, transparent);
@@ -5210,10 +5140,10 @@ a.activity-entry:focus-visible {
   max-height: 88vh;
   overflow: auto;
   background: var(--surface);
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 14px;
   padding: 28px;
-  box-shadow: 0 24px 80px color-mix(in srgb, var(--text) 16%, transparent);
+  box-shadow: var(--ui-float-shadow);
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -5263,16 +5193,15 @@ a.activity-entry:focus-visible {
   gap: 2px;
   align-items: flex-start;
   padding: 10px 12px;
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 10px;
-  background: transparent;
+  background: var(--ui-control-fill);
   cursor: pointer;
   text-align: left;
-  transition: border-color 140ms ease, background 140ms ease;
+  transition: background-color 140ms ease;
 }
 
 .onboard-provider.selected {
-  border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 7%, transparent);
 }
 
@@ -5296,16 +5225,18 @@ a.activity-entry:focus-visible {
 
 .onboard-field input {
   padding: 9px 12px;
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 8px;
   background: var(--bg);
   color: var(--text);
   font-size: 13.5px;
+  background-color: var(--ui-field-bg);
 }
 
 .onboard-field input:focus {
   outline: none;
-  border-color: var(--accent);
+  background-color: var(--ui-focus-fill);
+  color: var(--ui-focus-text);
 }
 
 .onboard-note {
@@ -5317,9 +5248,10 @@ a.activity-entry:focus-visible {
 
 .onboard-note code {
   padding: 1px 5px;
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 4px;
   font-size: 12px;
+  background: var(--ui-control-fill);
 }
 
 .onboard-note a {
@@ -5338,7 +5270,7 @@ a.activity-entry:focus-visible {
 
 .onboard-actions .btn-ghost {
   margin-left: auto;
-  border: none;
+  border: 0;
   background: transparent;
   color: var(--text-dim);
 }
@@ -5350,7 +5282,7 @@ a.activity-entry:focus-visible {
   flex-direction: column;
   gap: 6px;
   padding: 10px 12px;
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: var(--radius);
   background: color-mix(in srgb, var(--text) 3%, transparent);
   font-size: 13px;
@@ -5376,10 +5308,11 @@ a.activity-entry:focus-visible {
   flex: none;
   color: var(--text-dim);
   font-size: 12px;
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 999px;
   padding: 2px 10px;
   white-space: nowrap;
+  background: color-mix(in srgb, currentColor 9%, transparent);
 }
 
 .banner-actionable {
@@ -5428,9 +5361,9 @@ a.activity-entry:focus-visible {
   justify-content: center;
   width: 20px;
   height: 20px;
-  border: 1px solid var(--warn);
+  border: 0;
   border-radius: 5px;
-  background: transparent;
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
   color: var(--warn);
   cursor: pointer;
   padding: 0;
@@ -5445,29 +5378,27 @@ a.activity-entry:focus-visible {
 }
 
 .seat-ghost {
-  border-style: dashed;
   display: flex;
   flex-direction: column;
   gap: 6px;
 }
 
-.seat-custom {
-  border-color: var(--accent);
-}
 
 .ghost-input {
   width: 100%;
   padding: 5px 8px;
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 6px;
   background: var(--bg);
   color: var(--text);
   font-size: 12.5px;
+  background-color: var(--ui-field-bg);
 }
 
 .ghost-input:focus {
   outline: none;
-  border-color: var(--accent);
+  background-color: var(--ui-focus-fill);
+  color: var(--ui-focus-text);
 }
 
 .ghost-field {
@@ -5493,7 +5424,7 @@ a.activity-entry:focus-visible {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border: none;
+  border: 0;
   border-radius: 4px;
   background: transparent;
   color: var(--text-dim);
@@ -5513,9 +5444,9 @@ a.activity-entry:focus-visible {
   display: flex;
   align-items: center;
   justify-content: center;
-  border: 1px dashed var(--border);
+  border: 0;
   border-radius: 6px;
-  background: transparent;
+  background: var(--ui-control-fill);
   color: var(--text-dim);
   cursor: pointer;
   font-size: 16px;
@@ -5523,8 +5454,8 @@ a.activity-entry:focus-visible {
 }
 
 .ghost-add-subfield:hover {
-  border-color: var(--accent);
   color: var(--accent);
+  background: var(--ui-focus-fill);
 }
 
 .ghost-hint {
@@ -5552,7 +5483,7 @@ a.activity-entry:focus-visible {
   height: 30px;
   display: inline-grid;
   place-items: center;
-  border: none;
+  border: 0;
   background: transparent;
   color: var(--text);
   border-radius: 50%;
@@ -5606,15 +5537,15 @@ a.activity-entry:focus-visible {
   display: inline-grid;
   place-items: center;
   color: var(--text-dim);
-  background: var(--surface);
-  border: 1px solid var(--border);
+  background: var(--ui-control-fill);
+  border: 0;
   border-radius: 50%;
   font-size: 13px;
 }
 
 .attach-option:hover {
   color: var(--accent);
-  border-color: var(--accent);
+  background: var(--ui-focus-fill);
 }
 
 /*
@@ -5628,7 +5559,7 @@ a.activity-entry:focus-visible {
   bottom: calc(100% + 8px);
   z-index: 30;
   padding: 5px 8px;
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 6px;
   background: var(--surface);
   box-shadow: 0 8px 24px color-mix(in srgb, var(--text) 12%, transparent);
@@ -5663,7 +5594,7 @@ a.activity-entry:focus-visible {
    the moment the real output lands. */
 .live-thread {
   margin-top: 8px;
-  border: 1px dashed var(--border);
+  border: 0;
   border-radius: var(--radius);
   background: color-mix(in srgb, var(--text) 3%, transparent);
 }
@@ -5724,7 +5655,6 @@ a.activity-entry:focus-visible {
 }
 
 .banner-bad {
-  border-color: color-mix(in srgb, var(--bad) 45%, var(--border));
   color: var(--bad);
 }
 
@@ -5735,4 +5665,75 @@ a.activity-entry:focus-visible {
   border: 1.5px solid color-mix(in srgb, var(--accent) 25%, transparent);
   border-top-color: var(--accent);
   animation: save-spin 0.7s linear infinite;
+}
+
+.btn:not(.btn-primary):not(.btn-danger):hover:not(:disabled) {
+  background: var(--ui-focus-fill);
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--bad) 18%, transparent);
+}
+
+select:hover:not(:disabled) {
+  background-color: var(--ui-focus-fill);
+}
+
+.credit-banner {
+  background: color-mix(in srgb, var(--warn) 10%, var(--surface));
+}
+
+.update-toast-error {
+  background: color-mix(in srgb, var(--bad) 10%, var(--surface));
+}
+
+.update-toast-success {
+  background: color-mix(in srgb, var(--ok) 10%, var(--surface));
+}
+
+.update-toast-actionable {
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+}
+
+.paper-table tbody tr:nth-child(even),
+.action-table tbody tr:nth-child(even) {
+  background: color-mix(in srgb, var(--text) 3%, transparent);
+}
+
+.stage-selected {
+  background: color-mix(in srgb, var(--accent) 5%, var(--surface));
+}
+
+.job-card:hover {
+  background: color-mix(in srgb, var(--accent) 5%, var(--surface));
+}
+
+.seat-selectable:hover {
+  background: var(--ui-focus-fill);
+}
+
+.seat-custom {
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
+}
+
+.review-fold-judge {
+  background: color-mix(in srgb, var(--accent) 6%, var(--surface));
+}
+
+/* Keyboard focus uses a filled control state; no offset ring can be clipped by
+   scroll containers or introduce a second contour around rounded fields. */
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+summary:focus-visible {
+  outline: none;
+  background-color: var(--ui-focus-fill);
+  color: var(--ui-focus-text);
+}
+
+button.cell:focus-visible {
+  transform: scale(1.14);
+  box-shadow: 0 3px 10px color-mix(in srgb, var(--text) 22%, transparent);
 }

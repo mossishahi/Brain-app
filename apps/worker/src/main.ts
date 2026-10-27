@@ -32,6 +32,8 @@ import type {
 
 import {
   buildWebAccessManager,
+  notePaidRequest,
+  paidRequestsOfRun,
   prepareCodeWorkspace,
   type CodeRuntimeEnvironment,
   type GpuRunConfig,
@@ -66,6 +68,9 @@ import {
   providerConfigFromEnv,
   webSearchRuntimeFromEnv,
 } from "./wiring.js";
+import { literatureWiringForRun } from "./literature-wiring.js";
+import { availabilityEventWriter, readAvailabilitySeed } from "./availability-seed.js";
+import { workflowParamsFromEnv } from "./workflow-params.js";
 import { openLazyRegistryContent, type LazyRegistryContent } from "./registry-content.js";
 import {
   LocalTaxonomyService,
@@ -162,25 +167,88 @@ async function prepareRunCodeEnvironment(
  *
  * Offline runs build none: the capability broker already vouches web-search
  * as vacant there, and a manager with providers would contradict it.
+ *
+ * The paid fallback's billed requests go to the local usage ledger
+ * (`<workspace>/web-usage/`), and a resume counts this run's earlier ones
+ * against its per-run budget. The launch check (which sources and engines
+ * answer) starts with the run; until it lands, fail-over works as without it.
+ *
+ * The server's availability table (its instance file, or the legacy workspace
+ * file for standalone workers, when younger than 30 minutes) seeds the manager: its web-source statuses stand
+ * in for the launch probes they are fresh enough for, and its derived
+ * per-purpose orders become the run's route lists. The run's own status
+ * changes are appended to `<workspace>/availability-events.jsonl`.
  */
 function webLayerForRun(
   sessionRoot: string,
   runId: string,
   offline: boolean,
-): { readonly web?: WebAccess; readonly searchLog: SearchLog } {
+): { readonly web?: WebAccess; readonly searchLog: SearchLog; readonly nativeWeb: boolean } {
   const searchLog = createSearchLog(
     join(sessionRoot, runId, "searches.jsonl"),
     fsStoreOptions(process.env),
   );
-  if (offline) return { searchLog };
+  if (offline) return { searchLog, nativeWeb: false };
   const { config, secrets } = webSearchRuntimeFromEnv(process.env);
+  // The deployment handed web search to the agents' OWN tools: no host web
+  // layer is wired, and the run's search log stays empty by design.
+  if (config.mode === "agent") return { searchLog, nativeWeb: true };
+  const workspaceRoot = workspaceRootFromSessionRoot(sessionRoot);
+  const spentBrave = paidRequestsOfRun(workspaceRoot, "brave", runId);
+  const seed = readAvailabilitySeed(
+    workspaceRoot,
+    Date.now(),
+    undefined,
+    process.env.BRAINSTORM_AGENTIC_AVAILABILITY_PATH,
+  );
+  if (seed !== undefined) {
+    const routes = Object.keys(seed.routeOrders);
+    console.error(
+      `[web] availability table from ${Math.round((Date.now() - seed.updatedAt) / 60_000)} min ago seeds ` +
+        `${seed.seededStatuses.length} source statuses${routes.length > 0 ? ` and the ${routes.join(", ")} routes` : ""}`,
+    );
+  }
   const web = buildWebAccessManager({
     config,
     secrets,
     log: (record) => searchLog.note(record),
-    cacheDir: join(workspaceRootFromSessionRoot(sessionRoot), "web-cache"),
+    cacheDir: join(workspaceRoot, "web-cache"),
+    ...(spentBrave > 0 ? { spent: { brave: spentBrave } } : {}),
+    onSpend: (provider) => notePaidRequest(workspaceRoot, provider, runId),
+    ...(seed !== undefined ? { seededStatuses: seed.seededStatuses, routeOrders: seed.routeOrders } : {}),
+    onStatusChange: availabilityEventWriter(workspaceRoot, runId),
   });
-  return { ...(web !== undefined ? { web } : {}), searchLog };
+  web?.startChecks().catch((error: unknown) => {
+    console.error(`[web] launch check failed: ${error instanceof Error ? error.message : String(error)}`);
+  });
+  return { ...(web !== undefined ? { web } : {}), searchLog, nativeWeb: false };
+}
+
+/**
+ * The paper-based panel composition's wiring for a run: the encoders (with
+ * registry-served node vectors on a registry-backed run), the retrieval
+ * cache under the workspace, and which key-gated sources have their key.
+ */
+function literatureForRun(
+  sessionRoot: string,
+  lazy: LazyRegistryContent | undefined,
+  offline: boolean,
+): ReturnType<typeof literatureWiringForRun> {
+  const { secrets } = webSearchRuntimeFromEnv(process.env);
+  let openRouterApiKey: string | undefined;
+  if (!offline) {
+    try {
+      openRouterApiKey = providerConfigFromEnv(process.env, false).creditRecovery?.openRouterApiKey;
+    } catch {
+      openRouterApiKey = undefined;
+    }
+  }
+  return literatureWiringForRun({
+    workspaceRoot: workspaceRootFromSessionRoot(sessionRoot),
+    secrets,
+    ...(openRouterApiKey !== undefined ? { openRouterApiKey } : {}),
+    ...(lazy !== undefined ? { registry: lazy.client } : {}),
+  });
 }
 
 /**
@@ -239,33 +307,6 @@ function gpuRunForRun(
  * could. Absent (a workstation run, or a scheduler that would not say) means no
  * wind-down: the run behaves exactly as it did before.
  */
-/**
- * Per-run workflow-param overrides from the server's settings snapshot (the
- * environment is the submission channel). Read only by `run`: a resume
- * replays the params its checkpoint recorded at start, so the variable is
- * ignored there. The pinned bundle's declared bounds validate the value
- * authoritatively when the run starts; an unparsable value is ignored with
- * a loud line rather than guessed at.
- */
-function workflowParamsFromEnv(
-  env: NodeJS.ProcessEnv,
-): Record<string, number> | undefined {
-  const params: Record<string, number> = {};
-  const read = (name: string, param: string): void => {
-    const raw = env[name]?.trim();
-    if (raw === undefined || raw === "") return;
-    const value = Number(raw);
-    if (!Number.isSafeInteger(value) || value < 1) {
-      console.error(`[config] ignoring invalid ${name}="${raw}"`);
-      return;
-    }
-    params[param] = value;
-  };
-  read("BRAINSTORM_AGENTIC_MAX_REVIEW_ROUNDS", "maxReviewRounds");
-  read("BRAINSTORM_AGENTIC_PANEL_SIZE", "panelSize");
-  return Object.keys(params).length > 0 ? params : undefined;
-}
-
 /**
  * The interdisciplinary-seat switch, a HOST option rather than a workflow
  * param: pinned bundles declare no such param, and the weave that honors it
@@ -1055,12 +1096,13 @@ async function main(): Promise<void> {
       offline,
     );
     const gpuRun = gpuRunForRun(sessionRoot, runId, offline);
-    const { web, searchLog } = webLayerForRun(sessionRoot, runId, offline);
+    const { web, searchLog, nativeWeb } = webLayerForRun(sessionRoot, runId, offline);
     const interdisciplinarySeat = interdisciplinarySeatFromEnv(process.env);
     const runtime = buildRuntime({
       providerConfig: providerConfigFromEnv(process.env, offline),
       checkpoints: new FsCheckpointStore(sessionRoot, fsStoreOptions(process.env)),
       artifacts,
+      factLogPath: join(sessionRoot, runId, "facts.jsonl"),
       autoApproveGates: autoApprove,
       ...(dismissedMembers.length > 0 ? { dismissedMembers } : {}),
       ...(windDown !== undefined ? { windDown } : {}),
@@ -1072,6 +1114,8 @@ async function main(): Promise<void> {
       ...(codeEnvironment ? { codeEnvironment } : {}),
       ...(gpuRun ? { gpuRun } : {}),
       ...(web ? { web } : {}),
+      ...(nativeWeb ? { nativeWeb } : {}),
+      literature: literatureForRun(sessionRoot, lazy, offline),
       ...(interdisciplinarySeat !== undefined ? { interdisciplinarySeat } : {}),
       bundle: lazy?.bundle ?? loadContent(contentDir!),
       ...(lazy ? { skillResolver: lazy.skillResolver } : {}),
@@ -1079,8 +1123,8 @@ async function main(): Promise<void> {
       onLivePreview: ({ path, text }) => liveText.note(path, text),
       onPrompt: (record) => prompts.note(record),
     });
-    const params = workflowParamsFromEnv(process.env);
     try {
+      const params = workflowParamsFromEnv(process.env, runtime.compiled.content.params);
       const result = await runtime.run({
         runId,
         submission: {
@@ -1172,12 +1216,13 @@ async function main(): Promise<void> {
       offline,
     );
     const gpuRun = gpuRunForRun(sessionRoot, runId, offline);
-    const { web, searchLog } = webLayerForRun(sessionRoot, runId, offline);
+    const { web, searchLog, nativeWeb } = webLayerForRun(sessionRoot, runId, offline);
     const resumeInterdisciplinarySeat = interdisciplinarySeatFromEnv(process.env);
     const runtime = buildRuntime({
       providerConfig: providerConfigFromEnv(process.env, offline),
       checkpoints: new FsCheckpointStore(sessionRoot, fsStoreOptions(process.env)),
       artifacts,
+      factLogPath: join(sessionRoot, runId, "facts.jsonl"),
       autoApproveGates: resumeAutoApprove,
       ...(dismissedMembers.length > 0 ? { dismissedMembers } : {}),
       ...(windDown !== undefined ? { windDown } : {}),
@@ -1189,6 +1234,8 @@ async function main(): Promise<void> {
       ...(codeEnvironment ? { codeEnvironment } : {}),
       ...(gpuRun ? { gpuRun } : {}),
       ...(web ? { web } : {}),
+      ...(nativeWeb ? { nativeWeb } : {}),
+      literature: literatureForRun(sessionRoot, lazy, offline),
       ...(resumeInterdisciplinarySeat !== undefined
         ? { interdisciplinarySeat: resumeInterdisciplinarySeat }
         : {}),
