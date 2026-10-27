@@ -1116,13 +1116,19 @@ test("current bundle delivers game reports and scores through HTTP with the subm
     // the interval before this run has written its first checkpoint.
     await putSettings(server, { gamifiedReview: false, gameReview: { threshold: 0.1, initialPoints: 500 } });
     const detail = await waitFor(server, jobId, "completed");
+    // Content that declares the committee decision rule records it, with the
+    // leave-one-out switch, in the submitted mode (bundle defaults here).
+    const committeeRule = pinnedWorkflowDeclares("gameDecisionRule");
+    const submittedMode = committeeRule
+      ? { threshold: 0.6, initialPoints: 0, decisionRule: "chair-decisive", leaveOneOut: true }
+      : { threshold: 0.6, initialPoints: 0 };
     assert.equal(detail.gamifiedReview, true);
-    assert.deepEqual(detail.gameReview, { threshold: 0.6, initialPoints: 0 });
+    assert.deepEqual(detail.gameReview, submittedMode);
     assert.equal((await requestJson<ServerSettings>(server, "/api/settings")).value.gamifiedReview, false);
     const review = detail.stages.find((stage) => stage.id === "review-members");
     assert.ok(review && review.id === "review-members");
     assert.equal(review.gamifiedReview, true);
-    assert.deepEqual(review.gameReview, { threshold: 0.6, initialPoints: 0 });
+    assert.deepEqual(review.gameReview, submittedMode);
     assert.equal(review.gameLedger?.initialPoints, 0);
     assert.ok(review.gameLedger?.critics.every(critic => critic.balance >= 0 && critic.eligible && !critic.excluded));
     const rounds = review.members.flatMap((member) => member.steps.flatMap((step) => step.rounds));
@@ -1137,7 +1143,7 @@ test("current bundle delivers game reports and scores through HTTP with the subm
       assert.ok(chair.reason.length > 0);
       const settlement = round.gameSettlement;
       assert.ok(settlement, "deterministic settlement reaches the HTTP projection");
-      assert.equal(settlement.ruleVersion, "brier-peer/v2");
+      assert.equal(settlement.ruleVersion, committeeRule ? "brier-peer/v3" : "brier-peer/v2");
       assert.equal(settlement.meanQ, 0);
       assert.equal(settlement.threshold, 0.6);
       assert.equal(settlement.initialPoints, 0);

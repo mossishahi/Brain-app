@@ -6,6 +6,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { loadContent } from "@brainstorm-agentic/content";
+import { EMBEDDER_MANIFEST } from "@brainstorm-agentic/core";
 import type {
   AgentExecutor,
   AgentResult,
@@ -15,14 +16,18 @@ import type {
   JsonValue,
   RunResult,
   TaxonomyAccess,
+  TaxonomyEmbeddings,
   TaxonomyNodePosition,
   TaxonomyResolveResult,
+  WebAccess,
 } from "@brainstorm-agentic/core";
 
 import {
   BrainstormRuntime,
   StaticBrainstormRouteResolver,
   taxonomyActivities,
+  literatureActivities,
+  hashNgramEncoderProvider,
 } from "../src/index.js";
 
 /**
@@ -197,15 +202,15 @@ const noEvidence: JsonObject = {
 };
 
 /**
- * panelSize 3 seats three disciplinary members and the weave appends the
- * interdisciplinary one, so the panel is four seats deep; the processor fixture
- * asks for a three-step chain. Every count in this file is derived from these
- * two, never written as a bare number.
+ * panelSize 3 in fixed mode seats three disciplinary members and the weave
+ * appends the interdisciplinary one, so the panel is four seats deep; the
+ * processor fixture asks for a three-step chain. Every count in this file is
+ * derived from these two, never written as a bare number.
  */
 const PANEL_SEATS = ["member-1", "member-2", "member-3", "member-4"] as const;
 const CHAIN_STEPS = 3;
 
-/** The seat dismissed in these tests: the Computer Science / Machine Learning chair. */
+/** The seat dismissed in these tests: the Computer Science / Artificial Intelligence chair. */
 const DISMISSED = "member-2";
 
 function remainingSeats(): readonly string[] {
@@ -569,6 +574,56 @@ function judgedWorkflow(bundle: ReturnType<typeof loadContent>) {
   return cloned as NonNullable<(typeof bundle.workflows)["brainstorm"]>;
 }
 
+/**
+ * The scholarly fixture a literature-composed panel retrieves from (the same
+ * one the game runtime uses): three topics under the stub taxonomy, two
+ * supplied papers each, scholarly search only. Content whose panel is composed
+ * from the literature binds these handlers; earlier content never calls them.
+ */
+function literatureFixtureActivities() {
+  const nodes: TaxonomyEmbeddings["nodes"] = [
+    { id: "D1", name: "Natural Sciences", level: "domain" },
+    { id: "F1", name: "Computer Science", level: "field", parent: "D1" },
+    { id: "F2", name: "Mathematics", level: "field", parent: "D1" },
+    { id: "S1", name: "Artificial Intelligence", level: "subfield", parent: "F1" },
+    { id: "S2", name: "Signal Processing", level: "subfield", parent: "F1" },
+    { id: "S3", name: "Statistics and Probability", level: "subfield", parent: "F2" },
+    { id: "T1", name: "Graph Neural Networks", level: "topic", parent: "S1" },
+    { id: "T2", name: "Belief Propagation", level: "topic", parent: "S2" },
+    { id: "T3", name: "Gaussian Processes", level: "topic", parent: "S3" },
+  ];
+  const taxonomy = new (class extends StubTaxonomy {
+    async embeddings(): Promise<TaxonomyEmbeddings> {
+      return { revision: 7, embedder: EMBEDDER_MANIFEST, nodes, vectors: [] };
+    }
+  })();
+  const papers = nodes.filter((node) => node.level === "topic").flatMap((topic) => [1, 2].map((replicate) => ({
+    title: `${topic.name} for distributional message passing ${replicate}`,
+    doi: `10.5555/game-${topic.id}-${replicate}`, url: `https://example.org/game-${topic.id}-${replicate}`,
+    year: 2020,
+    abstract: `This paper studies ${topic.name.toLowerCase()} for distributional message passing over graphs. ` +
+      "Node states are probability distributions whose uncertainty is propagated through graph structure. " +
+      "We derive the update equations, identify assumptions needed for convergence, and test predictions on held-out graphs with explicit comparison controls.",
+  })));
+  const web: WebAccess = {
+    search: async () => { throw new Error("The game fixture serves scholarly search only."); },
+    fetch: async () => { throw new Error("The game fixture uses fully supplied paper abstracts."); },
+    backedKinds: () => ["scholarly"],
+    status: () => ["arxiv", "crossref", "semantic-scholar"].map((id) => ({ id, state: "unchecked" as const })),
+    searchPapers: async (query) => {
+      const source = query.sources?.[0] ?? "arxiv";
+      return { query: query.query, mode: "topic", route: "paper-topic", providers: [source], papers: papers.map((paper) => ({ ...paper, source })) };
+    },
+    paperDetails: async (query) => ({ papers: [], notFound: [...query.ids], providers: [] }),
+  };
+  return {
+    ...literatureActivities({
+        web, taxonomy, encoders: hashNgramEncoderProvider(), now: () => 0,
+        nodeTexts: { texts: async () => ({ sha256: "0".repeat(64), entries: nodes.filter((node) => node.level === "topic").map((node) => ({ id: node.id, text: `${node.name}. ${node.name} for graph distributions and message passing.` })) }) },
+    }),
+  };
+}
+
 function runtime(
   executor: AgentExecutor,
   dismissedMembers?: readonly string[],
@@ -581,7 +636,7 @@ function runtime(
     workflow: judgedWorkflow(bundle),
     agentExecutor: executor,
     humanGateMode,
-    activities: taxonomyActivities(new StubTaxonomy()),
+    activities: { ...taxonomyActivities(new StubTaxonomy()), ...literatureFixtureActivities() },
     routeResolver: new StaticBrainstormRouteResolver({
       reasoning: { modelId: "configured-reasoner", providerId: "fake" },
       writing: { modelId: "configured-writer", providerId: "fake" },
@@ -644,7 +699,7 @@ test("a dismissed seat buys no model call: it develops nothing, comments on nobo
   const result = await app.run({
     runId: "dismissed-seat",
     submission: SUBMISSION,
-    params: { panelSize: 3 },
+    params: { panelSize: 3, panelSizeMode: "fixed" },
   });
   completed(result);
   assert.deepEqual(result.status === "completed" && result.output, finalProposal());
@@ -712,7 +767,7 @@ test("the integrator and the chair never receive a dismissed member", async () =
     await app.run({
       runId: "dismissed-withheld",
       submission: SUBMISSION,
-      params: { panelSize: 3 },
+      params: { panelSize: 3, panelSizeMode: "fixed" },
     }),
   );
 
@@ -754,20 +809,20 @@ test("a run with nothing dismissed seats and walks the full panel, list or no li
   const result = await app.run({
     runId: "no-dismissal",
     submission: SUBMISSION,
-    params: { panelSize: 3 },
+    params: { panelSize: 3, panelSizeMode: "fixed" },
   });
   completed(result);
   assert.deepEqual(result.status === "completed" && result.output, finalProposal());
   assert.deepEqual(
     baseline.tasks("brain").map((entry) => [entry.agentId, entry.bindings.department, entry.bindings.umbrella]),
     [
-      ["member-1", "Physics", "Quantum Optics"],
-      ["member-2", "Computer Science", "Machine Learning"],
-      ["member-3", "Biology", "Systems Biology"],
+      ["member-1", "Computer Science", "Signal Processing"],
+      ["member-2", "Computer Science", "Artificial Intelligence"],
+      ["member-3", "Mathematics", "Statistics and Probability"],
       [
         "member-4",
         "Interdisciplinary Research",
-        "the interdisciplinary space between Quantum Optics, Machine Learning and Systems Biology",
+        "the interdisciplinary space between Signal Processing, Artificial Intelligence and Statistics and Probability",
       ],
     ],
   );
@@ -797,7 +852,7 @@ test("a run with nothing dismissed seats and walks the full panel, list or no li
       await runtime(executor, empty).run({
         runId: `empty-dismissal-${empty.length}`,
         submission: SUBMISSION,
-        params: { panelSize: 3 },
+        params: { panelSize: 3, panelSizeMode: "fixed" },
       }),
     );
     assert.deepEqual(
@@ -826,7 +881,7 @@ test("a seat dismissed while commenting on another member never resumes that com
   const stopped = await app.run({
     runId: "dismiss-mid-comment",
     submission: SUBMISSION,
-    params: { panelSize: 3 },
+    params: { panelSize: 3, panelSizeMode: "fixed" },
   });
   assert.equal(stopped.status, "failed", "the fixture stopped the run mid-comment");
   const killedComment = executor.seen.find(
@@ -884,7 +939,7 @@ test("a dismissal cannot reach back into a finished run's record", async () => {
     await app.run({
       runId: "dismiss-after-finish",
       submission: SUBMISSION,
-      params: { panelSize: 3 },
+      params: { panelSize: 3, panelSizeMode: "fixed" },
     }),
   );
   // Artifact names carry the run id, so the seat's own record is identified by
@@ -928,7 +983,7 @@ test("a dismissal arriving on a resume skips the seat without re-buying journall
   let state = await app.run({
     runId: "dismiss-on-resume",
     submission: SUBMISSION,
-    params: { panelSize: 3 },
+    params: { panelSize: 3, panelSizeMode: "fixed" },
   });
   assert.equal(state.status, "suspended");
   if (state.status !== "suspended") throw new Error("unreachable");
@@ -984,7 +1039,7 @@ test("the interdisciplinary seat, dismissed, stops commenting like any other", a
     await app.run({
       runId: "dismissed-bridge",
       submission: SUBMISSION,
-      params: { panelSize: 3 },
+      params: { panelSize: 3, panelSizeMode: "fixed" },
     }),
   );
   assert.equal(
@@ -1015,7 +1070,7 @@ test("two seats dismissed at once both stop, and the panel keeps reviewing", asy
     await app.run({
       runId: "dismissed-pair",
       submission: SUBMISSION,
-      params: { panelSize: 3 },
+      params: { panelSize: 3, panelSizeMode: "fixed" },
     }),
   );
   for (const gone of [DISMISSED, BRIDGE]) {
@@ -1047,7 +1102,7 @@ test("a run out of host time finishes what is in flight, starts nothing new, and
     bundle: loadContent(registryContentDir),
     agentExecutor: executor,
     humanGateMode: "autoApproveSkippable",
-    activities: taxonomyActivities(new StubTaxonomy()),
+    activities: { ...taxonomyActivities(new StubTaxonomy()), ...literatureFixtureActivities() },
     routeResolver: new StaticBrainstormRouteResolver({
       reasoning: { modelId: "configured-reasoner", providerId: "fake" },
       writing: { modelId: "configured-writer", providerId: "fake" },
@@ -1067,7 +1122,7 @@ test("a run out of host time finishes what is in flight, starts nothing new, and
   const result = await app.run({
     runId: "wind-down",
     submission: SUBMISSION,
-    params: { panelSize: 3 },
+    params: { panelSize: 3, panelSizeMode: "fixed" },
   });
 
   assert.equal(result.status, "wound_down", "the run reports the handover, not a failure");

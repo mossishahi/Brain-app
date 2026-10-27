@@ -771,6 +771,56 @@ const TEST_HOST_TOOLS: readonly HostToolManifest[] = [
   },
 ];
 
+/**
+ * The scholarly fixture a literature-composed panel retrieves from (the same
+ * one the game runtime uses): three topics under the stub taxonomy, two
+ * supplied papers each, scholarly search only. Content whose panel is composed
+ * from the literature binds these handlers; earlier content never calls them.
+ */
+function literatureFixtureActivities() {
+  const nodes: TaxonomyEmbeddings["nodes"] = [
+    { id: "D1", name: "Natural Sciences", level: "domain" },
+    { id: "F1", name: "Computer Science", level: "field", parent: "D1" },
+    { id: "F2", name: "Mathematics", level: "field", parent: "D1" },
+    { id: "S1", name: "Artificial Intelligence", level: "subfield", parent: "F1" },
+    { id: "S2", name: "Signal Processing", level: "subfield", parent: "F1" },
+    { id: "S3", name: "Statistics and Probability", level: "subfield", parent: "F2" },
+    { id: "T1", name: "Graph Neural Networks", level: "topic", parent: "S1" },
+    { id: "T2", name: "Belief Propagation", level: "topic", parent: "S2" },
+    { id: "T3", name: "Gaussian Processes", level: "topic", parent: "S3" },
+  ];
+  const taxonomy = new (class extends StubTaxonomy {
+    async embeddings(): Promise<TaxonomyEmbeddings> {
+      return { revision: 7, embedder: EMBEDDER_MANIFEST, nodes, vectors: [] };
+    }
+  })();
+  const papers = nodes.filter((node) => node.level === "topic").flatMap((topic) => [1, 2].map((replicate) => ({
+    title: `${topic.name} for distributional message passing ${replicate}`,
+    doi: `10.5555/game-${topic.id}-${replicate}`, url: `https://example.org/game-${topic.id}-${replicate}`,
+    year: 2020,
+    abstract: `This paper studies ${topic.name.toLowerCase()} for distributional message passing over graphs. ` +
+      "Node states are probability distributions whose uncertainty is propagated through graph structure. " +
+      "We derive the update equations, identify assumptions needed for convergence, and test predictions on held-out graphs with explicit comparison controls.",
+  })));
+  const web: WebAccess = {
+    search: async () => { throw new Error("The game fixture serves scholarly search only."); },
+    fetch: async () => { throw new Error("The game fixture uses fully supplied paper abstracts."); },
+    backedKinds: () => ["scholarly"],
+    status: () => ["arxiv", "crossref", "semantic-scholar"].map((id) => ({ id, state: "unchecked" as const })),
+    searchPapers: async (query) => {
+      const source = query.sources?.[0] ?? "arxiv";
+      return { query: query.query, mode: "topic", route: "paper-topic", providers: [source], papers: papers.map((paper) => ({ ...paper, source })) };
+    },
+    paperDetails: async (query) => ({ papers: [], notFound: [...query.ids], providers: [] }),
+  };
+  return {
+    ...literatureActivities({
+        web, taxonomy, encoders: hashNgramEncoderProvider(), now: () => 0,
+        nodeTexts: { texts: async () => ({ sha256: "0".repeat(64), entries: nodes.filter((node) => node.level === "topic").map((node) => ({ id: node.id, text: `${node.name}. ${node.name} for graph distributions and message passing.` })) }) },
+    }),
+  };
+}
+
 function runtime(
   executor: AgentExecutor,
   humanGateMode: "manual" | "autoApproveSkippable" = "autoApproveSkippable",
@@ -783,7 +833,7 @@ function runtime(
     agentExecutor: executor,
     humanGateMode,
     ...(workflow !== undefined ? { workflow } : {}),
-    activities: taxonomyActivities(new StubTaxonomy()),
+    activities: { ...taxonomyActivities(new StubTaxonomy()), ...literatureFixtureActivities() },
     routeResolver: new StaticBrainstormRouteResolver({
       reasoning: { modelId: "configured-reasoner", providerId: "fake" },
       writing: { modelId: "configured-writer", providerId: "fake" },
@@ -802,7 +852,7 @@ test("Pass path walks every seat in step order (seats in parallel) and keeps C-O
   const result = await app.run({
     runId: "pass-path",
     submission: { prompt: "Investigate the mechanism", attachments: [] },
-    params: { panelSize: 3 },
+    params: { panelSize: 3, panelSizeMode: "fixed" },
   });
 
   assert.equal(
@@ -830,19 +880,18 @@ test("Pass path walks every seat in step order (seats in parallel) and keeps C-O
       task.bindings.umbrella,
     ]),
     [
-      // One cxr-sorted queue with look-ahead: departments and umbrellas
-      // defer to children sitting within the remaining capacity, so Physics
-      // surfaces through the photon-counting topic, Machine Learning seats
-      // as an umbrella (its topic is outside the window), and Biology
-      // surfaces through network inference — in queue order. The weave then
-      // appends the interdisciplinary seat, a full member that develops too.
-      ["member-1", "Physics", "Quantum Optics"],
-      ["member-2", "Computer Science", "Machine Learning"],
-      ["member-3", "Biology", "Systems Biology"],
+      // The literature-composed panel in fixed mode: panel.seat takes the
+      // first three seats of panel.compose's greedy order, each fixture topic
+      // seated under its field (department) and subfield (umbrella), in pick
+      // order. The weave then appends the interdisciplinary seat, a full
+      // member that develops too.
+      ["member-1", "Computer Science", "Signal Processing"],
+      ["member-2", "Computer Science", "Artificial Intelligence"],
+      ["member-3", "Mathematics", "Statistics and Probability"],
       [
         "member-4",
         "Interdisciplinary Research",
-        "the interdisciplinary space between Quantum Optics, Machine Learning and Systems Biology",
+        "the interdisciplinary space between Signal Processing, Artificial Intelligence and Statistics and Probability",
       ],
     ],
   );
@@ -1110,32 +1159,29 @@ test("Pass path walks every seat in step order (seats in parallel) and keeps C-O
   assert.ok(schemas.includes("usefulFiles"), "useful-files artifact persisted");
   assert.ok(schemas.includes("ignoredFiles"), "ignored-files artifact persisted");
 
-  // The bridged experts tree is sorted by the pool builder's input-topic
-  // relevance at EVERY level (ties by count), and every node carries the
-  // score: departments Physics 0.9 > Biology 0.7 > Computer Science 0.65,
-  // Physics umbrellas Quantum Optics 0.9 > Condensed Matter 0.3, and inside
-  // Condensed Matter the leaves transport 0.3 > placed Chip Morphology 0.2.
-  const expertsRef = artifacts.find((ref) => ref.metadata?.schema === "experts");
-  assert.ok(expertsRef, "experts artifact persisted");
-  const experts = JSON.parse((await app.artifacts.get(expertsRef.id))!.data) as {
-    departments: Array<{
-      name: string;
-      relevance?: number;
-      umbrellas: Array<{ name: string; relevance?: number; subfields: Array<{ name: string }> }>;
-    }>;
+  // The composed panel evidence ranks its picks by greedy coverage gain (ties
+  // by evidence mass), and every pick carries its gain: each fixture topic
+  // covers every need at the affinity cap, so Belief Propagation 2.64 (level
+  // with Graph Neural Networks, ahead on mass) > Graph Neural Networks 0.528 >
+  // Gaussian Processes 0.1056, which falls below the auto-size stop and is
+  // why this run seats in fixed mode; the seats keep that order.
+  const evidenceRef = artifacts.find((ref) => ref.metadata?.schema === "panelEvidence");
+  assert.ok(evidenceRef, "panel evidence artifact persisted");
+  const evidence = JSON.parse((await app.artifacts.get(evidenceRef.id))!.data) as {
+    greedy: { trace: Array<{ cand: string; gain: number }> };
+    seats: Array<{ cand: string; umbrella: string; subfields: string[] }>;
   };
   assert.deepEqual(
-    experts.departments.map((department) => [department.name, department.relevance]),
-    [["Physics", 0.9], ["Biology", 0.7], ["Computer Science", 0.65]],
-  );
-  const physics = experts.departments[0]!;
-  assert.deepEqual(
-    physics.umbrellas.map((umbrella) => umbrella.name),
-    ["Quantum Optics", "Condensed Matter"],
+    evidence.greedy.trace.map((pick) => [pick.cand, pick.gain]),
+    [["T2", 2.64], ["T1", 0.528], ["T3", 0.1056]],
   );
   assert.deepEqual(
-    physics.umbrellas[1]!.subfields.map((leaf) => leaf.name),
-    ["transport", "Chip Morphology"],
+    evidence.seats.map((seat) => [seat.cand, seat.umbrella, seat.subfields]),
+    [
+      ["T2", "Signal Processing", ["Belief Propagation"]],
+      ["T1", "Artificial Intelligence", ["Graph Neural Networks"]],
+      ["T3", "Statistics and Probability", ["Gaussian Processes"]],
+    ],
   );
 });
 
@@ -1636,7 +1682,7 @@ test("the interdisciplinary seat switches off as a host option, and the panel ri
     agentExecutor: executor,
     humanGateMode: "autoApproveSkippable",
     interdisciplinarySeat: false,
-    activities: taxonomyActivities(new StubTaxonomy()),
+    activities: { ...taxonomyActivities(new StubTaxonomy()), ...literatureFixtureActivities() },
     routeResolver: new StaticBrainstormRouteResolver({
       reasoning: { modelId: "configured-reasoner", providerId: "fake" },
       writing: { modelId: "configured-writer", providerId: "fake" },
@@ -2013,7 +2059,7 @@ test("manual panel gate suspends and checkpoint resume does not repeat prior age
   }
   assert.equal(state.pendingGates[0]?.gateKey, "confirm-panel");
   assert.equal(executor.tasks("processor").length, 1);
-  assert.equal(executor.tasks("pool-builder").length, 1);
+  assert.equal(executor.tasks("code-annotator").length, 1);
 
   // A fresh runtime instance over the persisted stores proves checkpoint
   // replay does not rely on interpreter memory.
@@ -2026,7 +2072,7 @@ test("manual panel gate suspends and checkpoint resume does not repeat prior age
   });
   assert.equal(second.status, "completed");
   assert.equal(executor.tasks("processor").length, 1);
-  assert.equal(executor.tasks("pool-builder").length, 1);
+  assert.equal(executor.tasks("code-annotator").length, 1);
 });
 
 test("format-2 journals carry outputs only — no run-state copies", async () => {
@@ -2076,7 +2122,7 @@ test("format-2 journals carry outputs only — no run-state copies", async () =>
   assert.ok(checkpoint.journal.some((entry) => entry.kind === "agent"));
   assert.ok(
     checkpoint.journal.some((entry) =>
-      entry.key.endsWith("/select-panel/select-panel-run::result"),
+      entry.key.endsWith("/seat-panel/seat-panel-run::result"),
     ),
   );
 });
@@ -2122,7 +2168,7 @@ test("a format-1 journal migrates on load and resumes without repeating complete
   );
 
   const processorTasks = executor.tasks("processor").length;
-  const poolTasks = executor.tasks("pool-builder").length;
+  const annotatorTasks = executor.tasks("code-annotator").length;
   // A CURRENT runtime over the same stores: the load migrates the journal in
   // memory, replay reuses every recorded output, and the folds recompute.
   const modern = runtime(executor, "manual", legacyStores());
@@ -2135,7 +2181,7 @@ test("a format-1 journal migrates on load and resumes without repeating complete
     second.status === "failed" ? `${second.error.name}: ${second.error.message}` : undefined,
   );
   assert.equal(executor.tasks("processor").length, processorTasks, "no re-run after migration");
-  assert.equal(executor.tasks("pool-builder").length, poolTasks);
+  assert.equal(executor.tasks("code-annotator").length, annotatorTasks);
 
   // The first save after the migrated resume persists format 2, state-free.
   const after = await legacy.checkpoints.load("migrate-resume");
@@ -2429,7 +2475,7 @@ test("a hard requirement passes when the host vouches that there is nothing behi
     bundle: requiringAttachments(),
     agentExecutor: executor,
     humanGateMode: "autoApproveSkippable",
-    activities: taxonomyActivities(new StubTaxonomy()),
+    activities: { ...taxonomyActivities(new StubTaxonomy()), ...literatureFixtureActivities() },
     routeResolver: new StaticBrainstormRouteResolver({
       reasoning: { modelId: "configured-reasoner", providerId: "fake" },
       writing: { modelId: "configured-writer", providerId: "fake" },
@@ -2461,7 +2507,7 @@ test("the same requirement stops a run whose wiring lost the capability", async 
     bundle: requiringAttachments(),
     agentExecutor: executor,
     humanGateMode: "autoApproveSkippable",
-    activities: taxonomyActivities(new StubTaxonomy()),
+    activities: { ...taxonomyActivities(new StubTaxonomy()), ...literatureFixtureActivities() },
     routeResolver: new StaticBrainstormRouteResolver({
       reasoning: { modelId: "configured-reasoner", providerId: "fake" },
       writing: { modelId: "configured-writer", providerId: "fake" },
@@ -2550,7 +2596,7 @@ function partsRuntime(executor: AgentExecutor): BrainstormRuntime {
     bundle: partsBundle(),
     agentExecutor: executor,
     humanGateMode: "autoApproveSkippable",
-    activities: taxonomyActivities(new StubTaxonomy()),
+    activities: { ...taxonomyActivities(new StubTaxonomy()), ...literatureFixtureActivities() },
     routeResolver: new StaticBrainstormRouteResolver({
       reasoning: { modelId: "configured-reasoner", providerId: "fake" },
       writing: { modelId: "configured-writer", providerId: "fake" },
