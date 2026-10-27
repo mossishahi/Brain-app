@@ -34,12 +34,20 @@ import {
 interface MigrationTables {
   /** Content activity node id -> its declared output key (a state field). */
   readonly activityOutputKey: ReadonlyMap<string, string>;
+  /**
+   * `<condition id>/then` or `<condition id>/else` -> the id of the content
+   * activity that IS that branch. The runner runs a branch under the segment
+   * `then`/`else`, and format 1 compiles an activity to a bare node, so that
+   * activity's entry is keyed by the branch, not by the activity's id.
+   */
+  readonly branchActivity: ReadonlyMap<string, string>;
   /** Leaf node ids whose format-1 entries are fold state copies to drop. */
   readonly foldLeaves: ReadonlySet<string>;
 }
 
 function collectTables(content: ContentWorkflowDefinition): MigrationTables {
   const activityOutputKey = new Map<string, string>();
+  const branchActivity = new Map<string, string>();
   const foldLeaves = new Set<string>();
   const walk = (node: ContentWorkflowNode): void => {
     switch (node.kind) {
@@ -67,6 +75,8 @@ function collectTables(content: ContentWorkflowDefinition): MigrationTables {
         walk(node.body);
         return;
       case "condition":
+        if (node.then.kind === "activity") branchActivity.set(`${node.id}/then`, node.then.id);
+        if (node.else?.kind === "activity") branchActivity.set(`${node.id}/else`, node.else.id);
         walk(node.then);
         if (node.else) walk(node.else);
         return;
@@ -80,7 +90,7 @@ function collectTables(content: ContentWorkflowDefinition): MigrationTables {
     }
   };
   walk(content.root);
-  return { activityOutputKey, foldLeaves };
+  return { activityOutputKey, branchActivity, foldLeaves };
 }
 
 function isObject(value: unknown): value is JsonObject {
@@ -107,12 +117,15 @@ export function migrateCheckpointJournal(
     const leaf = path.split("/").pop() ?? "";
     if (entry.kind === "activity" && slot === "result") {
       if (tables.foldLeaves.has(leaf)) continue;
-      const outputKey = tables.activityOutputKey.get(leaf);
-      if (outputKey !== undefined) {
+      const activityId = tables.activityOutputKey.has(leaf)
+        ? leaf
+        : tables.branchActivity.get(path.split("/").slice(-2).join("/"));
+      const outputKey = activityId === undefined ? undefined : tables.activityOutputKey.get(activityId);
+      if (activityId !== undefined && outputKey !== undefined) {
         const output = isObject(entry.value) ? entry.value[outputKey] : undefined;
         if (output === undefined) continue;
         journal.push({
-          key: `${path}/${leaf}-run::result`,
+          key: `${path}/${activityId}-run::result`,
           kind: "activity",
           value: output,
         });
