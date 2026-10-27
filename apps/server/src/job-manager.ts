@@ -274,6 +274,7 @@ export const LIVE_NODE_SKILLS: Readonly<Record<string, string>> = {
   "annotate-code": "code-annotator",
   "build-pool": "pool-builder",
   "place-fields": "placer",
+  "screen-literature": "literature-screener",
   "develop-idea": "brain",
   "comment-step": "commentor",
   "comment-step-bridge": "interdisciplinary-commentor",
@@ -285,7 +286,7 @@ export const LIVE_NODE_SKILLS: Readonly<Record<string, string>> = {
   "game-chair-reassess": "committee-chair",
   "judge-reassess": "judge",
   "redevelop-idea": "redeveloper",
-  "game-redevelop-idea": "redeveloper",
+  "game-redevelop-idea": "game-redeveloper",
   "bridge-audit": "integrator",
   "synthesize-proposal": "chair",
 };

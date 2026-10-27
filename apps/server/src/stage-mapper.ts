@@ -990,6 +990,7 @@ const ROLE_LABELS: Readonly<Record<string, string>> = {
   "review-chair": "Committee chair",
   "committee-chair": "Committee chair",
   redeveloper: "Redeveloper",
+  "game-redeveloper": "Redeveloper",
   integrator: "Integrator",
   chair: "Chair",
   processor: "Processor",
@@ -1006,7 +1007,7 @@ function roleLabel(taskKind: string | undefined): string | undefined {
 }
 
 /** Roles whose actor is the seat whose chain is being worked on, not another. */
-const OWN_CHAIN_ROLES = new Set(["brain", "redeveloper"]);
+const OWN_CHAIN_ROLES = new Set(["brain", "redeveloper", "game-redeveloper"]);
 
 /**
  * Who is working, and where, for one activity row.
