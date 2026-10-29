@@ -768,7 +768,6 @@ export class AvailabilityService {
         all,
         new Promise<void>((resolve) => {
           timer = setTimeout(resolve, waitMs);
-          timer.unref();
         }),
       ]);
       if (timer !== undefined) clearTimeout(timer);
