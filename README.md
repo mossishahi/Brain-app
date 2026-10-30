@@ -63,7 +63,8 @@ npm test
 ### Models and reasoning by workflow stage
 
 In **Settings → Stage models**, the panel lets each agent
-stage use its own model, reasoning effort, and adaptive-thinking setting for the
+stage use its own model, reasoning effort, supported thinking controls, and
+thinking-transcript policy for the
 selected provider. For example, input classification and proposal synthesis can
 use different settings even though both use the same underlying reasoning route.
 Choices are retained separately for each provider. An unset stage option inherits
@@ -79,6 +80,35 @@ unavailable. Models that require thinking cannot have it disabled.
 
 New runs retain their stage settings and model catalog with the execution
 snapshot. Later settings edits do not change an existing run or its retry.
+
+Thinking transcripts are optional provider-supplied summaries. **Record when
+available** accepts models that return only their output; **Off** suppresses
+transcript capture in live text, thinking artifacts, reviewer notes, and prompt
+diagnostics. Neither option removes the explicit argument steps reviewers assess
+or changes the model's internal reasoning effort. Provider-required signatures
+remain in the tool conversation. Existing runs retain their previous behavior.
+
+### Direct Gemini models
+
+Choose **Gemini API** in the connection settings and enter a Gemini Developer API
+key. This uses Google's `@google/genai` SDK for direct model calls; the existing
+Co-inference pipeline still controls tools, validation, review, and retries.
+The model picker lists text-generation models returned for that key. The host
+refreshes this list at startup and before launch, then saves it with the run.
+Google's model-list API does not report every reasoning control, so documented
+profiles supply controls for known models; unknown models remain selectable with
+provider defaults. Unsupported controls are never inferred from model names.
+
+Gemini's thinking levels are independent of transcript recording. Some models
+require internal thinking and cannot disable it, even when transcripts are off.
+The adaptive-thinking toggle is offered only for providers and models that
+declare that control.
+
+For a direct worker launch, set `BRAINSTORM_AGENTIC_PROVIDER=gemini`,
+`GEMINI_API_KEY`, and `BRAINSTORM_AGENTIC_MODEL` to an available model ID. Set
+`BRAINSTORM_AGENTIC_TRANSCRIPT=off` or `if-available` to choose capture policy.
+`GOOGLE_API_KEY` is accepted as a fallback. Keys saved through the settings panel
+stay in the host's private credentials file and are never returned to the browser.
 
 ### Claude output-limit recovery
 

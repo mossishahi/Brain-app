@@ -63,3 +63,38 @@ test("the credentials file fills secrets the scheduler environment cannot carry"
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("Gemini credentials use explicit environment keys before the queued-worker credential file", () => {
+  const dir = mkdtempSync(join(tmpdir(), "brain-gemini-creds-"));
+  try {
+    const file = join(dir, "credentials.json");
+    writeFileSync(file, JSON.stringify({ geminiApiKey: "synthetic-file-gemini", anthropicApiKey: "synthetic-file-anthropic" }));
+    const env = { BRAINSTORM_AGENTIC_PROVIDER: "gemini", BRAINSTORM_AGENTIC_CREDENTIALS_FILE: file,
+      BRAINSTORM_AGENTIC_MODEL: "gemini-3.5-flash-lite", ANTHROPIC_BASE_URL: "https://anthropic.invalid",
+      GEMINI_BASE_URL: "https://gemini.invalid", BRAINSTORM_AGENTIC_TRANSCRIPT: "off",
+    };
+    const fromFile = providerConfigFromEnv(env, false);
+    assert.equal(fromFile.provider, "gemini");
+    assert.equal(fromFile.geminiApiKey, "synthetic-file-gemini");
+    assert.equal(fromFile.defaultModel, "gemini-3.5-flash-lite");
+    assert.equal(fromFile.baseURL, "https://gemini.invalid");
+    assert.equal(fromFile.transcript, "off");
+    assert.equal(providerConfigFromEnv({ ...env, GOOGLE_API_KEY: "synthetic-google" }, false).geminiApiKey, "synthetic-google");
+    assert.equal(providerConfigFromEnv({ ...env, GOOGLE_API_KEY: "synthetic-google", GEMINI_API_KEY: "synthetic-gemini" }, false).geminiApiKey, "synthetic-gemini");
+    // A deliberately empty primary value must not revive a previously saved key.
+    assert.equal(providerConfigFromEnv({ ...env, GEMINI_API_KEY: "" }, false).geminiApiKey, undefined);
+    assert.equal(providerConfigFromEnv({ ...env, BRAINSTORM_AGENTIC_PROVIDER: "anthropic" }, false).baseURL, "https://anthropic.invalid");
+    assert.equal(providerConfigFromEnv({ ...env, GEMINI_BASE_URL: undefined }, false).baseURL, undefined);
+    const offline = providerConfigFromEnv({ ...env, GEMINI_API_KEY: "synthetic-unused" }, true);
+    assert.equal(offline.provider, "offline");
+    assert.equal(offline.geminiApiKey, undefined);
+    assert.equal(offline.apiKey, undefined);
+    assert.equal(offline.transcript, "off");
+    writeFileSync(file, JSON.stringify({ geminiApiKey: { unexpected: "value" } }));
+    assert.equal(providerConfigFromEnv(env, false).geminiApiKey, undefined);
+    writeFileSync(file, "invalid-json");
+    assert.equal(providerConfigFromEnv(env, false).geminiApiKey, undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

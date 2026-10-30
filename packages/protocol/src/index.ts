@@ -868,6 +868,8 @@ export interface ReviewStepView {
    * on the rewrite that produced them (see revision.rewritten).
    */
   readonly thoughts?: string;
+  /** Explicit capture policy for the original version; absent on historical runs. */
+  readonly transcriptStatus?: "disabled";
   /**
    * Present when a reconsideration after a fact-table deletion rewrote this
    * step after the walk had passed it: one item per notice the rewrite
@@ -1114,6 +1116,8 @@ export interface FirstPassMemberView {
    * channel).
    */
   readonly thoughts?: string;
+  /** Explicit capture policy; absent on historical runs. */
+  readonly transcriptStatus?: "disabled";
   /** Set when the submitter dismissed this seat mid-run. */
   readonly dismissed?: DismissedSeatView;
 }
@@ -1450,6 +1454,7 @@ export interface GpuRunSettings {
 }
 
 export type ClaudeAgentEffort =
+  | "minimal"
   | "low"
   | "medium"
   | "high"
@@ -1469,8 +1474,12 @@ export interface ClaudeAgentSettings {
   readonly fallbackModel?: string;
 }
 
+/** Whether to retain provider-supplied thinking summaries; never changes internal reasoning. */
+export type TranscriptPolicy = "if-available" | "off";
+
 /** Overrides for one workflow agent node; absent fields inherit deployment defaults. */
 export interface StageModelSettings {
+  readonly transcript?: TranscriptPolicy;
   readonly model?: string;
   readonly effort?: ClaudeAgentEffort;
   readonly thinking?: "adaptive" | "disabled";
@@ -1550,14 +1559,17 @@ export interface LlmSettings {
    * "anthropic": developer Messages API + API key.
    * "claude-agent": Claude Agent SDK + token from `claude setup-token`.
    * "cursor-agent": Cursor SDK + API key from cursor.com/dashboard.
+   * "gemini": Google Gemini developer API + API key.
    * "offline": deterministic executor (no network, for testing).
    */
-  readonly provider: "anthropic" | "claude-agent" | "cursor-agent" | "offline";
+  readonly provider: "anthropic" | "claude-agent" | "cursor-agent" | "gemini" | "offline";
   /** Required for developer API; optional agent-SDK alias/full model id. */
   readonly model?: string;
   /** Optional developer-API endpoint override (not used by the agent SDKs). */
   readonly baseUrl?: string;
   readonly modelsByRoute?: Readonly<Record<string, string>>;
+  /** Summary recording is independent of reasoning effort or thinking mode. */
+  readonly transcript?: TranscriptPolicy;
   /** Stage ids are workflow agent node ids, independent of their shared logical route. */
   readonly stageSettingsByProvider?: Partial<Record<LlmSettings["provider"], Readonly<Record<string, StageModelSettings>>>>;
   /** Launch-time discovery snapshot; retained by jobs on retry, never user supplied. */
@@ -1575,6 +1587,8 @@ export interface LlmSettings {
   readonly setupTokenConfigured?: boolean;
   /** Public status only. The Cursor API key itself is never returned by the server. */
   readonly cursorApiKeyConfigured?: boolean;
+  /** Public status only; the Gemini API key is never returned. */
+  readonly geminiApiKeyConfigured?: boolean;
 }
 
 export interface ServerSettings {
@@ -1787,6 +1801,10 @@ export const DEFAULT_MODEL_CATALOG: ProviderModelCatalog = {
     { id: "claude-opus-5", label: "Claude Opus 5" },
     { id: "claude-sonnet-5", label: "Claude Sonnet 5" },
   ],
+  gemini: [
+    { id: "gemini-3.8-flash", label: "Gemini 3.8 Flash" },
+    { id: "gemini-3.5-flash-lite", label: "Gemini 3.5 Flash-Lite" },
+  ],
   offline: [],
 };
 
@@ -1911,11 +1929,12 @@ export interface ServerSettingsUpdate {
    * connection for real before it persists anything.
    */
   readonly llm?: {
-    readonly provider: "anthropic" | "claude-agent" | "cursor-agent" | "offline";
+    readonly provider: "anthropic" | "claude-agent" | "cursor-agent" | "gemini" | "offline";
     readonly model?: string;
     readonly baseUrl?: string;
     readonly modelsByRoute?: Readonly<Record<string, string>>;
     readonly stageSettingsByProvider?: LlmSettings["stageSettingsByProvider"];
+    readonly transcript?: TranscriptPolicy;
     readonly agentSdk?: ClaudeAgentSettings;
     readonly apiKey?: string;
     readonly clearApiKey?: boolean;
@@ -1923,6 +1942,8 @@ export interface ServerSettingsUpdate {
     readonly clearSetupToken?: boolean;
     readonly cursorApiKey?: string;
     readonly clearCursorApiKey?: boolean;
+    readonly geminiApiKey?: string;
+    readonly clearGeminiApiKey?: boolean;
   };
   /** Host tools the user wants enabled. Absent = keep current. */
   readonly hostTools?: {

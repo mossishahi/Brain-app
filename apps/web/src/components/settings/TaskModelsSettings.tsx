@@ -52,7 +52,7 @@ function StageModelsSettings({ options }: { options: ModelOptionsResponse }) {
     finally { if (live.current) setSaving(false); }
   }
   return <div className="settings-research-controls">
-    <p className="field-note">Choose models and reasoning settings for each stage of future research. Existing runs keep their saved settings.</p>
+    <p className="field-note">Choose models, reasoning settings, and optional thinking transcripts for future research. Reviewable argument steps are always kept. Existing runs keep their saved settings.</p>
     {(options.catalog?.stale || options.catalog?.source === 'fallback') && <p className="field-note">Using saved model information. Controls are available where the model’s capabilities are known.</p>}
     {options.stages?.length === 0 && <p className="field-note" role="status">Workflow stages are unavailable. They will be checked at the next research launch.</p>}
     {saveError && <p className="error-text" role="alert">{saveError}</p>}
@@ -98,7 +98,24 @@ function StageModelsSettings({ options }: { options: ModelOptionsResponse }) {
               </select>
             </div>
           </div>
+          <div className="field">
+            <label className="field-label" htmlFor={`${modelId}-transcript`}>Thinking transcript</label>
+            <select id={`${modelId}-transcript`} aria-label={`${stage.label} thinking transcript`} value={selected.transcript ?? ''} disabled={saving}
+              onChange={event => change(updateStage(draft, stage.id, { ...selected, transcript: (event.target.value as 'if-available' | 'off') || undefined }))}>
+              <option value="">Default ({options.defaults?.transcript === 'off' ? 'off' : 'when available'})</option>
+              <option value="if-available">Record when available</option>
+              <option value="off">Off</option>
+            </select>
+            <p className="field-note">Optional provider-supplied summaries. This does not change reasoning effort or remove argument steps.</p>
+          </div>
           {adaptive && <SettingsToggle label={<><span className="settings-stage-model-sr">{stage.label} </span>Adaptive thinking</>} checked={checked} disabled={saving || !canDisable} onCheckedChange={value => change(updateStage(draft, stage.id, { ...selected, thinking: value ? 'adaptive' : 'disabled' }))} description={capabilities.thinkingCanBeDisabled === false ? 'This model requires adaptive thinking.' : !canDisable ? 'The provider has not reported whether thinking can be disabled.' : selected.thinking ? 'Custom setting for this stage.' : 'Using the default for this model.'} />}
+          {!adaptive && canDisable && <div className="field">
+            <label className="field-label" htmlFor={`${modelId}-thinking`}>Internal thinking</label>
+            <select id={`${modelId}-thinking`} aria-label={`${stage.label} internal thinking`} value={selected.thinking ?? ''} disabled={saving}
+              onChange={event => change(updateStage(draft, stage.id, { ...selected, thinking: event.target.value === 'disabled' ? 'disabled' : undefined }))}>
+              <option value="">Default (model controlled)</option><option value="disabled">Disabled</option>
+            </select>
+          </div>}
           {unconfirmedThinking && <p className="field-note">The saved thinking override is not confirmed as supported by this model. Use the default or choose another model.</p>}
           {selected.thinking && <div><button type="button" className="btn btn-small" aria-label={`Use default thinking for ${stage.label}`} disabled={saving} onClick={() => change(updateStage(draft, stage.id, { ...selected, thinking: undefined }))}>Use default thinking</button></div>}
           {!capabilities && <p className="field-note">Reasoning controls are unavailable until this model’s capabilities are known.</p>}

@@ -749,7 +749,20 @@ export class ToolLoopAgentExecutor<
       }
     }
 
-    const baseRequest = this.#taskAdapter.createRequest(task, context, route);
+    let baseRequest = this.#taskAdapter.createRequest(task, context, route);
+    if (task.modelRequest?.execution?.transcript === "off") {
+      const options = baseRequest.providerOptions;
+      const thinking = options?.anthropic?.thinking;
+      // Request no readable summary without turning reasoning off or adding
+      // an unsupported reasoning mode. Keep all protocol state in messages.
+      baseRequest = { ...baseRequest, providerOptions: {
+        ...options,
+        gemini: { ...options?.gemini, includeThoughts: false },
+        ...(thinking !== null && typeof thinking === "object" && !Array.isArray(thinking) && (thinking as JsonObject).type !== "disabled"
+          ? { anthropic: { ...options?.anthropic, thinking: { ...thinking, display: "omitted" } } }
+          : {}),
+      } };
+    }
     if (baseRequest.modelId !== route.modelId) {
       throw new AgentRuntimeError(
         "Task adapter returned a model id different from the resolved route.",
@@ -840,10 +853,10 @@ export class ToolLoopAgentExecutor<
       throwIfAborted(context.signal);
       state.usage = addUsage(state.usage, response.usage);
       messages.push({ role: "assistant", content: response.content });
-      // Native reasoning traces (thinking blocks) are collected for artifact
-      // capture; they never join the parsed output or progress events.
+      // Optional native summaries never join parsed output or progress events.
+      // Off suppresses diagnostic copies, not provider-required wire history.
       for (const block of response.content) {
-        if (block.type === "thinking" && block.text.trim().length > 0) {
+        if (task.modelRequest?.execution?.transcript !== "off" && block.type === "thinking" && block.text.trim().length > 0) {
           thinkingSegments.push({ turn, text: block.text });
           // This path does not stream, so the live thread grows a whole block at
           // a time instead of a fragment at a time — later than the SDK paths,
@@ -1034,7 +1047,8 @@ export class ToolLoopAgentExecutor<
    * What this turn hands the model, recorded once and announced as ONE
    * `llm_call` row.
    *
-   * This path composes the whole wire request itself, so `complete` is true:
+   * This path composes the whole wire request itself, so `complete` is true
+   * unless transcript policy redacts thinking blocks from this copy:
    * unlike the agent-SDK backends, nothing is added between here and the
    * model. The sections carry the request field by field — instructions, every
    * message in order, the tool definitions offered, the output schema, the
@@ -1059,6 +1073,7 @@ export class ToolLoopAgentExecutor<
     if (context.reportPrompt === undefined) return;
     const json = (value: JsonValue): string => JSON.stringify(value, null, 2);
     const sections: { title: string; body: string }[] = [];
+    let transcriptRedacted = false;
     // Flattened here rather than through the shared helper: core-adapter is
     // this package's only import surface for contracts, and it exports the
     // types, not the prompt utilities.
@@ -1070,15 +1085,24 @@ export class ToolLoopAgentExecutor<
       sections.push({ title: "System prompt", body: system });
     }
     request.messages.forEach((message, index) => {
+      // Sanitize only the diagnostic projection. Signed/opaque blocks in
+      // request.messages must remain untouched for provider round-tripping.
+      const content = task.modelRequest?.execution?.transcript === "off"
+        ? message.content.map((block) => {
+            if (block.type !== "thinking") return block;
+            transcriptRedacted = true;
+            return textBlock("[Thinking transcript omitted by capture policy]");
+          })
+        : message.content;
       // Text-only turns read as prose; a turn carrying tool calls or tool
       // results is shown as the structure it is, because that structure is
       // what the model reads.
-      const plain = message.content.every((block) => block.type === "text");
+      const plain = content.every((block) => block.type === "text");
       sections.push({
         title: `Message ${index + 1} · ${message.role}`,
         body: plain
-          ? textContent(message.content)
-          : json(message.content as unknown as JsonValue),
+          ? textContent(content)
+          : json(content as unknown as JsonValue),
       });
     });
     if (request.tools !== undefined && request.tools.length > 0) {
@@ -1116,6 +1140,7 @@ export class ToolLoopAgentExecutor<
           ? [...request.nativeOperations]
           : null,
         providerOptions: (request.providerOptions ?? null) as JsonValue,
+        transcript: task.modelRequest?.execution?.transcript ?? null,
       }),
     });
     const record = {
@@ -1134,7 +1159,7 @@ export class ToolLoopAgentExecutor<
       ...(task.logicalRoute !== undefined
         ? { logicalRoute: task.logicalRoute }
         : {}),
-      complete: true,
+      complete: !transcriptRedacted,
       sections,
     };
     context.reportPrompt(record);

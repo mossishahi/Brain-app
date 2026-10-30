@@ -241,6 +241,9 @@ export function buildOrchestrationCommand(
   if (options.settings.llm.provider === "anthropic") {
     return `# Verified ANTHROPIC_* credentials are injected into the scheduler environment by the brain server.\n${command}`;
   }
+  if (options.settings.llm.provider === "gemini") {
+    return `# The verified GEMINI_API_KEY is injected into the scheduler environment by the brain server.\n${command}`;
+  }
   if (options.settings.llm.provider === "claude-agent") {
     return `# The verified CLAUDE_CODE_OAUTH_TOKEN is injected into the scheduler environment by the brain server.\n${command}`;
   }

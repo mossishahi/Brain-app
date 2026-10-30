@@ -67,6 +67,7 @@ import {
   type AnthropicConnectionValidator,
   type ClaudeAgentConnectionValidator,
   type CursorAgentConnectionValidator,
+  type GeminiConnectionValidator,
 } from "./settings.js";
 import {
   agentIdentity,
@@ -103,6 +104,7 @@ export interface JobManagerOptions {
   readonly validateAnthropic?: AnthropicConnectionValidator;
   readonly validateClaudeAgent?: ClaudeAgentConnectionValidator;
   readonly validateCursorAgent?: CursorAgentConnectionValidator;
+  readonly validateGemini?: GeminiConnectionValidator;
   readonly validateOpenRouter?: (
     apiKey: string,
     model: string,
@@ -341,6 +343,7 @@ export class JobManager {
       ...(options.validateClaudeAgent
         ? { validateClaudeAgent: options.validateClaudeAgent }
         : {}),
+      ...(options.validateGemini ? { validateGemini: options.validateGemini } : {}),
       ...(options.validateCursorAgent
         ? { validateCursorAgent: options.validateCursorAgent }
         : {}),
@@ -1005,6 +1008,9 @@ export class JobManager {
       throw new Error(
         "Configure and verify the Anthropic API key and model in Settings before submitting a job",
       );
+    }
+    if (settings.llm.provider === "gemini" && (!settings.llm.model || !settings.llm.geminiApiKeyConfigured)) {
+      throw new Error("Configure and verify the Gemini API key and model in Settings before submitting a job");
     }
     if (
       settings.llm.provider === "claude-agent" &&

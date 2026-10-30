@@ -19,7 +19,7 @@ import {
 import { errorMessage, putSettings } from "../api";
 import { hostStorageKey } from "../desktop/context";
 
-type Provider = "claude-agent" | "anthropic" | "cursor-agent";
+type Provider = "claude-agent" | "anthropic" | "cursor-agent" | "gemini";
 
 const DISMISS_KEY = hostStorageKey("brain-onboarding-dismissed");
 
@@ -29,6 +29,7 @@ export function onboardingNeeded(settings: ServerSettings | null): boolean {
   if (settings.llm.provider === "anthropic") {
     return settings.llm.apiKeyConfigured !== true;
   }
+  if (settings.llm.provider === "gemini") return settings.llm.geminiApiKeyConfigured !== true;
   if (settings.llm.provider === "cursor-agent") {
     return settings.llm.cursorApiKeyConfigured !== true;
   }
@@ -65,13 +66,13 @@ export function ProviderOnboarding({
       ? "anthropic"
       : settings.llm.provider === "cursor-agent"
         ? "cursor-agent"
-        : "claude-agent",
+        : settings.llm.provider === "gemini" ? "gemini" : "claude-agent",
   );
   const [runner, setRunner] = useState<"slurm" | "local">(settings.runner);
   const [secrets, setSecrets] = useState<Partial<Record<Provider, string>>>({});
   const secret = secrets[provider] ?? "";
   const [model, setModel] = useState(
-    settings.llm.provider === "anthropic" ? (settings.llm.model ?? "") : "",
+    settings.llm.provider === "anthropic" || settings.llm.provider === "gemini" ? (settings.llm.model ?? "") : "",
   );
   const [saving, setSaving] = useState<"connect" | "offline" | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -86,11 +87,13 @@ export function ProviderOnboarding({
     if (provider === next) return;
     clearFeedback();
     setProvider(next);
+    if (next === "gemini") setModel(settings.llm.provider === "gemini" ? settings.llm.model ?? "gemini-3.8-flash" : "gemini-3.8-flash");
+    else if (next === "anthropic") setModel(settings.llm.provider === "anthropic" ? settings.llm.model ?? "claude-sonnet-5" : "claude-sonnet-5");
   };
 
-  const anthropicModels = useMemo(
-    () => DEFAULT_MODEL_CATALOG.anthropic ?? [],
-    [],
+  const providerModels = useMemo(
+    () => DEFAULT_MODEL_CATALOG[provider] ?? [],
+    [provider],
   );
 
   // contentRegistry is deployment-owned and never sent; the server ignores it.
@@ -125,12 +128,12 @@ export function ProviderOnboarding({
           ? "Paste the token printed by `claude setup-token` first."
           : provider === "cursor-agent"
             ? "Paste a Cursor API key first."
-            : "Paste an Anthropic API key first.",
+            : provider === "gemini" ? "Paste a Gemini API key first." : "Paste an Anthropic API key first.",
       );
       return;
     }
-    if (provider === "anthropic" && model.trim() === "") {
-      setError("Choose the Anthropic model to use.");
+    if ((provider === "anthropic" || provider === "gemini") && model.trim() === "") {
+      setError("Choose the model to use.");
       return;
     }
     const context = verificationContext.current;
@@ -140,7 +143,7 @@ export function ProviderOnboarding({
       const updated = await putSettings({
         ...baseUpdate(),
         llm:
-          provider === "anthropic"
+          provider === "gemini" ? { provider: "gemini", model: model.trim(), geminiApiKey: credential } : provider === "anthropic"
             ? {
                 provider: "anthropic",
                 model: model.trim(),
@@ -292,6 +295,10 @@ export function ProviderOnboarding({
             <span className="onboard-provider-name">Cursor API key</span>
             <span className="onboard-provider-hint">Cursor SDK</span>
           </button>
+          <button type="button" role="radio" aria-checked={provider === "gemini"}
+            className={`onboard-provider${provider === "gemini" ? " selected" : ""}`} onClick={() => selectProvider("gemini")}>
+            <span className="onboard-provider-name">Gemini API key</span><span className="onboard-provider-hint">Google developer API</span>
+          </button>
         </div>
 
         <label className="onboard-field">
@@ -306,7 +313,7 @@ export function ProviderOnboarding({
                 ? "paste the token…"
                 : provider === "cursor-agent"
                   ? "cursor_…"
-                  : "sk-ant-…"
+                  : provider === "gemini" ? "paste the Gemini API key…" : "sk-ant-…"
             }
             autoFocus
             onChange={(event) => { setSecrets(current => ({ ...current, [provider]: event.target.value })); clearFeedback(); }}
@@ -315,18 +322,18 @@ export function ProviderOnboarding({
             }}
           />
         </label>
-        {provider === "anthropic" && (
+        {(provider === "anthropic" || provider === "gemini") && (
           <label className="onboard-field">
             <span>Model</span>
             <input
               type="text"
               value={model}
-              list="onboard-anthropic-models"
-              placeholder="claude-sonnet-5"
+              list="onboard-provider-models"
+              placeholder={provider === "gemini" ? "gemini-3.8-flash" : "claude-sonnet-5"}
               onChange={(event) => { setModel(event.target.value); clearFeedback(); }}
             />
-            <datalist id="onboard-anthropic-models">
-              {anthropicModels.map((option) => (
+            <datalist id="onboard-provider-models">
+              {providerModels.map((option) => (
                 <option key={option.id} value={option.id}>
                   {option.label}
                 </option>
@@ -352,6 +359,8 @@ export function ProviderOnboarding({
               </a>{" "}
               → Integrations → API keys, then paste it here.
             </>
+          ) : provider === "gemini" ? (
+            <>Create a key at <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer">Google AI Studio</a>, then paste it here. Saving checks model access without generating a response.</>
           ) : (
             <>
               Create a key at{" "}

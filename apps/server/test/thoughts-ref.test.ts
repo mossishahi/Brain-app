@@ -350,6 +350,22 @@ test("review views carry resolvable handles for the original and the rewrite", (
     );
     const seatTwo = firstPass.members.find((member) => member.memberId === "member-2");
     assert.equal(seatTwo?.thoughts, undefined, "no recorded slices, no handle");
+    assert.equal(seatOne?.transcriptStatus, undefined, "historical traces have no invented capture policy");
+
+    const disabled = entries.map((entry) => entry.key === DEVELOP_KEY ? {
+      ...entry, value: { taskId: "t-develop", status: "ok", output: firstIdea, metadata: { transcriptStatus: "disabled" } },
+    } : entry);
+    writeFileSync(join(sessionDir, "checkpoint.json"), JSON.stringify({ runId: "job-1", workflowId: "brainstorm", status: "completed", input: {}, journal: disabled, pendingGates: [], seq: 2, updatedAt: Date.now() }));
+    const withoutTranscript = buildJobDetail({ record, status: "completed", sessionDir, jobDir, settings });
+    const disabledFirstPass = withoutTranscript.stages.find((stage) => stage.id === "first-pass");
+    assert.ok(disabledFirstPass?.id === "first-pass");
+    const disabledSeat = disabledFirstPass.members.find((member) => member.memberId === "member-1");
+    assert.equal(disabledSeat?.transcriptStatus, "disabled");
+    assert.equal(disabledSeat?.thoughts, undefined);
+    assert.ok(disabledSeat?.idea, "the reviewable argument survives disabled transcript recording");
+    const disabledReview = withoutTranscript.stages.find((stage) => stage.id === "review-members");
+    assert.ok(disabledReview?.id === "review-members");
+    assert.equal(disabledReview.members.find((member) => member.memberId === "member-1")?.steps[0]?.transcriptStatus, "disabled");
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }

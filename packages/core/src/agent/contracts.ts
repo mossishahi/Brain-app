@@ -13,10 +13,17 @@ import type { ResolvedCapabilityPlan } from "../capability/types.js";
 
 /** Per-task controls resolved against the selected model's launch-time catalog. */
 export interface AgentModelExecutionControls {
-  readonly effort?: "low" | "medium" | "high" | "xhigh" | "max";
+  readonly effort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   readonly thinking?: "adaptive" | "disabled";
+  /**
+   * Optional provider thinking summaries, independent of reasoning controls.
+   * Missing summaries never invalidate an answer. Omitted preserves legacy
+   * capture behavior; off excludes summaries from live and persisted copies,
+   * while retaining opaque provider state needed for subsequent wire calls.
+   */
+  readonly transcript?: "if-available" | "off";
   /** Declared support constrains any bounded recovery adjustment. */
-  readonly supportedEffortLevels?: readonly ("low" | "medium" | "high" | "xhigh" | "max")[];
+  readonly supportedEffortLevels?: readonly ("minimal" | "low" | "medium" | "high" | "xhigh" | "max")[];
 }
 
 /**
@@ -171,8 +178,8 @@ export interface AgentProgress {
 }
 
 /**
- * Exactly what one hand-off to a model contained, kept verbatim so a reader can
- * reconstruct the request behind a single call byte for byte.
+ * What one hand-off to a model contained. Complete records retain the request
+ * verbatim; partial records identify SDK additions or transcript redactions.
  *
  * Deliberately NOT an AgentProgress payload: `sections` carry whole prompts,
  * and the progress channel is sanitized, streamed to every connected browser,
@@ -202,9 +209,10 @@ export interface PromptRecord {
    * paths, where the SDK composes the final request and adds its own system
    * prompt, built-in tools and harness scaffolding after we hand over. The
    * rendered file must SAY which case it is rather than imply completeness.
+   * Also false when transcript policy redacts thinking blocks from a record.
    */
   readonly complete: boolean;
-  /** Ordered, named sections: everything we sent, verbatim. */
+  /** Ordered sections; any transcript redaction must be labeled explicitly. */
   readonly sections: readonly { readonly title: string; readonly body: string }[];
 }
 

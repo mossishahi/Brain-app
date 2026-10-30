@@ -1,12 +1,13 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type { ClaudeAgentEffort, CursorModelCatalogEntry, LlmSettings, ModelCapabilities, ModelCatalogSnapshot, ModelOption, ServerSettings, StageModelSettings, StageOption } from "@brainstorm-agentic/protocol";
+import { discoverGeminiModels, type GeminiDiscoveredModel } from "@brainstorm-agentic/provider-gemini";
 import { listCursorModels } from "@brainstorm-agentic/executor-cursor-agent";
 import { normalizeClaudeSetupToken } from "@brainstorm-agentic/executor-claude-agent";
 import { atomicWriteFile, readJsonFile } from "./files.js";
 import { loadModelCatalog } from "./route-catalog.js";
 
-const EFFORTS: readonly ClaudeAgentEffort[] = ["low", "medium", "high", "xhigh", "max"];
+const EFFORTS: readonly ClaudeAgentEffort[] = ["minimal", "low", "medium", "high", "xhigh", "max"];
 const object = (value: unknown): Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const text = (value: unknown): string | undefined => typeof value === "string" && value.trim() !== "" ? value : undefined;
 const normalized = (value: string): string => value.toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -21,7 +22,7 @@ export function cursorModelOption(entry: CursorModelCatalogEntry): ModelOption {
   const thinking = parameters.find((p) => normalized(`${p.id} ${p.displayName ?? ""}`).includes("thinking"));
   const effort = parameters.find((p) => p !== thinking && /effort|reasoning/.test(normalized(`${p.id} ${p.displayName ?? ""}`)));
   const effortValues = new Set(effort?.values.map((v) => normalized(v.value)) ?? []);
-  const aliases: Record<ClaudeAgentEffort, readonly string[]> = { low: ["low", "minimal"], medium: ["medium", "standard", "default"], high: ["high"], xhigh: ["xhigh", "extrahigh", "veryhigh"], max: ["max", "maximum"] };
+  const aliases: Record<ClaudeAgentEffort, readonly string[]> = { minimal: ["minimal"], low: ["low"], medium: ["medium", "standard", "default"], high: ["high"], xhigh: ["xhigh", "extrahigh", "veryhigh"], max: ["max", "maximum"] };
   const thinkingValues = new Set((thinking ?? effort)?.values.map((v) => normalized(v.value)) ?? []);
   const off = ["off", "disabled", "none", "no", "false"].some((v) => thinkingValues.has(v));
   const adaptive = thinking !== undefined && ["adaptive", "auto", "on", "enabled", "true", "thinking"].some((v) => thinkingValues.has(v));
@@ -105,12 +106,25 @@ async function anthropicModels(context: DiscoveryContext, signal: AbortSignal, o
   return models;
 }
 
+export function geminiModelOption(row: GeminiDiscoveredModel): ModelOption {
+  return { id: row.id, label: row.displayName ?? row.id,
+    ...(row.profile ? { capabilities: {
+      effortLevels: EFFORTS.filter((level) => row.profile!.thinkingLevels.some((native) => native === level)),
+      adaptiveThinking: false,
+      ...(row.profile.thinkingBudget?.canDisable === true ? { thinkingCanBeDisabled: true } : {}),
+    } } : {}) };
+}
+
 export const discoverProviderModels: ModelDiscoverer = async (context, signal) => {
   if (context.provider === "offline") return { models: [] };
   if (!context.secret) throw new Error("Provider is not connected");
   if (context.provider === "cursor-agent") {
     const cursorModels = await listCursorModels(context.secret);
     return { models: cursorModels.map(cursorModelOption), cursorModels };
+  }
+  if (context.provider === "gemini") {
+    const rows = await discoverGeminiModels({ apiKey: context.secret, signal, ...(context.baseUrl ? { baseURL: context.baseUrl } : {}) });
+    return { models: rows.map(geminiModelOption) };
   }
   if (context.provider === "anthropic") {
     return { models: await anthropicModels(context, signal) };
@@ -177,7 +191,7 @@ export class ModelDiscovery {
       if (disk.schemaVersion !== 1) return;
       for (const [key, raw] of Object.entries(object(disk.entries))) {
         const row = object(raw);
-        if (!/^[a-f0-9]{64}$/.test(key) || !["anthropic", "claude-agent", "cursor-agent", "offline"].includes(String(row.provider)) || typeof row.fetchedAt !== "number" || !Number.isFinite(row.fetchedAt)) continue;
+        if (!/^[a-f0-9]{64}$/.test(key) || !["anthropic", "claude-agent", "cursor-agent", "gemini", "offline"].includes(String(row.provider)) || typeof row.fetchedAt !== "number" || !Number.isFinite(row.fetchedAt)) continue;
         const models = sanitizeModels(row.models); if (models.length === 0 && row.provider !== "offline") continue;
         this.cache.set(key, { provider: row.provider as LlmSettings["provider"], fetchedAt: row.fetchedAt, source: "provider", stale: true, models,
           ...(row.provider === "cursor-agent" ? { cursorModels: sanitizeCursorModels(row.cursorModels) } : {}) });

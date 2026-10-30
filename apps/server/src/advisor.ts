@@ -14,6 +14,7 @@ import {
 } from "@brainstorm-agentic/core";
 import { ClaudeAgentExecutor } from "@brainstorm-agentic/executor-claude-agent";
 import { CursorAgentExecutor } from "@brainstorm-agentic/executor-cursor-agent";
+import { GeminiModelProvider } from "@brainstorm-agentic/provider-gemini";
 import { AnthropicMessagesProvider } from "@brainstorm-agentic/provider-anthropic";
 
 import type { ReadinessAdviceRequest, ReadinessAdvisor } from "./readiness.js";
@@ -105,6 +106,13 @@ export function createReadinessAdvisor(
         },
         { signal: AbortSignal.timeout(ANTHROPIC_TIMEOUT_MS) },
       );
+      advice = textContent(response.content).trim() || undefined;
+    } else if (provider === "gemini") {
+      const apiKey = options.settings.getGeminiApiKey();
+      const model = settings.llm.model;
+      if (!apiKey || !model) return undefined;
+      const client = new GeminiModelProvider({ apiKey, model, ...(settings.llm.baseUrl ? { baseURL: settings.llm.baseUrl } : {}) });
+      const response = await client.complete({ modelId: model, system: ADVISOR_SYSTEM, messages: [userMessage(`${contextLine}\n\n${payload}`)], maxOutputTokens: 1200, providerOptions: { gemini: { includeThoughts: false } } }, { signal: AbortSignal.timeout(ANTHROPIC_TIMEOUT_MS) });
       advice = textContent(response.content).trim() || undefined;
     } else {
       // Both agent-SDK backends advise at max effort with adaptive thinking,

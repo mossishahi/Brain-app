@@ -28,7 +28,7 @@ function fields(value: QuickValue): Readonly<Record<string, string>> {
 }
 export function providerConfigured(settings: ServerSettings, provider: ServerSettings['llm']['provider']): boolean {
   return provider === 'offline' || (provider === 'anthropic' ? settings.llm.apiKeyConfigured === true
-    : provider === 'claude-agent' ? settings.llm.setupTokenConfigured === true : settings.llm.cursorApiKeyConfigured === true);
+    : provider === 'claude-agent' ? settings.llm.setupTokenConfigured === true : provider === 'gemini' ? settings.llm.geminiApiKeyConfigured === true : settings.llm.cursorApiKeyConfigured === true);
 }
 export function hostTools(settings: ServerSettings): readonly string[] {
   return settings.hostTools?.enabledToolIds ?? ['attachment_list', 'attachment_read', 'attachment_search'];
@@ -45,13 +45,13 @@ export function quickSettingsPatch(s: ServerSettings, { id, value }: QuickComman
   };
   switch (id) {
     case 'provider': {
-      const provider = choice(value, ['anthropic', 'claude-agent', 'cursor-agent', 'offline']);
+      const provider = choice(value, ['anthropic', 'claude-agent', 'cursor-agent', 'gemini', 'offline']);
       if (!providerConfigured(s, provider)) throw new Error('Connect this provider before selecting it.');
-      return { llm: { provider, ...(provider !== s.llm.provider ? { model: provider === 'anthropic' ? 'claude-sonnet-5' : '', baseUrl: '' } : {}) } };
+      return { llm: { provider, ...(provider !== s.llm.provider ? { model: provider === 'anthropic' ? 'claude-sonnet-5' : provider === 'gemini' ? 'gemini-3.8-flash' : '', baseUrl: '' } : {}) } };
     }
     case 'model': {
       if (s.llm.provider === 'offline') throw new Error('Offline research does not select a model.');
-      if (typeof value !== 'string' || (s.llm.provider === 'anthropic' && !value.trim())) throw new Error('Enter a model name.');
+      if (typeof value !== 'string' || ((s.llm.provider === 'anthropic' || s.llm.provider === 'gemini') && !value.trim())) throw new Error('Enter a model name.');
       return { llm: { provider: s.llm.provider, model: value.trim() } };
     }
     case 'effort': return agentPatch({ effort: choice(value, ['low', 'medium', 'high', 'xhigh', 'max']) });

@@ -1771,6 +1771,71 @@ test("tasks without the trace trait keep the omitted thinking display", async ()
   assert.equal(captured[0]!.options.mcpServers, undefined);
 });
 
+test("Claude transcript policy is independent of reasoning and never requires a transcript", async (t) => {
+  for (const transcript of ["if-available", "off"] as const) {
+    for (const hasThinking of [false, true]) {
+      await t.test(`${transcript}; thinking returned=${hasThinking}`, async () => {
+        const captured: ClaudeAgentQueryInput[] = [];
+        const live: string[] = [];
+        const records: PromptRecord[] = [];
+        const executor = new ClaudeAgentExecutor({ token: "test-token", queryFn: (input) => ({
+          async *[Symbol.asyncIterator]() {
+            if (hasThinking) {
+              yield { type: "stream_event", event: { type: "content_block_delta", delta: { thinking: "PRIVATE_THOUGHT" } } };
+              yield { type: "assistant", message: { content: [{ type: "thinking", thinking: "PRIVATE_THOUGHT", signature: "PRIVATE_SIGNATURE" }] } };
+            }
+            yield { type: "stream_event", event: { type: "content_block_delta", delta: { text: "Visible final response" } } };
+            yield* chainQuery(captured, [{ index: 1, text: "Reviewable argument" }], { answer: "ok" })(input);
+          },
+        }) });
+        const result = await executor.execute({ ...structuredTask,
+          // No trace trait; if-available must still capture returned summaries.
+          modelRequest: { ...structuredTask.modelRequest!, execution: { transcript, thinking: "adaptive" },
+            messages: [...structuredTask.modelRequest!.messages, { role: "assistant", content: [
+              { type: "thinking", text: "PRIVATE_INITIAL", metadata: { signature: "PRIVATE_INITIAL_SIGNATURE" } },
+            ] }],
+          },
+          metadata: { stepwise: { tool: "submit_step", field: "cot", parts: false, count: 1 } },
+        }, { runId: "transcript-policy", nodePath: "root/brain", reportLive: (text) => live.push(text), reportPrompt: (record) => records.push(record) });
+        assert.equal(result.status, "ok");
+        if (result.status !== "ok") throw new Error("unreachable");
+        assert.deepEqual(result.output, { answer: "ok", cot: ["Reviewable argument"] });
+        assert.equal(captured.length, 1, "missing transcripts must not cause retries");
+        assert.deepEqual(captured[0]!.options.thinking, { type: "adaptive", display: transcript === "off" ? "omitted" : "summarized" });
+        assert.equal(result.metadata?.thinkingSegments !== undefined, transcript === "if-available" && hasThinking);
+        assert.equal(live.includes("PRIVATE_THOUGHT"), transcript === "if-available" && hasThinking);
+        assert.ok(live.includes("Visible final response"));
+        assert.doesNotMatch(JSON.stringify(records), /PRIVATE_/);
+        assert.ok(records.every((record) => !record.complete));
+      });
+    }
+  }
+});
+
+test("Claude captures available summaries without selecting a reasoning mode", async () => {
+  const captured: ClaudeAgentQueryInput[] = [];
+  const executor = new ClaudeAgentExecutor({ token: "test-token", queryFn: (input) => ({
+    async *[Symbol.asyncIterator]() {
+      yield { type: "assistant", message: { content: [{ type: "thinking", thinking: "Available summary" }] } };
+      yield* successQuery(captured)(input);
+    },
+  }) });
+  const result = await executor.execute({ ...structuredTask, modelRequest: { ...structuredTask.modelRequest!, execution: { transcript: "if-available" } } },
+    { runId: "no-mode", nodePath: "root/brain" });
+  assert.equal(result.status, "ok");
+  assert.equal(captured[0]!.options.thinking, undefined);
+  assert.ok(result.status === "ok" && result.metadata?.thinkingSegments !== undefined);
+});
+
+test("Claude rejects Gemini-only minimal effort before invoking its SDK", async () => {
+  const captured: ClaudeAgentQueryInput[] = [];
+  const executor = new ClaudeAgentExecutor({ token: "test-token", queryFn: successQuery(captured) });
+  const result = await executor.execute({ ...structuredTask, modelRequest: { ...structuredTask.modelRequest!, execution: { effort: "minimal" } } },
+    { runId: "unsupported-effort", nodePath: "root/brain" });
+  assert.equal(result.status, "error");
+  assert.equal(captured.length, 0);
+});
+
 test("a session that goes silent is restarted fresh, then fails with the stall named", async () => {
   const captured: ClaudeAgentQueryInput[] = [];
   // The wedged subprocess: one message, then never another and never an end —

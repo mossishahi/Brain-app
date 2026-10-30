@@ -12,6 +12,7 @@ import type {
   ModelProvider,
   ModelRequest,
   ModelResponse,
+  PromptRecord,
   Tool,
   ToolResult,
 } from "@brainstorm-agentic/core";
@@ -594,6 +595,57 @@ test("stepwise tasks record ordered submit_step calls, inject the chain, and cap
     { index: 2, turn: 2 },
     { index: 3, turn: 2 },
   ]);
+});
+
+test("optional transcripts accept a model without thinking while preserving required argument steps", async () => {
+  const provider = new FakeProvider((_request, call) => call === 1
+    ? response([{ type: "tool_use", id: "step", name: "submit_step", input: { index: 1, text: "Reviewable argument" } }])
+    : response([{ type: "text", text: '{"answer":"ok"}' }]));
+  const executor = new ToolLoopAgentExecutor({ provider, tools: new ToolRegistry(),
+    modelRouteResolver: new FixedModelRouteResolver({ modelId: "fake-model", responseFormat: { type: "json" } }) });
+  const result = await executor.execute(task({ taskId: "no-transcript", input: "Answer with an argument",
+    requirements: { toolUse: true },
+    modelRequest: { messages: [], execution: { transcript: "if-available" } },
+    metadata: { stepwise: { tool: "submit_step", field: "cot", parts: false, count: 1 } },
+  }), context);
+  assert.equal(result.status, "ok");
+  if (result.status !== "ok") throw new Error("unreachable");
+  assert.deepEqual(result.output, { answer: "ok", cot: ["Reviewable argument"] });
+  assert.equal(result.metadata?.thinkingSegments, undefined);
+  assert.equal(provider.requests.length, 2);
+});
+
+test("transcript off redacts diagnostic copies and live text but preserves signed and opaque wire history", async () => {
+  const hidden: ModelResponse["content"] = [
+    { type: "thinking" as const, text: "PRIVATE_THOUGHT", metadata: { signature: "PRIVATE_SIGNATURE" } },
+    { type: "thinking" as const, text: "", metadata: { redactedData: "PRIVATE_OPAQUE_STATE" } },
+  ];
+  const provider = new FakeProvider((_request, call) => call === 1
+    ? response([...hidden, { type: "tool_use", id: "step", name: "submit_step", input: { index: 1, text: "Reviewable argument" } }])
+    : response([{ type: "text", text: '{"answer":"ok"}' }]));
+  const records: PromptRecord[] = [];
+  const live: string[] = [];
+  const executor = new ToolLoopAgentExecutor({ provider, tools: new ToolRegistry(),
+    modelRouteResolver: new FixedModelRouteResolver({ modelId: "fake-model", responseFormat: { type: "json" },
+      providerOptions: { anthropic: { thinking: { type: "adaptive", display: "summarized" } }, gemini: { includeThoughts: true } },
+    }) });
+  const result = await executor.execute(task({ taskId: "off", input: "Answer with an argument",
+    modelRequest: { messages: [], execution: { transcript: "off" } },
+    metadata: { stepwise: { tool: "submit_step", field: "cot", parts: false, count: 1 } },
+  }), { ...context, reportPrompt: (record) => records.push(record), reportLive: (text) => live.push(text) });
+  assert.equal(result.status, "ok");
+  if (result.status !== "ok") throw new Error("unreachable");
+  assert.deepEqual(result.output, { answer: "ok", cot: ["Reviewable argument"] });
+  assert.equal(result.metadata?.thinkingSegments, undefined);
+  assert.equal(result.metadata?.stepThoughts, undefined);
+  assert.deepEqual(live, []);
+  assert.equal(records[0]!.complete, true);
+  assert.equal(records[1]!.complete, false);
+  assert.match(JSON.stringify(records[1]), /omitted by capture policy/);
+  assert.doesNotMatch(JSON.stringify(records), /PRIVATE_/);
+  assert.deepEqual(provider.requests[1]!.messages.find((message) => message.role === "assistant")!.content.slice(0, 2), hidden);
+  assert.deepEqual(provider.requests[0]!.providerOptions?.anthropic?.thinking, { type: "adaptive", display: "omitted" });
+  assert.equal(provider.requests[0]!.providerOptions?.gemini?.includeThoughts, false);
 });
 
 test("a sparse stepwise task submits only rewritten steps, positions and all", async () => {

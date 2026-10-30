@@ -22,7 +22,7 @@ const live = 'Applies to existing runs';
 const local = 'This browser';
 const providers = [
   { value: 'anthropic', label: 'Anthropic API' }, { value: 'claude-agent', label: 'Claude Agent SDK' },
-  { value: 'cursor-agent', label: 'Cursor SDK' }, { value: 'offline', label: 'Offline' },
+  { value: 'cursor-agent', label: 'Cursor SDK' }, { value: 'gemini', label: 'Gemini API' }, { value: 'offline', label: 'Offline' },
 ] as const;
 
 export function WorkspaceControls({ open, onOpenChange, onOpenSettings }: { open: boolean; onOpenChange: (open: boolean) => void; onOpenSettings: (category: SettingsCategory) => void }) {

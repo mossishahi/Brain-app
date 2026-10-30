@@ -1,6 +1,7 @@
 import { textContent, userMessage } from "@brainstorm-agentic/core";
 import { ClaudeAgentExecutor } from "@brainstorm-agentic/executor-claude-agent";
 import { CursorAgentExecutor } from "@brainstorm-agentic/executor-cursor-agent";
+import { GeminiModelProvider } from "@brainstorm-agentic/provider-gemini";
 import { AnthropicMessagesProvider } from "@brainstorm-agentic/provider-anthropic";
 import type { GpuDiscovery, GpuSlurmParameters } from "@brainstorm-agentic/protocol";
 import type { SettingsStore } from "./settings.js";
@@ -37,6 +38,12 @@ export function createGpuPlanner(settings: SettingsStore, env?: NodeJS.ProcessEn
         ...(llm.baseUrl ? { baseURL: llm.baseUrl } : {}),
       });
       const result = await provider.complete({ modelId: llm.model, system: SYSTEM, messages: [userMessage(payload)], maxOutputTokens: 1600 }, { signal: bounded });
+      output = textContent(result.content);
+    } else if (llm.provider === "gemini") {
+      const apiKey = settings.getGeminiApiKey();
+      if (!apiKey || !llm.model) throw new Error("A verified LLM connection is required");
+      const provider = new GeminiModelProvider({ apiKey, model: llm.model, ...(llm.baseUrl ? { baseURL: llm.baseUrl } : {}) });
+      const result = await provider.complete({ modelId: llm.model, system: SYSTEM, messages: [userMessage(payload)], maxOutputTokens: 1600, providerOptions: { gemini: { includeThoughts: false } } }, { signal: bounded });
       output = textContent(result.content);
     } else if (llm.provider === "claude-agent" || llm.provider === "cursor-agent") {
       const config = { ...(llm.model ? { model: llm.model } : {}), maxTurns: 2, maxBudgetUsd: 0.5, effort: "medium" as const, thinking: "adaptive" as const, ...(env ? { env } : {}) };

@@ -795,6 +795,7 @@ function MemberCard({
         {member.usage && <TokenChip usage={member.usage} />}
         {/* The thinking recorded while this seat wrote its first version:
             hover previews, click downloads the whole trace. */}
+        {member.transcriptStatus === "disabled" && <span className="dim" title="Thinking transcript recording was off. The argument steps are still available.">Transcript off</span>}
         {member.thoughts !== undefined && (
           <ThoughtsButton jobId={jobId} refId={member.thoughts} />
         )}

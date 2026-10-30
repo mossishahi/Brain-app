@@ -76,7 +76,7 @@ export async function mockBrain(page: Page, options: { jobs?: readonly JobSummar
         }
         if (body.llm) {
           const llm = next.llm;
-          for (const [secret, configured] of [['apiKey', 'apiKeyConfigured'], ['setupToken', 'setupTokenConfigured'], ['cursorApiKey', 'cursorApiKeyConfigured']]) {
+          for (const [secret, configured] of [['apiKey', 'apiKeyConfigured'], ['setupToken', 'setupTokenConfigured'], ['cursorApiKey', 'cursorApiKeyConfigured'], ['geminiApiKey', 'geminiApiKeyConfigured']]) {
             if (llm[secret]) llm[configured] = true;
             delete llm[secret];
           }
@@ -124,7 +124,7 @@ export async function mockBrain(page: Page, options: { jobs?: readonly JobSummar
     if (path.startsWith('/readiness')) return json(state.readiness);
     if (path === '/model-options') return json({ defaultModel: 'auto', taskTypes: [{ id: 'review', description: 'Scientific review' }, { id: 'synthesis', description: 'Combine perspectives' }], models: [{ id: 'auto', label: 'Auto', capabilities: { effortLevels: ['low', 'medium', 'high'], adaptiveThinking: true, thinkingCanBeDisabled: true } }, { id: 'review-model', label: 'Review model' }],
       ...state.modelOptions, provider: state.settings.llm.provider, modelsByRoute: state.settings.llm.modelsByRoute ?? {},
-      ...(state.modelOptions?.stages ? { stageSettings: state.settings.llm.stageSettingsByProvider?.[state.settings.llm.provider] ?? {}, defaults: { model: state.settings.llm.model, effort: state.settings.llm.agentSdk?.effort, thinking: state.settings.llm.agentSdk?.thinking } } : {}),
+      ...(state.modelOptions?.stages ? { stageSettings: state.settings.llm.stageSettingsByProvider?.[state.settings.llm.provider] ?? {}, defaults: { model: state.settings.llm.model, effort: state.settings.llm.agentSdk?.effort, thinking: state.settings.llm.agentSdk?.thinking, transcript: state.settings.llm.transcript } } : {}),
     });
     if (path === '/capabilities') return json({ version: 'test', capabilities: [{ id: 'web-search', description: 'Find supporting material', operations: ['web.search'], locked: false }, { id: 'code-execution', description: 'Run calculations', operations: ['code.run'], locked: false }, { id: 'taxonomy-access', description: 'Required taxonomy', operations: ['taxonomy.get'], locked: true }] });
     if (path === '/jobs' && method === 'GET') return state.failJobs

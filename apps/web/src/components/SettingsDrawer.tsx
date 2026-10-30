@@ -44,8 +44,8 @@ export type { SettingsCategory } from "./settings/catalog";
 
 const categoryIcons = { connections: LuKeyRound, stageModels: LuWorkflow, research: LuFlaskConical, tools: LuGlobe, execution: LuCpu, recovery: LuRotateCcw, updates: LuDownload, appearance: LuPalette };
 
-type Provider = "anthropic" | "claude-agent" | "cursor-agent" | "offline";
-const providerLabels: Record<Provider, string> = { anthropic: "Anthropic API", "claude-agent": "Claude Agent SDK", "cursor-agent": "Cursor SDK", offline: "Offline" };
+type Provider = "anthropic" | "claude-agent" | "cursor-agent" | "gemini" | "offline";
+const providerLabels: Record<Provider, string> = { anthropic: "Anthropic API", "claude-agent": "Claude Agent SDK", "cursor-agent": "Cursor SDK", gemini: "Gemini API", offline: "Offline" };
 
 /**
  * The sections of an update, non-optional. Every field of ServerSettingsUpdate
@@ -94,11 +94,13 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
   const [apiKey, setApiKey] = useState("");
   const [setupToken, setSetupToken] = useState("");
   const [cursorApiKey, setCursorApiKey] = useState("");
+  const [geminiApiKey, setGeminiApiKey] = useState("");
+  const [transcript, setTranscript] = useState<"if-available" | "off" | undefined>();
   const [baseUrl, setBaseUrl] = useState("");
   const [agentMaxTurns, setAgentMaxTurns] = useState("100");
   const [agentMaxBudgetUsd, setAgentMaxBudgetUsd] = useState("");
   const [agentEffort, setAgentEffort] = useState<
-    "low" | "medium" | "high" | "xhigh" | "max"
+    "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
   >("high");
   const [agentThinking, setAgentThinking] = useState<"adaptive" | "disabled">(
     "adaptive",
@@ -180,7 +182,8 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
     ? loaded?.llm.apiKeyConfigured === true && apiKey.trim() === ""
     : candidate === "claude-agent"
       ? loaded?.llm.setupTokenConfigured === true && setupToken.trim() === ""
-      : loaded?.llm.cursorApiKeyConfigured === true && cursorApiKey.trim() === "");
+      : candidate === "gemini" ? loaded?.llm.geminiApiKeyConfigured === true && geminiApiKey.trim() === ""
+        : loaded?.llm.cursorApiKeyConfigured === true && cursorApiKey.trim() === "");
 
   const requestClose = async (discardDrafts = false) => {
     if (closeRequested.current) return;
@@ -233,6 +236,7 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
         setRunner(s.runner);
         setTemplate(s.slurmTemplate);
         setProvider(s.llm.provider);
+        setTranscript(s.llm.transcript);
         setModel(s.llm.model ?? "");
         setBaseUrl(s.llm.baseUrl ?? "");
         setAgentMaxTurns(String(s.llm.agentSdk?.maxTurns ?? 100));
@@ -346,7 +350,8 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
   const llmPatch = (): LlmPatch => ({
     provider,
     ...(model.trim() ? { model: model.trim() } : {}),
-    ...(provider === "anthropic" && baseUrl.trim()
+    ...(transcript !== undefined ? { transcript } : {}),
+    ...((provider === "anthropic" || provider === "gemini") && baseUrl.trim()
       ? { baseUrl: baseUrl.trim() }
       : {}),
     agentSdk: agentSdkPatch(),
@@ -425,7 +430,7 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
     model: () => {
       if (!canAutoSaveProvider()) return null;
       if (!agentSdkValid()) return null;
-      if (provider === "anthropic" && model.trim() === "") {
+      if ((provider === "anthropic" || provider === "gemini") && model.trim() === "") {
         reject("model", "Enter a model name.");
         return null;
       }
@@ -440,7 +445,7 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
       return { webSearch: { provider: webProvider, contactEmail } };
     },
   };
-  draftPresent.current = [apiKey, setupToken, cursorApiKey, tavilyApiKey, braveApiKey, openRouterApiKey].some((value) => value.trim() !== "")
+  draftPresent.current = [apiKey, setupToken, cursorApiKey, geminiApiKey, tavilyApiKey, braveApiKey, openRouterApiKey].some((value) => value.trim() !== "")
     || (loaded !== null && provider !== loaded.llm.provider)
     || (loaded !== null && webProvider !== (loaded.webSearch?.provider ?? "none"))
     || (webProvider === "searxng" && (searxngBaseUrl.trim() !== (loaded?.webSearch?.searxngBaseUrl ?? "") || webProvider !== loaded?.webSearch?.provider));
@@ -453,7 +458,7 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
         ? { apiKey: apiKey.trim() }
         : provider === "claude-agent"
           ? { setupToken: setupToken.replace(/\s+/g, "") }
-          : { cursorApiKey: cursorApiKey.trim() };
+          : provider === "gemini" ? { geminiApiKey: geminiApiKey.trim() } : { cursorApiKey: cursorApiKey.trim() };
     if (Object.values(secret)[0] === "") return;
     if (!agentSdkValid()) return;
     const context = credentialContext.current;
@@ -467,13 +472,14 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
     // A provider switch or new draft during verification must not erase it.
     if (provider === "anthropic") setApiKey((current) => current === apiKey ? "" : current);
     if (provider === "claude-agent") setSetupToken((current) => current === setupToken ? "" : current);
+    if (provider === "gemini") setGeminiApiKey((current) => current === geminiApiKey ? "" : current);
     if (provider === "cursor-agent") setCursorApiKey((current) => current === cursorApiKey ? "" : current);
     setConnectionMessage(
       provider === "anthropic"
         ? `Connected to ${saved.llm.model}.`
         : provider === "claude-agent"
           ? `Claude Agent SDK token verified${saved.llm.model ? ` with ${saved.llm.model}` : ""}.`
-          : `Cursor API key verified${saved.llm.model ? ` with ${saved.llm.model}` : ""}.`,
+          : provider === "gemini" ? `Gemini model access verified${saved.llm.model ? ` with ${saved.llm.model}` : ""}.` : `Cursor API key verified${saved.llm.model ? ` with ${saved.llm.model}` : ""}.`,
     );
   };
 
@@ -482,7 +488,7 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
       ? apiKey
       : provider === "claude-agent"
         ? setupToken
-        : cursorApiKey;
+        : provider === "gemini" ? geminiApiKey : cursorApiKey;
 
   /** Save button next to a credential input: spins, then settles into a check. */
   const credentialActions = (
@@ -682,12 +688,12 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
                       setModel("");
                       setBaseUrl("");
                     } else if (
-                      next === "anthropic" &&
-                      provider !== "anthropic" &&
-                      model.trim() === ""
+                      (next === "anthropic" || next === "gemini") &&
+                      next !== provider
                     ) {
-                      nextModel = "claude-sonnet-5";
+                      nextModel = next === "gemini" ? "gemini-3.8-flash" : "claude-sonnet-5";
                       setModel(nextModel);
+                      setBaseUrl("");
                     }
                     setProvider(next);
                     clearConnectionFeedback();
@@ -713,11 +719,12 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
                   <option value="cursor-agent">
                     Cursor SDK (API key)
                   </option>
+                  <option value="gemini">Gemini API (Google developer key)</option>
                   <option value="offline">Offline (deterministic, no key)</option>
                 </select>
                 {provider !== loaded.llm.provider && <span className="field-note" role="status">Active provider: {providerLabels[loaded.llm.provider]}. {providerLabels[provider]} is selected for setup and becomes active after verification succeeds.</span>}
               </div>
-              {provider === "anthropic" && (
+              {(provider === "anthropic" || provider === "gemini") && (
                 <>
                   <div className="field">
                     <label className="field-label" htmlFor="settings-api-key">
@@ -727,24 +734,24 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
                       <input
                         id="settings-api-key"
                         type="password"
-                        value={apiKey}
+                        value={provider === "gemini" ? geminiApiKey : apiKey}
                         autoComplete="new-password"
                         placeholder={
-                          loaded.llm.apiKeyConfigured
+                          (provider === "gemini" ? loaded.llm.geminiApiKeyConfigured : loaded.llm.apiKeyConfigured)
                             ? "Verified key saved — enter a new key to replace it"
-                            : "sk-ant-…"
+                            : provider === "gemini" ? "paste the Gemini API key…" : "sk-ant-…"
                         }
                         onChange={(e) => {
-                          setApiKey(e.target.value);
+                          if (provider === "gemini") setGeminiApiKey(e.target.value); else setApiKey(e.target.value);
                           clearConnectionFeedback();
                         }}
                       />
                       {credentialActions}
                     </div>
                     <span className="field-note">
-                      {loaded.llm.apiKeyConfigured
+                      {(provider === "gemini" ? loaded.llm.geminiApiKeyConfigured : loaded.llm.apiKeyConfigured)
                         ? "A verified key is configured. It is never returned to this page."
-                        : "Saving tests the key with Anthropic first; nothing is stored if it fails."}
+                        : provider === "gemini" ? "Get a key from Google AI Studio. Saving checks model access without generating a response; nothing is stored if verification fails." : "Saving tests the key with Anthropic first; nothing is stored if it fails."}
                     </span>
                   </div>
                   <div className="field">
@@ -755,7 +762,7 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
                       id="settings-model"
                       type="text"
                       value={model}
-                      placeholder="claude-sonnet-5"
+                      placeholder={provider === "gemini" ? "gemini-3.8-flash" : "claude-sonnet-5"}
                       onChange={(e) => {
                         setModel(e.target.value);
                         clearConnectionFeedback();
@@ -771,7 +778,7 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
                       id="settings-base-url"
                       type="url"
                       value={baseUrl}
-                      placeholder="Anthropic default"
+                      placeholder={provider === "gemini" ? "Google Gemini default" : "Anthropic default"}
                       onChange={(e) => {
                         setBaseUrl(e.target.value);
                         clearConnectionFeedback();
@@ -848,6 +855,12 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
                   </span>
                 </div>
               )}
+              {provider !== "offline" && <SettingsToggle label="Record thinking transcripts when available" checked={transcript !== "off"}
+                onCheckedChange={(checked) => {
+                  const next = checked ? "if-available" : "off";
+                  setTranscript(next);
+                  if (canAutoSaveProvider()) void save("model", { llm: { provider, transcript: next } });
+                }} description="Optional provider-supplied summaries. Reasoning effort and reviewable argument steps are unchanged. Individual stages can override this default." />}
               {connectionMessage && (
                 <p className="success-text">{connectionMessage}</p>
               )}

@@ -313,6 +313,10 @@ function agentOutput(entry: JournalEntry): unknown {
  * 1-based step; empty slices are dropped, so presence means there is
  * something to show.
  */
+function transcriptDisabled(entry: JournalEntry | undefined): boolean {
+  return entry?.kind === "agent" && object(object(entry.value)?.metadata)?.transcriptStatus === "disabled";
+}
+
 function stepThoughtsOf(entry: JournalEntry): Map<number, string> {
   const slices = new Map<number, string>();
   if (entry.kind !== "agent") return slices;
@@ -3016,6 +3020,7 @@ function buildReviews(
               ? "under-review"
               : "pending",
         rounds: views,
+        ...(transcriptDisabled(developEntry) ? { transcriptStatus: "disabled" as const } : {}),
         ...(developEntry !== undefined && developSlices.has(stepIndex + 1)
           ? { thoughts: thoughtsRef(developEntry.key, stepIndex + 1) }
           : {}),
@@ -3709,6 +3714,7 @@ export function buildJobDetailWithActivity(input: MapperInput): JobDetailWithAct
       ...(idea ? { idea } : {}),
       ...(usage !== undefined ? { usage } : {}),
       ...(thoughts !== undefined ? { thoughts } : {}),
+      ...(transcriptDisabled(developEntry) ? { transcriptStatus: "disabled" as const } : {}),
       ...dismissedSeat(member.id),
     };
   });

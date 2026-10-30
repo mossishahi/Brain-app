@@ -31,6 +31,7 @@
     "@brainstorm-agentic/host-tools": "0.1.0",
     "@brainstorm-agentic/protocol": "0.1.0",
     "@brainstorm-agentic/provider-anthropic": "0.1.0",
+    "@brainstorm-agentic/provider-gemini": "0.1.0",
     "@brainstorm-agentic/registry-client": "0.1.0",
     "@brainstorm-agentic/telemetry": "0.1.0",
     "undici": "^6.28.0",

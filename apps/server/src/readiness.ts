@@ -51,6 +51,7 @@ import { atomicWriteJson, readJsonFile } from "./files.js";
 import { slurmSubmissionDiagnostic, slurmSubmissionReceipt } from "./slurm-submission.js";
 import { searxngDir, searxngLocalUrl } from "./searxng-launcher.js";
 import {
+  validateGeminiConnection,
   localWebSearchIssue,
   localWebSearchUnavailable,
   paidWebSearchFallbackAvailable,
@@ -61,6 +62,7 @@ import type {
   AnthropicConnectionValidator,
   ClaudeAgentConnectionValidator,
   CursorAgentConnectionValidator,
+  GeminiConnectionValidator,
   SettingsStore,
 } from "./settings.js";
 
@@ -189,6 +191,7 @@ export interface ReadinessProbeContext {
   readonly signal: AbortSignal;
   readonly credentials: {
     readonly anthropicApiKey?: string;
+    readonly geminiApiKey?: string;
     readonly claudeSetupToken?: string;
     readonly cursorApiKey?: string;
   };
@@ -292,6 +295,7 @@ export interface DefaultReadinessProbeOptions {
   readonly validateAnthropic: AnthropicConnectionValidator;
   readonly validateClaudeAgent: ClaudeAgentConnectionValidator;
   readonly validateCursorAgent: CursorAgentConnectionValidator;
+  readonly validateGemini?: GeminiConnectionValidator;
   /** Ceiling for the whole SLURM probe (submission + queue wait). */
   readonly slurmProbeTimeoutMs?: number;
   /**
@@ -370,6 +374,12 @@ export function defaultReadinessProbes(
           }),
         );
         return { message: `Anthropic API responds · ${llm.model}` };
+      }
+      if (llm.provider === "gemini") {
+        const apiKey = context.credentials.geminiApiKey;
+        if (!apiKey || !llm.model) throw new ReadinessProbeError("Configure and verify the Gemini API key and model in Settings");
+        await attemptTwice(context.signal, () => (options.validateGemini ?? validateGeminiConnection)({ apiKey, model: llm.model!, ...(llm.baseUrl ? { baseUrl: llm.baseUrl } : {}) }));
+        return { message: `Gemini API model access verified · ${llm.model}` };
       }
       if (llm.provider === "claude-agent") {
         const token = context.credentials.claudeSetupToken;
@@ -581,7 +591,9 @@ export function defaultReadinessProbes(
       const target =
         context.settings.llm.provider === "cursor-agent"
           ? "https://api.cursor.com/v0/models"
-          : "https://api.anthropic.com/v1/models";
+          : context.settings.llm.provider === "gemini"
+            ? (context.settings.llm.baseUrl ?? "https://generativelanguage.googleapis.com/v1beta/models")
+            : "https://api.anthropic.com/v1/models";
       try {
         await attemptTwice(context.signal, async () => {
           await fetchImpl(target, {
@@ -803,9 +815,11 @@ function staticAdvice(id: ReadinessCheckId, settings: ServerSettings): string {
         ? "Run `claude setup-token` in any terminal where Claude Code is signed in, copy the printed token, then open Settings → Model connection and paste it. The token stays on this server."
         : settings.llm.provider === "cursor-agent"
           ? "Create an API key at https://cursor.com/dashboard (Integrations → API keys, or a team service account), then open Settings → Model connection, paste it, and Save. It is verified with one small request and stored only on this server."
-          : "Create an API key at https://console.anthropic.com (API Keys), then open Settings → Model connection, paste it, and Save. It is verified with one small request and stored only on this server.";
+          : settings.llm.provider === "gemini"
+            ? "Create a Gemini API key at https://aistudio.google.com/apikey, then open Settings → Model connection, select Gemini API, paste the key, and Save. Model access is checked without generating a response; the key stays on this server."
+            : "Create an API key at https://console.anthropic.com (API Keys), then open Settings → Model connection, paste it, and Save. It is verified with one small request and stored only on this server.";
     case "internet":
-      return "This host cannot reach the public internet over HTTPS. Note this check tests api.anthropic.com with the app's own HTTP stack — curl reaching google.com does not prove it. On HPC clusters compute nodes are often offline: launch the server on a node with outbound access, or export https_proxy/HTTPS_PROXY (your cluster's proxy) before `brain launch` — the app routes its own requests through it (NO_PROXY honored).";
+      return "This host cannot reach the public internet over HTTPS. This check contacts the selected provider with the app's own HTTP stack — curl reaching google.com does not prove it. On HPC clusters compute nodes are often offline: launch the server on a node with outbound access, or export https_proxy/HTTPS_PROXY (your cluster's proxy) before `brain launch` — the app routes its own requests through it (NO_PROXY honored).";
     case "code":
       return "The scratch workspace could not run a script. Check that the workspace path is on writable storage, that the filesystem is not mounted noexec, and that TMPDIR points somewhere writable.";
     case "capabilities":
@@ -1097,6 +1111,7 @@ export class ReadinessService {
           : {}),
         signal: this.controller.signal,
         credentials: {
+          ...(this.options.settings.getGeminiApiKey() !== undefined ? { geminiApiKey: this.options.settings.getGeminiApiKey() } : {}),
           ...(this.options.settings.getAnthropicApiKey() !== undefined
             ? { anthropicApiKey: this.options.settings.getAnthropicApiKey() }
             : {}),

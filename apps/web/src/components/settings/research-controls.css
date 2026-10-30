@@ -7,8 +7,8 @@
 .settings-stage-model-heading p { margin: var(--ui-space-2) 0 0; }
 .settings-stage-model-heading button { flex: 0 0 auto; }
 .settings-stage-model-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--ui-space-3); }
-.settings-stage-model-fields .field, .settings-stage-model-fields select { min-width: 0; max-width: 100%; }
-.settings-dialog .settings-stage-model-fields select { background: var(--surface); appearance: auto; }
+.settings-stage-model .field, .settings-stage-model select { min-width: 0; max-width: 100%; }
+.settings-dialog .settings-stage-model select { background: var(--surface); appearance: auto; }
 .settings-stage-model-actions { position: sticky; top: 0; z-index: 1; background: var(--surface); padding-block: var(--ui-space-3); }
 .settings-stage-model-sr { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 @media (max-width: 540px) { .settings-stage-model-fields { grid-template-columns: minmax(0, 1fr); } .settings-stage-model-heading { flex-wrap: wrap; } }

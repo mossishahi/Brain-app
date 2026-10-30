@@ -1147,6 +1147,48 @@ test("thinking deltas merge into readable trace segments; empty deltas split blo
   );
 });
 
+test("Cursor optional transcripts preserve argument steps and off suppresses returned thinking", async (t) => {
+  for (const transcript of ["if-available", "off"] as const) {
+    for (const hasThinking of [false, true]) {
+      await t.test(`${transcript}; thinking returned=${hasThinking}`, async () => {
+        const state = newState();
+        const records: PromptRecord[] = [];
+        const live: string[] = [];
+        const executor = new CursorAgentExecutor({ apiKey: "cursor-key", listModels: async () => CATALOG,
+          agentFactory: fakeFactory([{
+            messages: hasThinking ? [{ type: "thinking", text: "PRIVATE_THOUGHT" }] : [],
+            callTools: async (tools) => {
+              await tools.submit_step!.execute({ index: 1, text: "Reviewable argument" }, {});
+              await tools.submit_result!.execute({ answer: "ok" }, {});
+            },
+            result: finished(""),
+          }], state),
+        });
+        const result = await executor.execute({ ...structuredTask,
+          modelRequest: { ...structuredTask.modelRequest!, modelId: "sonnet",
+            execution: { transcript, ...(transcript === "off" ? { thinking: "adaptive" as const } : {}) },
+            messages: [...structuredTask.modelRequest!.messages, { role: "assistant", content: [
+              { type: "thinking", text: "PRIVATE_INITIAL", metadata: { signature: "PRIVATE_SIGNATURE" } },
+            ] }],
+          },
+          metadata: { stepwise: { tool: "submit_step", field: "cot", parts: false, count: 1 } },
+        }, { runId: "transcript-policy", nodePath: "root/brain", reportLive: (text) => live.push(text), reportPrompt: (record) => records.push(record) });
+        assert.equal(result.status, "ok");
+        if (result.status !== "ok") throw new Error("unreachable");
+        assert.deepEqual(result.output, { answer: "ok", cot: ["Reviewable argument"] });
+        assert.equal(state.options.length, 1, "missing transcripts must not cause retries");
+        assert.equal(result.metadata?.thinkingSegments !== undefined, transcript === "if-available" && hasThinking);
+        assert.deepEqual(live, transcript === "if-available" && hasThinking ? ["PRIVATE_THOUGHT"] : []);
+        assert.doesNotMatch(JSON.stringify(records), /PRIVATE_/);
+        assert.ok(records.every((record) => !record.complete));
+        assert.deepEqual(state.options[0]!.model.params, transcript === "off"
+          ? [{ id: "thinkingLevel", value: "adaptive" }]
+          : undefined);
+      });
+    }
+  }
+});
+
 test("stream tool_call events named mcp are not double-reported; wrappers own custom-tool progress", async () => {
   const state = newState();
   const events: AgentProgress[] = [];

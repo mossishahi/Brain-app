@@ -37,10 +37,10 @@ const lines = (...text: readonly string[]): string => text.join("\n");
 export const NOTES_SEARCH_DEFINITION = {
   name: "notes_search",
   description: lines(
-    "Search the thinker's working notes: everything the thinker recorded while working out the chain you are reviewing — the reasoning behind its first pass and behind every repair since, in full (around 50,000-200,000 characters per seat). The notes never appear in your prompt; this tool is the only way to read them, and it shows only the thinking recorded up to the step you have been shown.",
+    "Search optional working notes: thinking summaries the provider exposed during the first pass and subsequent repairs. They may be partial or entirely absent. The notes never appear in your prompt; this tool shows only notes recorded up to the step you have been shown. Check overview once; when no notes are available, stop searching notes and review the submitted argument and independently verified evidence alone. Missing notes are not a flaw and must not change a verdict or trigger a retry. Never request or reconstruct a private transcript.",
     "Why it helps you: the chain text is the polished result; the notes show how it was reached — the assumptions the thinker made and did not state, the alternatives it weighed and dropped, the numbers it worked out, the sources it relied on, and the places it was unsure or meant to check and never did. Those are leads for your suspicions. A lead is never a finding: verify every lead against the chain text and your own evidence before it enters a comment.",
     "Modes:",
-    "- \"overview\": size per source and per step, the most frequent terms, and where to start. Call it once first.",
+    "- \"overview\": availability, size per source and per step, the most frequent terms, and where to start. Call it once first; an empty answer ends notes exploration.",
     "- \"doubts\": sentences where the thinker left a question open (group \"open question\"), meant to check something (\"to-check\": need to verify, haven't tested, can't confirm) or hedged (\"hedge\"), in that order.",
     "- \"decisions\": sentences where the thinker chose between alternatives (each with the sentence that follows), e.g. a method it rejected.",
     "- \"claims\": sentences grouped as assumptions, calculations (numbers, estimates), evidence (citations, papers, URLs) and conclusions, in that order. Add query to keep only sentences about a topic, or group to keep one group.",

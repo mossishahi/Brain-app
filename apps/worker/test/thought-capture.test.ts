@@ -147,3 +147,38 @@ test("wrapped end to end, the offline first pass journals ready-to-fold slices",
     );
   }
 });
+
+test("transcripts off preserves authored output but leaves no trace artifact or journal slices", async () => {
+  const artifacts = new InMemoryArtifactStore();
+  const sourceTask = task("brain", "brainIdeaParts", { input: {} });
+  const sourceResult = await new OfflineBrainstormExecutor().execute(sourceTask);
+  assert.equal(sourceResult.status, "ok");
+  const executor = new ThinkingArtifactAgentExecutor(fakeInner({
+    ...sourceResult,
+    metadata: { ...sourceResult.metadata, stepThoughts: [{ step: 1, text: "old slice" }] },
+  }), artifacts);
+  const result = await executor.execute({ ...sourceTask,
+    modelRequest: { messages: [], execution: { transcript: "off", thinking: "adaptive" } },
+  }, context);
+  assert.equal(result.status, "ok");
+  assert.deepEqual(result.output, sourceResult.output, "argument steps remain intact");
+  assert.equal(result.metadata?.thinkingSegments, undefined);
+  assert.equal(result.metadata?.stepTurns, undefined);
+  assert.equal(result.metadata?.stepThoughts, undefined);
+  assert.equal(result.metadata?.transcriptStatus, "disabled");
+  assert.deepEqual(await artifacts.list(), []);
+});
+
+test("requesting an available transcript still accepts a model that returns output alone", async () => {
+  const artifacts = new InMemoryArtifactStore();
+  const output = { verdict: "Pass", explanation: "The submitted argument supports the claim." };
+  const executor = new ThinkingArtifactAgentExecutor(fakeInner({
+    taskId: "output-only", status: "ok", output, metadata: { providerId: "gemini" },
+  }), artifacts);
+  const result = await executor.execute({ ...task("judge", "judgeDecisionParts", {}),
+    modelRequest: { messages: [], execution: { transcript: "if-available" } },
+  }, context);
+  assert.equal(result.status, "ok");
+  assert.deepEqual(result.output, output);
+  assert.deepEqual(await artifacts.list(), []);
+});

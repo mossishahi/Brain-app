@@ -100,6 +100,7 @@ import {
   type AnthropicConnectionValidator,
   type ClaudeAgentConnectionValidator,
   type CursorAgentConnectionValidator,
+  type GeminiConnectionValidator,
 } from "./settings.js";
 import type { ProviderFetch } from "@brainstorm-agentic/host-tools";
 import type { StartupReporter } from "./startup-status.js";
@@ -271,6 +272,7 @@ export interface StartBrainServerOptions {
   readonly validateClaudeAgent?: ClaudeAgentConnectionValidator;
   /** Test/integration seam; production performs a real Cursor SDK request. */
   readonly validateCursorAgent?: CursorAgentConnectionValidator;
+  readonly validateGemini?: GeminiConnectionValidator;
   /** Test seam; production lists the account's live Cursor model catalog. */
   readonly listCursorModels?: (
     apiKey: string,
@@ -731,7 +733,8 @@ export async function startBrainServer(
     provider: settings.llm.provider,
     secret: settings.llm.provider === "claude-agent" ? manager.settings.getClaudeSetupToken()
       : settings.llm.provider === "cursor-agent" ? manager.settings.getCursorApiKey()
-        : settings.llm.provider === "anthropic" ? manager.settings.getAnthropicApiKey() : undefined,
+        : settings.llm.provider === "anthropic" ? manager.settings.getAnthropicApiKey()
+          : settings.llm.provider === "gemini" ? manager.settings.getGeminiApiKey() : undefined,
     ...(settings.llm.baseUrl ? { baseUrl: settings.llm.baseUrl } : {}),
   });
   const refreshModelOptions = async (settings: ServerSettings) => {
@@ -805,6 +808,7 @@ export async function startBrainServer(
     ...(options.validateClaudeAgent
       ? { validateClaudeAgent: options.validateClaudeAgent }
       : {}),
+    ...(options.validateGemini ? { validateGemini: options.validateGemini } : {}),
     ...(options.validateCursorAgent
       ? { validateCursorAgent: options.validateCursorAgent }
       : {}),
@@ -830,6 +834,7 @@ export async function startBrainServer(
     settings: manager.settings,
     contentRegistry,
     probes: defaultReadinessProbes({
+      ...(options.validateGemini ? { validateGemini: options.validateGemini } : {}),
       validateAnthropic: options.validateAnthropic ?? validateAnthropicConnection,
       validateClaudeAgent:
         options.validateClaudeAgent ?? validateClaudeAgentConnection,
@@ -1318,6 +1323,7 @@ export async function startBrainServer(
           stages,
           stageSettings: settings.llm.stageSettingsByProvider?.[settings.llm.provider] ?? {},
           defaults: {
+            ...(settings.llm.transcript !== undefined ? { transcript: settings.llm.transcript } : {}),
             ...(defaultModel ? { model: defaultModel } : {}),
             ...(settings.llm.agentSdk ? { effort: settings.llm.agentSdk.effort, thinking: settings.llm.agentSdk.thinking } : {}),
           },

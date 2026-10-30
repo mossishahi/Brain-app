@@ -102,7 +102,7 @@ export class GpuSetupService {
 
   private message(error: unknown): string {
     let result = error instanceof Error ? error.message : String(error);
-    const secrets = [this.options.settings.getAnthropicApiKey(), this.options.settings.getClaudeSetupToken(), this.options.settings.getCursorApiKey()];
+    const secrets = [this.options.settings.getAnthropicApiKey(), this.options.settings.getClaudeSetupToken(), this.options.settings.getCursorApiKey(), this.options.settings.getGeminiApiKey()];
     for (const secret of secrets) if (secret) result = result.replaceAll(secret, "[redacted]");
     return result.slice(-16_000);
   }
@@ -111,7 +111,8 @@ export class GpuSetupService {
     const llm = this.options.settings.get().llm;
     return llm.provider === "anthropic" ? !!this.options.settings.getAnthropicApiKey()
       : llm.provider === "claude-agent" ? !!this.options.settings.getClaudeSetupToken()
-      : llm.provider === "cursor-agent" ? !!this.options.settings.getCursorApiKey() : false;
+      : llm.provider === "cursor-agent" ? !!this.options.settings.getCursorApiKey()
+      : llm.provider === "gemini" ? !!this.options.settings.getGeminiApiKey() : false;
   }
 
   /** Startup/verified credential-save hook. Unrelated settings saves do no work. */

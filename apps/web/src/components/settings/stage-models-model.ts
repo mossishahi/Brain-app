@@ -13,6 +13,7 @@ export function updateStage(settings: StageSettingsMap, id: string, next: StageM
     ...(next.model ? { model: next.model } : {}),
     ...(next.effort ? { effort: next.effort } : {}),
     ...(next.thinking ? { thinking: next.thinking } : {}),
+    ...(next.transcript ? { transcript: next.transcript } : {}),
   };
   if (Object.keys(clean).length) result[id] = clean;
   else delete result[id];
@@ -23,6 +24,7 @@ export function changeStageModel(settings: StageSettingsMap, stage: StageOption,
   const capabilities = findModel(options.models, model || inheritedStageModel(options, stage))?.capabilities;
   return updateStage(settings, stage.id, {
     model,
+    ...(current.transcript ? { transcript: current.transcript } : {}),
     ...(current.effort && capabilities?.effortLevels.includes(current.effort) ? { effort: current.effort } : {}),
     ...(current.thinking === 'adaptive' && capabilities?.adaptiveThinking ? { thinking: current.thinking }
       : current.thinking === 'disabled' && capabilities?.thinkingCanBeDisabled === true ? { thinking: current.thinking } : {}),
@@ -30,5 +32,5 @@ export function changeStageModel(settings: StageSettingsMap, stage: StageOption,
 }
 export function sameStageSettings(a: StageSettingsMap, b: StageSettingsMap): boolean {
   return [...new Set([...Object.keys(a), ...Object.keys(b)])].every(id =>
-    a[id]?.model === b[id]?.model && a[id]?.effort === b[id]?.effort && a[id]?.thinking === b[id]?.thinking);
+    a[id]?.model === b[id]?.model && a[id]?.effort === b[id]?.effort && a[id]?.thinking === b[id]?.thinking && a[id]?.transcript === b[id]?.transcript);
 }

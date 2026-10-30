@@ -60,6 +60,7 @@ import { factConsultationSchema, factVerdictSchema } from "@brainstorm-agentic/c
 import { ClaudeAgentExecutor } from "@brainstorm-agentic/executor-claude-agent";
 import { CursorAgentExecutor } from "@brainstorm-agentic/executor-cursor-agent";
 import { AnthropicMessagesProvider } from "@brainstorm-agentic/provider-anthropic";
+import { GeminiModelProvider } from "@brainstorm-agentic/provider-gemini";
 import type { ModelCatalogSnapshot, StageModelSettings } from "@brainstorm-agentic/protocol";
 import { contentRouteResolver, modelCatalogFromEnv, stageSettingsFromEnv } from "./stage-models.js";
 
@@ -100,7 +101,7 @@ import { sliceThoughtsBySteps } from "./thought-slices.js";
 
 export interface ProviderConfig {
   /** Developer API, Claude Agent SDK, Cursor SDK, or deterministic offline. */
-  readonly provider: "anthropic" | "claude-agent" | "cursor-agent" | "offline";
+  readonly provider: "anthropic" | "gemini" | "claude-agent" | "cursor-agent" | "offline";
   /** Model id per logical content route (reasoning/writing/balanced). */
   readonly models?: Readonly<Record<string, string>>;
   /** Fallback model id when a route has no explicit entry. */
@@ -108,12 +109,14 @@ export interface ProviderConfig {
   readonly stageSettings?: Readonly<Record<string, StageModelSettings>>;
   readonly modelCatalog?: ModelCatalogSnapshot;
   readonly apiKey?: string;
+  readonly geminiApiKey?: string;
+  readonly transcript?: "if-available" | "off";
   readonly setupToken?: string;
   readonly cursorApiKey?: string;
   readonly agentSdk?: {
     readonly maxTurns?: number;
     readonly maxBudgetUsd?: number;
-    readonly effort?: "low" | "medium" | "high" | "xhigh" | "max";
+    readonly effort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
     readonly thinking?: "adaptive" | "disabled";
     readonly fallbackModel?: string;
     /** Session inactivity ceiling (ms); 0 disables the stall watchdog. */
@@ -426,7 +429,7 @@ export function buildAgentExecutor(
       ...(config.agentSdk?.maxBudgetUsd !== undefined
         ? { maxBudgetUsd: config.agentSdk.maxBudgetUsd }
         : {}),
-      ...(config.agentSdk?.effort
+      ...(config.agentSdk?.effort && config.agentSdk.effort !== "minimal"
         ? { effort: config.agentSdk.effort }
         : {}),
       ...(config.agentSdk?.thinking
@@ -446,7 +449,7 @@ export function buildAgentExecutor(
   const defaultModel = config.defaultModel ?? config.models?.reasoning;
   if (!defaultModel) {
     throw new Error(
-      "Anthropic wiring needs a model id: set BRAINSTORM_AGENTIC_MODEL (or per-route models) in the environment.",
+      "Direct model API wiring needs a model id: set BRAINSTORM_AGENTIC_MODEL (or per-route models) in the environment.",
     );
   }
   // ONE request coordinator for the whole run: every task's every model
@@ -454,7 +457,13 @@ export function buildAgentExecutor(
   // feed it, and one 429 pauses all dispatch until the declared reset —
   // the provider's own timing declarations pace the run, never a user knob.
   const coordinator = new RateCoordinator();
-  const provider = new AnthropicMessagesProvider({
+  const provider = config.provider === "gemini" ? new GeminiModelProvider({
+    model: defaultModel,
+    coordinator,
+    apiKey: config.geminiApiKey ?? "",
+    ...(config.baseURL !== undefined ? { baseURL: config.baseURL } : {}),
+    ...(config.maxOutputTokens !== undefined ? { maxOutputTokens: config.maxOutputTokens } : {}),
+  }) : new AnthropicMessagesProvider({
     model: defaultModel,
     coordinator,
     ...(config.apiKey !== undefined ? { apiKey: config.apiKey } : {}),
@@ -598,11 +607,15 @@ export class ThinkingArtifactAgentExecutor implements AgentExecutor {
     if (result.status !== "ok" || result.metadata === undefined) {
       return result;
     }
-    const { thinkingSegments, stepTurns, ...metadata } = result.metadata as {
+    const { thinkingSegments, stepTurns, stepThoughts: previousSlices, ...metadata } = result.metadata as {
       readonly thinkingSegments?: JsonValue;
       readonly stepTurns?: JsonValue;
+      readonly stepThoughts?: JsonValue;
       readonly [key: string]: JsonValue | undefined;
     };
+    if (task.modelRequest?.execution?.transcript === "off") {
+      return { ...result, metadata: { ...(metadata as JsonObject), transcriptStatus: "disabled" } };
+    }
     if (thinkingSegments === undefined && stepTurns === undefined) {
       return result;
     }
@@ -726,12 +739,12 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
   // own Read/Glob/Grep (mapped inside the executor from allowedCapabilities);
   // the Messages API path serves it through the registered attachment tools.
   const anthropicAttachmentTools =
-    options.providerConfig.provider === "anthropic" && attachmentRoots.length > 0
+    (options.providerConfig.provider === "anthropic" || options.providerConfig.provider === "gemini") && attachmentRoots.length > 0
       ? [...ATTACHMENT_TOOL_NAMES]
       : [];
   // Taxonomy reads are provider-neutral registered tools (Messages API path).
   const anthropicTaxonomyTools =
-    options.providerConfig.provider === "anthropic" && options.taxonomy
+    (options.providerConfig.provider === "anthropic" || options.providerConfig.provider === "gemini") && options.taxonomy
       ? [...TAXONOMY_TOOL_NAMES]
       : [];
   // The thinker notes live in the run's artifacts, so every run has them;
@@ -1155,6 +1168,7 @@ function launchIntervalFromEnv(env: NodeJS.ProcessEnv): number | undefined {
  */
 function credentialsFromFile(env: NodeJS.ProcessEnv): {
   anthropicApiKey?: string;
+  geminiApiKey?: string;
   claudeSetupToken?: string;
   cursorApiKey?: string;
   openRouterApiKey?: string;
@@ -1174,6 +1188,7 @@ function credentialsFromFile(env: NodeJS.ProcessEnv): {
     };
     return {
       ...field("anthropicApiKey"),
+      ...field("geminiApiKey"),
       ...field("claudeSetupToken"),
       ...field("cursorApiKey"),
       ...field("openRouterApiKey"),
@@ -1246,6 +1261,8 @@ export function providerConfigFromEnv(env: NodeJS.ProcessEnv, offline: boolean):
   if (offline) {
     return {
       provider: "offline",
+      ...(env.BRAINSTORM_AGENTIC_TRANSCRIPT === "off" || env.BRAINSTORM_AGENTIC_TRANSCRIPT === "if-available"
+        ? { transcript: env.BRAINSTORM_AGENTIC_TRANSCRIPT } : {}),
       ...(launchIntervalMs !== undefined ? { launchIntervalMs } : {}),
     };
   }
@@ -1255,7 +1272,7 @@ export function providerConfigFromEnv(env: NodeJS.ProcessEnv, offline: boolean):
       ? "claude-agent"
       : env.BRAINSTORM_AGENTIC_PROVIDER === "cursor-agent"
         ? "cursor-agent"
-        : "anthropic";
+        : env.BRAINSTORM_AGENTIC_PROVIDER === "gemini" ? "gemini" : "anthropic";
   const defaultModel = env.BRAINSTORM_AGENTIC_MODEL?.trim();
   const models = modelsByRouteFromEnv(env);
   const stageSettings = stageSettingsFromEnv(env);
@@ -1273,7 +1290,7 @@ export function providerConfigFromEnv(env: NodeJS.ProcessEnv, offline: boolean):
     ...(Number.isFinite(maxBudgetUsd) && maxBudgetUsd > 0
       ? { maxBudgetUsd }
       : {}),
-    ...(effort === "low" ||
+    ...(effort === "minimal" || effort === "low" ||
     effort === "medium" ||
     effort === "high" ||
     effort === "xhigh" ||
@@ -1314,6 +1331,8 @@ export function providerConfigFromEnv(env: NodeJS.ProcessEnv, offline: boolean):
     ...(defaultModel ? { defaultModel } : {}),
     ...(stageSettings !== undefined ? { stageSettings } : {}),
     ...(modelCatalog !== undefined ? { modelCatalog } : {}),
+    ...(env.BRAINSTORM_AGENTIC_TRANSCRIPT === "off" || env.BRAINSTORM_AGENTIC_TRANSCRIPT === "if-available"
+      ? { transcript: env.BRAINSTORM_AGENTIC_TRANSCRIPT } : {}),
     ...(env.ANTHROPIC_API_KEY ?? fileCredentials.anthropicApiKey
       ? { apiKey: (env.ANTHROPIC_API_KEY ?? fileCredentials.anthropicApiKey)! }
       : {}),
@@ -1323,11 +1342,16 @@ export function providerConfigFromEnv(env: NodeJS.ProcessEnv, offline: boolean):
     ...(env.CURSOR_API_KEY ?? fileCredentials.cursorApiKey
       ? { cursorApiKey: (env.CURSOR_API_KEY ?? fileCredentials.cursorApiKey)! }
       : {}),
+    ...(env.GEMINI_API_KEY ?? env.GOOGLE_API_KEY ?? fileCredentials.geminiApiKey
+      ? { geminiApiKey: (env.GEMINI_API_KEY ?? env.GOOGLE_API_KEY ?? fileCredentials.geminiApiKey)! }
+      : {}),
     ...(Object.keys(agentSdk).length > 0 ? { agentSdk } : {}),
     ...(Object.keys(creditRecovery).length > 0
       ? { creditRecovery }
       : {}),
-    ...(env.ANTHROPIC_BASE_URL ? { baseURL: env.ANTHROPIC_BASE_URL } : {}),
+    ...(selectedProvider === "gemini"
+      ? (env.GEMINI_BASE_URL ? { baseURL: env.GEMINI_BASE_URL } : {})
+      : (env.ANTHROPIC_BASE_URL ? { baseURL: env.ANTHROPIC_BASE_URL } : {})),
     // Present-but-empty is a DECISION, not a missing value: a user who turned
     // every host tool off sends "", and treating that as absent fell back to the
     // manifest defaults and silently switched the attachment and taxonomy reads

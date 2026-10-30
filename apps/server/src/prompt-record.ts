@@ -269,7 +269,9 @@ export function renderPromptMarkdown(
   lines.push(
     record.complete
       ? "This is every byte the model received: the sections below are the whole request."
-      : "This is only our half of the request. The " +
+      : record.provider === "gemini" || record.provider === "anthropic"
+        ? "This request record is partial: thinking transcript content was omitted by the recording policy. The provider received the conversation state needed to continue the task."
+        : "This is only our half of the request. The " +
           `${record.provider} SDK composes the final request after we hand over, ` +
           "adding its own system prompt, built-in tools and harness scaffolding " +
           "that we never see.",

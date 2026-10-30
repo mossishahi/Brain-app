@@ -1037,6 +1037,7 @@ function RoundDeck({
           </span>
           {newerButton}
           <span className="round-card-actions">
+            {step.transcriptStatus === "disabled" && <span className="dim">Transcript off</span>}
             {step.thoughts !== undefined && (
               <ThoughtsButton jobId={jobId} refId={step.thoughts} />
             )}

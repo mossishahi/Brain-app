@@ -9,6 +9,7 @@ import {
 import {
   validateCursorApiKey,
 } from "@brainstorm-agentic/executor-cursor-agent";
+import { discoverGeminiModels } from "@brainstorm-agentic/provider-gemini";
 import { AnthropicMessagesProvider } from "@brainstorm-agentic/provider-anthropic";
 import { ContentRegistryClient } from "@brainstorm-agentic/registry-client";
 import {
@@ -168,7 +169,7 @@ export function runtimeModelCatalog(settings: ServerSettings): ModelCatalogSnaps
 
 type StoredLlmSettings = Omit<
   LlmSettings,
-  "apiKeyConfigured" | "setupTokenConfigured"
+  "apiKeyConfigured" | "setupTokenConfigured" | "cursorApiKeyConfigured" | "geminiApiKeyConfigured"
 >;
 type StoredCreditRecovery = Omit<
   ServerSettings["creditRecovery"],
@@ -252,6 +253,7 @@ interface StoredCredentials {
   readonly anthropicApiKey?: string;
   readonly claudeSetupToken?: string;
   readonly cursorApiKey?: string;
+  readonly geminiApiKey?: string;
   readonly openRouterApiKey?: string;
   readonly tavilyApiKey?: string;
   readonly braveApiKey?: string;
@@ -289,6 +291,13 @@ export type CursorAgentConnectionValidator = (
   input: CursorAgentConnectionInput,
 ) => Promise<void>;
 
+export interface GeminiConnectionInput {
+  readonly apiKey: string;
+  readonly model: string;
+  readonly baseUrl?: string;
+}
+export type GeminiConnectionValidator = (input: GeminiConnectionInput) => Promise<void>;
+
 export interface WebSearchConnectionInput {
   readonly provider: "tavily" | "brave" | "searxng";
   readonly apiKey?: string;
@@ -307,6 +316,7 @@ export interface SettingsStoreOptions {
   readonly validateAnthropic?: AnthropicConnectionValidator;
   readonly validateClaudeAgent?: ClaudeAgentConnectionValidator;
   readonly validateCursorAgent?: CursorAgentConnectionValidator;
+  readonly validateGemini?: GeminiConnectionValidator;
   readonly validateOpenRouter?: (
     apiKey: string,
     model: string,
@@ -527,10 +537,11 @@ function validateCommonSettings(value: unknown): {
     llm.provider !== "anthropic" &&
     llm.provider !== "claude-agent" &&
     llm.provider !== "cursor-agent" &&
+    llm.provider !== "gemini" &&
     llm.provider !== "offline"
   ) {
     throw new Error(
-      'llm.provider must be "anthropic", "claude-agent", "cursor-agent", or "offline"',
+      'llm.provider must be "anthropic", "claude-agent", "cursor-agent", "gemini", or "offline"',
     );
   }
   const hostTools =
@@ -785,6 +796,11 @@ function validateModelsByRoute(
   return modelsByRoute;
 }
 
+function validateTranscript(value: unknown, field: string): LlmSettings["transcript"] {
+  if (value !== undefined && value !== "if-available" && value !== "off") throw new Error(`${field} must be if-available or off`);
+  return value;
+}
+
 export function validateStageSettings(value: unknown): Record<string, StageModelSettings> {
   const input = object(value, "stageSettings");
   const stages: Record<string, StageModelSettings> = {};
@@ -793,17 +809,19 @@ export function validateStageSettings(value: unknown): Record<string, StageModel
     const entry = object(raw, `stageSettings.${id}`);
     const model = optionalNonEmptyString(entry.model, `stageSettings.${id}.model`);
     const effort = entry.effort;
-    if (effort !== undefined && !["low", "medium", "high", "xhigh", "max"].includes(String(effort))) {
-      throw new Error(`stageSettings.${id}.effort must be low, medium, high, xhigh, or max`);
+    if (effort !== undefined && !["minimal", "low", "medium", "high", "xhigh", "max"].includes(String(effort))) {
+      throw new Error(`stageSettings.${id}.effort must be minimal, low, medium, high, xhigh, or max`);
     }
+    const transcript = validateTranscript(entry.transcript, `stageSettings.${id}.transcript`);
     const thinking = entry.thinking;
     if (thinking !== undefined && thinking !== "adaptive" && thinking !== "disabled") {
       throw new Error(`stageSettings.${id}.thinking must be adaptive or disabled`);
     }
-    if (model !== undefined || effort !== undefined || thinking !== undefined) {
+    if (model !== undefined || effort !== undefined || thinking !== undefined || transcript !== undefined) {
       stages[id] = { ...(model !== undefined ? { model } : {}),
         ...(effort !== undefined ? { effort: effort as StageModelSettings["effort"] } : {}),
-        ...(thinking !== undefined ? { thinking } : {}) };
+        ...(thinking !== undefined ? { thinking } : {}),
+        ...(transcript !== undefined ? { transcript } : {}) };
     }
   }
   return stages;
@@ -813,7 +831,7 @@ function validateStageSettingsByProvider(value: unknown): LlmSettings["stageSett
   if (value === undefined) return undefined;
   const result: NonNullable<LlmSettings["stageSettingsByProvider"]> = {};
   for (const [provider, stages] of Object.entries(object(value, "llm.stageSettingsByProvider"))) {
-    if (!["anthropic", "claude-agent", "cursor-agent", "offline"].includes(provider)) throw new Error("unknown stage settings provider");
+    if (!["anthropic", "claude-agent", "cursor-agent", "gemini", "offline"].includes(provider)) throw new Error("unknown stage settings provider");
     result[provider as LlmSettings["provider"]] = validateStageSettings(stages);
   }
   return result;
@@ -833,6 +851,7 @@ function validateClaudeAgentSettings(value: unknown): ClaudeAgentSettings {
   }
   const effort = input.effort;
   if (
+    effort !== "minimal" &&
     effort !== "low" &&
     effort !== "medium" &&
     effort !== "high" &&
@@ -840,7 +859,7 @@ function validateClaudeAgentSettings(value: unknown): ClaudeAgentSettings {
     effort !== "max"
   ) {
     throw new Error(
-      'llm.agentSdk.effort must be "low", "medium", "high", "xhigh", or "max"',
+      'llm.agentSdk.effort must be "minimal", "low", "medium", "high", "xhigh", or "max"',
     );
   }
   const thinking = input.thinking;
@@ -1015,13 +1034,15 @@ function validateStoredSettings(value: unknown): StoredServerSettings {
     | "anthropic"
     | "claude-agent"
     | "cursor-agent"
+    | "gemini"
     | "offline";
   const model =
     optionalNonEmptyString(common.llm.model, "llm.model") ??
-    (provider === "anthropic" ? DEFAULT_ANTHROPIC_MODEL : undefined);
+    (provider === "anthropic" ? DEFAULT_ANTHROPIC_MODEL : provider === "gemini" ? "gemini-3.8-flash" : undefined);
   const baseUrl = optionalNonEmptyString(common.llm.baseUrl, "llm.baseUrl");
   const modelsByRoute = validateModelsByRoute(common.llm.modelsByRoute);
   const stageSettingsByProvider = validateStageSettingsByProvider(common.llm.stageSettingsByProvider);
+  const transcript = validateTranscript(common.llm.transcript, "llm.transcript");
   const agentSdk = validateClaudeAgentSettings(common.llm.agentSdk);
   const creditRecovery = validateCreditRecovery(common.creditRecovery);
   const interruptedRecovery = validateInterruptedRecovery(common.interruptedRecovery);
@@ -1056,6 +1077,7 @@ function validateStoredSettings(value: unknown): StoredServerSettings {
       ...(baseUrl !== undefined ? { baseUrl } : {}),
       ...(modelsByRoute !== undefined ? { modelsByRoute } : {}),
       ...(stageSettingsByProvider !== undefined ? { stageSettingsByProvider } : {}),
+      ...(transcript !== undefined ? { transcript } : {}),
       agentSdk,
     },
     ...(hostTools !== undefined ? { hostTools } : {}),
@@ -1083,9 +1105,11 @@ interface ValidatedUpdate {
   readonly submittedApiKey?: string;
   readonly submittedSetupToken?: string;
   readonly submittedCursorApiKey?: string;
+  readonly submittedGeminiApiKey?: string;
   readonly clearApiKey: boolean;
   readonly clearSetupToken: boolean;
   readonly clearCursorApiKey: boolean;
+  readonly clearGeminiApiKey: boolean;
   readonly submittedOpenRouterApiKey?: string;
   readonly clearOpenRouterApiKey: boolean;
   /** Write-only web-search provider keys, verified before they are stored. */
@@ -1118,10 +1142,11 @@ function validateSettingsUpdate(value: unknown): ValidatedUpdate {
     | "anthropic"
     | "claude-agent"
     | "cursor-agent"
+    | "gemini"
     | "offline";
   const model = optionalNonEmptyString(common.llm.model, "llm.model");
-  if (provider === "anthropic" && model === undefined) {
-    throw new Error("llm.model is required for Anthropic");
+  if ((provider === "anthropic" || provider === "gemini") && model === undefined) {
+    throw new Error(`llm.model is required for ${provider === "gemini" ? "Gemini" : "Anthropic"}`);
   }
   const baseUrl = optionalNonEmptyString(common.llm.baseUrl, "llm.baseUrl");
   const submittedApiKey = optionalNonEmptyString(
@@ -1160,6 +1185,11 @@ function validateSettingsUpdate(value: unknown): ValidatedUpdate {
     throw new Error("llm.clearCursorApiKey must be a boolean");
   }
   const clearCursorApiKey = common.llm.clearCursorApiKey === true;
+  const submittedGeminiApiKey = optionalNonEmptyString(common.llm.geminiApiKey, "llm.geminiApiKey");
+  if (common.llm.clearGeminiApiKey !== undefined && typeof common.llm.clearGeminiApiKey !== "boolean") throw new Error("llm.clearGeminiApiKey must be a boolean");
+  const clearGeminiApiKey = common.llm.clearGeminiApiKey === true;
+  if (provider !== "gemini" && submittedGeminiApiKey !== undefined) throw new Error("select Gemini before setting a Gemini API key");
+  if (provider === "gemini" && clearGeminiApiKey) throw new Error("cannot clear the Gemini API key while Gemini is selected");
   if (provider !== "anthropic" && submittedApiKey !== undefined) {
     throw new Error("select Anthropic before setting an API key");
   }
@@ -1188,10 +1218,14 @@ function validateSettingsUpdate(value: unknown): ValidatedUpdate {
     (provider === "claude-agent" || provider === "cursor-agent") &&
     baseUrl !== undefined
   ) {
-    throw new Error("llm.baseUrl is only supported by the developer API");
+    throw new Error("llm.baseUrl is only supported by developer APIs");
   }
   const modelsByRoute = validateModelsByRoute(common.llm.modelsByRoute);
   const stageSettingsByProvider = validateStageSettingsByProvider(common.llm.stageSettingsByProvider);
+  // New Gemini connections make the checked recording preference explicit.
+  // Other providers and stored job snapshots retain their legacy defaults.
+  const transcript = validateTranscript(common.llm.transcript, "llm.transcript")
+    ?? (provider === "gemini" ? "if-available" : undefined);
   const agentSdk = validateClaudeAgentSettings(common.llm.agentSdk);
   const creditRecovery = validateCreditRecovery(common.creditRecovery);
   // Absent in an update = keep the currently stored policy (merged in put()).
@@ -1272,6 +1306,7 @@ function validateSettingsUpdate(value: unknown): ValidatedUpdate {
         ...(baseUrl !== undefined ? { baseUrl } : {}),
         ...(modelsByRoute !== undefined ? { modelsByRoute } : {}),
         ...(stageSettingsByProvider !== undefined ? { stageSettingsByProvider } : {}),
+        ...(transcript !== undefined ? { transcript } : {}),
         agentSdk,
       },
       ...(hostTools !== undefined ? { hostTools } : {}),
@@ -1283,9 +1318,11 @@ function validateSettingsUpdate(value: unknown): ValidatedUpdate {
     ...(submittedApiKey !== undefined ? { submittedApiKey } : {}),
     ...(submittedSetupToken !== undefined ? { submittedSetupToken } : {}),
     ...(submittedCursorApiKey !== undefined ? { submittedCursorApiKey } : {}),
+    ...(submittedGeminiApiKey !== undefined ? { submittedGeminiApiKey } : {}),
     clearApiKey,
     clearSetupToken,
     clearCursorApiKey,
+    clearGeminiApiKey,
     ...(submittedOpenRouterApiKey !== undefined
       ? { submittedOpenRouterApiKey }
       : {}),
@@ -1449,6 +1486,18 @@ export async function validateOpenRouterConnection(
   }
 }
 
+/** Metadata-only validation: never purchases a generated response. */
+export async function validateGeminiConnection(input: GeminiConnectionInput): Promise<void> {
+  try {
+    const models = await discoverGeminiModels({ apiKey: input.apiKey, ...(input.baseUrl ? { baseURL: input.baseUrl } : {}), signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS) });
+    const id = input.model.replace(/^models\//, "");
+    if (!models.some((model) => model.id.replace(/^models\//, "") === id)) throw new Error("model unavailable");
+  } catch {
+    // Provider errors can echo request details; credentials never enter a UI error.
+    throw new Error("Could not verify the Gemini API key and model. Check the key, selected model, and this host’s connection to Google.");
+  }
+}
+
 export async function validateContentRegistryConnection(
   url: string,
   bundle: string,
@@ -1484,6 +1533,7 @@ export class SettingsStore {
   private readonly connectionValidator: AnthropicConnectionValidator;
   private readonly claudeAgentValidator: ClaudeAgentConnectionValidator;
   private readonly cursorAgentValidator: CursorAgentConnectionValidator;
+  private readonly geminiValidator: GeminiConnectionValidator;
   private readonly openRouterValidator: (
     apiKey: string,
     model: string,
@@ -1505,6 +1555,7 @@ export class SettingsStore {
       options.validateClaudeAgent ?? validateClaudeAgentConnection;
     this.cursorAgentValidator =
       options.validateCursorAgent ?? validateCursorAgentConnection;
+    this.geminiValidator = options.validateGemini ?? validateGeminiConnection;
     this.openRouterValidator =
       options.validateOpenRouter ?? validateOpenRouterConnection;
     this.webSearchValidator =
@@ -1553,6 +1604,7 @@ export class SettingsStore {
         apiKeyConfigured: this.getAnthropicApiKey() !== undefined,
         setupTokenConfigured: this.getClaudeSetupToken() !== undefined,
         cursorApiKeyConfigured: this.getCursorApiKey() !== undefined,
+        geminiApiKeyConfigured: this.getGeminiApiKey() !== undefined,
       },
       creditRecovery: {
         ...settings.creditRecovery,
@@ -1605,6 +1657,11 @@ export class SettingsStore {
       this.credentialsPath,
     )?.cursorApiKey;
     return typeof key === "string" && key.length > 0 ? key : undefined;
+  }
+
+  getGeminiApiKey(): string | undefined {
+    const key = readJsonCached<StoredCredentials>(this.credentialsPath)?.geminiApiKey;
+    return typeof key === "string" && key.trim() !== "" ? key.trim() : undefined;
   }
 
   getOpenRouterApiKey(): string | undefined {
@@ -1750,6 +1807,8 @@ export class SettingsStore {
     const env = { ...base };
     // Always replace inherited launch policy, including empty maps on legacy jobs.
     env.BRAINSTORM_AGENTIC_STAGE_SETTINGS = JSON.stringify(settings.llm.stageSettingsByProvider?.[settings.llm.provider] ?? {});
+    delete env.BRAINSTORM_AGENTIC_TRANSCRIPT;
+    if (settings.llm.transcript !== undefined) env.BRAINSTORM_AGENTIC_TRANSCRIPT = settings.llm.transcript;
     delete env.BRAINSTORM_AGENTIC_MODEL_CATALOG;
     const catalog = runtimeModelCatalog(settings);
     if (catalog !== undefined) {
@@ -1799,6 +1858,21 @@ export class SettingsStore {
       }
       // New launches resolve these defaults against their provider catalog.
       // Older API job snapshots keep their original execution behavior.
+      if (catalog !== undefined) {
+        const agent = settings.llm.agentSdk ?? DEFAULT_CLAUDE_AGENT_SETTINGS;
+        env.BRAINSTORM_AGENTIC_AGENT_EFFORT = agent.effort;
+        env.BRAINSTORM_AGENTIC_AGENT_THINKING = agent.thinking;
+      }
+    } else if (settings.llm.provider === "gemini") {
+      const key = this.getGeminiApiKey();
+      if (!key) throw new Error("Gemini is selected but no verified API key is configured");
+      env.BRAINSTORM_AGENTIC_PROVIDER = "gemini";
+      env.GEMINI_API_KEY = key;
+      delete env.GEMINI_BASE_URL;
+      if (settings.llm.baseUrl) env.GEMINI_BASE_URL = settings.llm.baseUrl;
+      // A developer API key must never be silently routed to Vertex AI.
+      delete env.GOOGLE_GENAI_USE_VERTEXAI;
+      delete env.GOOGLE_API_KEY;
       if (catalog !== undefined) {
         const agent = settings.llm.agentSdk ?? DEFAULT_CLAUDE_AGENT_SETTINGS;
         env.BRAINSTORM_AGENTIC_AGENT_EFFORT = agent.effort;
@@ -2090,8 +2164,10 @@ export class SettingsStore {
     const currentKey = this.getAnthropicApiKey();
     const currentSetupToken = this.getClaudeSetupToken();
     const currentCursorKey = this.getCursorApiKey();
+    const currentGeminiKey = this.getGeminiApiKey();
     const currentOpenRouterKey = this.getOpenRouterApiKey();
     const candidateKey = update.submittedApiKey ?? currentKey;
+    const candidateGeminiKey = update.submittedGeminiApiKey ?? currentGeminiKey;
     const candidateSetupToken =
       update.submittedSetupToken ?? currentSetupToken;
     const candidateCursorKey =
@@ -2110,6 +2186,7 @@ export class SettingsStore {
       update.submittedApiKey !== undefined ||
       update.submittedSetupToken !== undefined ||
       update.submittedCursorApiKey !== undefined ||
+      update.submittedGeminiApiKey !== undefined ||
       update.settings.llm.provider !== currentSettings.llm.provider ||
       update.settings.llm.model !== currentSettings.llm.model ||
       update.settings.llm.baseUrl !== currentSettings.llm.baseUrl;
@@ -2128,6 +2205,10 @@ export class SettingsStore {
             : {}),
         });
       }
+    }
+    if (update.settings.llm.provider === "gemini") {
+      if (!candidateGeminiKey) throw new Error("A Gemini API key is required");
+      if (connectionChanged) await this.geminiValidator({ apiKey: candidateGeminiKey, model: update.settings.llm.model!, ...(update.settings.llm.baseUrl ? { baseUrl: update.settings.llm.baseUrl } : {}) });
     }
     if (update.settings.llm.provider === "claude-agent") {
       if (!candidateSetupToken) {
@@ -2275,6 +2356,7 @@ export class SettingsStore {
       anthropicApiKey?: string;
       claudeSetupToken?: string;
       cursorApiKey?: string;
+      geminiApiKey?: string;
       openRouterApiKey?: string;
       tavilyApiKey?: string;
       braveApiKey?: string;
@@ -2285,6 +2367,7 @@ export class SettingsStore {
     if (update.clearApiKey) delete nextCredentials.anthropicApiKey;
     if (update.clearSetupToken) delete nextCredentials.claudeSetupToken;
     if (update.clearCursorApiKey) delete nextCredentials.cursorApiKey;
+    if (update.clearGeminiApiKey) delete nextCredentials.geminiApiKey;
     if (update.clearOpenRouterApiKey) {
       delete nextCredentials.openRouterApiKey;
     }
@@ -2304,6 +2387,7 @@ export class SettingsStore {
     if (update.submittedCursorApiKey !== undefined) {
       nextCredentials.cursorApiKey = update.submittedCursorApiKey;
     }
+    if (update.submittedGeminiApiKey !== undefined) nextCredentials.geminiApiKey = update.submittedGeminiApiKey;
     if (update.submittedOpenRouterApiKey !== undefined) {
       nextCredentials.openRouterApiKey =
         update.submittedOpenRouterApiKey;

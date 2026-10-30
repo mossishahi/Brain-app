@@ -274,7 +274,7 @@ class SdkTerminalResultError extends Error {
 
 function recoveryEffort(
   effort: ClaudeAgentExecutorConfig["effort"],
-  supported?: readonly NonNullable<ClaudeAgentExecutorConfig["effort"]>[],
+  supported?: readonly string[],
 ): NonNullable<ClaudeAgentExecutorConfig["effort"]> {
   const reduced = effort === "max" || effort === "xhigh" ? "high" :
     effort === "low" || effort === "medium" ? effort : "medium";
@@ -1542,6 +1542,7 @@ function reportStreamEvent(
   message: UnknownRecord,
   context: AgentExecutionContext,
   state: SdkProgressState,
+  thinkingLive: boolean,
 ): void {
   const event = record(message.event);
   if (event.type === "message_start") {
@@ -1575,6 +1576,7 @@ function reportStreamEvent(
     // made the old timer fire, and the phase row above already said what this
     // stretch of the turn is doing.
     const delta = record(event.delta);
+    if (!thinkingLive && typeof delta.thinking === "string") return;
     const fragment =
       typeof delta.thinking === "string"
         ? delta.thinking
@@ -1589,9 +1591,10 @@ function reportSdkMessage(
   message: UnknownRecord,
   context: AgentExecutionContext,
   state: SdkProgressState,
+  thinkingLive: boolean,
 ): void {
   if (message.type === "stream_event") {
-    reportStreamEvent(message, context, state);
+    reportStreamEvent(message, context, state, thinkingLive);
     return;
   }
   if (message.type === "assistant") {
@@ -2276,7 +2279,7 @@ function queryOptions(
     maxTurns: config.maxTurns ?? 100,
     ...(effort !== undefined ? { effort } : {}),
     // The reasoning trace (a summary; the raw chain of thought is never
-    // returned) is requested only for routes that capture it; other tasks
+    // returned) is requested only when capture is enabled; other tasks
     // keep the faster omitted display.
     ...(thinking !== undefined ? { thinking:
       thinking === "disabled"
@@ -2527,6 +2530,7 @@ function reportPromptHandoff(
       maxTurns: typeof options.maxTurns === "number" ? options.maxTurns : null,
       effort: typeof options.effort === "string" ? options.effort : null,
       thinking: isJsonValue(options.thinking) ? options.thinking : null,
+      transcript: task.modelRequest?.execution?.transcript ?? null,
       maxBudgetUsd:
         typeof options.maxBudgetUsd === "number" ? options.maxBudgetUsd : null,
       permissionMode:
@@ -2735,7 +2739,7 @@ async function executeQuery(
             }
           }
         }
-        reportSdkMessage(current, context, progressState);
+        reportSdkMessage(current, context, progressState, task.modelRequest?.execution?.transcript !== "off");
         if (current.type === "result") finalResult = current;
       }
     } catch (error) {
@@ -2852,6 +2856,12 @@ export class ClaudeAgentExecutor implements AgentExecutor {
   ): Promise<AgentResult> {
     const attempts = this.config.maxValidationAttempts ?? 3;
     const execution = task.modelRequest?.execution;
+    if (execution?.effort === "minimal") {
+      return { taskId: task.taskId, status: "error", error: {
+        name: "UnsupportedModelControlError",
+        message: "Claude Agent SDK does not support minimal effort.",
+      } };
+    }
     const taskConfig: ClaudeAgentExecutorConfig = execution === undefined ? this.config : {
       ...this.config, effort: execution.effort, thinking: execution.thinking,
     };
@@ -2882,9 +2892,10 @@ export class ClaudeAgentExecutor implements AgentExecutor {
         },
       });
     }
-    const wantsTrace =
-      routeTraits(task).includes(TRACE_TRAIT) &&
-      (execution === undefined ? taskConfig.thinking !== "disabled" : taskConfig.thinking === "adaptive");
+    const wantsTrace = execution?.transcript !== undefined
+      ? execution.transcript === "if-available"
+      : routeTraits(task).includes(TRACE_TRAIT) &&
+        (execution === undefined ? taskConfig.thinking !== "disabled" : taskConfig.thinking === "adaptive");
     let validationIssues: string[] = [];
     let rejectedOutput: JsonValue | undefined;
     let usage = emptyUsage();

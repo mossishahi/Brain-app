@@ -1,12 +1,12 @@
 import type { AgentModelExecutionControls } from "@brainstorm-agentic/core";
-import type { BrainstormRouteResolver } from "@brainstorm-agentic/brainstorm-runtime";
+import type { BrainstormRouteResolver, ResolvedBrainstormRoute } from "@brainstorm-agentic/brainstorm-runtime";
 import type {
   ClaudeAgentEffort,
   ModelCatalogSnapshot,
   StageModelSettings,
 } from "@brainstorm-agentic/protocol";
 
-const EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
+const EFFORTS = new Set(["minimal", "low", "medium", "high", "xhigh", "max"]);
 
 function object(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -25,16 +25,18 @@ export function stageSettingsFromEnv(env: NodeJS.ProcessEnv): Readonly<Record<st
   const settings: Record<string, StageModelSettings> = Object.create(null);
   for (const [id, stage] of Object.entries(value)) {
     if (!/^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$/.test(id) || !object(stage) ||
-      Object.keys(stage).some((key) => !["model", "effort", "thinking"].includes(key)) ||
+      Object.keys(stage).some((key) => !["model", "effort", "thinking", "transcript"].includes(key)) ||
       (stage.model !== undefined && (typeof stage.model !== "string" || !stage.model.trim())) ||
       (stage.effort !== undefined && (typeof stage.effort !== "string" || !EFFORTS.has(stage.effort))) ||
-      (stage.thinking !== undefined && stage.thinking !== "adaptive" && stage.thinking !== "disabled")) {
+      (stage.thinking !== undefined && stage.thinking !== "adaptive" && stage.thinking !== "disabled") ||
+      (stage.transcript !== undefined && stage.transcript !== "if-available" && stage.transcript !== "off")) {
       throw new Error("BRAINSTORM_AGENTIC_STAGE_SETTINGS contains an invalid stage override");
     }
     settings[id] = Object.freeze({
       ...(typeof stage.model === "string" ? { model: stage.model.trim() } : {}),
       ...(typeof stage.effort === "string" ? { effort: stage.effort as ClaudeAgentEffort } : {}),
       ...(stage.thinking !== undefined ? { thinking: stage.thinking } : {}),
+      ...(stage.transcript !== undefined ? { transcript: stage.transcript } : {}),
     });
   }
   return Object.freeze(settings);
@@ -94,6 +96,7 @@ interface StageRoutingConfig {
   readonly models?: Readonly<Record<string, string>>;
   readonly defaultModel?: string;
   readonly agentSdk?: AgentModelExecutionControls;
+  readonly transcript?: "if-available" | "off";
   readonly stageSettings?: Readonly<Record<string, StageModelSettings>>;
   readonly modelCatalog?: ModelCatalogSnapshot;
 }
@@ -103,10 +106,11 @@ export function contentRouteResolver(config: StageRoutingConfig): BrainstormRout
   const models = config.models ?? {};
   const fallback = config.defaultModel ?? models.reasoning ?? (config.provider === "cursor-agent" ? "auto" : "");
   return {
-    resolve(request) {
-      if (config.provider === "offline") return {};
+    resolve(request): ResolvedBrainstormRoute {
+      if (config.provider === "offline") return config.transcript === undefined ? {} : { execution: { transcript: config.transcript } };
       const stage = request.nodeId ? config.stageSettings?.[request.nodeId] : undefined;
       const modelId = stage?.model ?? models[request.logicalRoute] ?? fallback;
+      const transcript = stage?.transcript ?? config.transcript;
       // Legacy CLI launches and saved jobs have no snapshot. The desktop
       // exports an empty stage map on their resume to clear inherited policy.
       // Every new desktop launch supplies a catalog, even on discovery failure.
@@ -114,9 +118,14 @@ export function contentRouteResolver(config: StageRoutingConfig): BrainstormRout
         return {
           providerId: config.provider,
           ...(modelId ? { modelId } : {}),
+          ...(transcript !== undefined ? { execution: {
+            ...(config.provider === "claude-agent" ? { effort: "high" as const, thinking: "adaptive" as const } : {}),
+            ...config.agentSdk, transcript,
+          } } : {}),
           ...(config.provider === "anthropic" && request.traits.includes("extended-reasoning") ? {
-            providerOptions: { anthropic: { thinking: { type: "adaptive", display: "summarized" } } },
+            providerOptions: { anthropic: { thinking: { type: "adaptive", display: transcript === "off" ? "omitted" : "summarized" } } },
           } : {}),
+          ...(config.provider === "gemini" ? { providerOptions: { gemini: { includeThoughts: transcript === "if-available" } } } : {}),
         };
       }
       const model = config.modelCatalog?.models.find((entry) => entry.id === modelId || entry.aliases?.includes(modelId));
@@ -136,6 +145,7 @@ export function contentRouteResolver(config: StageRoutingConfig): BrainstormRout
       const requestedThinking = stage?.thinking ?? config.agentSdk?.thinking ??
         (config.provider === "claude-agent" || request.traits.includes("extended-reasoning") ? "adaptive" : undefined);
       const execution: AgentModelExecutionControls = {
+        ...(transcript !== undefined ? { transcript } : {}),
         ...(requestedEffort !== undefined && capabilities?.effortLevels.includes(requestedEffort) ? { effort: requestedEffort } : {}),
         ...(requestedThinking !== undefined && supportsThinking(requestedThinking) ? { thinking: requestedThinking } : {}),
         ...(capabilities !== undefined ? { supportedEffortLevels: capabilities.effortLevels } : {}),
@@ -149,9 +159,17 @@ export function contentRouteResolver(config: StageRoutingConfig): BrainstormRout
             ...(execution.effort !== undefined ? { output_config: { effort: execution.effort } } : {}),
             ...(execution.thinking !== undefined ? {
               thinking: execution.thinking === "disabled" ? { type: "disabled" } : {
-                type: "adaptive", display: request.traits.includes("extended-reasoning") ? "summarized" : "omitted",
+                type: "adaptive", display: transcript === "off" ? "omitted" :
+                  transcript === "if-available" || request.traits.includes("extended-reasoning") ? "summarized" : "omitted",
               },
             } : {}),
+          } },
+        } : {}),
+        ...(config.provider === "gemini" ? {
+          providerOptions: { gemini: {
+            includeThoughts: transcript === "if-available",
+            ...(execution.effort !== undefined ? { thinkingLevel: execution.effort } : {}),
+            ...(execution.thinking === "disabled" ? { thinkingBudget: 0 } : {}),
           } },
         } : {}),
       };

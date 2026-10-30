@@ -148,6 +148,7 @@ test("resuming a legacy job with an exported empty stage map preserves its saved
   assert.equal(route.execution, undefined);
   const calls: Record<string, unknown>[] = [];
   const executor = new ClaudeAgentExecutor({ token: "test-token", ...config.agentSdk,
+    effort: config.agentSdk?.effort === "minimal" ? undefined : config.agentSdk?.effort,
     queryFn: (input) => ({ async *[Symbol.asyncIterator]() {
       calls.push(input.options);
       yield { type: "result", subtype: "success", is_error: false, result: '{"answer":"ok"}', structured_output: { answer: "ok" } };
@@ -159,4 +160,97 @@ test("resuming a legacy job with an exported empty stage map preserves its saved
   assert.equal(result.status, "ok");
   assert.equal(calls[0]!.effort, "max");
   assert.deepEqual(calls[0]!.thinking, { type: "adaptive", display: "omitted" });
+});
+
+test("transcript overrides are independent of reasoning support and preserve stage precedence", async () => {
+  const resolver = contentRouteResolver({ provider: "claude-agent", defaultModel: "large", modelCatalog: catalog,
+    agentSdk: { effort: "high", thinking: "adaptive" }, transcript: "off",
+    stageSettings: { "classify-input": { model: "unknown", transcript: "if-available" } },
+  });
+  assert.deepEqual((await resolver.resolve(request("classify-input"))).execution, { transcript: "if-available" });
+  assert.deepEqual((await resolver.resolve(request("develop-idea"))).execution, {
+    transcript: "off", effort: "high", thinking: "adaptive", supportedEffortLevels: ["low", "medium", "high", "max"],
+  });
+});
+
+test("Anthropic transcript display changes without turning adaptive reasoning off", async () => {
+  for (const transcript of ["off", "if-available"] as const) {
+    const resolver = contentRouteResolver({ provider: "anthropic", defaultModel: "large",
+      modelCatalog: { ...catalog, provider: "anthropic" }, agentSdk: { thinking: "adaptive" }, transcript,
+    });
+    const route = await resolver.resolve({ ...request("classify-input"), traits: [] });
+    assert.equal(route.execution?.thinking, "adaptive");
+    assert.deepEqual(route.providerOptions?.anthropic?.thinking, { type: "adaptive", display: transcript === "off" ? "omitted" : "summarized" });
+  }
+});
+
+test("Gemini stages map native minimal effort and disabled reasoning separately from transcripts", async () => {
+  const geminiCatalog: ModelCatalogSnapshot = { provider: "gemini", fetchedAt: 123, source: "provider", stale: false,
+    models: [
+      { id: "gemini-3.5-flash-lite", label: "Flash Lite", capabilities: {
+        effortLevels: ["minimal", "low", "medium", "high"], adaptiveThinking: false, thinkingCanBeDisabled: false,
+      } },
+      { id: "gemini-2.5-flash-lite", label: "Legacy Lite", capabilities: {
+        effortLevels: [], adaptiveThinking: false, thinkingCanBeDisabled: true,
+      } },
+      { id: "gemini-future", label: "Unknown capabilities" },
+    ],
+  };
+  const resolver = contentRouteResolver({ provider: "gemini", modelCatalog: geminiCatalog,
+    agentSdk: { effort: "max", thinking: "adaptive" }, transcript: "if-available",
+    stageSettings: {
+      "classify-input": { model: "gemini-3.5-flash-lite", effort: "minimal", transcript: "off" },
+      "develop-idea": { model: "gemini-2.5-flash-lite", thinking: "disabled" },
+      "fact-verification": { model: "gemini-future" },
+    },
+  });
+  const classifier = await resolver.resolve(request("classify-input"));
+  assert.equal(classifier.providerId, "gemini");
+  assert.equal(classifier.execution?.effort, "minimal");
+  assert.equal(classifier.execution?.thinking, undefined);
+  assert.deepEqual(classifier.providerOptions, { gemini: { includeThoughts: false, thinkingLevel: "minimal" } });
+  const legacy = await resolver.resolve(request("develop-idea"));
+  assert.deepEqual(legacy.providerOptions, { gemini: { includeThoughts: true, thinkingBudget: 0 } });
+  const unknown = await resolver.resolve(request("fact-verification"));
+  assert.deepEqual(unknown.execution, { transcript: "if-available" });
+  assert.deepEqual(unknown.providerOptions, { gemini: { includeThoughts: true } });
+  for (const override of [{ effort: "max" as const }, { thinking: "disabled" as const }]) {
+    await assert.rejects(async () => contentRouteResolver({ provider: "gemini", modelCatalog: geminiCatalog,
+      stageSettings: { "classify-input": { model: "gemini-3.5-flash-lite", ...override } },
+    }).resolve(request("classify-input")), /launch catalog/);
+  }
+});
+
+test("worker environment preserves transcript policy and validates native minimal stage effort", () => {
+  const stages = stageSettingsFromEnv({ BRAINSTORM_AGENTIC_STAGE_SETTINGS: JSON.stringify({
+    "classify-input": { model: "gemini-3.5-flash-lite", effort: "minimal", transcript: "off" },
+  }) })!;
+  assert.deepEqual(stages["classify-input"], { model: "gemini-3.5-flash-lite", effort: "minimal", transcript: "off" });
+  assert.ok(Object.isFrozen(stages["classify-input"]));
+  for (const transcript of ["required", "adaptive", true, null]) {
+    assert.throws(() => stageSettingsFromEnv({ BRAINSTORM_AGENTIC_STAGE_SETTINGS: JSON.stringify({ stage: { transcript } }) }), /invalid stage/);
+  }
+  for (const transcript of ["off", "if-available"] as const) {
+    const config = providerConfigFromEnv({ BRAINSTORM_AGENTIC_PROVIDER: "gemini", BRAINSTORM_AGENTIC_TRANSCRIPT: transcript }, false);
+    assert.equal(config.provider, "gemini");
+    assert.equal(config.transcript, transcript);
+    assert.equal(providerConfigFromEnv({ BRAINSTORM_AGENTIC_TRANSCRIPT: transcript }, true).transcript, transcript);
+  }
+});
+
+test("a legacy transcript-only selection preserves Claude's existing reasoning defaults", async () => {
+  for (const transcript of ["off", "if-available"] as const) {
+    const route = await contentRouteResolver({ provider: "claude-agent", defaultModel: "large", transcript }).resolve(request("develop-idea"));
+    const calls: Record<string, unknown>[] = [];
+    const executor = new ClaudeAgentExecutor({ token: "test-token", queryFn: (input) => ({ async *[Symbol.asyncIterator]() {
+      calls.push(input.options);
+      yield { type: "result", subtype: "success", is_error: false, result: '{"answer":"ok"}', structured_output: { answer: "ok" } };
+    } }) });
+    const result = await executor.execute({ taskId: "legacy-transcript", kind: "classifier", input: {},
+      modelRequest: { modelId: route.modelId, execution: route.execution, messages: [{ role: "user", content: [{ type: "text", text: "Classify." }] }] },
+    }, { runId: "legacy-transcript", nodePath: "root/classify-input" });
+    assert.equal(result.status, "ok");
+    assert.equal(calls[0]!.effort, "high");
+    assert.deepEqual(calls[0]!.thinking, { type: "adaptive", display: transcript === "off" ? "omitted" : "summarized" });
+  }
 });

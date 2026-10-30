@@ -71,3 +71,13 @@ test('invalid numbers and missing setup fail before a settings request can be bu
   assert.throws(() => quickSettingsPatch({ ...current, gpu: { template: '', timeLimitMinutes: 60 } }, { id: 'gpuTime', value: 20 }), /GPU setup/);
   assert.throws(() => quickSettingsPatch({ ...current, llm: { provider: 'offline' } }, { id: 'agentLimits', value: { maxTurns: '30' } }), /Agent SDK/);
 });
+
+test('Gemini quick selection requires its own verified key and chooses a Gemini default', () => {
+  assert.throws(() => quickSettingsPatch(settings(), { id: 'provider', value: 'gemini' }), /Connect/);
+  const ready = { ...settings(), llm: { ...settings().llm, geminiApiKeyConfigured: true, transcript: 'off' as const } };
+  const selected = projectQuickSetting(ready, { id: 'provider', value: 'gemini' });
+  assert.equal(selected.llm.provider, 'gemini');
+  assert.equal(selected.llm.model, 'gemini-3.8-flash');
+  assert.equal(selected.llm.transcript, 'off');
+  assert.throws(() => quickSettingsPatch(selected, { id: 'model', value: '' }), /model name/);
+});

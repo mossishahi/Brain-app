@@ -28,6 +28,53 @@ async function openSettings(page: Page) {
 }
 const requests = (brain: Awaited<ReturnType<typeof mockBrain>>) => brain.requests.filter(request => request.path === '/model-options').length;
 
+test('Gemini reasoning and transcript controls are independent, including unknown models', async ({ page }) => {
+  const settings = defaultTestSettings();
+  settings.llm = { provider: 'gemini', model: 'gemini-3.5-flash-lite', geminiApiKeyConfigured: true, transcript: 'off' };
+  const brain = await mockBrain(page, { settings, modelOptions: { stages, models: [
+    { id: 'gemini-3.5-flash-lite', label: 'Gemini Flash-Lite', capabilities: { effortLevels: ['minimal', 'low', 'medium', 'high'], adaptiveThinking: false } },
+    { id: 'unknown', label: 'Unknown model' },
+  ] } });
+  await page.goto('/');
+  const dialog = await openSettings(page);
+  await expect(dialog.getByRole('switch', { name: 'Classify input Adaptive thinking', exact: true })).toHaveCount(0);
+  const effort = dialog.getByRole('combobox', { name: 'Classify input reasoning effort', exact: true });
+  await expect(effort.locator('option')).toHaveText(['Default (model decides)', 'Minimal', 'Low', 'Medium', 'High']);
+  await effort.selectOption('minimal');
+  const transcript = dialog.getByRole('combobox', { name: 'Classify input thinking transcript', exact: true });
+  await expect(transcript.locator('option').first()).toHaveText('Default (off)');
+  await transcript.selectOption('off');
+  await dialog.getByRole('button', { name: 'Save models', exact: true }).click();
+  await expect.poll(() => brain.settings.llm.stageSettingsByProvider?.gemini?.['classify-input']).toEqual({ effort: 'minimal', transcript: 'off' });
+  await dialog.getByRole('combobox', { name: 'Classify input model', exact: true }).selectOption('unknown');
+  await expect(effort).toBeDisabled();
+  await expect(transcript).toBeEnabled();
+  await expect(transcript).toHaveValue('off');
+  expect(brain.unhandled).toEqual([]);
+});
+
+test('changing transcript recording updates stage defaults without changing reasoning or credentials', async ({ page }) => {
+  const settings = defaultTestSettings();
+  settings.llm = { provider: 'gemini', model: 'gemini-3.5-flash-lite', geminiApiKeyConfigured: true,
+    transcript: 'if-available', stageSettingsByProvider: { gemini: { 'classify-input': { effort: 'minimal', transcript: 'if-available' } } } };
+  const brain = await mockBrain(page, { settings, modelOptions: { stages, models: [
+    { id: 'gemini-3.5-flash-lite', label: 'Gemini Flash-Lite', capabilities: { effortLevels: ['minimal', 'low', 'medium', 'high'], adaptiveThinking: false } },
+  ] } });
+  await page.goto('/');
+  const dialog = await openSettings(page);
+  await dialog.getByRole('button', { name: 'Models & connections', exact: true }).click();
+  await dialog.getByRole('switch', { name: 'Record thinking transcripts when available', exact: true }).click();
+  await expect.poll(() => brain.settings.llm.transcript).toBe('off');
+  await dialog.getByRole('button', { name: 'Stage models', exact: true }).click();
+  const transcript = dialog.getByRole('combobox', { name: 'Classify input thinking transcript', exact: true });
+  await expect(transcript.locator('option').first()).toHaveText('Default (off)');
+  await expect(transcript).toHaveValue('if-available');
+  await expect(dialog.getByRole('combobox', { name: 'Classify input reasoning effort', exact: true })).toHaveValue('minimal');
+  const write = brain.writes.find(entry => entry.path === '/settings');
+  expect(write?.body.llm).toEqual({ provider: 'gemini', transcript: 'off' });
+  expect(brain.unhandled).toEqual([]);
+});
+
 test('launch loads one shared catalog and stage controls follow selected model capabilities', async ({ page }) => {
   const brain = await mockBrain(page, { modelOptions });
   await page.goto('/');

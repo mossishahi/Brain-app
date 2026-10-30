@@ -125,3 +125,21 @@ test('onboarding normalizes wrapped setup tokens before its explicit connection 
   await expect.poll(() => brain.writes.find(write => write.path === '/settings')?.body.llm.setupToken).toBe('sk-ant-oat01-browser-token-part');
   await expect(onboarding).toHaveCount(0);
 });
+
+test('Gemini onboarding submits only its own key and model', async ({ page }) => {
+  const settings = defaultTestSettings();
+  settings.llm = { provider: 'gemini', model: 'gemini-3.8-flash', geminiApiKeyConfigured: false };
+  const brain = await mockBrain(page, { settings });
+  await page.goto('/');
+  const onboarding = page.getByRole('dialog', { name: 'Connect a model', exact: true });
+  await expect(onboarding.getByRole('radio', { name: /Gemini API key/ })).toHaveAttribute('aria-checked', 'true');
+  await onboarding.getByLabel('API key', { exact: true }).fill('test-browser-gemini');
+  await onboarding.getByRole('button', { name: 'Connect', exact: true }).click();
+  await expect.poll(() => brain.settings.llm.geminiApiKeyConfigured).toBe(true);
+  await expect(onboarding).toHaveCount(0);
+  const submitted = brain.writes.find(write => write.path === '/settings')?.body.llm as Record<string, unknown>;
+  expect(submitted.geminiApiKey).toBe('test-browser-gemini');
+  expect(submitted.model).toBe('gemini-3.8-flash');
+  expect(submitted.apiKey).toBeUndefined();
+  expect(submitted.setupToken).toBeUndefined();
+});

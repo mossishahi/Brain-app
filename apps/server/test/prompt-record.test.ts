@@ -114,6 +114,14 @@ test("an SDK hand-off says in plain words that it is only our half", () => {
   assert.doesNotMatch(markdown, /\*\*Place\*\*/);
 });
 
+test("a redacted direct-provider prompt explains the recording policy without claiming SDK scaffolding", () => {
+  for (const provider of ["gemini", "anthropic"]) {
+    const markdown = renderPromptMarkdown(record({ complete: false, provider }), { role: "Thinker" });
+    assert.match(markdown, /thinking transcript content was omitted/);
+    assert.doesNotMatch(markdown, /SDK composes|every byte/);
+  }
+});
+
 test("sections render in order, fenced where the body is machine material", () => {
   const markdown = renderPromptMarkdown(
     record({

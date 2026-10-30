@@ -275,7 +275,7 @@ export interface CursorAgentExecutorConfig {
    */
   readonly maxBudgetUsd?: number;
   /** Reasoning effort; mapped onto the model's declared effort parameter. */
-  readonly effort?: "low" | "medium" | "high" | "xhigh" | "max";
+  readonly effort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   /** Adaptive reasoning or no extended thinking; mapped like effort. */
   readonly thinking?: "adaptive" | "disabled";
   /** Model used when the primary model is refused at agent creation. */
@@ -778,6 +778,7 @@ function normalizeParamText(value: string): string {
  * "max" prefers the strongest offered tier.
  */
 const EFFORT_LADDER: Readonly<Record<string, readonly string[]>> = {
+  minimal: ["minimal"],
   low: ["low", "minimal"],
   medium: ["medium", "standard", "default"],
   high: ["high"],
@@ -1905,6 +1906,7 @@ function reportPromptHandoff(
       maxTurns: config.maxTurns ?? 100,
       effort: config.effort ?? null,
       thinking: config.thinking ?? null,
+      transcript: task.modelRequest?.execution?.transcript ?? null,
       maxBudgetUsd: config.maxBudgetUsd ?? null,
       maxValidationAttempts: config.maxValidationAttempts ?? 3,
     }),
@@ -2231,11 +2233,11 @@ async function executeAttempt(
           // Consecutive fragments concatenate into one trace segment so the
           // captured reasoning summary reads as prose, not confetti.
           const text = typeof message.text === "string" ? message.text : "";
-          // Live text gets every delta, whether or not this route captures a
-          // trace: a reader watching a task that runs for minutes reads along
+          // Unless explicitly off, live text gets every delta even when the
+          // legacy route stores no trace: a reader watching a task reads along
           // with it. The host owns the thread — appending the fragments, then
           // discarding them when the output lands — so nothing accumulates here.
-          if (text.length > 0) context.reportLive?.(text);
+          if (text.length > 0 && task.modelRequest?.execution?.transcript !== "off") context.reportLive?.(text);
           if (text.length === 0) {
             thinkingOpen = false;
           } else if (capture.wantsTrace) {
@@ -2499,9 +2501,10 @@ export class CursorAgentExecutor implements AgentExecutor {
         },
       });
     }
-    const wantsTrace =
-      routeTraits(task).includes(TRACE_TRAIT) &&
-      (execution === undefined ? taskConfig.thinking !== "disabled" : taskConfig.thinking === "adaptive");
+    const wantsTrace = execution?.transcript !== undefined
+      ? execution.transcript === "if-available"
+      : routeTraits(task).includes(TRACE_TRAIT) &&
+        (execution === undefined ? taskConfig.thinking !== "disabled" : taskConfig.thinking === "adaptive");
     let validationIssues: string[] = [];
     let rejectedOutput: JsonValue | undefined;
     let usage = emptyUsage();

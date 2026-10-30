@@ -15,7 +15,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { loadContent } from "@brainstorm-agentic/content";
-import type { TaxonomyAccess } from "@brainstorm-agentic/core";
+import type { AgentResult, JsonValue, TaxonomyAccess } from "@brainstorm-agentic/core";
 
 import {
   buildRuntime,
@@ -211,6 +211,71 @@ test("offline run completes end to end with file-backed stores and auto-approved
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+for (const gamifiedReview of [false, true]) {
+  test(`transcripts off preserves the complete ${gamifiedReview ? "game" : "standard"} review pipeline and final output`, async () => {
+    const root = tempRoot();
+    try {
+      let reference: ReadonlyMap<string, JsonValue | undefined> | undefined;
+      let referenceOutput: JsonValue | undefined;
+      for (const transcript of ["if-available", "off"] as const) {
+        const runId = `bsa_transcripts_${gamifiedReview}_${transcript}`;
+        const artifacts = new FsArtifactStore(root, runId);
+        const checkpoints = new FsCheckpointStore(root);
+        const runtime = buildRuntime({
+          providerConfig: { provider: "offline", transcript },
+          checkpoints,
+          artifacts,
+          autoApproveGates: true,
+          ...testTaxonomy(root),
+          bundle: registryBundle,
+        });
+        const result = await runtime.run({
+          runId,
+          submission: { prompt: "Can KNN graph construction be made differentiable?", attachments: [] },
+          params: { panelSize: 2, maxReviewRounds: 1, gamifiedReview },
+        });
+        assert.equal(result.status, "completed");
+        assert.ok(result.output !== undefined, "the final deliverable is produced");
+        const checkpoint = await checkpoints.load(runId);
+        assert.ok(checkpoint);
+        const outputs = new Map(checkpoint.journal
+          .filter((entry) => entry.kind === "agent")
+          .map((entry) => {
+            const agent = entry.value as unknown as AgentResult;
+            assert.equal(agent.status, "ok");
+            return [entry.key, agent.status === "ok" ? agent.output : undefined] as const;
+          }));
+        const firstPass = [...outputs].filter(([key]) => key.includes("/develop-idea-execute::result"));
+        assert.ok(firstPass.length >= 2, "the seated members author their arguments");
+        for (const [, output] of firstPass) {
+          const cot = (output as { cot?: unknown[] }).cot;
+          assert.ok(Array.isArray(cot) && cot.length === 3, "all three reviewable argument steps remain required");
+        }
+        assert.ok([...outputs.keys()].some((key) => key.endsWith(gamifiedReview
+          ? "/game-comment-step-execute::result" : "/comment-step-execute::result")), "reviewers assess the steps");
+        assert.ok([...outputs.keys()].some((key) => key.endsWith(gamifiedReview
+          ? "/chair-step-execute::result" : "/judge-step-execute::result")), "the review decision is made");
+        assert.ok([...outputs.keys()].some((key) => key.endsWith("/bridge-audit-execute::result")), "the final audit runs");
+        const stored = await artifacts.list();
+        if (transcript === "if-available") {
+          assert.ok(stored.some((artifact) => artifact.metadata?.kind === "thinking"), "the fixture provides real capture data to suppress");
+          assert.match(JSON.stringify(checkpoint), /offline deterministic thoughts/);
+          reference = outputs;
+          referenceOutput = result.output;
+        } else {
+          assert.ok(stored.every((artifact) => artifact.metadata?.kind !== "thinking"), "no trace artifacts are persisted");
+          assert.doesNotMatch(JSON.stringify(checkpoint), /"thinkingSegments"|"stepThoughts"|offline deterministic thoughts/,
+            "no captured thinking reaches the durable journal or replay state");
+          assert.deepEqual([...outputs].sort(), [...reference!].sort(), "every authored stage output and review decision is unchanged");
+          assert.deepEqual(result.output, referenceOutput, "the final deliverable is unchanged");
+        }
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
 
 test("manual gate suspends; resume across a fresh runtime instance completes from disk", async () => {
   const root = tempRoot();

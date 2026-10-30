@@ -29,3 +29,12 @@ test('reset drops only that stage and draft comparisons ignore key order and emp
   assert.equal(sameStageSettings({ a: { model: 'x', effort: 'low' }, empty: {} }, { a: { effort: 'low', model: 'x' } }), true);
   assert.equal(sameStageSettings({ a: { effort: 'high' } }, { a: { effort: 'low' } }), false);
 });
+
+test('transcript preference survives model changes independently of reasoning support', () => {
+  const initial: Record<string, StageModelSettings> = { [stage.id]: { model: 'capable', effort: 'high', thinking: 'disabled', transcript: 'off' } };
+  assert.deepEqual(changeStageModel(initial, stage, 'unknown', options), { [stage.id]: { model: 'unknown', transcript: 'off' } });
+  assert.deepEqual(updateStage({}, stage.id, { transcript: 'if-available' }), { [stage.id]: { transcript: 'if-available' } });
+  assert.equal(sameStageSettings({ a: { transcript: 'off' } }, { a: { transcript: 'if-available' } }), false);
+  const gemini = { ...options, provider: 'gemini' as const, models: [{ id: 'gemini', label: 'Gemini', capabilities: { effortLevels: ['minimal' as const, 'high' as const], adaptiveThinking: false } }] };
+  assert.deepEqual(changeStageModel({ [stage.id]: { effort: 'minimal', transcript: 'if-available' } }, stage, 'gemini', gemini), { [stage.id]: { model: 'gemini', effort: 'minimal', transcript: 'if-available' } });
+});
