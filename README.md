@@ -60,6 +60,26 @@ npm run build
 npm test
 ```
 
+### Models and reasoning by workflow stage
+
+In **Settings → Stage models**, the panel lets each agent
+stage use its own model, reasoning effort, and adaptive-thinking setting for the
+selected provider. For example, input classification and proposal synthesis can
+use different settings even though both use the same underlying reasoning route.
+Choices are retained separately for each provider. An unset stage option inherits
+the existing route or connection default, subject to the selected model's reported
+capabilities.
+
+The host discovers models and their capabilities through the selected provider,
+loads the catalog at startup, and refreshes it before a new research run. The
+browser keeps the loaded options so opening a panel or selector does not repeat
+provider discovery. The panel only offers effort levels and thinking controls
+reported for the selected model; missing capability information is shown as
+unavailable. Models that require thinking cannot have it disabled.
+
+New runs retain their stage settings and model catalog with the execution
+snapshot. Later settings edits do not change an existing run or its retry.
+
 ### Claude output-limit recovery
 
 If a Claude Code response reaches its output-token limit, the executor can retry

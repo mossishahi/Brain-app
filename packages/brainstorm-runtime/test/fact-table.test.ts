@@ -425,6 +425,30 @@ test("the supreme judge's task: its role, the factVerdict schema, the three cata
   assert.ok(!("requirements" in task), "no requirements were resolved");
 });
 
+test("workflow and fact-control tasks resolve by stable node identity and retain execution controls", async () => {
+  const requested: string[] = [];
+  const compiled = compileContentWorkflow({
+    bundle: bundle(), workflow: WORKFLOW,
+    routeResolver: { resolve(request) {
+      requested.push(request.nodeId!);
+      return {
+        modelId: request.nodeId === "fact-verification" ? "verification-model" : "workflow-model",
+        execution: { effort: "low", thinking: "disabled", supportedEffortLevels: ["low"] },
+      };
+    } },
+    hostTools: [PROBE_TOOL], enabledHostToolIds: new Set([PROBE_TOOL.toolId]),
+  });
+  const node = await nodeTask(compiled, "verify", scopeWith({}));
+  const control = await compiled.factVerificationTask!(REQUEST);
+  assert.deepEqual(requested, ["verify", "fact-verification"]);
+  assert.equal(node.modelRequest?.modelId, "workflow-model");
+  assert.equal(control.modelRequest?.modelId, "verification-model");
+  for (const task of [node, control]) {
+    assert.deepEqual(task.modelRequest?.execution, { effort: "low", thinking: "disabled", supportedEffortLevels: ["low"] });
+    assert.deepEqual((task.input as JsonObject).modelRequest, task.modelRequest);
+  }
+});
+
 test("the supreme judge's task is the task an agent node running the verifier gets", async () => {
   const compiled = compile(bundle());
   const task = await compiled.factVerificationTask!(REQUEST);

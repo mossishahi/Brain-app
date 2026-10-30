@@ -1469,6 +1469,13 @@ export interface ClaudeAgentSettings {
   readonly fallbackModel?: string;
 }
 
+/** Overrides for one workflow agent node; absent fields inherit deployment defaults. */
+export interface StageModelSettings {
+  readonly model?: string;
+  readonly effort?: ClaudeAgentEffort;
+  readonly thinking?: "adaptive" | "disabled";
+}
+
 /**
  * The host-owned web layer's deployment settings. Web search and web fetch
  * run through the app's OWN unified pipeline on every backend — no model
@@ -1551,6 +1558,10 @@ export interface LlmSettings {
   /** Optional developer-API endpoint override (not used by the agent SDKs). */
   readonly baseUrl?: string;
   readonly modelsByRoute?: Readonly<Record<string, string>>;
+  /** Stage ids are workflow agent node ids, independent of their shared logical route. */
+  readonly stageSettingsByProvider?: Partial<Record<LlmSettings["provider"], Readonly<Record<string, StageModelSettings>>>>;
+  /** Launch-time discovery snapshot; retained by jobs on retry, never user supplied. */
+  readonly modelCatalog?: ModelCatalogSnapshot;
   /**
    * Agent SDK execution controls, shared VERBATIM by the claude-agent and
    * cursor-agent backends: both read the same maxTurns / effort / thinking /
@@ -1701,6 +1712,46 @@ export interface ServerSettings {
 export interface ModelOption {
   readonly id: string;
   readonly label: string;
+  readonly aliases?: readonly string[];
+  /** Absent means the provider has not supplied capability information. */
+  readonly capabilities?: ModelCapabilities;
+}
+
+export interface ModelCapabilities {
+  readonly effortLevels: readonly ClaudeAgentEffort[];
+  readonly adaptiveThinking: boolean;
+  /** Unknown when omitted; adaptive support alone does not imply an off switch. */
+  readonly thinkingCanBeDisabled?: boolean;
+}
+
+/** Cursor's declared parameters, preserved so workers do not rediscover them per task. */
+export interface CursorModelCatalogEntry {
+  readonly id: string;
+  readonly displayName?: string;
+  readonly aliases?: readonly string[];
+  readonly parameters?: readonly {
+    readonly id: string;
+    readonly displayName?: string;
+    readonly values: readonly { readonly value: string; readonly displayName?: string }[];
+    readonly defaultValue?: string;
+  }[];
+}
+
+export interface ModelCatalogSnapshot {
+  readonly provider: LlmSettings["provider"];
+  readonly fetchedAt: number | null;
+  readonly source: "provider" | "fallback";
+  readonly stale: boolean;
+  readonly error?: string;
+  readonly models: readonly ModelOption[];
+  readonly cursorModels?: readonly CursorModelCatalogEntry[];
+}
+
+export interface StageOption {
+  readonly id: string;
+  readonly label: string;
+  readonly description: string;
+  readonly route?: string;
 }
 
 /** Per-provider dictionary of models offered by the per-task-type picker. */
@@ -1745,7 +1796,7 @@ export interface TaskTypeOption {
   readonly description: string;
 }
 
-/** GET /api/model-options: everything the per-task-type model picker needs. */
+/** GET /api/model-options: cached stage choices and provider-declared controls. */
 export interface ModelOptionsResponse {
   readonly provider: LlmSettings["provider"];
   /** Task types from the pinned bundle's route catalog, in declared order. */
@@ -1755,6 +1806,16 @@ export interface ModelOptionsResponse {
   /** Current per-task-type selection; a missing type uses defaultModel. */
   readonly modelsByRoute: Readonly<Record<string, string>>;
   readonly defaultModel?: string;
+  /** Additive fields: older backends expose logical routes only. */
+  readonly stages?: readonly StageOption[];
+  readonly stageSettings?: Readonly<Record<string, StageModelSettings>>;
+  readonly defaults?: StageModelSettings;
+  readonly catalog?: ModelCatalogSnapshot;
+}
+
+export interface StageModelsUpdate {
+  readonly provider: LlmSettings["provider"];
+  readonly stageSettings: Readonly<Record<string, StageModelSettings>>;
 }
 
 /**
@@ -1854,6 +1915,7 @@ export interface ServerSettingsUpdate {
     readonly model?: string;
     readonly baseUrl?: string;
     readonly modelsByRoute?: Readonly<Record<string, string>>;
+    readonly stageSettingsByProvider?: LlmSettings["stageSettingsByProvider"];
     readonly agentSdk?: ClaudeAgentSettings;
     readonly apiKey?: string;
     readonly clearApiKey?: boolean;
@@ -2561,9 +2623,10 @@ export interface ToolUsageReport {
  *   POST /api/update                          -> UpdateAppResponse   (starts the detached self-updater and exits; 409 when no release is known, self-update is disabled, or the checkout is dirty)
  *   GET  /api/settings                        -> ServerSettings
  *   PUT  /api/settings                        -> ServerSettings (body: ServerSettingsUpdate — a PATCH: absent sections keep their stored value, and the provider connection is tested only when the model connection itself materially changed)
- *   GET  /api/model-options                   -> ModelOptionsResponse (task types from the pinned bundle + provider model catalog)
+ *   GET  /api/model-options                   -> ModelOptionsResponse (cached workflow stages, model capabilities, and selections)
  *   GET  /api/capabilities                    -> CapabilityOptionsResponse (toggleable capabilities from the pinned bundle's catalog)
  *   PUT  /api/settings/models-by-route        -> ServerSettings (body: ModelsByRouteUpdate; no credential re-verification)
+ *   PUT  /api/settings/stage-models           -> ServerSettings (body: StageModelsUpdate; cached capability validation, no provider call)
  *   GET  /api/jobs                            -> JobSummary[]
  *   GET  /api/attachments/roots               -> ServerAttachmentRootsResponse
  *   GET  /api/attachments/browse              -> BrowseServerFilesResponse

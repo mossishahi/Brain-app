@@ -2399,6 +2399,7 @@ class ContentCompiler {
         }
       }
       const resolved = await this.routeResolver.resolve({
+        nodeId: node.id,
         logicalRoute: node.route,
         traits: routeDefinition.traits,
         skill: node.skill,
@@ -2519,6 +2520,7 @@ class ContentCompiler {
       ];
       const modelRequest = {
         ...(resolved.modelId !== undefined ? { modelId: resolved.modelId } : {}),
+        ...(resolved.execution !== undefined ? { execution: resolved.execution } : {}),
         system,
         messages,
         ...(resolved.toolChoice !== undefined ? { toolChoice: resolved.toolChoice } : {}),
@@ -2803,6 +2805,7 @@ class ContentCompiler {
       );
     }
     const resolved = await this.routeResolver.resolve({
+      nodeId: spec.nodeId,
       logicalRoute: route,
       traits: routeDefinition.traits,
       skill,
@@ -2891,6 +2894,7 @@ class ContentCompiler {
     ];
     const modelRequest = {
       ...(resolved.modelId !== undefined ? { modelId: resolved.modelId } : {}),
+      ...(resolved.execution !== undefined ? { execution: resolved.execution } : {}),
       system,
       messages,
       ...(resolved.toolChoice !== undefined ? { toolChoice: resolved.toolChoice } : {}),

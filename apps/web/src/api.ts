@@ -2,8 +2,9 @@
  * Typed fetch helpers for every brain endpoint plus the SSE hook used by the
  * landing page and the dashboard. All shapes come from the protocol package.
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { BoundedCache } from './data/bounded-cache';
+import { CachedResource } from './data/cached-resource';
 import { SerializedResource } from './data/serialized-resource';
 import { compactEvents, isServerEvent } from './data/event-batch';
 import { API_BASE } from "./desktop/context";
@@ -35,6 +36,7 @@ import type {
   SearchServerFilesResponse,
   SendDiagnosticsResponse,
   StageActivityPage,
+  StageModelsUpdate,
   SubmitJobRequest,
   SubmitJobResponse,
   ThoughtsResponse,
@@ -128,8 +130,15 @@ export const cancelGpuProbe = (): Promise<GpuSetupReport> => request("/gpu/cance
 const settingsResource = new SerializedResource<ServerSettings>();
 function publishSettings(settings: ServerSettings): void {
   window.dispatchEvent(new CustomEvent('brain-settings-updated', { detail: settings }));
+  void refreshModelOptions().catch(() => undefined);
 }
-export const getSettings = (): Promise<ServerSettings> => settingsResource.read(() => request("/settings"));
+export const getSettings = (): Promise<ServerSettings> => settingsResource.read(() => request<ServerSettings>("/settings")).then(settings => {
+  const cached = modelOptionsResource.getSnapshot();
+  // A provider changed in another window. Ordinary settings reads reuse the
+  // launch catalog; only a known provider mismatch needs a new cached view.
+  if (cached.value && cached.value.provider !== settings.llm.provider && !cached.loading) void refreshModelOptions().catch(() => undefined);
+  return settings;
+});
 
 export const putSettings = (settings: ServerSettingsUpdate): Promise<ServerSettings> =>
   settingsResource.mutate(() => request("/settings", jsonInit("PUT", settings)), publishSettings);
@@ -141,8 +150,13 @@ export const updateSettings = (build: (current: ServerSettings) => ServerSetting
     return request("/settings", jsonInit("PUT", build(current)));
   }, publishSettings);
 
-export const getModelOptions = (): Promise<ModelOptionsResponse> =>
-  request("/model-options");
+const modelOptionsResource = new CachedResource<ModelOptionsResponse>(() => request("/model-options"));
+export const getModelOptions = modelOptionsResource.read;
+export const refreshModelOptions = modelOptionsResource.refresh;
+export const useModelOptions = () => useSyncExternalStore(modelOptionsResource.subscribe, modelOptionsResource.getSnapshot);
+
+export const putStageModels = (update: StageModelsUpdate): Promise<ServerSettings> =>
+  settingsResource.mutate(() => request("/settings/stage-models", jsonInit("PUT", update)), publishSettings);
 
 export const putModelsByRoute = (
   update: ModelsByRouteUpdate,
@@ -198,7 +212,7 @@ export const submitJob = (
   attachments: readonly string[] = [],
   capabilityOverrides: Readonly<Record<string, boolean>> = {},
 ): Promise<SubmitJobResponse> =>
-  request(
+  request<SubmitJobResponse>(
     "/jobs",
     jsonInit("POST", {
       topic,
@@ -207,7 +221,10 @@ export const submitJob = (
         ? { capabilityOverrides }
         : {}),
     } satisfies SubmitJobRequest),
-  );
+  ).finally(() => {
+    // Launch may have refreshed the provider catalog or pinned a new workflow.
+    void refreshModelOptions().catch(() => undefined);
+  });
 
 export const getCapabilityOptions = (): Promise<CapabilityOptionsResponse> =>
   request("/capabilities");

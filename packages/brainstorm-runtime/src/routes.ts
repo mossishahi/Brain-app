@@ -1,4 +1,5 @@
 import type {
+  AgentModelExecutionControls,
   CapabilityRequirements,
   JsonObject,
   ProviderOptions,
@@ -8,6 +9,8 @@ import type {
 import { RouteResolutionError } from "./errors.js";
 
 export interface BrainstormRouteRequest {
+  /** Stable workflow agent node, including synthetic fact-table tasks. */
+  readonly nodeId?: string;
   readonly logicalRoute: string;
   readonly traits: readonly string[];
   readonly skill: string;
@@ -22,6 +25,7 @@ export interface BrainstormRouteRequest {
 export interface ResolvedBrainstormRoute {
   readonly providerId?: string;
   readonly modelId?: string;
+  readonly execution?: AgentModelExecutionControls;
   readonly requirements?: CapabilityRequirements;
   readonly providerOptions?: ProviderOptions;
   readonly toolChoice?: ToolChoice;

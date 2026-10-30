@@ -190,6 +190,42 @@ function finished(result?: string): CursorSdkRunResult {
 
 /* ------------------------------------------------------------------ tests */
 
+test("stage controls use the cached Cursor catalog without mutating shared defaults", async () => {
+  const state = newState();
+  const records: PromptRecord[] = [];
+  let catalogReads = 0;
+  const executor = new CursorAgentExecutor({ apiKey: "test-key", effort: "xhigh", thinking: "adaptive",
+    listModels: async () => { catalogReads += 1; return CATALOG; },
+    agentFactory: fakeFactory([{ result: finished('{"answer":"ok"}') }], state),
+  });
+  await executor.execute({ ...structuredTask, modelRequest: { ...structuredTask.modelRequest!, modelId: "sonnet",
+    execution: { effort: "high", thinking: "disabled" },
+  } }, { runId: "stage-controls", nodePath: "root/classify", reportPrompt: (record) => records.push(record) });
+  await executor.execute({ ...structuredTask, modelRequest: { ...structuredTask.modelRequest!, execution: {} } },
+    { runId: "stage-controls", nodePath: "root/unknown" });
+  await executor.execute(structuredTask, { runId: "stage-controls", nodePath: "root/brain" });
+  assert.equal(catalogReads, 1);
+  assert.deepEqual(state.options[0]!.model, { id: "sonnet", params: [
+    { id: "thinkingLevel", value: "off" }, { id: "reasoningEffort", value: "high" },
+  ] });
+  assert.deepEqual(state.options[1]!.model, { id: "claude-sonnet-5" });
+  assert.deepEqual(state.options[2]!.model, { id: "claude-sonnet-5", params: [
+    { id: "thinkingLevel", value: "adaptive" }, { id: "reasoningEffort", value: "xhigh" },
+  ] });
+  const settings = JSON.parse(records[0]!.sections.find((section) => section.title === "Execution settings in force")!.body);
+  assert.equal(settings.effort, "high");
+  assert.equal(settings.thinking, "disabled");
+  assert.deepEqual(settings.modelParams, state.options[0]!.model.params);
+});
+
+test("a stage can disable Cursor reasoning without explicitly setting effort", () => {
+  const entry: CursorModelListEntry = { id: "reasoner", parameters: [
+    { id: "reasoning", values: [{ value: "none" }, { value: "low" }, { value: "high" }] },
+  ] };
+  assert.deepEqual(resolveModelParams(entry, undefined, "disabled"), [{ id: "reasoning", value: "none" }]);
+  assert.deepEqual(resolveModelParams(entry, undefined, undefined), []);
+});
+
 test("GPU custom tools preserve task ownership, the durable budget and caller cancellation", async () => {
   const root = mkdtempSync(join(tmpdir(), "cursor-gpu-context-"));
   try {

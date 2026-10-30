@@ -1221,6 +1221,48 @@ test("returns a normalized error when Agent SDK execution fails", async () => {
 
 const OUTPUT_LIMIT_MESSAGE = "API Error: Claude's response exceeded the 64000 output token maximum. To configure this behavior, set the CLAUDE_CODE_MAX_OUTPUT_TOKENS environment variable.";
 
+test("per-stage Claude controls override shared defaults without leaking to the next task", async () => {
+  const captured: ClaudeAgentQueryInput[] = [];
+  const records: PromptRecord[] = [];
+  const executor = new ClaudeAgentExecutor({ token: "test-token", effort: "max", thinking: "adaptive", queryFn: successQuery(captured) });
+  await executor.execute({ ...structuredTask, modelRequest: { ...structuredTask.modelRequest!, modelId: "stage-model",
+    execution: { effort: "low", thinking: "disabled", supportedEffortLevels: ["low", "medium"] },
+  } }, { runId: "stage-controls", nodePath: "root/classify", reportPrompt: (record) => records.push(record) });
+  await executor.execute(structuredTask, { runId: "stage-controls", nodePath: "root/brain" });
+  assert.equal(captured[0]!.options.model, "stage-model");
+  assert.equal(captured[0]!.options.effort, "low");
+  assert.deepEqual(captured[0]!.options.thinking, { type: "disabled" });
+  assert.equal(captured[1]!.options.effort, "max");
+  assert.equal((captured[1]!.options.thinking as { type: string }).type, "adaptive");
+  const settings = JSON.parse(records[0]!.sections.find((section) => section.title === "Execution settings in force")!.body);
+  assert.equal(settings.effort, "low");
+  assert.deepEqual(settings.thinking, { type: "disabled" });
+});
+
+test("stage output-limit recovery retains unknown controls and respects declared effort support", async (t) => {
+  for (const execution of [{}, { effort: "high" as const, supportedEffortLevels: ["high" as const] },
+    { effort: "high" as const, supportedEffortLevels: ["medium" as const, "high" as const] }]) {
+    await t.test(JSON.stringify(execution), async () => {
+      const captured: ClaudeAgentQueryInput[] = [];
+      const executor = new ClaudeAgentExecutor({ token: "test-token", effort: "max", thinking: "adaptive",
+        queryFn: (input) => ({ async *[Symbol.asyncIterator]() {
+          captured.push(input);
+          if (captured.length === 1) throw new Error(OUTPUT_LIMIT_MESSAGE);
+          yield* successQuery([])(input);
+        } }),
+      });
+      const result = await executor.execute({ ...structuredTask, modelRequest: { ...structuredTask.modelRequest!, execution } },
+        { runId: "stage-recovery", nodePath: "root/classify" });
+      assert.equal(result.status, "ok");
+      assert.equal(captured.length, 2);
+      for (const input of captured) assert.equal(input.options.thinking, undefined);
+      assert.equal(captured[0]!.options.effort, "effort" in execution ? execution.effort : undefined);
+      assert.equal(captured[1]!.options.effort, "effort" in execution
+        ? execution.supportedEffortLevels!.some((level) => level === "medium") ? "medium" : "high" : undefined);
+    });
+  }
+});
+
 test("output-limit recovery preserves the schema, caps, validator, and terminal usage when the SDK subsequently throws", async () => {
   const captured: ClaudeAgentQueryInput[] = [];
   const reported: AgentProgress[] = [];

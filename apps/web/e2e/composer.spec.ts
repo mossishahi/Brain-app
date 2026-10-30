@@ -251,7 +251,7 @@ test('attachment menus restore focus and Settings task-model saves preserve unre
   await page.keyboard.press('ArrowDown');
   await page.keyboard.press('Escape');
   await expect(attachments).toBeFocused();
-  const models = await openSettings(page, 'Models & connections');
+  const models = await openSettings(page, 'Stage models');
   await models.getByRole('combobox', { name: 'Review', exact: true }).selectOption('review-model');
   await expect(models.getByRole('combobox', { name: 'Synthesis', exact: true })).toHaveValue('retained-custom-model');
   await models.getByRole('button', { name: 'Save models', exact: true }).click();
@@ -262,7 +262,7 @@ test('attachment menus restore focus and Settings task-model saves preserve unre
   await expect(models).not.toBeVisible();
   await expect(page.locator('#canvas-settings-trigger')).toBeFocused();
   await expect(question(page)).toHaveValue('A draft that stays while models are configured');
-  await openSettings(page, 'Models & connections');
+  await openSettings(page, 'Stage models');
   await expect(models.getByRole('combobox', { name: 'Review', exact: true })).toHaveValue('review-model');
   await expect(models.getByRole('combobox', { name: 'Synthesis', exact: true })).toHaveValue('retained-custom-model');
   await models.getByRole('button', { name: 'Done', exact: true }).click();

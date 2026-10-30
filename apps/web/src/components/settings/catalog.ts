@@ -1,6 +1,7 @@
 /** Settings navigation is independent of the forms and their storage scopes. */
 export const settingsCategories = [
   { id: "connections", label: "Models & connections", description: "Choose a provider and configure how models work." },
+  { id: "stageModels", label: "Stage models", description: "Choose a model and reasoning settings for each stage of research." },
   { id: "research", label: "Research", description: "Set your review defaults and approval preferences." },
   { id: "tools", label: "Tools & sources", description: "Manage search, attachments, and execution capabilities." },
   { id: "execution", label: "Execution", description: "Configure where research tasks and GPU jobs run." },
@@ -14,7 +15,7 @@ export type SettingsSectionId = "updates" | "execution" | "gpu" | "model" | "cre
 export type SaveState = "idle" | "saving" | "saved" | "error";
 
 export const categorySections: Record<SettingsCategory, readonly SettingsSectionId[]> = {
-  connections: ["model", "credential"], research: ["confirmation", "review", "panel", "panelComposition"],
+  connections: ["model", "credential"], stageModels: [], research: ["confirmation", "review", "panel", "panelComposition"],
   tools: ["tools", "webSearch", "availability"], execution: ["execution", "gpu"],
   recovery: ["recovery"], updates: ["updates"], appearance: [],
 };

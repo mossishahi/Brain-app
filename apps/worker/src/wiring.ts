@@ -18,8 +18,6 @@ import {
   literatureActivities,
   StaticCapabilityToolResolver,
   taxonomyActivities,
-  type BrainstormRouteResolver,
-  type ResolvedBrainstormRoute,
   type SkillResolver,
 } from "@brainstorm-agentic/brainstorm-runtime";
 import {
@@ -62,6 +60,8 @@ import { factConsultationSchema, factVerdictSchema } from "@brainstorm-agentic/c
 import { ClaudeAgentExecutor } from "@brainstorm-agentic/executor-claude-agent";
 import { CursorAgentExecutor } from "@brainstorm-agentic/executor-cursor-agent";
 import { AnthropicMessagesProvider } from "@brainstorm-agentic/provider-anthropic";
+import type { ModelCatalogSnapshot, StageModelSettings } from "@brainstorm-agentic/protocol";
+import { contentRouteResolver, modelCatalogFromEnv, stageSettingsFromEnv } from "./stage-models.js";
 
 import { attachmentTools, ATTACHMENT_TOOL_NAMES } from "./attachment-tools.js";
 import { lazyEncoderProvider, nodeTextsFromBundle } from "./literature-wiring.js";
@@ -105,6 +105,8 @@ export interface ProviderConfig {
   readonly models?: Readonly<Record<string, string>>;
   /** Fallback model id when a route has no explicit entry. */
   readonly defaultModel?: string;
+  readonly stageSettings?: Readonly<Record<string, StageModelSettings>>;
+  readonly modelCatalog?: ModelCatalogSnapshot;
   readonly apiKey?: string;
   readonly setupToken?: string;
   readonly cursorApiKey?: string;
@@ -341,6 +343,9 @@ export function buildAgentExecutor(
     // switching SDKs changes the transport, never the knobs.
     return new CursorAgentExecutor({
       apiKey: config.cursorApiKey,
+      ...(config.modelCatalog !== undefined ? {
+        listModels: async () => config.modelCatalog!.cursorModels ?? [],
+      } : {}),
       ...(attachmentRoots.length > 0
         ? { attachmentRoots: [...attachmentRoots] }
         : {}),
@@ -502,45 +507,6 @@ export function buildAgentExecutor(
     // executor a window onto it lets the activity feed narrate those waits.
     dispatchGate: coordinator,
   });
-}
-
-/**
- * Logical content route -> concrete model id, as pure deployment config. The
- * resolver is dynamic over route names, so new task types published by the
- * bundle work without code changes. Routes carrying the "extended-reasoning"
- * trait additionally get the Messages-API thinking configuration; it is
- * constant per route across a run, which keeps prompt-cache prefixes stable.
- */
-function contentRouteResolver(config: ProviderConfig): BrainstormRouteResolver {
-  const models = config.models ?? {};
-  const fallback = config.defaultModel ?? models.reasoning ?? "";
-  return {
-    resolve(request): ResolvedBrainstormRoute {
-      if (config.provider === "offline") return {};
-      const modelId = models[request.logicalRoute] ?? fallback;
-      const thinking =
-        config.provider === "anthropic" &&
-        request.traits.includes("extended-reasoning")
-          ? {
-              providerOptions: {
-                anthropic: {
-                  thinking: { type: "adaptive", display: "summarized" },
-                },
-              },
-            }
-          : {};
-      return {
-        providerId:
-          config.provider === "claude-agent"
-            ? "claude-agent"
-            : config.provider === "cursor-agent"
-              ? "cursor-agent"
-              : "anthropic",
-        ...(modelId ? { modelId } : {}),
-        ...thinking,
-      };
-    },
-  };
 }
 
 /**
@@ -1292,6 +1258,8 @@ export function providerConfigFromEnv(env: NodeJS.ProcessEnv, offline: boolean):
         : "anthropic";
   const defaultModel = env.BRAINSTORM_AGENTIC_MODEL?.trim();
   const models = modelsByRouteFromEnv(env);
+  const stageSettings = stageSettingsFromEnv(env);
+  const modelCatalog = modelCatalogFromEnv(env, selectedProvider);
   const maxTurns = Number(env.BRAINSTORM_AGENTIC_AGENT_MAX_TURNS);
   const maxBudgetUsd = Number(
     env.BRAINSTORM_AGENTIC_AGENT_MAX_BUDGET_USD,
@@ -1344,6 +1312,8 @@ export function providerConfigFromEnv(env: NodeJS.ProcessEnv, offline: boolean):
     provider: selectedProvider,
     ...(Object.keys(models).length > 0 ? { models } : {}),
     ...(defaultModel ? { defaultModel } : {}),
+    ...(stageSettings !== undefined ? { stageSettings } : {}),
+    ...(modelCatalog !== undefined ? { modelCatalog } : {}),
     ...(env.ANTHROPIC_API_KEY ?? fileCredentials.anthropicApiKey
       ? { apiKey: (env.ANTHROPIC_API_KEY ?? fileCredentials.anthropicApiKey)! }
       : {}),

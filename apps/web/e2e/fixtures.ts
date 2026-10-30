@@ -1,5 +1,5 @@
 import type { Page } from '@playwright/test';
-import type { GpuSetupReport, JobSummary, ReadinessReport, ServerSettings } from '@brainstorm-agentic/protocol';
+import type { GpuSetupReport, JobSummary, ModelOptionsResponse, ReadinessReport, ServerSettings } from '@brainstorm-agentic/protocol';
 
 export function gpuDraftFixture(): GpuSetupReport {
   return {
@@ -33,9 +33,10 @@ export function defaultTestSettings(): ServerSettings {
 export type MockWrite = { method: string; path: string; body: any };
 
 /** Every API request is fulfilled locally. Unknown routes fail closed. */
-export async function mockBrain(page: Page, options: { jobs?: readonly JobSummary[]; trash?: readonly JobSummary[]; settings?: ServerSettings } = {}) {
+export async function mockBrain(page: Page, options: { jobs?: readonly JobSummary[]; trash?: readonly JobSummary[]; settings?: ServerSettings; modelOptions?: Partial<ModelOptionsResponse> } = {}) {
   const state = {
     settings: options.settings ?? defaultTestSettings(),
+    modelOptions: options.modelOptions,
     jobs: [...(options.jobs ?? [makeJob(1), makeJob(2)])],
     trash: [...(options.trash ?? [])],
     readiness: { ready: true, updatedAt: Date.now(), checks: [{ id: 'llm', label: 'Model connection', required: true, state: 'ok', message: 'Ready' }] } as ReadinessReport,
@@ -58,10 +59,14 @@ export async function mockBrain(page: Page, options: { jobs?: readonly JobSummar
     if (method !== 'GET') state.writes.push({ method, path, body });
     const json = (value: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(value) });
     if (path === '/settings' && method === 'GET') return json(state.settings);
-    if ((path === '/settings' || path === '/settings/models-by-route') && method === 'PUT') {
+    if ((path === '/settings' || path === '/settings/models-by-route' || path === '/settings/stage-models') && method === 'PUT') {
       if (state.settingsDelayMs) await new Promise((resolve) => setTimeout(resolve, state.settingsDelayMs));
       if (state.failSettings) return json({ error: typeof state.failSettings === 'string' ? state.failSettings : 'The settings service is temporarily unavailable.' }, 503);
-      if (path.endsWith('models-by-route')) state.settings = { ...state.settings, llm: { ...state.settings.llm, modelsByRoute: body.modelsByRoute } };
+      if (path.endsWith('stage-models')) {
+        if (body.provider !== state.settings.llm.provider) return json({ error: 'The provider changed. Reload model settings.' }, 409);
+        state.settings = { ...state.settings, llm: { ...state.settings.llm, stageSettingsByProvider: { ...state.settings.llm.stageSettingsByProvider, [body.provider]: body.stageSettings } } };
+      }
+      else if (path.endsWith('models-by-route')) state.settings = { ...state.settings, llm: { ...state.settings.llm, modelsByRoute: body.modelsByRoute } };
       else {
         const next = { ...state.settings, ...body };
         // Match SettingsManager.mergeOverStored: these sections merge once;
@@ -117,7 +122,10 @@ export async function mockBrain(page: Page, options: { jobs?: readonly JobSummar
     }
     if (path === '/update-check') return json({ version: '0.1.0', selfUpdateEnabled: false });
     if (path.startsWith('/readiness')) return json(state.readiness);
-    if (path === '/model-options') return json({ provider: state.settings.llm.provider, defaultModel: 'auto', modelsByRoute: state.settings.llm.modelsByRoute ?? {}, taskTypes: [{ id: 'review', description: 'Scientific review' }, { id: 'synthesis', description: 'Combine perspectives' }], models: [{ id: 'auto', label: 'Auto' }, { id: 'review-model', label: 'Review model' }] });
+    if (path === '/model-options') return json({ defaultModel: 'auto', taskTypes: [{ id: 'review', description: 'Scientific review' }, { id: 'synthesis', description: 'Combine perspectives' }], models: [{ id: 'auto', label: 'Auto', capabilities: { effortLevels: ['low', 'medium', 'high'], adaptiveThinking: true, thinkingCanBeDisabled: true } }, { id: 'review-model', label: 'Review model' }],
+      ...state.modelOptions, provider: state.settings.llm.provider, modelsByRoute: state.settings.llm.modelsByRoute ?? {},
+      ...(state.modelOptions?.stages ? { stageSettings: state.settings.llm.stageSettingsByProvider?.[state.settings.llm.provider] ?? {}, defaults: { model: state.settings.llm.model, effort: state.settings.llm.agentSdk?.effort, thinking: state.settings.llm.agentSdk?.thinking } } : {}),
+    });
     if (path === '/capabilities') return json({ version: 'test', capabilities: [{ id: 'web-search', description: 'Find supporting material', operations: ['web.search'], locked: false }, { id: 'code-execution', description: 'Run calculations', operations: ['code.run'], locked: false }, { id: 'taxonomy-access', description: 'Required taxonomy', operations: ['taxonomy.get'], locked: true }] });
     if (path === '/jobs' && method === 'GET') return state.failJobs
       ? json({ error: typeof state.failJobs === 'string' ? state.failJobs : 'Research history is temporarily unavailable.' }, 503)

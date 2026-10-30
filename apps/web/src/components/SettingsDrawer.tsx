@@ -15,7 +15,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { Dialog } from "@base-ui/react/dialog";
-import { LuKeyRound, LuFlaskConical, LuGlobe, LuCpu, LuRotateCcw, LuDownload, LuPalette } from "react-icons/lu";
+import { LuKeyRound, LuWorkflow, LuFlaskConical, LuGlobe, LuCpu, LuRotateCcw, LuDownload, LuPalette } from "react-icons/lu";
 import {
   SLURM_COMMAND_TAG,
 } from "@brainstorm-agentic/protocol";
@@ -24,7 +24,7 @@ import type {
   ServerSettings,
   ServerSettingsUpdate,
 } from "@brainstorm-agentic/protocol";
-import { errorMessage, getHealth, getSettings, postUpdateCheck } from "../api";
+import { errorMessage, getHealth, getSettings, postUpdateCheck, useModelOptions } from "../api";
 import { TrashIcon, XIcon } from "./Icons";
 import { categorySections, settingsCategories, settingsCategory, type SettingsCategory } from "./settings/catalog";
 import { SettingsCategoryContext, SettingsSection as Section, SaveStatus } from "./settings/SettingsSection";
@@ -35,13 +35,14 @@ import { ToolsAndProviders } from "./settings/ToolsAndProviders";
 import { SettingsToggle } from "./settings/SettingsToggle";
 import { RunCapabilitiesSettings } from "./settings/RunCapabilitiesSettings";
 import { TaskModelsSettings } from "./settings/TaskModelsSettings";
+import { findModel } from "./settings/stage-models-model";
 import { GpuSetupControl } from "../features/gpu/GpuSetup";
 import { ToolReadinessSettings } from "./settings/ToolReadinessSettings";
 import { approvalPreferenceDescription, askBeforeApprovalLabel } from "./settings/approval-preference";
 import "./settings/settings.css";
 export type { SettingsCategory } from "./settings/catalog";
 
-const categoryIcons = { connections: LuKeyRound, research: LuFlaskConical, tools: LuGlobe, execution: LuCpu, recovery: LuRotateCcw, updates: LuDownload, appearance: LuPalette };
+const categoryIcons = { connections: LuKeyRound, stageModels: LuWorkflow, research: LuFlaskConical, tools: LuGlobe, execution: LuCpu, recovery: LuRotateCcw, updates: LuDownload, appearance: LuPalette };
 
 type Provider = "anthropic" | "claude-agent" | "cursor-agent" | "offline";
 const providerLabels: Record<Provider, string> = { anthropic: "Anthropic API", "claude-agent": "Claude Agent SDK", "cursor-agent": "Cursor SDK", offline: "Offline" };
@@ -87,6 +88,9 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
   } | null>(null);
   const [provider, setProvider] = useState<Provider>("anthropic");
   const [model, setModel] = useState("");
+  const modelOptions = useModelOptions().value;
+  const defaultCapabilities = modelOptions?.provider === provider
+    ? findModel(modelOptions.models, model || modelOptions.defaults?.model || modelOptions.defaultModel)?.capabilities : undefined;
   const [apiKey, setApiKey] = useState("");
   const [setupToken, setSetupToken] = useState("");
   const [cursorApiKey, setCursorApiKey] = useState("");
@@ -919,11 +923,12 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
                   <div className="field-grid-two">
                     <div className="field">
                       <label className="field-label" htmlFor="settings-agent-effort">
-                        Reasoning effort
+                        Default reasoning effort
                       </label>
                       <select
                         id="settings-agent-effort"
                         value={agentEffort}
+                        disabled={!defaultCapabilities?.effortLevels.length}
                         onChange={(e) => {
                           setAgentEffort(
                             e.target.value as "low" | "medium" | "high" | "xhigh" | "max",
@@ -945,20 +950,19 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
                           });
                         }}
                       >
-                        <option value="low">low</option>
-                        <option value="medium">medium</option>
-                        <option value="high">high</option>
-                        <option value="xhigh">xhigh</option>
-                        <option value="max">max</option>
+                        {!defaultCapabilities?.effortLevels.includes(agentEffort) && <option value={agentEffort} disabled>{agentEffort} (saved; unavailable for this model)</option>}
+                        {defaultCapabilities?.effortLevels.map(effort => <option key={effort} value={effort}>{effort}</option>)}
                       </select>
+                      {!defaultCapabilities && <span className="field-note">This model’s reasoning capabilities are not available.</span>}
                     </div>
                     <div className="field">
                       <label className="field-label" htmlFor="settings-agent-thinking">
-                        Extended thinking
+                        Default adaptive thinking
                       </label>
                       <select
                         id="settings-agent-thinking"
                         value={agentThinking}
+                        disabled={!defaultCapabilities?.adaptiveThinking || defaultCapabilities.thinkingCanBeDisabled !== true}
                         onChange={(e) => {
                           const next = e.target.value as "adaptive" | "disabled";
                           setAgentThinking(next);
@@ -971,9 +975,10 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
                           });
                         }}
                       >
-                        <option value="adaptive">adaptive</option>
-                        <option value="disabled">disabled</option>
+                        {(defaultCapabilities?.adaptiveThinking || agentThinking === 'adaptive') && <option value="adaptive" disabled={!defaultCapabilities?.adaptiveThinking}>adaptive</option>}
+                        {(defaultCapabilities?.thinkingCanBeDisabled === true || agentThinking === 'disabled') && <option value="disabled" disabled={defaultCapabilities?.thinkingCanBeDisabled !== true}>disabled</option>}
                       </select>
+                      {defaultCapabilities?.adaptiveThinking && defaultCapabilities.thinkingCanBeDisabled !== true && <span className="field-note">This model manages thinking automatically.</span>}
                     </div>
                   </div>
                   <div className="field">
@@ -995,8 +1000,8 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
               )}
             </Section>
 
-            <Section category="connections" title="Models by task type">
-              {activeCategory === "connections" && <TaskModelsSettings settings={loaded} />}
+            <Section category="stageModels" title="Models by workflow stage" summary={`Provider: ${providerLabels[loaded.llm.provider]}`}>
+              {activeCategory === "stageModels" && <TaskModelsSettings settings={loaded} />}
             </Section>
 
             <Section
@@ -1846,7 +1851,7 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
             </div>
           </div>
           <footer className="settings-footer">
-            {closeWarning ? <div className="settings-close-warning" role="alert"><p>{closeWarning}</p><div><button type="button" className="btn" onClick={() => { afterClose.current = null; setCloseWarning(null); }}>Keep editing</button><button type="button" className="btn" disabled={closing} onClick={() => void requestClose(true)}>Discard unsaved changes</button></div></div> : <><span>Most changes save automatically. Credentials and task models need Save.</span><button type="button" className="btn" disabled={closing} onClick={() => void requestClose()}>{closing ? "Saving…" : "Done"}</button></>}
+            {closeWarning ? <div className="settings-close-warning" role="alert"><p>{closeWarning}</p><div><button type="button" className="btn" onClick={() => { afterClose.current = null; setCloseWarning(null); }}>Keep editing</button><button type="button" className="btn" disabled={closing} onClick={() => void requestClose(true)}>Discard unsaved changes</button></div></div> : <><span>Most changes save automatically. Credentials and stage models need Save.</span><button type="button" className="btn" disabled={closing} onClick={() => void requestClose()}>{closing ? "Saving…" : "Done"}</button></>}
           </footer>
         </Dialog.Popup>
       </Dialog.Portal>

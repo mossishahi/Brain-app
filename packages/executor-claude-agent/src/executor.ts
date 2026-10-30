@@ -274,10 +274,12 @@ class SdkTerminalResultError extends Error {
 
 function recoveryEffort(
   effort: ClaudeAgentExecutorConfig["effort"],
+  supported?: readonly NonNullable<ClaudeAgentExecutorConfig["effort"]>[],
 ): NonNullable<ClaudeAgentExecutorConfig["effort"]> {
-  if (effort === "max" || effort === "xhigh") return "high";
-  if (effort === "low" || effort === "medium") return effort;
-  return "medium";
+  const reduced = effort === "max" || effort === "xhigh" ? "high" :
+    effort === "low" || effort === "medium" ? effort : "medium";
+  return supported !== undefined && !supported.includes(reduced) && effort !== undefined
+    ? effort : reduced;
 }
 
 /** Default session inactivity ceiling; see ClaudeAgentExecutorConfig.stallTimeoutMs. */
@@ -2258,6 +2260,8 @@ function queryOptions(
     (name) => !tools.includes(name),
   );
   const description = task.modelRequest;
+  const effort = config.effort ?? (description?.execution === undefined ? "high" : undefined);
+  const thinking = config.thinking ?? (description?.execution === undefined ? "adaptive" : undefined);
   const options: UnknownRecord = {
     abortController: controller,
     allowedTools: tools,
@@ -2270,17 +2274,18 @@ function queryOptions(
     // content-free heartbeats. This adds no tokens, turns, or API calls.
     includePartialMessages: true,
     maxTurns: config.maxTurns ?? 100,
-    effort: config.effort ?? "high",
+    ...(effort !== undefined ? { effort } : {}),
     // The reasoning trace (a summary; the raw chain of thought is never
     // returned) is requested only for routes that capture it; other tasks
     // keep the faster omitted display.
-    thinking:
-      config.thinking === "disabled"
+    ...(thinking !== undefined ? { thinking:
+      thinking === "disabled"
         ? { type: "disabled" }
         : {
             type: "adaptive",
             display: capture.wantsTrace ? "summarized" : "omitted",
           },
+    } : {}),
     cwd: config.cwd ?? process.cwd(),
     env: sdkEnvironment(config.token, config.env),
     hooks: fileAccessHooks(config, observeToolUse),
@@ -2846,6 +2851,10 @@ export class ClaudeAgentExecutor implements AgentExecutor {
     context: AgentExecutionContext,
   ): Promise<AgentResult> {
     const attempts = this.config.maxValidationAttempts ?? 3;
+    const execution = task.modelRequest?.execution;
+    const taskConfig: ClaudeAgentExecutorConfig = execution === undefined ? this.config : {
+      ...this.config, effort: execution.effort, thinking: execution.thinking,
+    };
     const stepwise = stepwiseSpecOf(task);
     // One machine-readable record of how the broker resolved this task's
     // capabilities, mirroring the generic tool loop, so both executor paths
@@ -2875,7 +2884,7 @@ export class ClaudeAgentExecutor implements AgentExecutor {
     }
     const wantsTrace =
       routeTraits(task).includes(TRACE_TRAIT) &&
-      this.config.thinking !== "disabled";
+      (execution === undefined ? taskConfig.thinking !== "disabled" : taskConfig.thinking === "adaptive");
     let validationIssues: string[] = [];
     let rejectedOutput: JsonValue | undefined;
     let usage = emptyUsage();
@@ -2909,10 +2918,12 @@ export class ClaudeAgentExecutor implements AgentExecutor {
       try {
         const result = await executeQuery(
           {
-            ...this.config,
+            ...taskConfig,
             cwd: workspace,
             ...(outputLimitRetries > 0 ? {
-              effort: recoveryEffort(this.config.effort),
+              ...(taskConfig.effort !== undefined || execution === undefined
+                ? { effort: recoveryEffort(taskConfig.effort, execution?.supportedEffortLevels) }
+                : {}),
               ...(this.config.maxBudgetUsd !== undefined ? {
                 maxBudgetUsd: Math.max(0, this.config.maxBudgetUsd - reportedCostUsd),
               } : {}),

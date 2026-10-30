@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
-import { errorMessage, postUpdateCheck } from '../../api';
+import { errorMessage, postUpdateCheck, useModelOptions } from '../../api';
+import { findModel } from '../settings/stage-models-model';
 import { loadOptionalModule } from '../../optional-module';
 import { backgroundOptions, setAppearance, useAppearance } from '../../backgrounds';
 import { settingsCategories, type SettingsCategory } from '../settings/catalog';
@@ -13,7 +14,7 @@ import type { QuickEditorId } from './QuickSettingsEditor';
 
 const QuickSettingsEditor = lazy(() => loadOptionalModule(() => import('./QuickSettingsEditor')).then(module => ({ default: module.QuickSettingsEditor })));
 const editorCategory: Record<QuickEditorId, SettingsCategory> = {
-  model: 'connections', modelsByTask: 'connections', agentLimits: 'connections', searchLimits: 'tools',
+  model: 'connections', modelsByTask: 'stageModels', agentLimits: 'connections', searchLimits: 'tools',
   contactEmail: 'tools', recoveryBuffer: 'recovery', appInfo: 'updates',
 };
 const future = 'Defaults for new research';
@@ -26,6 +27,7 @@ const providers = [
 
 export function WorkspaceControls({ open, onOpenChange, onOpenSettings }: { open: boolean; onOpenChange: (open: boolean) => void; onOpenSettings: (category: SettingsCategory) => void }) {
   const state = useQuickSettings();
+  const modelOptions = useModelOptions().value;
   const appearance = useAppearance();
   const [editor, setEditor] = useState<QuickEditorId | null>(null);
   const [checking, setChecking] = useState(false);
@@ -85,6 +87,7 @@ export function WorkspaceControls({ open, onOpenChange, onOpenSettings }: { open
         onSelect: () => setAppearance({ [id]: option.value } as Parameters<typeof setAppearance>[0]) })),
     });
     const groups: Partial<Record<SettingsCategory, QuickControlItem[]>> = {
+      stageModels: [setup('stageModels', 'Configure stage models…')],
       appearance: [
         appearanceChoice('theme', 'Theme', [{ value: 'system', label: 'Follow system' }, { value: 'light', label: 'Light' }, { value: 'dark', label: 'Dark' }]),
         appearanceChoice('background', 'Background', backgroundOptions.map(option => ({ value: option.id, label: option.label }))),
@@ -103,6 +106,8 @@ export function WorkspaceControls({ open, onOpenChange, onOpenSettings }: { open
     if (s) {
       const agent = { ...agentDefaults, ...s.llm.agentSdk };
       const sdk = s.llm.provider === 'claude-agent' || s.llm.provider === 'cursor-agent';
+      const capabilities = modelOptions?.provider === s.llm.provider
+        ? findModel(modelOptions.models, s.llm.model || modelOptions.defaults?.model || modelOptions.defaultModel)?.capabilities : undefined;
       const web = s.webSearch;
       const host = web?.mode !== 'agent';
       const hostReason = host ? undefined : 'Uses the app search tools. Agent-native search is currently selected.';
@@ -116,9 +121,9 @@ export function WorkspaceControls({ open, onOpenChange, onOpenSettings }: { open
             ? { kind: 'choice', id: `provider-${provider.value}`, label: provider.label, selected: s.llm.provider === provider.value, disabled: state.status.provider?.pending, onSelect: () => { void changeQuickSetting('provider', provider.value); } }
             : action(`provider-${provider.value}`, `${provider.label}…`, () => configure('connections'), { description: 'Set up a connection first.' })) },
         { ...editorAction('model', 'Default model…', s.llm.model ?? 'Provider default'), disabled: s.llm.provider === 'offline', reason: s.llm.provider === 'offline' ? 'Offline research uses no model.' : undefined },
-        { ...editorAction('modelsByTask', 'Models by task type…'), disabled: s.llm.provider === 'offline' },
-        ...(sdk ? [selection('effort', 'Reasoning effort', agent.effort, ['low', 'medium', 'high', 'xhigh', 'max'].map(value => ({ value, label: value === 'xhigh' ? 'Extra high' : value[0]!.toUpperCase() + value.slice(1) }))),
-          toggle('thinking', 'Extended thinking', agent.thinking !== 'disabled', 'Adaptive reasoning when enabled.'), editorAction('agentLimits', 'Task limits & fallback…', `${agent.maxTurns} turns`)] : []),
+        { ...(modelOptions?.stages ? action('edit-stage-models', 'Models by workflow stage…', () => configure('stageModels')) : editorAction('modelsByTask', 'Models by task type…')), disabled: s.llm.provider === 'offline' },
+        ...(sdk ? [{ ...selection('effort', 'Reasoning effort', agent.effort, (capabilities?.effortLevels ?? []).map(value => ({ value, label: value === 'xhigh' ? 'Extra high' : value[0]!.toUpperCase() + value.slice(1) })), 'Default for stages using this model.'), disabled: !capabilities?.effortLevels.length, reason: 'Supported reasoning levels depend on the selected model.' },
+          toggle('thinking', 'Extended thinking', capabilities?.adaptiveThinking === true && (capabilities.thinkingCanBeDisabled === false || agent.thinking !== 'disabled'), 'Default adaptive thinking for new research.', '', !capabilities?.adaptiveThinking || capabilities.thinkingCanBeDisabled !== true, 'A thinking switch is not available for this model.'), editorAction('agentLimits', 'Task limits & fallback…', `${agent.maxTurns} turns`)] : []),
         setup('connections', 'Configure connections…'),
       ];
       groups.research = [
@@ -171,7 +176,7 @@ export function WorkspaceControls({ open, onOpenChange, onOpenSettings }: { open
     }
     return settingsCategories.map(category => ({ kind: 'submenu', id: category.id, label: category.label, contentDescription: category.id === 'appearance' ? local : category.id === 'recovery' ? live : category.id === 'updates' ? 'This deployment' : future,
       children: groups[category.id] ?? [action(`load-${category.id}`, state.loading ? 'Loading settings…' : 'Retry loading settings', () => { void loadQuickSettings(); }, { keepOpen: true, disabled: state.loading, error: state.error }), setup(category.id, 'Open settings…')] }));
-  }, [state, appearance, checking, checkStatus, checkError, onOpenSettings, onOpenChange]);
+  }, [state, modelOptions, appearance, checking, checkStatus, checkError, onOpenSettings, onOpenChange]);
 
   return <>
     <QuickControls open={open} onOpenChange={next => { if (next) setEditor(null); onOpenChange(next); }} items={items} loading={state.loading && !state.data} error={state.error}

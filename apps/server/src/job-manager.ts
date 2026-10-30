@@ -94,6 +94,8 @@ export interface JobManagerOptions {
   readonly searxngInstanceId?: string;
   readonly contentRegistryUrl?: string;
   readonly workerPath?: string;
+  /** Refresh model metadata and validate new-run choices before creating a job. */
+  readonly prepareLaunchSettings?: (settings: ServerSettings) => Promise<ServerSettings>;
   readonly env?: NodeJS.ProcessEnv;
   readonly now?: () => number;
   readonly onChange?: () => void;
@@ -298,6 +300,7 @@ export class JobManager {
   private readonly jobs = new Map<string, JobRecord>();
   private readonly contentRegistryUrl: string | undefined;
   private readonly workerPath: string;
+  private readonly prepareLaunchSettings?: (settings: ServerSettings) => Promise<ServerSettings>;
   private readonly env: NodeJS.ProcessEnv;
   private readonly now: () => number;
   private readonly onChange: () => void;
@@ -348,6 +351,7 @@ export class JobManager {
     this.sessionsDir = join(options.workspace, "workspace", "sessions");
     this.contentRegistryUrl = options.contentRegistryUrl;
     this.workerPath = options.workerPath ?? defaultWorkerPath();
+    this.prepareLaunchSettings = options.prepareLaunchSettings;
     this.env = options.env ?? process.env;
     this.now = options.now ?? (() => Date.now());
     this.onChange = options.onChange ?? (() => undefined);
@@ -988,7 +992,7 @@ export class JobManager {
       ),
     );
     const settings: ServerSettings = {
-      ...structuredClone(this.settings.get()),
+      ...structuredClone(await this.settings.snapshotForLaunch(this.prepareLaunchSettings)),
       ...(Object.keys(overrides).length > 0
         ? { capabilityOverrides: overrides }
         : {}),

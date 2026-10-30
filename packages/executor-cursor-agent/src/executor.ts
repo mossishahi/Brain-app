@@ -843,7 +843,7 @@ export function resolveModelParams(
     );
     if (value !== undefined) params.push({ id: thinkingDefinition.id, value });
   }
-  if (effort !== undefined && effortDefinition !== undefined) {
+  if (effortDefinition !== undefined && (effort !== undefined || (thinking === "disabled" && thinkingDefinition === undefined))) {
     // GPT/Kimi/GLM-family models fold BOTH knobs into one `reasoning`
     // parameter. An explicit "no extended thinking" wins over effort there:
     // reasoning "none" IS thinking off for those models.
@@ -851,8 +851,8 @@ export function resolveModelParams(
       thinking === "disabled" && thinkingDefinition === undefined;
     const value = wantsOff
       ? (pick(effortDefinition, THINKING_OFF_VALUES) ??
-        pick(effortDefinition, EFFORT_LADDER[effort] ?? []))
-      : pick(effortDefinition, EFFORT_LADDER[effort] ?? []);
+        pick(effortDefinition, effort === undefined ? [] : EFFORT_LADDER[effort] ?? []))
+      : pick(effortDefinition, effort === undefined ? [] : EFFORT_LADDER[effort] ?? []);
     if (value !== undefined) params.push({ id: effortDefinition.id, value });
   }
   return params;
@@ -2459,7 +2459,10 @@ export class CursorAgentExecutor implements AgentExecutor {
     const id =
       modelOverride ?? task.modelRequest?.modelId ?? this.config.model ?? "auto";
     const entry = findModelEntry(await this.catalog(), id);
-    const params = resolveModelParams(entry, this.config.effort, this.config.thinking);
+    const execution = task.modelRequest?.execution;
+    const params = resolveModelParams(entry,
+      execution === undefined ? this.config.effort : execution.effort,
+      execution === undefined ? this.config.thinking : execution.thinking);
     return { id, ...(params.length > 0 ? { params: [...params] } : {}) };
   }
 
@@ -2468,6 +2471,10 @@ export class CursorAgentExecutor implements AgentExecutor {
     context: AgentExecutionContext,
   ): Promise<AgentResult> {
     const attempts = this.config.maxValidationAttempts ?? 3;
+    const execution = task.modelRequest?.execution;
+    const taskConfig: CursorAgentExecutorConfig = execution === undefined ? this.config : {
+      ...this.config, effort: execution.effort, thinking: execution.thinking,
+    };
     const stepwise = stepwiseSpecOf(task);
     if (task.capabilityPlan !== undefined) {
       progress(context, {
@@ -2493,7 +2500,8 @@ export class CursorAgentExecutor implements AgentExecutor {
       });
     }
     const wantsTrace =
-      routeTraits(task).includes(TRACE_TRAIT) && this.config.thinking !== "disabled";
+      routeTraits(task).includes(TRACE_TRAIT) &&
+      (execution === undefined ? taskConfig.thinking !== "disabled" : taskConfig.thinking === "adaptive");
     let validationIssues: string[] = [];
     let rejectedOutput: JsonValue | undefined;
     let usage = emptyUsage();
@@ -2536,7 +2544,7 @@ export class CursorAgentExecutor implements AgentExecutor {
           usedFallbackModel ? this.config.fallbackModel : undefined,
         );
         const { result, costUsd } = await executeAttempt(
-          { ...this.config, cwd: workspace },
+          { ...taskConfig, cwd: workspace },
           task,
           context,
           capture,

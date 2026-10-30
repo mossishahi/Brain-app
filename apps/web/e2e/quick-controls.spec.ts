@@ -33,7 +33,7 @@ async function holdNextSave(page: Page) {
   return { wait: () => expect.poll(() => held).toBe(true), release };
 }
 
-test('all seven categories open menus and retain the current workspace', async ({ page }) => {
+test('all settings categories open menus and retain the current workspace', async ({ page }) => {
   const brain = await mockBrain(page);
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
@@ -41,7 +41,7 @@ test('all seven categories open menus and retain the current workspace', async (
   await question(page).fill('Keep this research draft while changing preferences.');
   const composer = await question(page).elementHandle();
   const before = await question(page).boundingBox();
-  for (const label of ['Models & connections', 'Research', 'Tools & sources', 'Execution', 'Recovery', 'App updates', 'Appearance']) {
+  for (const label of ['Models & connections', 'Stage models', 'Research', 'Tools & sources', 'Execution', 'Recovery', 'App updates', 'Appearance']) {
     await openCategory(page, label);
     await expect(page.getByRole('menu', { name: label, exact: true })).toBeVisible();
     await expect(settingsDialog(page)).toHaveCount(0);

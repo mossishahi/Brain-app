@@ -11,6 +11,14 @@ import type { ToolChoice } from "../model/tools.js";
 import type { JsonObject, JsonValue } from "../types/json.js";
 import type { ResolvedCapabilityPlan } from "../capability/types.js";
 
+/** Per-task controls resolved against the selected model's launch-time catalog. */
+export interface AgentModelExecutionControls {
+  readonly effort?: "low" | "medium" | "high" | "xhigh" | "max";
+  readonly thinking?: "adaptive" | "disabled";
+  /** Declared support constrains any bounded recovery adjustment. */
+  readonly supportedEffortLevels?: readonly ("low" | "medium" | "high" | "xhigh" | "max")[];
+}
+
 /**
  * Provider-neutral model request material prepared by a workflow integration.
  * Routing may leave modelId absent for an AgentExecutor to resolve from the
@@ -18,6 +26,11 @@ import type { ResolvedCapabilityPlan } from "../capability/types.js";
  */
 export interface AgentModelRequestDescription {
   readonly modelId?: string;
+  /**
+   * When present, these are the complete resolved controls. An omitted field
+   * must stay omitted, rather than inheriting an unsupported executor default.
+   */
+  readonly execution?: AgentModelExecutionControls;
   readonly system?: SystemPrompt;
   readonly messages: readonly ModelMessage[];
   readonly toolChoice?: ToolChoice;

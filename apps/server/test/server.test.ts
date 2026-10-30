@@ -32,6 +32,7 @@ import {
   type ReadinessReport,
   type ServerSettings,
   type ServerSettingsUpdate,
+  type ModelOptionsResponse,
 } from "@brainstorm-agentic/protocol";
 
 import {
@@ -1816,6 +1817,68 @@ test("model options serve the account's LIVE Cursor catalog when cursor-agent is
     await server.close();
     await removeWorkspace(workspace);
   }
+});
+
+test("stage model options await startup discovery, stay cached on reads, and refresh before each new job snapshot", async () => {
+  const workspace = tempRoot();
+  const worker = join(workspace, "empty-worker.mjs");
+  writeFileSync(worker, "process.exit(0);\n");
+  const store = new SettingsStore(workspace, { validateCursorAgent: async () => undefined });
+  await store.put({ runner: "local", llm: { provider: "cursor-agent", model: "model-a", cursorApiKey: "test-cursor" } });
+  let release!: () => void;
+  const firstDiscovery = new Promise<void>((resolve) => { release = resolve; });
+  let discoveries = 0;
+  let supportsLow = true;
+  const server = await startTestBrainServer({
+    workspace, port: 0, workerPath: worker,
+    validateCursorAgent: async () => undefined,
+    discoverModels: async () => {
+      const generation = ++discoveries;
+      if (generation === 1) await firstDiscovery;
+      return { models: [{ id: "model-a", label: `Discovery ${generation}`, capabilities: {
+        effortLevels: supportsLow ? ["low", "high"] : ["high"], adaptiveThinking: true, thinkingCanBeDisabled: true,
+      } }], cursorModels: [{ id: "model-a", parameters: [] }] };
+    },
+    readinessProbes: { llm: async () => ({}), code: async () => ({}), internet: async () => ({}), slurm: async () => ({}), capabilities: async () => ({}) },
+  });
+  try {
+    let optionsAnswered = false;
+    const opening = requestJson<ModelOptionsResponse>(server, "/api/model-options").then((answer) => { optionsAnswered = true; return answer; });
+    assert.equal((await requestJson(server, "/api/health")).status, 200, "metadata discovery does not block the service");
+    assert.equal(optionsAnswered, false, "initial picker read waits for already-started discovery");
+    release();
+    const initial = await opening;
+    assert.equal(initial.value.models[0]!.label, "Discovery 1");
+    assert.ok(initial.value.stages!.some((stage) => stage.id === "classify-input"));
+    assert.ok(initial.value.stages!.some((stage) => stage.id === "fact-verification"));
+    const registryReads = server.registryReads.length;
+    await requestJson(server, "/api/model-options");
+    await requestJson(server, "/api/model-options");
+    assert.equal(discoveries, 1);
+    assert.equal(server.registryReads.length, registryReads, "picker reads never re-fetch the workflow");
+    const saved = await requestJson(server, "/api/settings/stage-models", { method: "PUT", body: JSON.stringify({
+      provider: "cursor-agent", stageSettings: { "classify-input": { model: "model-a", effort: "low", thinking: "disabled" } },
+    }) });
+    assert.equal(saved.status, 200);
+    assert.equal(discoveries, 1, "selection saves never discover models");
+    const first = await requestJson<{ jobId: string }>(server, "/api/jobs", { method: "POST", body: JSON.stringify({ topic: "First cached model selection" }) });
+    assert.equal(first.status, 200);
+    assert.equal(discoveries, 2);
+    const firstRecord = JSON.parse(readFileSync(join(server.manager.jobDir(first.value.jobId), "job.json"), "utf8")) as { executionSettings: ServerSettings };
+    assert.equal(firstRecord.executionSettings.llm.modelCatalog!.models[0]!.label, "Discovery 2");
+    assert.equal(firstRecord.executionSettings.llm.stageSettingsByProvider?.["cursor-agent"]?.["classify-input"]?.effort, "low");
+    const second = await requestJson<{ jobId: string }>(server, "/api/jobs", { method: "POST", body: JSON.stringify({ topic: "Second cached model selection" }) });
+    assert.equal(second.status, 200);
+    assert.equal(discoveries, 3);
+    assert.equal(firstRecord.executionSettings.llm.modelCatalog!.models[0]!.label, "Discovery 2", "existing jobs retain their original discovery snapshot");
+    const countBefore = readdirSync(join(workspace, "workspace", "jobs")).length;
+    supportsLow = false;
+    const rejected = await requestJson<{ message: string }>(server, "/api/jobs", { method: "POST", body: JSON.stringify({ topic: "Unsupported selection after provider changed" }) });
+    assert.equal(rejected.status, 400);
+    assert.match(rejected.value.message, /Classify input.*low effort/);
+    assert.equal(discoveries, 4);
+    assert.equal(readdirSync(join(workspace, "workspace", "jobs")).length, countBefore, "unsupported explicit choices fail before job creation");
+  } finally { release(); await server.close(); await removeWorkspace(workspace); }
 });
 
 test("under systemd the update applies the checkout IN-PROCESS, before the server exits", async () => {

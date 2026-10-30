@@ -18,6 +18,8 @@ import {
   type GpuRunSettings,
   type GameReviewSettings,
   type LlmSettings,
+  type StageModelSettings,
+  type ModelCatalogSnapshot,
   type ServerSettings,
   type ServerSettingsUpdate,
   type WebSearchSettings,
@@ -137,6 +139,32 @@ export const DEFAULT_CLAUDE_AGENT_SETTINGS: ClaudeAgentSettings = {
   effort: "high",
   thinking: "adaptive",
 };
+
+/** Keep the complete catalog on the job, but only selected models in the worker environment. */
+export function runtimeModelCatalog(settings: ServerSettings): ModelCatalogSnapshot | undefined {
+  const catalog = settings.llm.modelCatalog;
+  if (!catalog) return undefined;
+  const llm = settings.llm;
+  const selected = new Set([
+    llm.model ?? llm.modelsByRoute?.reasoning ?? (llm.provider === "cursor-agent" ? "auto" : llm.provider === "claude-agent" ? "sonnet" : ""),
+    llm.agentSdk?.fallbackModel ?? "",
+    ...Object.values(llm.modelsByRoute ?? {}),
+    ...Object.values(llm.stageSettingsByProvider?.[llm.provider] ?? {}).map((stage) => stage.model ?? ""),
+  ].filter(Boolean));
+  // Alias/canonical rows can refer to each other; retain their complete connected set.
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const entry of catalog.models) {
+      if (!selected.has(entry.id) && !entry.aliases?.some((alias) => selected.has(alias))) continue;
+      for (const id of [entry.id, ...(entry.aliases ?? [])]) {
+        if (!selected.has(id)) { selected.add(id); changed = true; }
+      }
+    }
+  }
+  return { ...catalog, models: catalog.models.filter((entry) => selected.has(entry.id)),
+    ...(catalog.cursorModels ? { cursorModels: catalog.cursorModels.filter((entry) => selected.has(entry.id) || entry.aliases?.some((alias) => selected.has(alias))) } : {}) };
+}
 
 type StoredLlmSettings = Omit<
   LlmSettings,
@@ -757,6 +785,40 @@ function validateModelsByRoute(
   return modelsByRoute;
 }
 
+export function validateStageSettings(value: unknown): Record<string, StageModelSettings> {
+  const input = object(value, "stageSettings");
+  const stages: Record<string, StageModelSettings> = {};
+  for (const [id, raw] of Object.entries(input)) {
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$/.test(id)) throw new Error("stageSettings keys must be workflow stage ids");
+    const entry = object(raw, `stageSettings.${id}`);
+    const model = optionalNonEmptyString(entry.model, `stageSettings.${id}.model`);
+    const effort = entry.effort;
+    if (effort !== undefined && !["low", "medium", "high", "xhigh", "max"].includes(String(effort))) {
+      throw new Error(`stageSettings.${id}.effort must be low, medium, high, xhigh, or max`);
+    }
+    const thinking = entry.thinking;
+    if (thinking !== undefined && thinking !== "adaptive" && thinking !== "disabled") {
+      throw new Error(`stageSettings.${id}.thinking must be adaptive or disabled`);
+    }
+    if (model !== undefined || effort !== undefined || thinking !== undefined) {
+      stages[id] = { ...(model !== undefined ? { model } : {}),
+        ...(effort !== undefined ? { effort: effort as StageModelSettings["effort"] } : {}),
+        ...(thinking !== undefined ? { thinking } : {}) };
+    }
+  }
+  return stages;
+}
+
+function validateStageSettingsByProvider(value: unknown): LlmSettings["stageSettingsByProvider"] {
+  if (value === undefined) return undefined;
+  const result: NonNullable<LlmSettings["stageSettingsByProvider"]> = {};
+  for (const [provider, stages] of Object.entries(object(value, "llm.stageSettingsByProvider"))) {
+    if (!["anthropic", "claude-agent", "cursor-agent", "offline"].includes(provider)) throw new Error("unknown stage settings provider");
+    result[provider as LlmSettings["provider"]] = validateStageSettings(stages);
+  }
+  return result;
+}
+
 function validateClaudeAgentSettings(value: unknown): ClaudeAgentSettings {
   if (value === undefined) return { ...DEFAULT_CLAUDE_AGENT_SETTINGS };
   const input = object(value, "llm.agentSdk");
@@ -959,6 +1021,7 @@ function validateStoredSettings(value: unknown): StoredServerSettings {
     (provider === "anthropic" ? DEFAULT_ANTHROPIC_MODEL : undefined);
   const baseUrl = optionalNonEmptyString(common.llm.baseUrl, "llm.baseUrl");
   const modelsByRoute = validateModelsByRoute(common.llm.modelsByRoute);
+  const stageSettingsByProvider = validateStageSettingsByProvider(common.llm.stageSettingsByProvider);
   const agentSdk = validateClaudeAgentSettings(common.llm.agentSdk);
   const creditRecovery = validateCreditRecovery(common.creditRecovery);
   const interruptedRecovery = validateInterruptedRecovery(common.interruptedRecovery);
@@ -992,6 +1055,7 @@ function validateStoredSettings(value: unknown): StoredServerSettings {
       ...(model !== undefined ? { model } : {}),
       ...(baseUrl !== undefined ? { baseUrl } : {}),
       ...(modelsByRoute !== undefined ? { modelsByRoute } : {}),
+      ...(stageSettingsByProvider !== undefined ? { stageSettingsByProvider } : {}),
       agentSdk,
     },
     ...(hostTools !== undefined ? { hostTools } : {}),
@@ -1127,6 +1191,7 @@ function validateSettingsUpdate(value: unknown): ValidatedUpdate {
     throw new Error("llm.baseUrl is only supported by the developer API");
   }
   const modelsByRoute = validateModelsByRoute(common.llm.modelsByRoute);
+  const stageSettingsByProvider = validateStageSettingsByProvider(common.llm.stageSettingsByProvider);
   const agentSdk = validateClaudeAgentSettings(common.llm.agentSdk);
   const creditRecovery = validateCreditRecovery(common.creditRecovery);
   // Absent in an update = keep the currently stored policy (merged in put()).
@@ -1206,6 +1271,7 @@ function validateSettingsUpdate(value: unknown): ValidatedUpdate {
         ...(model !== undefined ? { model } : {}),
         ...(baseUrl !== undefined ? { baseUrl } : {}),
         ...(modelsByRoute !== undefined ? { modelsByRoute } : {}),
+        ...(stageSettingsByProvider !== undefined ? { stageSettingsByProvider } : {}),
         agentSdk,
       },
       ...(hostTools !== undefined ? { hostTools } : {}),
@@ -1682,6 +1748,13 @@ export class SettingsStore {
     settings: ServerSettings = this.get(),
   ): NodeJS.ProcessEnv {
     const env = { ...base };
+    // Always replace inherited launch policy, including empty maps on legacy jobs.
+    env.BRAINSTORM_AGENTIC_STAGE_SETTINGS = JSON.stringify(settings.llm.stageSettingsByProvider?.[settings.llm.provider] ?? {});
+    delete env.BRAINSTORM_AGENTIC_MODEL_CATALOG;
+    const catalog = runtimeModelCatalog(settings);
+    if (catalog !== undefined) {
+      env.BRAINSTORM_AGENTIC_MODEL_CATALOG = JSON.stringify(catalog);
+    }
     // A worker must seed routing from this app's health checks, never a
     // sibling server's snapshot from the shared workspace or parent shell.
     delete env.BRAINSTORM_AGENTIC_AVAILABILITY_PATH;
@@ -1723,6 +1796,13 @@ export class SettingsStore {
       env.ANTHROPIC_API_KEY = apiKey;
       if (settings.llm.baseUrl) {
         env.ANTHROPIC_BASE_URL = settings.llm.baseUrl;
+      }
+      // New launches resolve these defaults against their provider catalog.
+      // Older API job snapshots keep their original execution behavior.
+      if (catalog !== undefined) {
+        const agent = settings.llm.agentSdk ?? DEFAULT_CLAUDE_AGENT_SETTINGS;
+        env.BRAINSTORM_AGENTIC_AGENT_EFFORT = agent.effort;
+        env.BRAINSTORM_AGENTIC_AGENT_THINKING = agent.thinking;
       }
     } else if (settings.llm.provider === "claude-agent") {
       const token = this.getClaudeSetupToken();
@@ -1915,6 +1995,29 @@ export class SettingsStore {
    */
   putModelsByRoute(value: unknown): Promise<ServerSettings> {
     return this.enqueueWrite(() => this.putModelsByRouteExclusive(value));
+  }
+
+  /** Discovery and launch snapshots share the write queue so account/settings cannot race. */
+  snapshotForLaunch(prepare?: (settings: ServerSettings) => Promise<ServerSettings>): Promise<ServerSettings> {
+    return this.enqueueWrite(() => prepare ? prepare(this.get()) : this.get());
+  }
+
+  putStageModels(
+    value: unknown,
+    validate: (settings: ServerSettings, stages: Readonly<Record<string, StageModelSettings>>) => void,
+  ): Promise<ServerSettings> {
+    return this.enqueueWrite(() => {
+      const body = object(value, "stage model update");
+      const settings = this.get();
+      if (body.provider !== settings.llm.provider) throw new Error("The active provider changed. Reload settings before saving stage models.");
+      const stages = validateStageSettings(body.stageSettings);
+      validate(settings, stages);
+      const stored = validateStoredSettings(readJsonFile<unknown>(this.path));
+      atomicWriteJson(this.path, { ...stored, llm: { ...stored.llm, stageSettingsByProvider: {
+        ...stored.llm.stageSettingsByProvider, [settings.llm.provider]: stages,
+      } } });
+      return this.get();
+    });
   }
 
   private putModelsByRouteExclusive(value: unknown): ServerSettings {

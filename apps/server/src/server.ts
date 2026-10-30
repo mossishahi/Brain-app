@@ -23,7 +23,8 @@ import {
   type AttachmentSelectionKind,
   type GateAnswerRequest,
   type HealthResponse,
-  type ModelOption,
+  type ServerSettings,
+  type CursorModelCatalogEntry,
   type ModelOptionsResponse,
   type AvailabilityServerEvent,
   type ReadinessCheckId,
@@ -82,7 +83,8 @@ import {
   type ApplyAppUpdateOptions,
   type StartedAppUpdate,
 } from "./self-update.js";
-import { RouteCatalog, loadModelCatalog } from "./route-catalog.js";
+import { RouteCatalog } from "./route-catalog.js";
+import { ModelDiscovery, cursorModelOption, discoverProviderModels, validateStageCapabilities, type DiscoveryContext, type ModelDiscoverer } from "./model-discovery.js";
 import {
   CapabilityCatalog,
   LOCKED_CAPABILITY_IDS,
@@ -99,7 +101,6 @@ import {
   type ClaudeAgentConnectionValidator,
   type CursorAgentConnectionValidator,
 } from "./settings.js";
-import { listCursorModels } from "@brainstorm-agentic/executor-cursor-agent";
 import type { ProviderFetch } from "@brainstorm-agentic/host-tools";
 import type { StartupReporter } from "./startup-status.js";
 
@@ -273,7 +274,10 @@ export interface StartBrainServerOptions {
   /** Test seam; production lists the account's live Cursor model catalog. */
   readonly listCursorModels?: (
     apiKey: string,
-  ) => Promise<readonly { id: string; displayName?: string }[]>;
+  ) => Promise<readonly CursorModelCatalogEntry[]>;
+  /** Discovery reads model metadata only, never generates an answer. */
+  readonly discoverModels?: ModelDiscoverer;
+  readonly modelDiscoveryTimeoutMs?: number;
   /** Test seam; production launches a real local SearXNG container. */
   readonly searxngLauncher?: SearxngLauncher;
   /** How long one live registry verification stays cached. Default 60s. */
@@ -710,40 +714,33 @@ export async function startBrainServer(
 
   const jobStreams = new Set<SseConnection>();
   const detailStreams = new Map<string, Set<SseConnection>>();
-  const routeCatalog = new RouteCatalog();
+  const routeCatalog = new RouteCatalog(options.workspace);
   const capabilityCatalog = new CapabilityCatalog();
   const workflowParamsCatalog = new WorkflowParamsCatalog();
 
-  // The account's live Cursor model catalog, TTL-cached: new models appear
-  // in the picker without an app release, but a settings render never pays
-  // more than one network round-trip per window.
-  const CURSOR_MODELS_TTL_MS = 5 * 60_000;
-  let cursorModelsCache:
-    | { at: number; models: readonly ModelOption[] }
-    | undefined;
-  const cursorModelOptions = async (): Promise<readonly ModelOption[]> => {
-    if (
-      cursorModelsCache &&
-      Date.now() - cursorModelsCache.at < CURSOR_MODELS_TTL_MS
-    ) {
-      return cursorModelsCache.models;
+  const modelDiscovery = new ModelDiscovery(options.workspace, options.discoverModels ?? (async (context, signal) => {
+    if (context.provider === "cursor-agent" && context.secret && options.listCursorModels) {
+      const cursorModels = await options.listCursorModels(context.secret);
+      return { models: cursorModels.map(cursorModelOption), cursorModels };
     }
-    const apiKey = manager.settings.getCursorApiKey();
-    if (!apiKey) return [];
-    try {
-      const listed = await (options.listCursorModels ?? listCursorModels)(apiKey);
-      const models = listed.map((entry) => ({
-        id: entry.id,
-        label: entry.displayName ?? entry.id,
-      }));
-      cursorModelsCache = { at: Date.now(), models };
-      return models;
-    } catch {
-      // Unreachable API or a revoked key: the static catalog still serves.
-      return [];
-    }
-  };
+    return discoverProviderModels(context, signal);
+  }), options.modelDiscoveryTimeoutMs);
   let manager!: JobManager;
+  let modelRefresh: Promise<unknown> | undefined;
+  const discoveryContext = (settings: ServerSettings): DiscoveryContext => ({
+    provider: settings.llm.provider,
+    secret: settings.llm.provider === "claude-agent" ? manager.settings.getClaudeSetupToken()
+      : settings.llm.provider === "cursor-agent" ? manager.settings.getCursorApiKey()
+        : settings.llm.provider === "anthropic" ? manager.settings.getAnthropicApiKey() : undefined,
+    ...(settings.llm.baseUrl ? { baseUrl: settings.llm.baseUrl } : {}),
+  });
+  const refreshModelOptions = async (settings: ServerSettings) => {
+    const { url, bundle, version } = settings.contentRegistry;
+    const work = Promise.all([modelDiscovery.refresh(discoveryContext(settings)), routeCatalog.refresh(url, bundle, version)]);
+    modelRefresh = work;
+    try { return (await work)[0]; }
+    finally { if (modelRefresh === work) modelRefresh = undefined; }
+  };
   let readiness!: ReadinessService;
   const broadcastJobs = (): void => {
     for (const stream of jobStreams) {
@@ -791,6 +788,15 @@ export async function startBrainServer(
     workspace: options.workspace,
     searxngInstanceId,
     contentRegistryUrl,
+    prepareLaunchSettings: async (settings) => {
+      const catalog = await refreshModelOptions(settings);
+      const { url, bundle, version } = settings.contentRegistry;
+      const stages = routeCatalog.cachedStages(url, bundle, version);
+      const selections = settings.llm.stageSettingsByProvider?.[settings.llm.provider] ?? {};
+      if (stages.length === 0 && Object.keys(selections).length > 0) throw new Error("Workflow stages are unavailable, so saved stage model choices cannot be verified. Retry when the registry is reachable.");
+      validateStageCapabilities(settings, selections, catalog, stages);
+      return { ...settings, llm: { ...settings.llm, modelCatalog: catalog } };
+    },
     ...(options.workerPath ? { workerPath: options.workerPath } : {}),
     ...(options.env ? { env: options.env } : {}),
     ...(options.validateAnthropic
@@ -816,6 +822,9 @@ export async function startBrainServer(
       : {}),
     onChange: broadcast,
   });
+  // Begin discovery independently of HTTP readiness. A first picker read awaits
+  // this bounded work; later reads use the persisted snapshot without refetching.
+  void refreshModelOptions(manager.settings.get()).catch(() => undefined);
   readiness = new ReadinessService({
     workspace: options.workspace,
     settings: manager.settings,
@@ -1164,10 +1173,14 @@ export async function startBrainServer(
         try {
           const body = await readJson(req);
           const before = manager.settings.get();
+          const beforeModelConnection = modelDiscovery.key(discoveryContext(before));
           if (body && typeof body === "object" && "gpu" in body && gpuSetup.report().phase === "probing") {
             throw new HttpError(409, "Cancel or finish the GPU probe before changing its profile");
           }
           const settings = await manager.settings.put(body);
+          if (modelDiscovery.key(discoveryContext(settings)) !== beforeModelConnection) {
+            await refreshModelOptions(settings);
+          }
           gpuSetup.settingsChanged();
           broadcast();
           // The app-launched search instance follows the setting: selecting
@@ -1284,28 +1297,32 @@ export async function startBrainServer(
         return;
       }
       if (req.method === "GET" && path === "/api/model-options") {
+        await modelRefresh;
         const settings = manager.settings.get();
-        const catalog = loadModelCatalog(options.workspace);
-        const taskTypes = await routeCatalog.taskTypes(
+        const stages = routeCatalog.cachedStages(settings.contentRegistry.url, settings.contentRegistry.bundle, settings.contentRegistry.version);
+        const cachedCatalog = modelDiscovery.read(discoveryContext(settings));
+        const catalog = stages.length > 0 ? cachedCatalog : { ...cachedCatalog, stale: true,
+          error: [cachedCatalog.error, "The workflow stage list is unavailable. It will refresh at the next pipeline launch."].filter(Boolean).join(" ") };
+        const defaultModel = settings.llm.model ?? settings.llm.modelsByRoute?.reasoning
+          ?? (settings.llm.provider === "cursor-agent" ? "auto" : undefined);
+        const taskTypes = routeCatalog.cachedTaskTypes(
           settings.contentRegistry.url,
           settings.contentRegistry.bundle,
           settings.contentRegistry.version,
         );
-        let models = catalog[settings.llm.provider] ?? [];
-        if (settings.llm.provider === "cursor-agent") {
-          // Cursor serves many vendors' models per account, so the picker
-          // offers the LIVE catalog (every Sonnet/Opus version, GPT,
-          // Composer, …) instead of a hardcoded excerpt. Failure or a
-          // missing key falls back to the static list.
-          const live = await cursorModelOptions();
-          if (live.length > 0) models = live;
-        }
         const response: ModelOptionsResponse = {
           provider: settings.llm.provider,
           taskTypes,
-          models,
+          models: catalog.models,
+          catalog,
+          stages,
+          stageSettings: settings.llm.stageSettingsByProvider?.[settings.llm.provider] ?? {},
+          defaults: {
+            ...(defaultModel ? { model: defaultModel } : {}),
+            ...(settings.llm.agentSdk ? { effort: settings.llm.agentSdk.effort, thinking: settings.llm.agentSdk.thinking } : {}),
+          },
           modelsByRoute: settings.llm.modelsByRoute ?? {},
-          ...(settings.llm.model ? { defaultModel: settings.llm.model } : {}),
+          ...(defaultModel ? { defaultModel } : {}),
         };
         sendJson(res, 200, response);
         return;
@@ -1368,6 +1385,19 @@ export async function startBrainServer(
             400,
             error instanceof Error ? error.message : String(error),
           );
+        }
+        return;
+      }
+      if (req.method === "PUT" && path === "/api/settings/stage-models") {
+        try {
+          const settings = await manager.settings.putStageModels(await readJson(req), (current, stages) => {
+            const { url, bundle, version } = current.contentRegistry;
+            validateStageCapabilities(current, stages, modelDiscovery.read(discoveryContext(current)), routeCatalog.cachedStages(url, bundle, version));
+          });
+          broadcast();
+          sendJson(res, 200, settings);
+        } catch (error) {
+          throw new HttpError(400, error instanceof Error ? error.message : String(error));
         }
         return;
       }
