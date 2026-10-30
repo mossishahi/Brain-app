@@ -7,14 +7,10 @@ import {
   type ChildProcess,
 } from "node:child_process";
 
-import { assertSupportedNodeVersion } from "@brainstorm-agentic/core";
-
 import type { ContentRegistryRuntimeStatus } from "./model.js";
-import { configureOutboundHttp } from "./proxy.js";
-import { startBrainServer } from "./server.js";
-import { ContentRegistryClient } from "@brainstorm-agentic/registry-client";
-import { DEFAULT_CONTENT_REGISTRY_URL } from "./settings.js";
-import { allowsSourceUpdates, readDesktopApiToken } from "./desktop-auth.js";
+import { createStartupReporter, type StartupReporter } from "./startup-status.js";
+
+let reportStartup: StartupReporter = () => {};
 
 interface ParsedArgs {
   readonly command: string;
@@ -27,6 +23,7 @@ interface ContentRegistryConnection {
 }
 
 async function inspectContentRegistry(url: string) {
+  const { ContentRegistryClient } = await import("@brainstorm-agentic/registry-client");
   const client = new ContentRegistryClient(url);
   try {
     return await client.resolvePin("brainstorm");
@@ -197,10 +194,18 @@ async function main(): Promise<void> {
   // out of each other's way; an operator-set value always wins. Setting it
   // after the pool exists is harmless (it is simply ignored).
   process.env.UV_THREADPOOL_SIZE ??= "16";
-  // An unsupported Node must fail with one clear sentence, never as a
-  // cryptic dependency crash minutes later.
-  assertSupportedNodeVersion();
   const args = parseArgs(process.argv.slice(2));
+  if (args.command === "launch" && !args.values.has("help")) {
+    reportStartup = createStartupReporter();
+    reportStartup("loading");
+  }
+  // An unsupported Node must fail with one clear sentence, never as a
+  // cryptic dependency crash minutes later. Resolve the package without
+  // evaluating its runtime index: this shared guard needs only two tiny files.
+  const { assertSupportedNodeVersion } = await import(
+    new URL("./util/node-version.js", import.meta.resolve("@brainstorm-agentic/core")).href
+  ) as Pick<typeof import("@brainstorm-agentic/core"), "assertSupportedNodeVersion">;
+  assertSupportedNodeVersion();
   if (args.command === "desktop-check") {
     console.log("CO_INFERENCE_PROTOCOL=1");
     return;
@@ -219,6 +224,20 @@ async function main(): Promise<void> {
     process.exitCode = 2;
     return;
   }
+  // The SSH compatibility probe runs under a short deadline. Loading the
+  // server also loads provider SDKs and can take minutes on a cold shared
+  // filesystem; only a real launch needs that dependency graph.
+  const [
+    { configureOutboundHttp },
+    { startBrainServer },
+    { DEFAULT_CONTENT_REGISTRY_URL },
+    { allowsSourceUpdates, readDesktopApiToken },
+  ] = await Promise.all([
+    import("./proxy.js"),
+    import("./server.js"),
+    import("./settings.js"),
+    import("./desktop-auth.js"),
+  ]);
   console.log(`[launch] outbound HTTP: ${configureOutboundHttp()}`);
 
   const host = stringFlag(args, "ip") ?? "127.0.0.1";
@@ -260,6 +279,7 @@ async function main(): Promise<void> {
       host,
       port,
       apiToken,
+      onStartupPhase: reportStartup,
       ...(attachmentRoots && attachmentRoots.length > 0
         ? { attachmentRoots }
         : {}),
@@ -277,6 +297,7 @@ async function main(): Promise<void> {
     spawned.child?.kill("SIGTERM");
     throw error;
   }
+  reportStartup("ready");
   console.log(`BRAIN_URL=${running.url}`);
   if (!args.values.has("no-open")) openBrowser(running.url);
 
@@ -296,6 +317,7 @@ async function main(): Promise<void> {
 }
 
 main().catch((error: unknown) => {
+  reportStartup("failed");
   console.error(error instanceof Error ? error.message : String(error));
   process.exitCode = 1;
 });

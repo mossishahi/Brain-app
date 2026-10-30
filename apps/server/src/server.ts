@@ -101,6 +101,7 @@ import {
 } from "./settings.js";
 import { listCursorModels } from "@brainstorm-agentic/executor-cursor-agent";
 import type { ProviderFetch } from "@brainstorm-agentic/host-tools";
+import type { StartupReporter } from "./startup-status.js";
 
 /**
  * The announced app version, read from the app-root package.json at startup.
@@ -249,6 +250,8 @@ async function probeContentRegistry(
 
 export interface StartBrainServerOptions {
   readonly workspace: string;
+  /** Advisory lifecycle progress for the desktop supervisor; never replaces its handshake. */
+  readonly onStartupPhase?: StartupReporter;
   /** Required bearer token for a desktop-managed backend; omitted for legacy deployments. */
   readonly apiToken?: string;
   readonly host?: string;
@@ -579,13 +582,13 @@ function openSse(res: ServerResponse): void {
 
 function watcher(path: string, notify: () => void): FSWatcher | undefined {
   try {
-    return watch(path, { recursive: true }, notify);
+    // Recursive watches synchronously walk every saved run (including copied
+    // dependencies) on Linux. On shared HPC filesystems that can block the
+    // desktop handshake for minutes. Watch only additions/removals at the root;
+    // the existing poll broadcasts nested checkpoint, artifact, and log changes.
+    return watch(path, notify);
   } catch {
-    try {
-      return watch(path, notify);
-    } catch {
-      return undefined;
-    }
+    return undefined;
   }
 }
 
@@ -594,6 +597,7 @@ export async function startBrainServer(
 ): Promise<RunningBrainServer> {
   const host = options.host ?? "127.0.0.1";
   if (options.apiToken !== undefined) validateDesktopApiToken(options.apiToken);
+  options.onStartupPhase?.("initializing");
   const instanceId = randomUUID();
   const searxngHost = searxngAdvertiseHost(host, options.env ?? process.env);
   const searxngListenPort = searxngPort(searxngHost, options.env ?? process.env);
@@ -2054,6 +2058,7 @@ export async function startBrainServer(
       resolvePort(typeof address === "object" && address ? address.port : 0);
     });
   });
+  options.onStartupPhase?.("listening");
 
   const watchers = [
     watcher(manager.jobsDir, broadcast),
@@ -2120,7 +2125,13 @@ export async function startBrainServer(
   const registryPoll = setInterval(() => {
     void probeContentRegistry(contentRegistryUrl, contentRegistry);
   }, REGISTRY_HEARTBEAT_MS);
-  await manager.resumeDueCreditBlocks();
+  // Recovery may wait on the scheduler; an authenticated desktop must be
+  // able to connect and inspect its existing jobs while that work continues.
+  if (options.apiToken) {
+    void manager.resumeDueCreditBlocks().catch((error: unknown) => {
+      console.error(`[recovery] startup credit recovery failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  } else await manager.resumeDueCreditBlocks();
   if (options.apiToken) void probeContentRegistry(contentRegistryUrl, contentRegistry);
   else await probeContentRegistry(contentRegistryUrl, contentRegistry);
   // Startup recovery + verification run in the background: interrupted jobs
