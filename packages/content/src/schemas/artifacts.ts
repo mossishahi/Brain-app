@@ -282,8 +282,8 @@ export const embeddingFacetSchema = z
      * The concept's term of art: the phrase a survey title or taxonomy node
      * would use (2-5 words, one concept — never two joined by "and").
      */
-    name: singleLine(answered(4, "facet name")).refine(
-      (value) => value.length <= 80,
+    name: singleLine(answered(4, "facet name")).max(
+      80,
       { message: "facet name must stay a short term of art (at most 80 characters)" },
     ),
     /**
@@ -295,7 +295,7 @@ export const embeddingFacetSchema = z
       .refine((value) => paragraphs(1).safeParse(value).success, {
         message: "facet statement must be a single paragraph",
       })
-      .refine((value) => value.length <= 600, {
+      .max(600, {
         message: "facet statement is runaway output; keep it to 1-2 sentences",
       }),
     /** Centrality of this facet to the submission's core, 0-1. */
@@ -394,8 +394,8 @@ export type EquivalentProblem = z.infer<typeof equivalentProblemSchema>;
 export const embeddingInputSchema = z
   .object({
     /** A paper-style title for the submission's scientific core; one line. */
-    title: singleLine(answered(8, "embedding title")).refine(
-      (value) => value.length <= 200,
+    title: singleLine(answered(8, "embedding title")).max(
+      200,
       { message: "embedding title must stay title-length (at most 200 characters)" },
     ),
     /**
@@ -407,7 +407,7 @@ export const embeddingInputSchema = z
       .refine((value) => paragraphs(1).safeParse(value).success, {
         message: "embedding abstract must be a single paragraph",
       })
-      .refine((value) => value.length <= 2500, {
+      .max(2500, {
         message: "embedding abstract is runaway output; keep it to 3-6 sentences",
       }),
     /** The submission's distinct concepts, most central first. */
@@ -422,7 +422,7 @@ export const embeddingInputSchema = z
       .refine((value) => paragraphs(1).safeParse(value).success, {
         message: "problem formulation must be a single paragraph",
       })
-      .refine((value) => value.length <= 1500, {
+      .max(1500, {
         message: "problem formulation is runaway output; keep it to at most 1,500 characters",
       })
       .optional(),

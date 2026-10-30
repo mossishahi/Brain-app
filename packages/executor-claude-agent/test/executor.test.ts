@@ -403,6 +403,10 @@ test("salvageJsonText finds the JSON that is really there and never invents one"
     undefined,
     "malformed JSON is rejected, not repaired",
   );
+  assert.equal(salvageJsonText('{"items":[1,2],"summary":"unfinished'), undefined,
+    "an inner array is not the unfinished outer result");
+  assert.equal(salvageJsonText('```json\n{"items":[1,2],"summary":"unfinished'), undefined);
+  assert.deepEqual(salvageJsonText('{"answer":"escaped \\\" }"} trailing prose'), { answer: 'escaped " }' });
 });
 
 test("an unparseable final message costs one attempt, not the task: the retry succeeds", async () => {
@@ -1213,6 +1217,231 @@ test("returns a normalized error when Agent SDK execution fails", async () => {
     result.status === "error" ? result.error.message : "",
     /oauth token rejected/,
   );
+});
+
+const OUTPUT_LIMIT_MESSAGE = "API Error: Claude's response exceeded the 64000 output token maximum. To configure this behavior, set the CLAUDE_CODE_MAX_OUTPUT_TOKENS environment variable.";
+
+test("output-limit recovery preserves the schema, caps, validator, and terminal usage when the SDK subsequently throws", async () => {
+  const captured: ClaudeAgentQueryInput[] = [];
+  const reported: AgentProgress[] = [];
+  let validated = 0;
+  const executor = new ClaudeAgentExecutor({
+    token: "setup-token-secret",
+    effort: "max",
+    env: { CLAUDE_CODE_MAX_OUTPUT_TOKENS: "64000" },
+    queryFn: (input) => ({
+      async *[Symbol.asyncIterator]() {
+        captured.push(input);
+        if (captured.length === 1) {
+          yield { type: "assistant", error: "max_output_tokens", message: {
+            id: "api-turn", content: [], usage: { input_tokens: 10, output_tokens: 50 },
+          } };
+          // Real SDK shape: subtype success can still be an error. Its partial
+          // structured result must never be validated or accepted.
+          yield { type: "result", subtype: "success", is_error: true,
+            result: OUTPUT_LIMIT_MESSAGE, structured_output: { answer: "partial" },
+            usage: { input_tokens: 20, output_tokens: 64_000, cache_read_input_tokens: 7 },
+          };
+          throw new Error(OUTPUT_LIMIT_MESSAGE);
+        }
+        yield* successQuery([])({ prompt: input.prompt, options: input.options });
+      },
+    }),
+    outputValidator: { validate(value) { validated += 1; assert.deepEqual(value, { answer: "ok" }); return true; } },
+  });
+  const result = await executor.execute(structuredTask, {
+    runId: "run-output-limit", nodePath: "root/classify", reportProgress: (entry) => reported.push(entry),
+  });
+  assert.equal(result.status, "ok");
+  assert.equal(captured.length, 2);
+  assert.equal(validated, 1);
+  assert.equal(captured[0]!.options.effort, "max");
+  assert.equal(captured[1]!.options.effort, "high");
+  assert.deepEqual(captured[1]!.options.outputFormat, captured[0]!.options.outputFormat);
+  assert.deepEqual(captured[1]!.options.thinking, captured[0]!.options.thinking);
+  assert.equal((captured[1]!.options.env as Record<string, string>).CLAUDE_CODE_MAX_OUTPUT_TOKENS, "64000");
+  assert.notEqual(captured[1]!.options.cwd, captured[0]!.options.cwd);
+  assert.match(captured[1]!.prompt, /shorter analysis/);
+  assert.match(captured[1]!.prompt, /every required field/);
+  assert.equal(result.usage?.inputTokens, 32);
+  assert.equal(result.usage?.outputTokens, 64_004);
+  assert.equal(result.usage?.cacheReadInputTokens, 9);
+  assert.equal(reported.filter((entry) => entry.kind === "retry").length, 1);
+});
+
+test("output-limit throws without a terminal result retain distinct assistant usage without double counting snapshots", async () => {
+  let calls = 0;
+  const executor = new ClaudeAgentExecutor({
+    token: "setup-token-secret",
+    queryFn: (input) => ({ async *[Symbol.asyncIterator]() {
+      if (++calls === 1) {
+        for (const [id, output] of [["one", 3], ["one", 8], ["one", 5], ["two", 4]] as const) {
+          yield { type: "assistant", message: { id, content: [], usage: { input_tokens: 2, output_tokens: output } } };
+        }
+        throw new Error(OUTPUT_LIMIT_MESSAGE);
+      }
+      yield* successQuery([])(input);
+    } }),
+  });
+  const result = await executor.execute(structuredTask, { runId: "run-output-usage", nodePath: "root/classify" });
+  assert.equal(result.status, "ok");
+  assert.equal(result.usage?.inputTokens, 16);
+  assert.equal(result.usage?.outputTokens, 16);
+});
+
+test("output-limit recovery never raises an explicitly lower effort and has one retry within the validation budget", async (t) => {
+  for (const [effort, recovered] of [["low", "low"], ["medium", "medium"], ["high", "medium"], ["xhigh", "high"], ["max", "high"]] as const) {
+    await t.test(effort, async () => {
+      const captured: ClaudeAgentQueryInput[] = [];
+      const executor = new ClaudeAgentExecutor({ token: "setup-token-secret", effort,
+        queryFn: (input) => ({ async *[Symbol.asyncIterator]() {
+          captured.push(input);
+          yield { type: "result", subtype: "error_during_execution", is_error: true,
+            stop_reason: "max_tokens", errors: ["Execution failed"], usage: { input_tokens: 1, output_tokens: 2 } };
+        } }),
+      });
+      const result = await executor.execute(structuredTask, { runId: "run-output-bounded", nodePath: "root/classify" });
+      assert.equal(result.status, "error");
+      assert.equal(result.status === "error" && result.error.name, "OutputTokenLimitError");
+      assert.equal(captured.length, 2);
+      assert.equal(captured[1]!.options.effort, recovered);
+      assert.equal(result.usage?.outputTokens, 4);
+    });
+  }
+  let calls = 0;
+  const executor = new ClaudeAgentExecutor({ token: "setup-token-secret", maxValidationAttempts: 1,
+    queryFn: () => ({ async *[Symbol.asyncIterator]() { calls += 1; throw new Error(OUTPUT_LIMIT_MESSAGE); yield undefined; } }),
+  });
+  const result = await executor.execute(structuredTask, { runId: "run-output-no-budget", nodePath: "root/classify" });
+  assert.equal(result.status, "error");
+  assert.equal(calls, 1);
+});
+
+test("assistant output-limit signals only trigger recovery at an unsuccessful end", async (t) => {
+  await t.test("SDK recovered and returned a complete result", async () => {
+    let calls = 0;
+    const executor = new ClaudeAgentExecutor({ token: "setup-token-secret",
+      queryFn: (input) => ({ async *[Symbol.asyncIterator]() {
+        calls += 1;
+        yield { type: "assistant", error: "max_output_tokens", message: { content: [] } };
+        yield* successQuery([])(input);
+      } }),
+    });
+    assert.equal((await executor.execute(structuredTask, { runId: "run-sdk-recovered", nodePath: "root/classify" })).status, "ok");
+    assert.equal(calls, 1);
+  });
+  await t.test("typed assistant error and no terminal result", async () => {
+    let calls = 0;
+    const executor = new ClaudeAgentExecutor({ token: "setup-token-secret",
+      queryFn: (input) => ({ async *[Symbol.asyncIterator]() {
+        if (++calls === 1) {
+          yield { type: "assistant", error: "max_output_tokens", message: { content: [] } };
+          return;
+        }
+        yield* successQuery([])(input);
+      } }),
+    });
+    assert.equal((await executor.execute(structuredTask, { runId: "run-sdk-typed-limit", nodePath: "root/classify" })).status, "ok");
+    assert.equal(calls, 2);
+  });
+});
+
+test("output-limit recovery respects terminal auth, credit, budget, turn, and cancellation failures", async (t) => {
+  for (const kind of ["auth", "billing", "budget", "turns", "credit", "cancel"] as const) {
+    await t.test(kind, async () => {
+      let calls = 0;
+      const controller = new AbortController();
+      const executor = new ClaudeAgentExecutor({ token: "setup-token-secret",
+        queryFn: () => ({ async *[Symbol.asyncIterator]() {
+          calls += 1;
+          yield { type: "assistant", error: "max_output_tokens", message: { content: [] } };
+          if (kind === "auth" || kind === "billing") {
+            yield { type: "assistant", error: kind === "auth" ? "authentication_failed" : "billing_error", message: { content: [] } };
+          } else if (kind === "cancel") controller.abort("cancelled");
+          else yield { type: "result", subtype: kind === "budget" ? "error_max_budget_usd" : kind === "turns" ? "error_max_turns" : "error_during_execution",
+            is_error: true, errors: [kind === "credit" ? "insufficient credits" : `Session stopped: ${kind}`], usage: { input_tokens: 1, output_tokens: 2 } };
+          throw new Error(kind === "credit" ? OUTPUT_LIMIT_MESSAGE : "Claude Code process exited with code 1");
+        } }),
+      });
+      const execution = executor.execute(structuredTask, { runId: "run-output-terminal", nodePath: "root/classify", signal: controller.signal });
+      if (kind === "credit" || kind === "cancel") await assert.rejects(execution, { name: kind === "credit" ? "CreditBlockedError" : "AbortError" });
+      else {
+        const result = await execution;
+        assert.equal(result.status, "error");
+        assert.notEqual(result.status === "error" && result.error.name, "OutputTokenLimitError");
+        assert.equal(result.status === "error" && result.error.name, "ClaudeAgentResultError");
+      }
+      assert.equal(calls, 1);
+    });
+  }
+});
+
+test("output-limit recovery does not replay writes or unknown tools, including calls observed only by the hook", async (t) => {
+  for (const [name, input, safe] of [
+    ["Read", {}, true], ["mcp__facts__fact_table", { mode: "status" }, true],
+    ["Bash", {}, false], ["mcp__gpu__gpu_run", {}, false],
+    ["mcp__facts__fact_table", { mode: "submit" }, false], ["future_external_tool", {}, false],
+  ] as const) {
+    await t.test(name + JSON.stringify(input), async () => {
+      let calls = 0;
+      const executor = new ClaudeAgentExecutor({ token: "setup-token-secret",
+        queryFn: (query) => ({ async *[Symbol.asyncIterator]() {
+          if (++calls === 1) {
+            const hooks = query.options.hooks as { PreToolUse: Array<{ matcher?: string; hooks: Array<(input: unknown) => Promise<unknown>> }> };
+            const observer = hooks.PreToolUse.find((entry) => entry.matcher === undefined)!;
+            await observer.hooks[0]!({ hook_event_name: "PreToolUse", tool_name: name, tool_input: input });
+            throw new Error(OUTPUT_LIMIT_MESSAGE);
+          }
+          yield* successQuery([])(query);
+        } }),
+      });
+      const result = await executor.execute(structuredTask, { runId: "run-output-tools", nodePath: "root/classify" });
+      assert.equal(result.status, safe ? "ok" : "error");
+      assert.equal(calls, safe ? 2 : 1);
+      if (!safe) assert.match(result.status === "error" ? result.error.message : "", /external state/);
+    });
+  }
+});
+
+test("output-limit recovery spends only the verified remaining cost budget", async (t) => {
+  for (const cost of [undefined, 1, 0.4]) {
+    await t.test(String(cost), async () => {
+      const captured: ClaudeAgentQueryInput[] = [];
+      const executor = new ClaudeAgentExecutor({ token: "setup-token-secret", maxBudgetUsd: 1,
+        outputValidator: { validate: () => ({ success: false, issues: ["incomplete"] }) },
+        queryFn: (input) => ({ async *[Symbol.asyncIterator]() {
+          captured.push(input);
+          if (captured.length === 1) {
+            yield { type: "result", subtype: "error_during_execution", is_error: true, errors: [OUTPUT_LIMIT_MESSAGE],
+              usage: { input_tokens: 1, output_tokens: 2 }, ...(cost !== undefined ? { total_cost_usd: cost } : {}) };
+          } else yield { type: "result", subtype: "success", is_error: false, structured_output: { answer: "incomplete" },
+            total_cost_usd: 0.6, usage: { input_tokens: 1, output_tokens: 2 } };
+        } }),
+      });
+      const result = await executor.execute(structuredTask, { runId: "run-output-cost", nodePath: "root/classify" });
+      assert.equal(result.status, "error");
+      assert.equal(captured.length, cost === 0.4 ? 2 : 1);
+      if (cost === 0.4) assert.equal(captured[1]!.options.maxBudgetUsd, 0.6);
+      assert.match(result.status === "error" ? result.error.message : "", /budget/);
+    });
+  }
+});
+
+test("output-limit recovery remembers external writes from an earlier validation attempt", async () => {
+  let calls = 0;
+  const executor = new ClaudeAgentExecutor({ token: "setup-token-secret",
+    outputValidator: { validate: () => false },
+    queryFn: (input) => ({ async *[Symbol.asyncIterator]() {
+      if (++calls === 1) {
+        yield { type: "assistant", message: { content: [{ type: "tool_use", id: "write", name: "Bash", input: {} }] } };
+        yield* successQuery([])(input);
+      } else throw new Error(OUTPUT_LIMIT_MESSAGE);
+    } }),
+  });
+  const result = await executor.execute(structuredTask, { runId: "run-output-prior-write", nodePath: "root/classify" });
+  assert.equal(result.status, "error");
+  assert.equal(calls, 2, "the cap must not introduce a third replay after an earlier write");
+  assert.match(result.status === "error" ? result.error.message : "", /external state/);
 });
 
 test("a crashed Claude Code subprocess is retried in a fresh session before failing", async () => {

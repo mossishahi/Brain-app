@@ -60,6 +60,30 @@ npm run build
 npm test
 ```
 
+### Claude output-limit recovery
+
+If a Claude Code response reaches its output-token limit, the executor can retry
+once in a fresh session, within the configured validation-attempt budget. The
+retry asks for a concise, complete answer and keeps the output schema and
+authoritative validator. It reduces `max`/`xhigh` effort to `high`, or `high` to
+`medium`; `low` and `medium` stay unchanged. This applies only to recovery for
+that task: saved settings, the model, thinking mode, and explicit token limits
+remain unchanged. Progress and captured execution settings identify the retry.
+The classifier's existing embedding-text length limits also appear in the JSON
+schema sent to the model, as well as in post-generation validation.
+
+The executor does not retry this failure after a tool that can change external
+state has run. Authentication, credit, cancellation, and budget errors retain
+their own handling. With an explicit dollar budget, recovery requires a reported
+cost and uses only the remaining allowance. A second output-limit failure stops
+with a clear error; partial output is never accepted as a completed artifact.
+
+For a job that has already failed, **Retry** resumes its saved checkpoint. It
+reuses completed tasks and reruns the failed task with the job's saved execution
+settings. New workers must load the updated executor before the recovery is
+available; updating a source checkout alone does not update an installed desktop
+backend.
+
 ### Optional GPU execution (SLURM)
 
 After the LLM connection is configured, the host discovers its architecture,

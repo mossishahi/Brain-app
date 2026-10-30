@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { z } from "zod";
 
 import {
   ContentValidationError,
@@ -21,6 +22,7 @@ import {
   literatureSchema,
   panelEvidenceSchema,
   readContentBundle,
+  taskClassificationSchema,
 } from "../src/index.js";
 import { registryContentDir } from "./helpers.js";
 
@@ -41,6 +43,64 @@ const base = {
     "Convergence depends on the spectral properties of the graph and on walk-summability.",
   facets,
 };
+
+test("classifier JSON schema delivers the existing embedding length ceilings to providers", () => {
+  type NativeSchema = { properties?: Record<string, NativeSchema>; items?: NativeSchema; maxLength?: number };
+  // Use the runtime converter's settings: arbitrary refinements are omitted,
+  // so a validation-only length check would silently disappear on this path.
+  const schema = z.toJSONSchema(taskClassificationSchema, {
+    target: "draft-2020-12",
+    io: "output",
+    unrepresentable: "any",
+  }) as NativeSchema;
+  const embedding = schema.properties!.embeddingInput.properties!;
+  const facet = embedding.facets.items!.properties!;
+  assert.equal(embedding.title.maxLength, 200);
+  assert.equal(embedding.abstract.maxLength, 2500);
+  assert.equal(embedding.problemFormulation.maxLength, 1500);
+  assert.equal(facet.name.maxLength, 80);
+  assert.equal(facet.statement.maxLength, 600);
+});
+
+test("embedding length ceilings keep their boundaries, messages, and semantic refinements", () => {
+  assert.ok(taskClassificationSchema.safeParse({
+    primary: { type: "research idea", reason: "The submission proposes a new inference method." },
+    alternative: { type: "research question", reason: "The submission also asks whether convergence holds." },
+    cotSteps: 4,
+    requestedOutputs: [],
+    embeddingInput: base,
+  }).success);
+
+  const cases = [
+    { field: "title", max: 200,
+      message: "embedding title must stay title-length (at most 200 characters)",
+      replace: (value: string) => ({ ...base, title: value }) },
+    { field: "abstract", max: 2500,
+      message: "embedding abstract is runaway output; keep it to 3-6 sentences",
+      replace: (value: string) => ({ ...base, abstract: value }) },
+    { field: "problemFormulation", max: 1500,
+      message: "problem formulation is runaway output; keep it to at most 1,500 characters",
+      replace: (value: string) => ({ ...base, problemFormulation: value }) },
+    { field: "facet name", max: 80,
+      message: "facet name must stay a short term of art (at most 80 characters)",
+      replace: (value: string) => ({ ...base, facets: [{ ...facets[0], name: value }, ...facets.slice(1)] }) },
+    { field: "facet statement", max: 600,
+      message: "facet statement is runaway output; keep it to 1-2 sentences",
+      replace: (value: string) => ({ ...base, facets: [{ ...facets[0], statement: value }, ...facets.slice(1)] }) },
+  ];
+  for (const { field, max, message, replace } of cases) {
+    const text = "A meaningful concept ".repeat(Math.ceil((max + 1) / 21));
+    assert.ok(embeddingInputSchema.safeParse(replace(text.slice(0, max))).success, `${field} accepts its ceiling`);
+    const over = embeddingInputSchema.safeParse(replace(text.slice(0, max + 1)));
+    assert.equal(over.success, false, `${field} rejects one character beyond its ceiling`);
+    if (!over.success) assert.ok(over.error.issues.some((issue) => issue.message === message), field);
+  }
+  assert.equal(embeddingInputSchema.safeParse({ ...base, title: "placeholder" }).success, false);
+  assert.equal(embeddingInputSchema.safeParse({ ...base, title: "A title\non two lines" }).success, false);
+  assert.equal(embeddingInputSchema.safeParse({ ...base, abstract: `${base.abstract}\n\n${base.abstract}` }).success, false);
+  assert.equal(embeddingFacetSchema.safeParse({ ...facets[0], name: "two\nlines" }).success, false);
+  assert.equal(embeddingFacetSchema.safeParse({ ...facets[0], statement: `${facets[0].statement}\n\n${facets[0].statement}` }).success, false);
+});
 
 test("embedding facets accept the optional classifier v2 aliases and kind; v1 facets stay valid", () => {
   assert.ok(embeddingFacetSchema.safeParse(facets[0]).success, "a v1 facet");

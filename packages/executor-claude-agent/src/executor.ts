@@ -255,6 +255,31 @@ const TRACE_TRAIT = "extended-reasoning";
  */
 const MAX_CRASH_RETRIES = 2;
 
+/** Output exhaustion gets one smaller attempt, within the validation budget. */
+const MAX_OUTPUT_LIMIT_RETRIES = 1;
+
+class OutputTokenLimitError extends Error {
+  constructor(message: string, readonly replaySafe: boolean) {
+    super(message);
+    this.name = "OutputTokenLimitError";
+  }
+}
+
+class SdkTerminalResultError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ClaudeAgentResultError";
+  }
+}
+
+function recoveryEffort(
+  effort: ClaudeAgentExecutorConfig["effort"],
+): NonNullable<ClaudeAgentExecutorConfig["effort"]> {
+  if (effort === "max" || effort === "xhigh") return "high";
+  if (effort === "low" || effort === "medium") return effort;
+  return "medium";
+}
+
 /** Default session inactivity ceiling; see ClaudeAgentExecutorConfig.stallTimeoutMs. */
 const DEFAULT_SESSION_STALL_MS = 15 * 60_000;
 
@@ -389,6 +414,7 @@ interface StepwiseStep {
 interface TraceCapture {
   readonly wantsTrace: boolean;
   readonly thinking: { turn: number; text: string }[];
+  mayHaveExternalEffects: boolean;
   readonly stepwise?: {
     readonly spec: StepwiseSpec;
     readonly steps: StepwiseStep[];
@@ -1797,9 +1823,12 @@ function usageFromResult(value: unknown): TokenUsage {
  * The property never leaves the process — serializeError keeps only
  * name/message/stack — so nothing extra reaches checkpoints or events.
  */
-function attachTaskUsage<T>(error: T, usage: TokenUsage): T {
+function attachTaskUsage<T>(error: T, usage: TokenUsage, costUsd?: unknown): T {
   if (typeof error === "object" && error !== null) {
     (error as { taskUsage?: TokenUsage }).taskUsage = usage;
+    if (typeof costUsd === "number" && Number.isFinite(costUsd) && costUsd >= 0) {
+      (error as { taskCostUsd?: number }).taskCostUsd = costUsd;
+    }
   }
   return error;
 }
@@ -1819,6 +1848,82 @@ function takeTaskUsage(error: unknown): TokenUsage | undefined {
   return carried as TokenUsage;
 }
 
+function outputLimitMessage(message: string): boolean {
+  return /response exceeded (?:the )?[\d,]+ output token maximum|^\s*(?:API Error:\s*)?max_output_tokens\s*$|output token (?:limit|maximum).{0,30}(?:exceeded|exhausted|reached)/i.test(message);
+}
+
+function sdkResultFailureMessage(result: UnknownRecord): string {
+  if (Array.isArray(result.errors) && result.errors.length > 0) return result.errors.map(String).join("; ");
+  if (typeof result.result === "string" && result.result.trim()) return result.result;
+  return `Claude Agent SDK ended with ${String(result.subtype)}`;
+}
+
+/** Assistant errors can be recovered inside the SDK: only classify a failed end. */
+function classifySdkFailure(
+  error: unknown,
+  result: UnknownRecord | undefined,
+  assistantError: string | undefined,
+  replaySafe: boolean,
+): unknown {
+  const message = error instanceof Error ? error.message : String(error);
+  const otherFailure = (text: string): boolean => isCreditLimitMessage(text) ||
+    /auth(?:entication|orization)?|oauth|unauthori[sz]ed|forbidden|invalid.request|model.not.found|max.budget|budget.{0,40}(?:exceeded|exhausted)|rate.limit|overloaded/i.test(text);
+  if (error instanceof Error && error.name === "AbortError") return error;
+  if (result && result.subtype !== "error_during_execution" && result.subtype !== "success") {
+    // The SDK may throw a generic subprocess-exit error after its terminal
+    // result. A known budget/turn stop must never become a crash restart.
+    return new SdkTerminalResultError(sdkResultFailureMessage(result));
+  }
+  if (assistantError !== undefined && assistantError !== "max_output_tokens" && assistantError !== "unknown") {
+    return new SdkTerminalResultError(`Claude Agent SDK failed (${assistantError}): ${message}`);
+  }
+  if (otherFailure(message)) return new SdkTerminalResultError(message);
+  if (
+    error instanceof SessionStalledError ||
+    (result?.subtype === "success" && result.is_error !== true)
+  ) return error;
+  const terminalMessage = result ? sdkResultFailureMessage(result) : "";
+  if (otherFailure(terminalMessage)) return new SdkTerminalResultError(terminalMessage);
+  const genericEnd = /^Claude (?:Agent SDK ended|Code process (?:exited|terminated))|^Execution failed\.?$/i.test(message);
+  if (
+    outputLimitMessage(message) || outputLimitMessage(terminalMessage) ||
+    record(error).code === "max_output_tokens" ||
+    result?.stop_reason === "max_tokens" ||
+    (assistantError === "max_output_tokens" && genericEnd)
+  ) {
+    return new OutputTokenLimitError(
+      outputLimitMessage(message) || outputLimitMessage(terminalMessage)
+        ? (outputLimitMessage(message) ? message : terminalMessage)
+        : "Claude Code exhausted the maximum output tokens before completing the response.",
+      replaySafe,
+    );
+  }
+  return error;
+}
+
+/** A message may be emitted once per content block with cumulative usage. */
+function recordAssistantUsage(message: UnknownRecord, seen: Map<string, UnknownRecord>): void {
+  const body = record(message.message);
+  if (typeof body.id !== "string" || body.usage === undefined) return;
+  const latest = record(body.usage);
+  const combined = { ...seen.get(body.id) };
+  for (const field of ["input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"]) {
+    const value = latest[field];
+    if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+      combined[field] = Math.max(typeof combined[field] === "number" ? combined[field] as number : 0, value);
+    }
+  }
+  seen.set(body.id, combined);
+}
+
+function reportedQueryUsage(result: UnknownRecord | undefined, seen: Map<string, UnknownRecord>): TokenUsage {
+  // The terminal total includes all turns: never add it to assistant snapshots.
+  if (result?.usage !== undefined) return usageFromResult(result.usage);
+  let usage = emptyUsage();
+  for (const value of seen.values()) usage = addUsage(usage, usageFromResult(value));
+  return usage;
+}
+
 /**
  * Best-effort extraction of one JSON value from a model's final TEXT message
  * (the raw-JSON fallback path when native structured output is exhausted).
@@ -1830,6 +1935,35 @@ function takeTaskUsage(error: unknown): TokenUsage | undefined {
 export function salvageJsonText(text: string): JsonValue | undefined {
   const candidates: string[] = [];
   const trimmed = text.trim();
+  // An unfinished envelope must not turn into one of its complete inner
+  // arrays/objects. This also covers malformed fenced raw-JSON responses.
+  const envelope = trimmed.startsWith("```")
+    ? trimmed.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "").trim()
+    : trimmed;
+  if (/^[{[]/.test(envelope)) {
+    const stack: string[] = [];
+    let quoted = false;
+    let escaped = false;
+    for (let index = 0; index < envelope.length; index += 1) {
+      const char = envelope[index]!;
+      if (quoted) {
+        if (escaped) escaped = false;
+        else if (char === "\\") escaped = true;
+        else if (char === '"') quoted = false;
+      } else if (char === '"') quoted = true;
+      else if (char === "{" || char === "[") stack.push(char);
+      else if (char === "}" || char === "]") {
+        if (stack.pop() !== (char === "}" ? "{" : "[")) return undefined;
+        if (stack.length === 0) {
+          try {
+            const parsed: unknown = JSON.parse(envelope.slice(0, index + 1));
+            return isJsonValue(parsed) ? parsed : undefined;
+          } catch { return undefined; }
+        }
+      }
+    }
+    return undefined;
+  }
   candidates.push(trimmed);
   // A fenced block anywhere in the message, not only as the entire message.
   const fence = /```(?:json)?\s*([\s\S]*?)```/i.exec(trimmed);
@@ -1870,7 +2004,7 @@ function parseResultOutput(result: UnknownRecord, task: AgentTask): JsonValue {
       // escaping, or a message cut off at the output-token cap is exactly
       // what the error consumer needs to know — and by then the session is
       // gone. An unterminated JSON string in a long message is the
-      // signature of truncation, which no retry can fix.
+      // signature of truncation, not merely a stray Markdown fence.
       const head = text.slice(0, 400).replace(/\s+/g, " ");
       const tail = text.length > 700 ? text.slice(-200).replace(/\s+/g, " ") : "";
       const truncated =
@@ -1990,6 +2124,7 @@ function shellPathCandidates(
  */
 function fileAccessHooks(
   config: ClaudeAgentExecutorConfig,
+  observeToolUse: (name: string, input: unknown) => void,
 ): UnknownRecord {
   const taskRoot = resolve(config.cwd ?? process.cwd());
   const roots = [
@@ -2074,6 +2209,15 @@ function fileAccessHooks(
         matcher: "Bash",
         hooks: [shellHook],
       },
+      {
+        hooks: [async (input: unknown) => {
+          const event = record(input);
+          if (event.hook_event_name === "PreToolUse" && typeof event.tool_name === "string") {
+            observeToolUse(event.tool_name, event.tool_input);
+          }
+          return { continue: true };
+        }],
+      },
     ],
   };
 }
@@ -2086,6 +2230,7 @@ function queryOptions(
   nativeStructuredOutput: boolean,
   capture: TraceCapture,
   watchdog: SessionWatchdog,
+  observeToolUse: (name: string, input: unknown) => void,
 ): UnknownRecord {
   const builtinTools = allowedTools(task, config.nativeWeb === true);
   const wantsTaxonomy =
@@ -2138,7 +2283,7 @@ function queryOptions(
           },
     cwd: config.cwd ?? process.cwd(),
     env: sdkEnvironment(config.token, config.env),
-    hooks: fileAccessHooks(config),
+    hooks: fileAccessHooks(config, observeToolUse),
   };
   const mcpServers: UnknownRecord = {
     ...(capture.stepwise !== undefined
@@ -2418,6 +2563,7 @@ async function executeQuery(
   validationIssues: readonly string[] = [],
   nativeStructuredOutput = true,
   rejectedOutput: JsonValue | undefined = undefined,
+  outputLimitRecovery = false,
 ): Promise<AgentResult> {
   assertToken(config.token);
   if (context.signal?.aborted) throw abortError(context.signal.reason);
@@ -2445,6 +2591,23 @@ async function executeQuery(
           input as Parameters<typeof sdkQuery>[0],
         ) as unknown as ClaudeAgentQuery);
     let finalResult: UnknownRecord | undefined;
+    let assistantError: string | undefined;
+    const assistantUsage = new Map<string, UnknownRecord>();
+    let replaySafe = true;
+    const replaySafeTools = new Set([
+      "Read", "Glob", "Grep", "WebSearch", "WebFetch", STRUCTURED_OUTPUT_TOOL,
+      ...taxonomySdkToolNames(), ...notesSdkToolNames(), ...attachmentsSdkToolNames(),
+      ...(config.web ? webSdkToolNames(config.web) : []),
+      ...(capture.stepwise ? [stepwiseSdkToolName(capture.stepwise.spec)] : []),
+    ]);
+    const observeToolUse = (name: string, input: unknown): void => {
+      // A fresh session cannot roll back cluster submissions or shared facts.
+      // Unknown tools are unsafe by default; per-attempt structured steps are local.
+      if (!replaySafeTools.has(name) && !(name === `mcp__${FACTS_SERVER}__fact_table` && record(input).mode === "status")) {
+        replaySafe = false;
+        capture.mayHaveExternalEffects = true;
+      }
+    };
     const progressState = newProgressState();
     let messageCount = 0;
     const wantsAttachments =
@@ -2489,6 +2652,14 @@ async function executeQuery(
             "Produce a corrected complete result. Do not discuss the validation errors.",
           ]
         : []),
+      ...(outputLimitRecovery
+        ? [
+            "",
+            "The previous session exhausted its output-token allowance before completing the response.",
+            "Use a shorter analysis and produce the complete requested result promptly. Avoid repeated exploration, restating the input, or optional elaboration.",
+            "Keep every required field, constraint, and substantive conclusion. Do not truncate the answer, replace required content with placeholders, or omit required steps.",
+          ]
+        : []),
       ...(!nativeStructuredOutput && task.outputSchema
         ? [
             "",
@@ -2505,6 +2676,7 @@ async function executeQuery(
       nativeStructuredOutput,
       capture,
       watchdog,
+      observeToolUse,
     );
     // Before the query, never after: the record describes what we are about to
     // send, and a session that dies mid-stream must still leave the reader the
@@ -2524,6 +2696,19 @@ async function executeQuery(
         if (settled.done === true) break;
         watchdog.touch();
         const current = record(settled.value);
+        if (current.type === "assistant") {
+          recordAssistantUsage(current, assistantUsage);
+          assistantError = typeof current.error === "string" ? current.error : undefined;
+          const content = record(current.message).content;
+          if (Array.isArray(content)) {
+            for (const candidate of content) {
+              const block = record(candidate);
+              if (block.type === "tool_use" && typeof block.name === "string") {
+                observeToolUse(block.name, block.input);
+              }
+            }
+          }
+        }
         // Stream deltas are progress signals, not conversation turns.
         if (current.type !== "stream_event") messageCount += 1;
         capture.turn = messageCount;
@@ -2575,7 +2760,13 @@ async function executeQuery(
         }
         controller.abort(error.message);
       }
-      throw error;
+      // SDK versions may throw after yielding an error result, or before any
+      // result. Preserve the cumulative total, falling back to distinct API turns.
+      throw attachTaskUsage(
+        classifySdkFailure(error, finalResult, assistantError, replaySafe),
+        reportedQueryUsage(finalResult, assistantUsage),
+        finalResult?.total_cost_usd,
+      );
     } finally {
       watchdog.stop();
     }
@@ -2583,17 +2774,22 @@ async function executeQuery(
       throw abortError(context.signal?.reason);
     }
     if (!finalResult) {
-      throw new Error("Claude Agent SDK ended without a result message");
+      throw attachTaskUsage(
+        classifySdkFailure(new Error("Claude Agent SDK ended without a result message"), undefined, assistantError, replaySafe),
+        reportedQueryUsage(undefined, assistantUsage),
+      );
     }
     // The result message carries the session's cumulative usage even when
     // the session did not succeed; from here on every throw rides it out,
     // so the retry ladder records what the failed attempt already spent.
-    const queryUsage = usageFromResult(finalResult.usage);
+    const queryUsage = reportedQueryUsage(finalResult, assistantUsage);
     if (finalResult.subtype !== "success" || finalResult.is_error === true) {
-      const errors = Array.isArray(finalResult.errors)
-        ? finalResult.errors.map(String).join("; ")
-        : `Claude Agent SDK ended with ${String(finalResult.subtype)}`;
-      throw attachTaskUsage(new Error(errors), queryUsage);
+      const errors = sdkResultFailureMessage(finalResult);
+      throw attachTaskUsage(
+        classifySdkFailure(new Error(errors), finalResult, assistantError, replaySafe),
+        queryUsage,
+        finalResult.total_cost_usd,
+      );
     }
     let output: JsonValue;
     try {
@@ -2601,7 +2797,7 @@ async function executeQuery(
     } catch (error) {
       // An unparseable final message spends a validation attempt in a fresh
       // session; the tokens this one billed must not vanish with it.
-      throw attachTaskUsage(error, queryUsage);
+      throw attachTaskUsage(error, queryUsage, finalResult.total_cost_usd);
     }
     const metadata: JsonObject = {
       executor: "claude-agent-sdk",
@@ -2685,13 +2881,26 @@ export class ClaudeAgentExecutor implements AgentExecutor {
     let usage = emptyUsage();
     let nativeStructuredOutput = true;
     let crashRetries = 0;
+    let outputLimitRetries = 0;
+    let reportedCostUsd = 0;
+    let costKnown = true;
+    let replaySafe = true;
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      if (outputLimitRetries > 0 && this.config.maxBudgetUsd !== undefined && (!costKnown || reportedCostUsd >= this.config.maxBudgetUsd)) {
+        return {
+          taskId: task.taskId,
+          status: "error",
+          error: serializeError(new Error("Claude Code recovery stopped because no verified budget remains for another attempt.")),
+          usage,
+        };
+      }
       const workspace = taskWorkspace(this.config, task, context, attempt);
       // Fresh per-attempt trace state: attempts run in fresh sessions, so
       // recorded steps and thinking segments must never leak across them.
       const capture: TraceCapture = {
         wantsTrace,
         thinking: [],
+        mayHaveExternalEffects: false,
         ...(stepwise !== undefined
           ? { stepwise: { spec: stepwise, steps: [] } }
           : {}),
@@ -2699,7 +2908,16 @@ export class ClaudeAgentExecutor implements AgentExecutor {
       };
       try {
         const result = await executeQuery(
-          { ...this.config, cwd: workspace },
+          {
+            ...this.config,
+            cwd: workspace,
+            ...(outputLimitRetries > 0 ? {
+              effort: recoveryEffort(this.config.effort),
+              ...(this.config.maxBudgetUsd !== undefined ? {
+                maxBudgetUsd: Math.max(0, this.config.maxBudgetUsd - reportedCostUsd),
+              } : {}),
+            } : {}),
+          },
           task,
           context,
           capture,
@@ -2707,8 +2925,13 @@ export class ClaudeAgentExecutor implements AgentExecutor {
           validationIssues,
           nativeStructuredOutput,
           rejectedOutput,
+          outputLimitRetries > 0,
         );
+        replaySafe &&= !capture.mayHaveExternalEffects;
         if (result.usage) usage = addUsage(usage, result.usage);
+        const resultCostUsd = result.metadata?.totalCostUsd;
+        if (typeof resultCostUsd === "number" && Number.isFinite(resultCostUsd) && resultCostUsd >= 0) reportedCostUsd += resultCostUsd;
+        else costKnown = false;
         if (result.status === "error") {
           return { ...result, usage };
         }
@@ -2819,11 +3042,15 @@ export class ClaudeAgentExecutor implements AgentExecutor {
           usage,
         };
       } catch (error) {
+        replaySafe &&= !capture.mayHaveExternalEffects;
         // A thrown attempt may still carry the usage its session already
         // billed (a non-success end, an unparseable final message); fold it
         // in so retries and final failures account for it.
         const lostUsage = takeTaskUsage(error);
         if (lostUsage !== undefined) usage = addUsage(usage, lostUsage);
+        const lostCostUsd = record(error).taskCostUsd;
+        if (typeof lostCostUsd === "number" && Number.isFinite(lostCostUsd) && lostCostUsd >= 0) reportedCostUsd += lostCostUsd;
+        else costKnown = false;
         if (
           context.signal?.aborted ||
           (error instanceof Error && error.name === "AbortError")
@@ -2854,6 +3081,31 @@ export class ClaudeAgentExecutor implements AgentExecutor {
           throw resolved !== undefined
             ? new CreditBlockedError(resolved.retryAt, message, resolved.source)
             : new CreditBlockedError(undefined, message, "manual");
+        }
+        if (error instanceof OutputTokenLimitError) {
+          const budgetAvailable = this.config.maxBudgetUsd === undefined || (costKnown && reportedCostUsd < this.config.maxBudgetUsd);
+          const canReplay = replaySafe && error.replaySafe;
+          if (canReplay && budgetAvailable && outputLimitRetries < MAX_OUTPUT_LIMIT_RETRIES && attempt < attempts) {
+            outputLimitRetries += 1;
+            progress(context, {
+              kind: "retry",
+              message: "Output-token limit reached; retrying once with shorter reasoning and a complete concise result",
+            });
+            continue;
+          }
+          const reason = !canReplay
+            ? "Automatic retry was skipped because this session may have changed external state."
+            : !budgetAvailable
+              ? costKnown
+                ? "Automatic retry was skipped because the reported cost exhausted the configured budget."
+                : "Automatic retry was skipped because the remaining configured budget could not be verified."
+              : "No output-limit recovery attempts remain.";
+          return {
+            taskId: task.taskId,
+            status: "error",
+            error: serializeError(new OutputTokenLimitError(`${message} ${reason}`, canReplay)),
+            usage,
+          };
         }
         if (
           task.outputSchema &&
@@ -2907,6 +3159,7 @@ export class ClaudeAgentExecutor implements AgentExecutor {
         // giving up, so one silent process death cannot sink a long run.
         // Crash retries consume no validation attempts.
         if (
+          !(error instanceof SdkTerminalResultError) &&
           /Claude Code process (?:exited with code \d+|terminated by signal \w+)|Failed to spawn Claude Code process/.test(
             message,
           ) &&
