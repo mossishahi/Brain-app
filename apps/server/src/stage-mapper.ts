@@ -46,6 +46,7 @@ import {
   type InterpretationCandidateView,
   type InterpretOutputView,
   type JobDetail,
+  type JobSummary,
   type JobStatus,
   type JudgeDecisionView,
   type JudgeIssueView,
@@ -3396,6 +3397,60 @@ export function compositionInputs(sessionDir: string): {
 
 export function buildJobDetail(input: MapperInput): JobDetail {
   return buildJobDetailWithActivity(input).detail;
+}
+
+/**
+ * A settled landing card needs the run's identity and recorded outcome, not
+ * every historical artifact. On shared storage that archive can contain
+ * thousands of cold files. Keep their hydration behind the detail request.
+ */
+export function buildSettledJobSummary(input: MapperInput): JobSummary {
+  const checkpoint = readCheckpoint(input.sessionDir);
+  const entries = checkpoint?.journal ?? [];
+  const processed = processor(journalAgent(entries, (key) =>
+    /\/process-input(?:\/process-input-execute)?::result$/.test(key)
+  ));
+  const classified = journalAgent(entries, (key) =>
+    /\/classify-input(?:\/classify-input-execute)?::result$/.test(key)
+  );
+  const mergedInput = processor(journalNodeOutput(entries, "apply-classification", "input"));
+  const output = mergedInput ?? processed;
+  const processComplete = checkpoint?.status === "completed" || output?.type !== undefined;
+  const titleReady = checkpoint?.status === "completed" ||
+    (output !== undefined && (classified === undefined || output.type !== undefined));
+  const completed = new Set<StageId>();
+  for (const entry of entries) {
+    // A child task is not the completion of its enclosing fan-out stage.
+    const match = /\/([^/:]+)::result$/.exec(entry.key);
+    const id = match?.[1];
+    if (id !== undefined && (STAGE_IDS as readonly string[]).includes(id)) completed.add(id as StageId);
+  }
+  if (processComplete) completed.add("process-input");
+  else completed.delete("process-input");
+  const gamifiedReview = gameReviewEnabled(checkpoint, input.record.executionSettings);
+  const contentBundle = input.record.contentBundle ?? readContentBundle(input.jobDir);
+  return {
+    jobId: input.record.jobId,
+    topic: input.record.topic,
+    ...(titleReady && output?.title ? { title: output.title } : {}),
+    ...(input.record.attachments?.length ? { attachments: input.record.attachments } : {}),
+    status: input.status,
+    runner: input.record.runner,
+    gamifiedReview,
+    ...(gamifiedReview ? { gameReview: gameReviewConfiguration(checkpoint, input.record.executionSettings) } : {}),
+    createdAt: input.record.createdAt,
+    updatedAt: Math.max(input.record.updatedAt, checkpoint?.updatedAt ?? 0),
+    ...(input.record.slurmJobId ? { slurmJobId: input.record.slurmJobId } : {}),
+    ...(contentBundle ? { contentBundle: { id: contentBundle.id, version: contentBundle.version } } : {}),
+    ...(input.record.trashedAt !== undefined ? { trashedAt: input.record.trashedAt } : {}),
+    progress: {
+      completedStages: checkpoint?.status === "completed" ? STAGE_IDS.length : completed.size,
+      totalStages: STAGE_IDS.length,
+    },
+    ...(input.record.error ?? checkpoint?.error?.message
+      ? { error: input.record.error ?? checkpoint?.error?.message }
+      : {}),
+  };
 }
 
 export function buildJobDetailWithActivity(input: MapperInput): JobDetailWithActivity {

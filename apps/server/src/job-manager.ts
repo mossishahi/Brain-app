@@ -71,6 +71,7 @@ import {
 import {
   agentIdentity,
   buildJobDetailWithActivity,
+  buildSettledJobSummary,
   compactJobDetail,
   compositionInputs,
   liveIdentityPanel,
@@ -1498,6 +1499,9 @@ export class JobManager {
     // read is failing, but invalidate the fingerprint so the next call retries.
     const factReadFailed = value.stages.some((stage) => stage.id === "done" && stage.factTable?.error !== undefined);
     this.detailCache.set(jobId, { fingerprint: factReadFailed ? "" : fingerprint, value, activity, outputHistory });
+    if (JobManager.SETTLED_STATUSES.has(status)) {
+      this.summaryCache.set(jobId, { key: `${status}:${record.updatedAt}`, value: compactJobDetail(value) });
+    }
     return value;
   }
 
@@ -1566,21 +1570,24 @@ export class JobManager {
   ]);
 
   /**
-   * Landing-card summary. Settled jobs are hydrated once and cached so a list
-   * snapshot does not re-read every job's event log and artifacts; live jobs
-   * recompute so their progress stays current.
+   * Landing-card summary. Settled jobs use checkpoint metadata until a detail
+   * request has hydrated their archive; cold lists never scan old artifacts.
+   * Live jobs recompute so their progress stays current.
    */
   private async summary(record: JobRecord): Promise<JobSummary> {
     const status = await this.reconcile(record);
     const key = `${status}:${record.updatedAt}`;
     const cached = this.summaryCache.get(record.jobId);
     if (cached?.key === key) return cached.value;
+    if (JobManager.SETTLED_STATUSES.has(status)) {
+      const value = buildSettledJobSummary({ record, status, sessionDir: this.sessionDir(record.jobId),
+        jobDir: this.jobDir(record.jobId), settings: record.executionSettings ?? this.settings.get() });
+      this.summaryCache.set(record.jobId, { key, value });
+      return value;
+    }
     // Live jobs ride the fingerprint-cached detail, so a list snapshot
     // costs stats — not a rebuild — when nothing changed.
     const value = compactJobDetail(await this.detail(record.jobId));
-    if (JobManager.SETTLED_STATUSES.has(status)) {
-      this.summaryCache.set(record.jobId, { key, value });
-    }
     return value;
   }
 
