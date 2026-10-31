@@ -136,6 +136,58 @@ function resultToolName(request: ModelRequest): string | undefined {
   return name;
 }
 
+/**
+ * Gemini expands array cardinality bounds into its constrained-output grammar.
+ * Large bounds (including the processor's 400-file ceiling) can make an otherwise
+ * small schema fail with INVALID_ARGUMENT. Keep those bounds as model guidance;
+ * the host still validates the result against the untouched original schema.
+ */
+function outputSchemaForGemini(schema: JsonObject): JsonObject {
+  const normalized = structuredClone(schema);
+  let safeToRelax = true;
+  const visit = (value: unknown): void => {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) return;
+    const node = value as Wire;
+    // Negation, selectors, exclusive unions, match counts and unevaluated-node
+    // annotations need more than local relaxation to preserve their meaning.
+    // Leave the whole schema unchanged, including any shared $defs targets.
+    if (["not", "if", "oneOf", "contains", "maxContains", "unevaluatedItems", "unevaluatedProperties"]
+      .some((key) => node[key] !== undefined)) safeToRelax = false;
+    const count = (key: string): number | undefined => {
+      const bound = node[key];
+      return typeof bound === "number" && Number.isSafeInteger(bound) && bound >= 0 ? bound : undefined;
+    };
+    const min = count("minItems");
+    const max = count("maxItems");
+    if (min !== undefined || max !== undefined) {
+      if (min !== undefined) delete node.minItems;
+      if (max !== undefined) delete node.maxItems;
+      const guidance = min !== undefined && min === max
+        ? `This array must contain exactly ${min} items.`
+        : `This array must contain ${[
+          ...(min !== undefined ? [`at least ${min} items`] : []),
+          ...(max !== undefined ? [`no more than ${max} items`] : []),
+        ].join(" and ")}.`;
+      node.description = [typeof node.description === "string" ? node.description : "", guidance].filter(Boolean).join("\n");
+    }
+    // Visit schema positions only. Property names and literal enum/default
+    // objects can themselves be named minItems or maxItems and must survive.
+    for (const key of ["properties", "patternProperties", "$defs", "definitions", "dependentSchemas", "dependencies"]) {
+      for (const child of Object.values(record(node[key]))) visit(child);
+    }
+    for (const key of ["items", "additionalItems", "contains", "additionalProperties", "unevaluatedItems",
+      "unevaluatedProperties", "not", "if", "then", "else", "propertyNames", "contentSchema"]) {
+      if (Array.isArray(node[key])) for (const child of node[key]) visit(child);
+      else visit(node[key]);
+    }
+    for (const key of ["allOf", "anyOf", "oneOf", "prefixItems"]) {
+      if (Array.isArray(node[key])) for (const child of node[key]) visit(child);
+    }
+  };
+  visit(normalized);
+  return safeToRelax ? normalized : structuredClone(schema);
+}
+
 function requestParams(request: ModelRequest, maxOutputTokens: number | undefined, signal?: AbortSignal): { params: Wire; finalTool?: string } {
   const contents = messagesToContents(request.messages);
   if (!contents.length) invalid("Gemini requests require at least one message.");
@@ -144,7 +196,9 @@ function requestParams(request: ModelRequest, maxOutputTokens: number | undefine
   const plainJsonWithTools = geminiModelProfile(request.modelId)?.supportsJsonWithTools !== true &&
     request.responseFormat?.type === "json" && request.toolChoice?.type !== "none" && (request.tools?.length ?? 0) > 0;
   const config: Wire = {
-    candidateCount: 1,
+    // The API defaults to one candidate. Explicit candidateCount is rejected
+    // by newer models (including 3.8 Flash), even when it is set to one.
+    // https://firebase.google.com/docs/ai-logic/model-parameters
     // The host owns tools, retries and budgets. Never hide extra model calls inside the SDK.
     automaticFunctionCalling: { disable: true },
     automaticContinuation: false,
@@ -166,7 +220,7 @@ function requestParams(request: ModelRequest, maxOutputTokens: number | undefine
     const declarations = tools.map((tool) => ({ name: tool.name,
       ...(tool.description !== undefined ? { description: tool.description } : {}), parametersJsonSchema: tool.inputSchema }));
     if (finalTool && request.responseFormat?.type === "jsonSchema") declarations.push({ name: finalTool,
-      description: "Deliver the final structured result after all required host tool and argument-step work is complete.", parametersJsonSchema: request.responseFormat.schema });
+      description: "Deliver the final structured result after all required host tool and argument-step work is complete.", parametersJsonSchema: outputSchemaForGemini(request.responseFormat.schema) });
     config.tools = [{ functionDeclarations: declarations }];
     const choice = request.toolChoice;
     if (choice?.type === "tool" && !tools.some((tool) => tool.name === choice.name)) invalid(`Gemini requested an undeclared tool: ${choice.name}.`);
@@ -187,7 +241,7 @@ function requestParams(request: ModelRequest, maxOutputTokens: number | undefine
   const forcedTool = request.toolChoice?.type === "required" || request.toolChoice?.type === "tool";
   if (!finalTool && !plainJsonWithTools && !forcedTool && (request.responseFormat?.type === "json" || request.responseFormat?.type === "jsonSchema")) {
     config.responseMimeType = "application/json";
-    if (request.responseFormat.type === "jsonSchema") config.responseJsonSchema = request.responseFormat.schema;
+    if (request.responseFormat.type === "jsonSchema") config.responseJsonSchema = outputSchemaForGemini(request.responseFormat.schema);
   }
   return { params: { model: request.modelId.replace(/^models\//, ""), contents, config }, ...(finalTool ? { finalTool } : {}) };
 }

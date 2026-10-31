@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { userMessage, type ModelRequest, type RequestCoordinator } from "@brainstorm-agentic/core";
+import { userMessage, type JsonObject, type ModelRequest, type RequestCoordinator } from "@brainstorm-agentic/core";
 import { GeminiModelProvider, discoverGeminiModels, geminiModelProfile, GeminiProviderError, type GeminiClient } from "../src/index.js";
 
 type Wire = Record<string, any>;
@@ -15,6 +15,24 @@ function client(responses: unknown[] = []): { client: GeminiClient; calls: Wire[
   } } };
 }
 const response = (parts: Wire[], extra: Wire = {}): Wire => ({ candidates: [{ content: { role: "model", parts }, finishReason: "STOP" }], ...extra });
+
+test("newer Gemini models use the single-candidate default without an unsupported parameter", async () => {
+  const strictClient: GeminiClient = { models: {
+    async generateContent(params) {
+      if (Object.hasOwn((params as Wire).config, "candidateCount")) {
+        throw Object.assign(new Error("candidateCount is not supported for this model"), { status: 400 });
+      }
+      return response([{ text: "accepted" }]);
+    },
+    async list() { return (async function* () {})(); },
+  } };
+  const provider = new GeminiModelProvider({ apiKey: "unused", client: strictClient });
+  for (const modelId of ["gemini-3.7-flash", "gemini-3.8-flash", "gemini-4-argon"]) {
+    const result = await provider.complete(request({ modelId }));
+    assert.equal(result.stopReason, "end_turn");
+    assert.deepEqual(result.content, [{ type: "text", text: "accepted", metadata: { gemini: { part: { text: "accepted" } } } }]);
+  }
+});
 
 test("no thought summaries by default; system, schema, token usage and controls are independent", async () => {
   const fake = client([response([{ text: '{"ok":true}' }], { usageMetadata: { promptTokenCount: 100, candidatesTokenCount: 20, thoughtsTokenCount: 30, totalTokenCount: 150, cachedContentTokenCount: 60 } })]);
@@ -30,6 +48,93 @@ test("no thought summaries by default; system, schema, token usage and controls 
   assert.deepEqual(fake.calls[0]!.config.responseJsonSchema, schema);
   assert.equal(fake.calls[0]!.config.automaticContinuation, false);
   assert.equal(fake.calls[0]!.config.maxOutputTokens, 8000);
+});
+
+test("large output arrays use description guidance without changing host contracts or host tool schemas", async () => {
+  const schema = { type: "object", properties: {
+    files: { type: "array", description: "Submitted files.", minItems: 0, maxItems: 400,
+      items: { type: "object", properties: { path: { type: "string", minLength: 1, maxLength: 2000 } }, required: ["path"], additionalProperties: false } },
+    score: { type: "integer", minimum: 1, maximum: 5 },
+  }, required: ["files"], additionalProperties: false };
+  const original = structuredClone(schema);
+  const toolSchema = { type: "object", properties: { files: { type: "array", minItems: 1, maxItems: 10, items: { type: "string" } } } };
+  for (const modelId of ["gemini-3.5-flash", "gemini-2.5-flash"]) {
+    const fake = client([response([{ text: '{"files":[]}' }])]);
+    const provider = new GeminiModelProvider({ apiKey: "unused", client: fake.client });
+    await provider.complete(request({ modelId, tools: [{ name: "inspect", inputSchema: toolSchema }], responseFormat: { type: "jsonSchema", schema } }));
+    const config = fake.calls[0]!.config;
+    const wire = modelId === "gemini-2.5-flash" ? config.tools[0].functionDeclarations[1].parametersJsonSchema : config.responseJsonSchema;
+    assert.deepEqual(wire.properties.files, {
+      type: "array", description: "Submitted files.\nThis array must contain at least 0 items and no more than 400 items.",
+      items: original.properties.files.items,
+    });
+    assert.deepEqual(wire.properties.score, original.properties.score);
+    assert.deepEqual(wire.required, original.required);
+    assert.equal(wire.additionalProperties, false);
+    assert.deepEqual(config.tools[0].functionDeclarations[0].parametersJsonSchema, toolSchema);
+    assert.deepEqual(schema, original, "the host validator still receives its full original contract");
+  }
+});
+
+test("output schema normalization reaches nested, composed and referenced schemas without interpreting literal data", async () => {
+  const bounded = () => ({ type: "array", minItems: 2, maxItems: 2, items: { type: "string" } });
+  const literal = { minItems: 7, maxItems: 9, not: {}, if: {}, oneOf: [], contains: {}, properties: { nested: { minItems: 3, maxItems: 4 } } };
+  const schema = {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    type: "object",
+    properties: {
+      minItems: { type: "string", const: "maxItems" },
+      maxItems: { type: "integer", minimum: 1, maximum: 10 },
+      nested: { type: "array", maxItems: 3, items: bounded() },
+      composed: { anyOf: [bounded(), { type: "null" }] },
+      reference: { $ref: "#/$defs/bounded" },
+      tuple: { type: "array", prefixItems: [bounded()] },
+      literal: { type: "object", enum: [literal], default: literal, const: literal },
+    },
+    $defs: { bounded: bounded() },
+    allOf: [{ properties: { composedAgain: { anyOf: [bounded(), { type: "string" }] } } }],
+    additionalProperties: bounded(),
+  };
+  const original = structuredClone(schema);
+  const fake = client([response([{ text: "{}" }])]);
+  const provider = new GeminiModelProvider({ apiKey: "unused", client: fake.client });
+  await provider.complete(request({ responseFormat: { type: "jsonSchema", schema } }));
+  const wire = fake.calls[0]!.config.responseJsonSchema;
+  const exactArray = { type: "array", description: "This array must contain exactly 2 items.", items: { type: "string" } };
+  assert.deepEqual(wire.properties.nested, { type: "array", description: "This array must contain no more than 3 items.", items: exactArray });
+  assert.deepEqual(wire.properties.composed.anyOf[0], exactArray);
+  assert.deepEqual(wire.properties.tuple.prefixItems[0], exactArray);
+  assert.deepEqual(wire.$defs.bounded, exactArray);
+  assert.deepEqual(wire.allOf[0].properties.composedAgain.anyOf[0], exactArray);
+  assert.deepEqual(wire.additionalProperties, exactArray);
+  assert.deepEqual(wire.properties.reference, original.properties.reference);
+  assert.deepEqual(wire.properties.minItems, original.properties.minItems);
+  assert.deepEqual(wire.properties.maxItems, original.properties.maxItems);
+  assert.deepEqual(wire.properties.literal, original.properties.literal);
+  assert.equal(wire.$schema, original.$schema);
+  assert.deepEqual(schema, original);
+});
+
+test("nonmonotonic schema contexts retain all bounds including their shared reference targets", async () => {
+  const contexts: JsonObject[] = [
+    { not: { $ref: "#/$defs/bounded" } },
+    { if: { $ref: "#/$defs/bounded" }, then: { maxItems: 2 }, else: { minItems: 3 } },
+    { oneOf: [{ $ref: "#/$defs/bounded" }, { type: "array", maxItems: 10 }] },
+    { contains: { $ref: "#/$defs/bounded" }, maxContains: 1 },
+    { maxContains: 1 },
+    { allOf: [{ $ref: "#/$defs/bounded" }], unevaluatedItems: false },
+    { anyOf: [{ $ref: "#/$defs/bounded" }], unevaluatedProperties: false },
+  ];
+  for (const context of contexts) {
+    const schema = { type: "object", properties: { result: context },
+      $defs: { bounded: { type: "array", maxItems: 400, items: { type: "string" } } } };
+    const original = structuredClone(schema);
+    const fake = client([response([{ text: "{}" }])]);
+    const provider = new GeminiModelProvider({ apiKey: "unused", client: fake.client });
+    await provider.complete(request({ responseFormat: { type: "jsonSchema", schema } }));
+    assert.deepEqual(fake.calls[0]!.config.responseJsonSchema, original);
+    assert.deepEqual(schema, original);
+  }
 });
 
 test("parallel tool calls retain signed Parts and opaque IDs byte-for-byte over a second turn", async () => {
