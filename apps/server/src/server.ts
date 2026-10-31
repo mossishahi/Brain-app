@@ -1212,15 +1212,21 @@ export async function startBrainServer(
             syncSearxng();
           }
           // Provider/runner changes flip which checks matter, so those re-verify.
-          // Nothing else does: with each section saving on its own, refreshing
-          // on every save would re-probe the provider (a real request) every
-          // time someone nudged an unrelated control.
+          // Host tool changes only re-evaluate the capability plan: refreshing
+          // every check on each section save would make another paid model
+          // request whenever someone nudged an unrelated control.
           if (
             settings.llm.provider !== before.llm.provider ||
             settings.llm.model !== before.llm.model ||
             settings.runner !== before.runner
           ) {
             readiness.refresh();
+            broadcastReadiness();
+          } else if (
+            JSON.stringify(settings.hostTools?.enabledToolIds) !==
+            JSON.stringify(before.hostTools?.enabledToolIds)
+          ) {
+            readiness.refresh(["capabilities"]);
             broadcastReadiness();
           }
           // Tool availability re-probes only what this save touched (a pasted

@@ -73,6 +73,7 @@ import {
 import {
   ALL_HOST_TOOL_MANIFESTS,
   ATTACHMENT_MANIFESTS,
+  CODE_EXECUTION_MANIFESTS,
   FACT_MANIFESTS,
   GPU_RUN_MANIFESTS,
   NOTES_MANIFESTS,
@@ -809,6 +810,14 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
   // tools that can only refuse.
   if (attachmentRoots.length === 0) {
     for (const manifest of ATTACHMENT_MANIFESTS) {
+      enabledHostToolIds.delete(manifest.toolId);
+    }
+  }
+  // Enabling host code execution does not guarantee that its scratch
+  // workspace could be prepared. Without that environment no executable tool
+  // is registered, so the broker must not advertise one to the model.
+  if (options.codeEnvironment === undefined) {
+    for (const manifest of CODE_EXECUTION_MANIFESTS) {
       enabledHostToolIds.delete(manifest.toolId);
     }
   }

@@ -15,7 +15,8 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { loadContent } from "@brainstorm-agentic/content";
-import type { AgentResult, JsonValue, TaxonomyAccess } from "@brainstorm-agentic/core";
+import { Scope, type AgentResult, type JsonValue, type TaxonomyAccess } from "@brainstorm-agentic/core";
+import { prepareCodeWorkspace } from "@brainstorm-agentic/host-tools";
 
 import {
   buildRuntime,
@@ -177,6 +178,50 @@ test("a dismissal reaches the runtime the worker builds", () => {
       false,
       "a seated member's comment is not",
     );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Gemini tasks advertise host code execution only when enabled and prepared", async () => {
+  const root = tempRoot();
+  try {
+    const codeEnvironment = await prepareCodeWorkspace(join(root, "code-env"), {
+      pythonCandidates: [],
+    });
+    for (const scenario of [
+      { name: "enabled and prepared", enabled: true, prepared: true, disabled: false, source: "host" },
+      { name: "preparation failed", enabled: true, prepared: false, disabled: false, source: "unavailable" },
+      { name: "host tool disabled", enabled: false, prepared: true, disabled: false, source: "unavailable" },
+      { name: "capability disabled", enabled: true, prepared: true, disabled: true, source: "unavailable" },
+    ] as const) {
+      const runtime = buildRuntime({
+        providerConfig: {
+          provider: "gemini",
+          defaultModel: "gemini-3.8-flash",
+          geminiApiKey: "unused-test-key",
+          enabledHostToolIds: scenario.enabled ? ["code_execute"] : [],
+          ...(scenario.disabled ? { disabledCapabilities: ["code-execution"] } : {}),
+        },
+        checkpoints: new FsCheckpointStore(root),
+        artifacts: new FsArtifactStore(root, "bsa_test_code_capability"),
+        autoApproveGates: true,
+        attachmentStore: "declared-none",
+        ...(scenario.prepared ? { codeEnvironment } : {}),
+        bundle: registryBundle,
+      });
+      const scope = Scope.root(runtime.compiled.createInput({ prompt: "Check two plus two.", attachments: [] }));
+      const task = await runtime.compiled.functions.taskBuilder("brainstorm.brainstorm.process-input.task")(
+        scope,
+        undefined,
+        { runId: "bsa_test_code_capability", nodePath: "brainstorm-root/process-input", signal: new AbortController().signal },
+      );
+      const operation = task.capabilityPlan?.operations.find((entry) => entry.operationId === "code.execute");
+      assert.equal(operation?.source, scenario.source, scenario.name);
+      assert.deepEqual(operation?.toolNames, scenario.source === "host" ? ["code_execute"] : [], scenario.name);
+      assert.equal(task.tools?.includes("code_execute") ?? false, scenario.source === "host", scenario.name);
+      assert.equal(task.capabilityPlan?.hostToolDefinitions.some((tool) => tool.name === "code_execute"), scenario.source === "host", scenario.name);
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
