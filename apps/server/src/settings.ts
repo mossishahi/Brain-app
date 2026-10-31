@@ -1807,6 +1807,9 @@ export class SettingsStore {
     const env = { ...base };
     // Always replace inherited launch policy, including empty maps on legacy jobs.
     env.BRAINSTORM_AGENTIC_STAGE_SETTINGS = JSON.stringify(settings.llm.stageSettingsByProvider?.[settings.llm.provider] ?? {});
+    // An empty map is authoritative too: otherwise a cleared route selection
+    // can leak back in from the server or scheduler's inherited environment.
+    env.BRAINSTORM_AGENTIC_MODELS_BY_ROUTE = JSON.stringify(settings.llm.modelsByRoute ?? {});
     delete env.BRAINSTORM_AGENTIC_TRANSCRIPT;
     if (settings.llm.transcript !== undefined) env.BRAINSTORM_AGENTIC_TRANSCRIPT = settings.llm.transcript;
     delete env.BRAINSTORM_AGENTIC_MODEL_CATALOG;
@@ -1988,12 +1991,6 @@ export class SettingsStore {
         .replace(/[^A-Z0-9_]/g, "_")}`;
       env[name] = model;
     }
-    // Lossless JSON form of the per-route map; the worker prefers it over
-    // the mangled legacy variables above.
-    const modelsByRoute = settings.llm.modelsByRoute ?? {};
-    if (Object.keys(modelsByRoute).length > 0) {
-      env.BRAINSTORM_AGENTIC_MODELS_BY_ROUTE = JSON.stringify(modelsByRoute);
-    }
     return env;
   }
 
@@ -2021,10 +2018,20 @@ export class SettingsStore {
       name: "llm" | "creditRecovery" | "hostTools" | "gpu" | "webSearch" | "availability",
     ): unknown => {
       if (patch[name] === undefined) return (stored as Record<string, unknown>)[name];
-      return {
+      const submitted = object(patch[name], name);
+      const merged = {
         ...object((stored as Record<string, unknown>)[name] ?? {}, name),
-        ...object(patch[name], name),
+        ...submitted,
       };
+      // Legacy route choices have no provider key. Inheriting them on a
+      // provider change can send (for example) a Claude model ID to Gemini.
+      // A map explicitly submitted with the new provider remains intentional;
+      // provider-scoped stage settings stay available when switching back.
+      if (name === "llm" && submitted.provider !== undefined &&
+          submitted.provider !== stored.llm.provider && submitted.modelsByRoute === undefined) {
+        delete merged.modelsByRoute;
+      }
+      return merged;
     };
     const merged: Record<string, unknown> = {
       slurmTemplate: patch.slurmTemplate ?? stored.slurmTemplate,

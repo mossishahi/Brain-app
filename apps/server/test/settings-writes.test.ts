@@ -5,12 +5,75 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { SettingsStore } from "../src/settings.js";
+import { buildOrchestrationCommand } from "../src/command.js";
 
 function deferred() {
   let resolve!: () => void;
   const promise = new Promise<void>((done) => { resolve = done; });
   return { promise, resolve };
 }
+
+test("provider changes clear inherited route models while keeping each provider's stage choices", async (t) => {
+  const workspace = mkdtempSync(join(tmpdir(), "brain-provider-routes-"));
+  t.after(() => rmSync(workspace, { recursive: true, force: true }));
+  const store = new SettingsStore(workspace, {
+    validateAnthropic: async () => undefined,
+    validateGemini: async () => undefined,
+  });
+  const stages = {
+    anthropic: { "process-input": { model: "claude-sonnet-5" } },
+    gemini: { "process-input": { model: "gemini-3.8-flash" } },
+  };
+  await store.put({ llm: {
+    provider: "anthropic", model: "claude-sonnet-5", apiKey: "test-anthropic",
+    modelsByRoute: { reasoning: "claude-sonnet-5", writing: "claude-sonnet-5" },
+    stageSettingsByProvider: stages,
+  } });
+
+  const sameProvider = await store.put({ llm: { provider: "anthropic", transcript: "off" } });
+  assert.deepEqual(sameProvider.llm.modelsByRoute, { reasoning: "claude-sonnet-5", writing: "claude-sonnet-5" });
+  const switched = await store.put({ llm: { provider: "gemini", model: "gemini-3.8-flash", geminiApiKey: "test-gemini" } });
+  assert.equal(switched.llm.modelsByRoute, undefined);
+  assert.deepEqual(switched.llm.stageSettingsByProvider, stages);
+  assert.equal(new SettingsStore(workspace).get().llm.modelsByRoute, undefined, "the cleared routes must persist");
+
+  const explicit = await store.put({ llm: {
+    provider: "anthropic", model: "claude-sonnet-5", modelsByRoute: { reasoning: "claude-route" },
+  } });
+  assert.deepEqual(explicit.llm.modelsByRoute, { reasoning: "claude-route" });
+  assert.deepEqual(explicit.llm.stageSettingsByProvider, stages);
+  const partial = await store.put({ llm: { transcript: "if-available" } });
+  assert.deepEqual(partial.llm.modelsByRoute, { reasoning: "claude-route" });
+  const empty = await store.put({ llm: { provider: "gemini", model: "gemini-3.8-flash", modelsByRoute: {} } });
+  assert.deepEqual(empty.llm.modelsByRoute, {});
+});
+
+test("worker environments and scheduler commands replace inherited routing even with an empty map", async (t) => {
+  const workspace = mkdtempSync(join(tmpdir(), "brain-route-environment-"));
+  t.after(() => rmSync(workspace, { recursive: true, force: true }));
+  const store = new SettingsStore(workspace, { validateGemini: async () => undefined });
+  await store.put({ llm: { provider: "gemini", model: "gemini-3.8-flash", geminiApiKey: "test-gemini" } });
+  const inherited = {
+    BRAINSTORM_AGENTIC_MODELS_BY_ROUTE: JSON.stringify({ reasoning: "claude-sonnet-5" }),
+    BRAINSTORM_AGENTIC_MODEL_REASONING: "claude-sonnet-5",
+  };
+  const command = (settings: ReturnType<SettingsStore["get"]>) => buildOrchestrationCommand({
+    workerPath: "/tmp/worker.js", mode: "run", runId: "route-environment", topic: "Test",
+    sessionRoot: "/tmp/sessions", eventsFile: "/tmp/events.jsonl", contentDir: "/tmp/content", settings,
+  });
+  const empty = store.get();
+  assert.deepEqual(JSON.parse(store.executionEnvironment(inherited).BRAINSTORM_AGENTIC_MODELS_BY_ROUTE!), {});
+  assert.match(command(empty), /BRAINSTORM_AGENTIC_MODELS_BY_ROUTE='\{\}'/);
+
+  await store.putModelsByRoute({ modelsByRoute: { "custom-route": "gemini-route" } });
+  assert.deepEqual(JSON.parse(store.executionEnvironment(inherited).BRAINSTORM_AGENTIC_MODELS_BY_ROUTE!), { "custom-route": "gemini-route" });
+  assert.match(command(store.get()), /BRAINSTORM_AGENTIC_MODELS_BY_ROUTE='\{"custom-route":"gemini-route"\}'/);
+  assert.deepEqual(JSON.parse(store.executionEnvironment(inherited, empty).BRAINSTORM_AGENTIC_MODELS_BY_ROUTE!), {}, "resumes use the job snapshot, not current routes");
+
+  const offline = await store.put({ llm: { provider: "offline" } });
+  assert.deepEqual(JSON.parse(store.executionEnvironment(inherited).BRAINSTORM_AGENTIC_MODELS_BY_ROUTE!), {});
+  assert.match(command(offline), /BRAINSTORM_AGENTIC_MODELS_BY_ROUTE='\{\}'/);
+});
 
 test("wrapped Claude setup tokens are normalized before verification, persistence, and worker use", async () => {
   const workspace = mkdtempSync(join(tmpdir(), "brain-claude-token-"));

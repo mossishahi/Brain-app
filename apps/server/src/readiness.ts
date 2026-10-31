@@ -29,6 +29,7 @@ import {
 } from "@brainstorm-agentic/core";
 import {
   ATTACHMENT_MANIFESTS,
+  CODE_EXECUTION_MANIFESTS,
   FACT_MANIFESTS,
   NOTES_MANIFESTS,
   TAXONOMY_MANIFESTS,
@@ -448,6 +449,7 @@ export function defaultReadinessProbes(
       });
       const hostTools = [
         ...ATTACHMENT_MANIFESTS,
+        ...CODE_EXECUTION_MANIFESTS,
         ...TAXONOMY_MANIFESTS,
         ...WEB_SEARCH_MANIFESTS,
         ...NOTES_MANIFESTS,
@@ -551,10 +553,15 @@ export function defaultReadinessProbes(
         .concat(localSearchFailure ? [localSearchFailure.detail] : [])
         .join("\n");
       if (unsatisfied.length > 0) {
+        const codeAdvice = unsatisfied.includes("code-execution") &&
+          !enabledHostToolIds.has("code_execute")
+          ? "Enable Code execution in Settings → Tools → Capabilities & host tools to let agents run scripts in this host's scratch workspace. "
+          : "";
         throw new ReadinessProbeError(
           (localSearchFailure ? `${localSearchFailure.message}. ` : "") +
             `${unsatisfied.join(", ")} cannot be satisfied on this deployment — agents that ` +
             "depend on it would run degraded (or fail, where the skill marks it required). " +
+            codeAdvice +
             "Re-enable the backing host tools in Settings, or switch to a backend that " +
             "provides the capability natively.",
           detail,
@@ -823,7 +830,7 @@ function staticAdvice(id: ReadinessCheckId, settings: ServerSettings): string {
     case "code":
       return "The scratch workspace could not run a script. Check that the workspace path is on writable storage, that the filesystem is not mounted noexec, and that TMPDIR points somewhere writable.";
     case "capabilities":
-      return "One or more agent capabilities resolve to no tool on this deployment, so agents depending on them would run degraded (or fail where a skill marks the capability required). Open Settings and re-enable the backing host tools (attachment and taxonomy reads ship enabled by default), or switch to a backend that provides the capability natively. The technical detail lists every operation and where it resolved.";
+      return "One or more agent capabilities have no available tool. Open Settings → Tools → Capabilities & host tools to enable the missing tool. Gemini uses the Code execution host tool to run scripts in this host's scratch workspace; this setting is off by default. The technical detail lists every operation and its source.";
     case "slurm":
       return "Verify job submission works from this node: `sbatch --version` must succeed and the template's partition/QOS/account must be valid for your user. The probe script and its log are kept under workspace/readiness/ — submit the script manually with sbatch to see the scheduler's own message.";
     case "registry":

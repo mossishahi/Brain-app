@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { CreditBlockedError, isCreditBlocked } from "@brainstorm-agentic/core";
 
 import type {
   AgentExecutionContext,
@@ -1014,7 +1015,96 @@ test("rate limits get their own retry budget and honor the declared retry-after"
   );
 });
 
-test("a declared retry-after never exceeds one budget window", async () => {
+test("quota exhaustion becomes a durable timed credit block without sleeping or retrying", async () => {
+  const retryAt = Date.now() + 14 * 60 * 60 * 1000;
+  const safeMessage = "Gemini daily request quota is exhausted.";
+  const provider = new FakeProvider(() => {
+    throw Object.assign(new Error(safeMessage), {
+      category: "quota_exhausted", status: 429, retryAfterMs: 14 * 60 * 60 * 1000,
+      retryAt, transient: true,
+    });
+  });
+  const delays: number[] = [];
+  const retries: string[] = [];
+  const executor = new ToolLoopAgentExecutor({
+    provider, tools: new ToolRegistry(),
+    modelRouteResolver: new FixedModelRouteResolver({ modelId: "fake-model" }),
+    retry: { sleep: async (delay) => { delays.push(delay); } },
+  });
+  await assert.rejects(executor.execute(task({ taskId: "daily-quota", input: "Answer." }), {
+    ...context, reportProgress: (event) => { if (event.kind === "retry") retries.push(event.message); },
+  }), (error: unknown) => {
+    assert.ok(isCreditBlocked(error));
+    assert.equal(error.retryAt, retryAt);
+    assert.equal(error.source, "deterministic");
+    assert.equal(error.providerMessage, safeMessage);
+    return true;
+  });
+  assert.equal(provider.requests.length, 1);
+  assert.deepEqual(delays, []);
+  assert.deepEqual(retries, []);
+});
+
+test("quota reset times must be future timestamps within seven days or require manual resumption", async (t) => {
+  const now = 1_800_000_000_000;
+  t.mock.method(Date, "now", () => now);
+  const week = 7 * 24 * 60 * 60 * 1000;
+  for (const reset of [undefined, null, "tomorrow", Number.NaN, Infinity, -Infinity, now - 1, now, now + week + 1, now + week]) {
+    const provider = new FakeProvider(() => {
+      throw Object.assign(new Error("Provider quota exhausted."), { category: "quota_exhausted", retryAt: reset });
+    });
+    const executor = new ToolLoopAgentExecutor({
+      provider, tools: new ToolRegistry(),
+      modelRouteResolver: new FixedModelRouteResolver({ modelId: "fake-model" }),
+      retry: { sleep: async () => { assert.fail("quota blocks must not sleep"); } },
+    });
+    await assert.rejects(executor.execute(task({ taskId: "quota-reset", input: "Answer." }), context), (error: unknown) => {
+      assert.ok(isCreditBlocked(error));
+      assert.equal(error.retryAt, reset === now + week ? reset : undefined);
+      assert.equal(error.source, reset === now + week ? "deterministic" : "manual");
+      return true;
+    });
+    assert.equal(provider.requests.length, 1);
+  }
+});
+
+test("existing credit blocks pass through unchanged even with a permissive transient retry policy", async () => {
+  const blocked = new CreditBlockedError(undefined, "Account top-up required.", "manual");
+  const provider = new FakeProvider(() => { throw blocked; });
+  const executor = new ToolLoopAgentExecutor({
+    provider, tools: new ToolRegistry(),
+    modelRouteResolver: new FixedModelRouteResolver({ modelId: "fake-model" }),
+    retry: { isTransient: () => true, sleep: async () => { assert.fail("credit blocks must not sleep"); } },
+  });
+  await assert.rejects(executor.execute(task({ taskId: "already-blocked", input: "Answer." }), context), (error: unknown) => error === blocked);
+  assert.equal(provider.requests.length, 1);
+});
+
+test("cancellation takes precedence over quota and credit blocks", async () => {
+  for (const kind of ["abort-error", "quota", "credit"] as const) {
+    const controller = new AbortController();
+    const provider = new FakeProvider(() => {
+      const error = kind === "credit"
+        ? new CreditBlockedError(undefined, "Credit blocked.", "manual")
+        : Object.assign(new Error("Interrupted quota request."), {
+          name: kind === "abort-error" ? "AbortError" : "Error", category: "quota_exhausted", retryAt: Date.now() + 60_000,
+        });
+      if (kind !== "abort-error") controller.abort("User interrupted the request.");
+      throw error;
+    });
+    const executor = new ToolLoopAgentExecutor({
+      provider, tools: new ToolRegistry(),
+      modelRouteResolver: new FixedModelRouteResolver({ modelId: "fake-model" }),
+      retry: { sleep: async () => { assert.fail("interrupted requests must not sleep"); } },
+    });
+    await assert.rejects(executor.execute(task({ taskId: "quota-interrupted", input: "Answer." }), {
+      ...context, signal: controller.signal,
+    }), (error: unknown) => error instanceof Error && error.name === "AbortError" && !isCreditBlocked(error));
+    assert.equal(provider.requests.length, 1);
+  }
+});
+
+test("a long provider-declared retry-after is honored and narrated without truncation", async () => {
   const delays: number[] = [];
   const provider = new FakeProvider((_request, call) => {
     if (call === 1) {
@@ -1039,12 +1129,14 @@ test("a declared retry-after never exceeds one budget window", async () => {
     },
   });
 
+  const progress: string[] = [];
   const result = await executor.execute(
-    task({ taskId: "capped-wait-task", input: "Answer." }),
-    context,
+    task({ taskId: "declared-wait-task", input: "Answer." }),
+    { ...context, reportProgress: (event) => { if (event.kind === "retry") progress.push(event.message); } },
   );
   assert.equal(result.status, "ok");
-  assert.deepEqual(delays, [60_000]);
+  assert.deepEqual(delays, [500_000]);
+  assert.deepEqual(progress, ["Rate limited: retry 1/8 in 500s"]);
 });
 
 test("the rate-limit budget is bounded: a wall that never lifts still fails", async () => {

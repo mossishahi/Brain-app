@@ -73,6 +73,7 @@ import {
 import {
   ALL_HOST_TOOL_MANIFESTS,
   ATTACHMENT_MANIFESTS,
+  CODE_EXECUTION_MANIFESTS,
   FACT_MANIFESTS,
   GPU_RUN_MANIFESTS,
   NOTES_MANIFESTS,
@@ -812,6 +813,14 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
       enabledHostToolIds.delete(manifest.toolId);
     }
   }
+  // Enabling host code execution does not guarantee that its scratch
+  // workspace could be prepared. Without that environment no executable tool
+  // is registered, so the broker must not advertise one to the model.
+  if (options.codeEnvironment === undefined) {
+    for (const manifest of CODE_EXECUTION_MANIFESTS) {
+      enabledHostToolIds.delete(manifest.toolId);
+    }
+  }
   // And for GPU runs: without a completed submission template there is
   // nothing to submit through, so the broker must resolve gpu-execution
   // unavailable (its whenUnavailable prose tells the agent GPU runs need
@@ -1126,6 +1135,10 @@ export function modelsByRouteFromEnv(env: NodeJS.ProcessEnv): Record<string, str
     try {
       const parsed: unknown = JSON.parse(json);
       if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+        // This is the complete launch snapshot, including an explicitly empty
+        // map. Merging legacy variables inherited from the server's shell can
+        // resurrect a previous provider's models after the user switches APIs.
+        for (const route of Object.keys(models)) delete models[route];
         for (const [route, model] of Object.entries(parsed)) {
           if (typeof model === "string" && model.trim().length > 0) {
             models[route] = model.trim();

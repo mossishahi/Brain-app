@@ -3,11 +3,18 @@ import test from "node:test";
 
 import {
   CreditBlockedError,
+  InMemoryCheckpointStore,
+  WorkflowFunctions,
+  WorkflowRunner,
+  agent,
+  workflow,
   type AgentExecutionContext,
   type AgentExecutor,
   type AgentResult,
   type AgentTask,
 } from "@brainstorm-agentic/core";
+import { FixedModelRouteResolver, ToolLoopAgentExecutor, ToolRegistry } from "@brainstorm-agentic/agent-runtime";
+import { GeminiModelProvider, type GeminiClient } from "@brainstorm-agentic/provider-gemini";
 
 import { CreditBlockDetectingAgentExecutor } from "../src/wiring.js";
 
@@ -115,4 +122,45 @@ test("rethrows an already-typed credit block unchanged", async () => {
     ),
     (error: unknown) => error === typed,
   );
+});
+
+test("Gemini daily quota checkpoints once and resumes through the worker wrapper", async () => {
+  let calls = 0;
+  const client: GeminiClient = { models: {
+    async generateContent() {
+      calls++;
+      if (calls === 1) throw Object.assign(new Error(JSON.stringify({ error: { details: [
+        { "@type": "type.googleapis.com/google.rpc.QuotaFailure", violations: [{
+          quotaMetric: "generativelanguage.googleapis.com/generate_content_free_tier_requests",
+          quotaId: "GenerateRequestsPerDayPerProjectPerModel-FreeTier", quotaValue: "20",
+        }] },
+        { "@type": "type.googleapis.com/google.rpc.RetryInfo", retryDelay: "51194s" },
+      ] } })), { status: 429 });
+      return { candidates: [{ content: { parts: [{ text: "Resumed successfully." }] }, finishReason: "STOP" }] };
+    },
+    async list() { return (async function* () {})(); },
+  } };
+  const provider = new GeminiModelProvider({ apiKey: "unused", client });
+  const executor = new CreditBlockDetectingAgentExecutor(new ToolLoopAgentExecutor({
+    provider, tools: new ToolRegistry(),
+    modelRouteResolver: new FixedModelRouteResolver({ modelId: "gemini-3.5-flash" }),
+    retry: { sleep: async () => assert.fail("Daily quota must checkpoint rather than sleep or retry") },
+  }));
+  const checkpoints = new InMemoryCheckpointStore();
+  const functions = new WorkflowFunctions().registerTaskBuilder("quotaTask", () => ({ kind: "quota.test", input: "Answer." }));
+  const definition = workflow("quota", agent("quotaTask", { id: "work" }));
+  const runner = new WorkflowRunner({ functions, agentExecutor: executor, checkpoints });
+  const before = Date.now();
+  const first = await runner.run(definition, { runId: "gemini-quota-run" });
+  assert.equal(first.status, "credit_blocked");
+  const checkpoint = await checkpoints.load("gemini-quota-run");
+  assert.equal(checkpoint?.status, "credit_blocked");
+  assert.equal(checkpoint?.journal.length, 0);
+  assert.ok(checkpoint!.creditBlock!.retryAt! >= before + 51_194_000);
+  assert.match(checkpoint!.creditBlock!.providerMessage, /daily.*quota/i);
+  assert.equal(calls, 1);
+
+  const resumed = await runner.resume(definition, "gemini-quota-run");
+  assert.equal(resumed.status, "completed");
+  assert.equal(calls, 2);
 });
