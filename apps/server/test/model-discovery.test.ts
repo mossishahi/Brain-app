@@ -241,3 +241,34 @@ test("stage validation uses actual stage defaults and rejects newly unavailable 
   const changed = { ...catalog, models: [{ ...model, capabilities: { ...model.capabilities!, thinkingCanBeDisabled: false } }] };
   assert.throws(() => validateStageCapabilities(settings, { "classify-input": { thinking: "disabled" } }, changed, stages), /does not advertise disabling thinking/);
 });
+
+test("launch validation checks inherited Gemini models for all active stages and preserves aliases and overrides", () => {
+  const settings: ServerSettings = { ...defaultServerSettings(), llm: { provider: "gemini", model: "gemini-3.8-flash" } };
+  const catalog = { provider: "gemini" as const, fetchedAt: 1, source: "provider" as const, stale: false, models: [
+    { id: "gemini-3.8-flash", label: "Flash", aliases: ["gemini-flash-alias"] },
+    { id: "gemini-pro", label: "Pro" },
+  ] };
+  const stages = [
+    { id: "process-input", label: "Process input", description: "", route: "reasoning" },
+    { id: "proposal", label: "Proposal", description: "", route: "writing" },
+  ];
+  assert.doesNotThrow(() => validateStageCapabilities(settings, {}, catalog, stages));
+  assert.doesNotThrow(() => validateStageCapabilities({ ...settings, llm: { ...settings.llm, modelsByRoute: { reasoning: "gemini-flash-alias" } } }, {}, catalog, stages));
+  assert.doesNotThrow(() => validateStageCapabilities(settings, { "process-input": { model: "gemini-pro" }, "future-stage": { model: "unknown-future-model" } }, catalog, stages));
+  const staleRoute: ServerSettings = { ...settings, llm: { ...settings.llm, modelsByRoute: { reasoning: "claude-sonnet-5" } } };
+  assert.throws(() => validateStageCapabilities(staleRoute, {}, catalog, stages), /Process input.*claude-sonnet-5.*not available/);
+  assert.doesNotThrow(() => validateStageCapabilities(staleRoute, { "process-input": { model: "gemini-pro" } }, catalog, stages), "an explicit stage choice supersedes the inherited route");
+  assert.throws(() => validateStageCapabilities({ ...settings, llm: { ...settings.llm, model: "removed-default" } }, {}, catalog, stages), /Process input.*removed-default.*not available/);
+  assert.throws(() => validateStageCapabilities({ ...settings, llm: { ...settings.llm, modelsByRoute: { writing: "removed-writer" } } }, {}, catalog, stages), /Proposal.*removed-writer.*not available/);
+  assert.doesNotThrow(() => validateStageCapabilities({ ...settings, llm: { ...settings.llm, provider: "offline" } }, {}, { ...catalog, provider: "offline", models: [] }, stages), "offline execution ignores the saved online model");
+});
+
+test("discovery outages do not reject unverified inherited models while explicit unknown stage models remain invalid", () => {
+  const settings: ServerSettings = { ...defaultServerSettings(), llm: { provider: "gemini", model: "new-model" } };
+  const stages = [{ id: "process-input", label: "Process input", description: "", route: "reasoning" }];
+  for (const source of ["fallback", "provider"] as const) {
+    const unavailable = { provider: "gemini" as const, fetchedAt: 1, source, stale: true, models: [], error: "Model discovery is unavailable." };
+    assert.doesNotThrow(() => validateStageCapabilities(settings, {}, unavailable, stages));
+    assert.throws(() => validateStageCapabilities(settings, { "process-input": { model: "unknown-stage-model" } }, unavailable, stages), /unknown-stage-model.*not available/);
+  }
+});

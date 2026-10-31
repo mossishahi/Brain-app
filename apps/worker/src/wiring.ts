@@ -1135,6 +1135,10 @@ export function modelsByRouteFromEnv(env: NodeJS.ProcessEnv): Record<string, str
     try {
       const parsed: unknown = JSON.parse(json);
       if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+        // This is the complete launch snapshot, including an explicitly empty
+        // map. Merging legacy variables inherited from the server's shell can
+        // resurrect a previous provider's models after the user switches APIs.
+        for (const route of Object.keys(models)) delete models[route];
         for (const [route, model] of Object.entries(parsed)) {
           if (typeof model === "string" && model.trim().length > 0) {
             models[route] = model.trim();
