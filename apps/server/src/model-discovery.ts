@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { importRuntimeComponent } from "@brainstorm-agentic/core";
 import { join } from "node:path";
 import type { ClaudeAgentEffort, CursorModelCatalogEntry, LlmSettings, ModelCapabilities, ModelCatalogSnapshot, ModelOption, ServerSettings, StageModelSettings, StageOption } from "@brainstorm-agentic/protocol";
 import { discoverGeminiModels, type GeminiDiscoveredModel } from "@brainstorm-agentic/provider-gemini";
@@ -135,7 +136,8 @@ export const discoverProviderModels: ModelDiscoverer = async (context, signal) =
 };
 
 async function claudeSdkModels(secret: string, signal: AbortSignal): Promise<ModelOption[]> {
-  const { query } = await import("@anthropic-ai/claude-agent-sdk");
+  const { query } = await importRuntimeComponent("claude", "@anthropic-ai/claude-agent-sdk", import.meta.url,
+    () => import("@anthropic-ai/claude-agent-sdk"));
   const controller = new AbortController();
   const abort = (): void => controller.abort();
   signal.addEventListener("abort", abort, { once: true });
@@ -180,11 +182,20 @@ function sanitizeCursorModels(value: unknown): CursorModelCatalogEntry[] | undef
   });
 }
 
+/** Component acquisition has its own bounded download; provider discovery keeps its short deadline. */
+export async function prepareProviderRuntime(context: DiscoveryContext): Promise<void> {
+  if (!context.secret) return;
+  if (context.provider === "claude-agent") await importRuntimeComponent("claude", "@anthropic-ai/claude-agent-sdk", import.meta.url,
+    () => import("@anthropic-ai/claude-agent-sdk"));
+  else if (context.provider === "cursor-agent") await importRuntimeComponent("cursor", "@cursor/sdk", import.meta.url);
+}
+
 export class ModelDiscovery {
   private readonly cache = new Map<string, ModelCatalogSnapshot>();
   private readonly pending = new Map<string, Promise<ModelCatalogSnapshot>>();
   private readonly path: string;
-  constructor(private readonly workspace: string, private readonly discover: ModelDiscoverer = discoverProviderModels, private readonly timeoutMs = 15_000) {
+  constructor(private readonly workspace: string, private readonly discover: ModelDiscoverer = discoverProviderModels, private readonly timeoutMs = 15_000,
+    private readonly prepare: ((context: DiscoveryContext) => Promise<void>) | undefined = discover === discoverProviderModels ? prepareProviderRuntime : undefined) {
     this.path = join(workspace, "model-options-cache.json");
     try {
       const disk = object(readJsonFile<unknown>(this.path));
@@ -208,6 +219,7 @@ export class ModelDiscovery {
     const controller = new AbortController(); let timer: ReturnType<typeof setTimeout> | undefined;
     const work = (async () => {
       try {
+        if (this.prepare) await this.prepare(context);
         const discovered = await Promise.race([this.discover(context, controller.signal), new Promise<never>((_, reject) => {
           timer = setTimeout(() => { controller.abort(); reject(new Error("discovery timeout")); }, this.timeoutMs);
         })]);

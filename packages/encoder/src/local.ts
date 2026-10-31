@@ -17,6 +17,7 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 
 import type { EncodeMode, EncoderManifest, TextEncoder } from "@brainstorm-agentic/core";
+import { importRuntimeComponent } from "@brainstorm-agentic/core";
 
 import { formatQuery } from "./util.js";
 
@@ -88,14 +89,16 @@ async function fileSha256(path: string): Promise<string> {
 }
 
 async function loadOrt(): Promise<OrtModule> {
-  const loaded = (await import("onnxruntime-node")) as unknown as Partial<OrtModule> & { readonly default?: OrtModule };
+  const loaded = (await importRuntimeComponent("encoder", "onnxruntime-node", import.meta.url,
+    () => import("onnxruntime-node"))) as unknown as Partial<OrtModule> & { readonly default?: OrtModule };
   const ort = loaded.InferenceSession ? (loaded as OrtModule) : loaded.default;
   if (!ort?.InferenceSession || !ort.Tensor) throw new Error("onnxruntime-node did not load");
   return ort;
 }
 
 async function loadTokenizer(json: object, config: object): Promise<TokenizerLike> {
-  const loaded = (await import("@huggingface/tokenizers")) as unknown as {
+  const loaded = (await importRuntimeComponent("encoder", "@huggingface/tokenizers", import.meta.url,
+    () => import("@huggingface/tokenizers"))) as unknown as {
     readonly Tokenizer: new (tokenizer: object, config: object) => TokenizerLike;
   };
   return new loaded.Tokenizer(json, config);
@@ -143,6 +146,7 @@ export async function createLocalEncoder(options: LocalEncoderOptions): Promise<
 
   const ort = await loadOrt();
   const sessionOptions = {
+    executionProviders: ["cpu"],
     intraOpNumThreads: threads,
     interOpNumThreads: 1,
     executionMode: "sequential",

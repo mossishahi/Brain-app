@@ -9,11 +9,12 @@ import {
   renameSync,
   statSync,
 } from "node:fs";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   execFile,
   spawn,
+  spawnSync,
   type ExecFileOptions,
 } from "node:child_process";
 
@@ -1604,6 +1605,57 @@ export class JobManager {
         b.createdAt - a.createdAt || b.jobId.localeCompare(a.jobId)
       );
     return Promise.all(records.map((record) => this.summary(record)));
+  }
+
+  /** A settled checkpoint can precede the worker's final telemetry/file writes. */
+  hasLiveLocalWorkers(): boolean {
+    return this.autoResuming.size > 0 || [...this.jobs.values()].some(record =>
+      record.runner === "local" && this.ownedLocalWorkerAlive(record));
+  }
+
+  /** Historical PIDs are reusable; only this job's shell or worker owns its files. */
+  private ownedLocalWorkerAlive(record: JobRecord): boolean {
+    const { pid } = record;
+    if (!pid || !this.localAlive(pid)) return false;
+    const jobDirectory = this.jobDir(record.jobId);
+    const scriptName = /^submit(?:-[a-z]+)*(?:-\d+)?\.sh$/;
+    try {
+      if (process.platform === "linux") {
+        const bytes = readFileSync(`/proc/${pid}/cmdline`);
+        if (bytes.length > 262_144) return true;
+        if (bytes.length === 0) {
+          // Zombies still answer kill(0), but cannot write to the workspace.
+          const state = /\)\s+([A-Z])\s/.exec(readFileSync(`/proc/${pid}/stat`, "utf8"))?.[1];
+          return state !== "Z" && this.localAlive(pid);
+        }
+        const args = bytes.toString("utf8").split("\0").filter(Boolean);
+        if (basename(args[0] ?? "") === "bash" && args.length === 2) {
+          return dirname(args[1]!) === jobDirectory && scriptName.test(basename(args[1]!));
+        }
+        const flag = (name: string, value: string) => {
+          const index = args.indexOf(name, 3);
+          return index >= 0 && args[index + 1] === value;
+        };
+        return basename(args[0] ?? "") === "node" && args[1] === this.workerPath &&
+          (args[2] === "run" || args[2] === "resume") &&
+          flag("--run-id", record.jobId) && flag("--session-root", this.sessionsDir);
+      }
+      // macOS has no /proc. ps is local, bounded, and never invokes a shell.
+      const inspected = spawnSync("/bin/ps", ["-ww", "-p", String(pid), "-o", "command="], {
+        encoding: "utf8", timeout: 500, maxBuffer: 262_144,
+      });
+      if (inspected.error || inspected.status !== 0) return this.localAlive(pid);
+      const command = inspected.stdout.trim();
+      const escape = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      if (new RegExp(`^(?:/[^\\s]+/)?bash ${escape(jobDirectory)}/submit(?:-[a-z]+)*(?:-\\d+)?\\.sh$`).test(command)) return true;
+      const worker = new RegExp(`^(?:${escape(process.execPath)}|(?:[^\\s]+/)?node) ${escape(this.workerPath)} (?:run|resume)(?: |$)`);
+      const flag = (name: string, value: string) => new RegExp(`(?:^| )${name} ${escape(value)}(?: |$)`).test(command);
+      return worker.test(command) && flag("--run-id", record.jobId) && flag("--session-root", this.sessionsDir);
+    } catch {
+      // A process that disappeared is safe. An inaccessible live process is
+      // uncertain, so preserve it rather than authorizing bundle replacement.
+      return this.localAlive(pid);
+    }
   }
 
   /** Trashed jobs, newest trash first. View-only: files stay on disk. */

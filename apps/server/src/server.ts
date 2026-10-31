@@ -84,7 +84,7 @@ import {
   type StartedAppUpdate,
 } from "./self-update.js";
 import { RouteCatalog } from "./route-catalog.js";
-import { ModelDiscovery, cursorModelOption, discoverProviderModels, validateStageCapabilities, type DiscoveryContext, type ModelDiscoverer } from "./model-discovery.js";
+import { ModelDiscovery, cursorModelOption, discoverProviderModels, prepareProviderRuntime, validateStageCapabilities, type DiscoveryContext, type ModelDiscoverer } from "./model-discovery.js";
 import {
   CapabilityCatalog,
   LOCKED_CAPABILITY_IDS,
@@ -338,6 +338,8 @@ export interface RunningBrainServer {
   readonly availability: AvailabilityService;
   readonly gpuSetup: GpuSetupService;
   readonly httpServer: HttpServer;
+  prepareForDesktopUpdate(): Promise<boolean>;
+  cancelDesktopUpdate(): void;
   close(): Promise<void>;
 }
 
@@ -726,7 +728,10 @@ export async function startBrainServer(
       return { models: cursorModels.map(cursorModelOption), cursorModels };
     }
     return discoverProviderModels(context, signal);
-  }), options.modelDiscoveryTimeoutMs);
+  }), options.modelDiscoveryTimeoutMs, options.discoverModels ? undefined : async context => {
+    if (context.provider === "cursor-agent" && options.listCursorModels) return;
+    await prepareProviderRuntime(context);
+  });
   let manager!: JobManager;
   let modelRefresh: Promise<unknown> | undefined;
   const discoveryContext = (settings: ServerSettings): DiscoveryContext => ({
@@ -972,8 +977,19 @@ export async function startBrainServer(
     process.env.BRAIN_WEBAPP_DIR ??
     defaultWebappDir();
 
+  let desktopUpdatePending = false;
+  let activeRequests = 0;
+  const backgroundJobs = new Set<Promise<unknown>>();
+  const trackBackgroundJob = (task: Promise<unknown>): void => {
+    backgroundJobs.add(task);
+    void task.finally(() => backgroundJobs.delete(task)).catch(() => undefined);
+  };
   const httpServer = createServer(async (req, res) => {
+    let counted = false;
     try {
+      if (desktopUpdatePending) throw new HttpError(503, "The desktop app is preparing to update. Please wait for it to restart.");
+      activeRequests++;
+      counted = true;
       if (options.apiToken !== undefined && !authorizedDesktopRequest(req.headers.authorization, options.apiToken)) {
         res.setHeader("www-authenticate", "Bearer");
         res.setHeader("cache-control", "no-store");
@@ -2080,6 +2096,8 @@ export async function startBrainServer(
       sendJson(res, status, {
         message: error instanceof Error ? error.message : String(error),
       });
+    } finally {
+      if (counted) activeRequests--;
     }
   });
   httpServer.requestTimeout = 0;
@@ -2101,13 +2119,14 @@ export async function startBrainServer(
     watcher(manager.sessionsDir, broadcast),
   ].filter((entry): entry is FSWatcher => entry !== undefined);
   const poll = setInterval(() => {
-    void manager
+    if (desktopUpdatePending) return;
+    trackBackgroundJob(manager
       .resumeDueCreditBlocks()
       .then(() => manager.autoApproveDueGates())
-      .finally(broadcast);
+      .finally(broadcast));
   }, POLL_MS);
   const interruptedPoll = setInterval(() => {
-    void manager.resumeInterruptedJobs().finally(broadcast);
+    if (!desktopUpdatePending) trackBackgroundJob(manager.resumeInterruptedJobs().finally(broadcast));
   }, INTERRUPTED_SCAN_MS);
   // Telemetry rides an existing timer rather than adding its own: a flush is
   // a no-op when the spool is empty, which is the common case.
@@ -2164,16 +2183,16 @@ export async function startBrainServer(
   // Recovery may wait on the scheduler; an authenticated desktop must be
   // able to connect and inspect its existing jobs while that work continues.
   if (options.apiToken) {
-    void manager.resumeDueCreditBlocks().catch((error: unknown) => {
+    trackBackgroundJob(manager.resumeDueCreditBlocks().catch((error: unknown) => {
       console.error(`[recovery] startup credit recovery failed: ${error instanceof Error ? error.message : String(error)}`);
-    });
+    }));
   } else await manager.resumeDueCreditBlocks();
   if (options.apiToken) void probeContentRegistry(contentRegistryUrl, contentRegistry);
   else await probeContentRegistry(contentRegistryUrl, contentRegistry);
   // Startup recovery + verification run in the background: interrupted jobs
   // found on the shared workspace resume from their checkpoints, and every
   // required environment check re-verifies for the status icons.
-  void manager.resumeInterruptedJobs().finally(broadcast);
+  trackBackgroundJob(manager.resumeInterruptedJobs().finally(broadcast));
   readiness.refresh();
   // Failed required checks re-probe themselves on a per-check cooldown, so
   // one transient failure at launch cannot hold the submission gate red
@@ -2197,6 +2216,17 @@ export async function startBrainServer(
     availability,
     gpuSetup,
     httpServer,
+    prepareForDesktopUpdate: async () => {
+      desktopUpdatePending = true;
+      if (activeRequests || backgroundJobs.size) { desktopUpdatePending = false; return false; }
+      try {
+        const jobs = await manager.list();
+        const settled = new Set(["completed", "failed", "cancelled", "paused"]);
+        if (manager.hasLiveLocalWorkers() || jobs.some(job => !settled.has(job.status))) { desktopUpdatePending = false; return false; }
+        return desktopUpdatePending;
+      } catch (error) { desktopUpdatePending = false; throw error; }
+    },
+    cancelDesktopUpdate: () => { desktopUpdatePending = false; },
     close: async () => {
       clearInterval(poll);
       clearInterval(interruptedPoll);
