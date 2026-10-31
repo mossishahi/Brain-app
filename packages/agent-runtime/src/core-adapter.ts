@@ -5,8 +5,10 @@
  */
 export {
   addUsage,
+  CreditBlockedError,
   emptyUsage,
   isCancellation,
+  isCreditBlocked,
   satisfiesRequirements,
   serializeError,
   textBlock,

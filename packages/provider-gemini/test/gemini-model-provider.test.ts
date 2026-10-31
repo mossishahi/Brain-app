@@ -3,7 +3,7 @@ import test from "node:test";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { userMessage, type JsonObject, type ModelRequest, type RequestCoordinator } from "@brainstorm-agentic/core";
-import { GeminiModelProvider, discoverGeminiModels, geminiModelProfile, GeminiProviderError, type GeminiClient } from "../src/index.js";
+import { GeminiModelProvider, classifyGeminiError, discoverGeminiModels, geminiModelProfile, GeminiProviderError, type GeminiClient } from "../src/index.js";
 
 type Wire = Record<string, any>;
 const request = (extra: Partial<ModelRequest> = {}): ModelRequest => ({ modelId: "gemini-3.8-flash", messages: [userMessage("Assess this claim.")], ...extra });
@@ -296,6 +296,81 @@ test("rate limits pace the shared queue using service RetryInfo and sanitize raw
   });
   assert.deepEqual(acquired, ["high"]);
   assert.ok(blocked[0]! >= before + 12500);
+});
+
+function quotaError(options: { id?: string; limit?: unknown; delay?: unknown; retryType?: string; quotaType?: string; status?: number } = {}): Error {
+  return Object.assign(new Error(JSON.stringify({ error: {
+    message: "secret-api-key and private prompt echoed by a gateway",
+    code: options.status ?? 429,
+    status: "RESOURCE_EXHAUSTED",
+    details: [
+      { "@type": options.quotaType ?? "type.googleapis.com/google.rpc.QuotaFailure", violations: [{
+        quotaMetric: "generativelanguage.googleapis.com/generate_content_free_tier_requests",
+        quotaId: options.id ?? "GenerateRequestsPerDayPerProjectPerModel-FreeTier",
+        quotaDimensions: { model: "gemini-3.6-flash", location: "global" },
+        quotaValue: options.limit ?? "20",
+      }] },
+      { "@type": options.retryType ?? "type.googleapis.com/google.rpc.RetryInfo", ...(options.delay !== undefined ? { retryDelay: options.delay } : {}) },
+    ],
+  } })), { status: options.status ?? 429 });
+}
+
+test("daily Gemini quota exhaustion carries a safe resume time without blocking the in-process dispatch queue", async () => {
+  const blocks: number[] = [];
+  const fake = client([quotaError({ delay: "51194s" })]);
+  const provider = new GeminiModelProvider({ apiKey: "unused", client: fake.client,
+    coordinator: { acquire: async () => {}, observe() {}, block: (until) => { blocks.push(until); } },
+  });
+  const before = Date.now();
+  await assert.rejects(provider.complete(request()), (error: unknown) => {
+    assert.ok(error instanceof GeminiProviderError);
+    assert.equal(error.category, "quota_exhausted");
+    assert.equal(error.transient, false);
+    assert.equal(error.status, 429);
+    assert.equal(error.retryAfterMs, 51_194_000);
+    assert.ok(error.retryAt! >= before + 51_194_000 + 1000);
+    assert.ok(error.retryAt! <= Date.now() + 51_194_000 + 1000);
+    assert.match(error.message, /daily API quota.*limit: 20/);
+    assert.ok(error.message.includes(new Date(error.retryAt!).toISOString()));
+    assert.equal(error.cause, undefined);
+    assert.doesNotMatch(`${error.message} ${error.stack} ${JSON.stringify(error)}`, /secret-api-key|private prompt|quotaDimensions/);
+    return true;
+  });
+  assert.deepEqual(blocks, []);
+  assert.equal(fake.calls.length, 1);
+});
+
+test("daily quota without a valid declared reset or with zero allowance requires manual retry", () => {
+  for (const delay of [undefined, "invalid", "-1s", "1e10s", `${"9".repeat(400)}s`, "9007199254740991s", 51_194]) {
+    const error = classifyGeminiError(quotaError({ delay }));
+    assert.equal(error.category, "quota_exhausted");
+    assert.equal(error.transient, false);
+    assert.equal(error.retryAt, undefined);
+    assert.match(error.message, /Automatic retry is unavailable/);
+  }
+  const zero = classifyGeminiError(quotaError({ limit: "0", delay: "51194s" }));
+  assert.equal(zero.retryAt, undefined);
+  assert.match(zero.message, /limit: 0/);
+  const invalidLimit = classifyGeminiError(quotaError({ limit: "20 secret-api-key", delay: "51194s" }));
+  assert.equal(invalidLimit.category, "quota_exhausted");
+  assert.ok(invalidLimit.retryAt);
+  assert.doesNotMatch(invalidLimit.message, /limit:|secret-api-key/);
+  const untypedTiming = classifyGeminiError(quotaError({ delay: "51194s", retryType: "untrusted-type" }));
+  assert.equal(untypedTiming.retryAt, undefined);
+});
+
+test("minute limits and untyped quota claims keep ordinary rate-limit behavior", () => {
+  const minute = classifyGeminiError(quotaError({ id: "GenerateRequestsPerMinutePerProjectPerModel-FreeTier", delay: "12.5s" }));
+  assert.equal(minute.category, "rate_limit");
+  assert.equal(minute.transient, true);
+  assert.equal(minute.retryAfterMs, 12500);
+  assert.equal(minute.retryAt, undefined);
+  assert.equal(classifyGeminiError(quotaError({ quotaType: "untrusted-type", delay: "12.5s" })).category, "rate_limit");
+  assert.equal(classifyGeminiError(quotaError({ status: 503, delay: "12.5s" })).category, "server");
+  const header = classifyGeminiError(Object.assign(new Error("secret-api-key"), { status: 429, headers: { "retry-after": "3" } }));
+  assert.equal(header.retryAfterMs, 3000);
+  assert.equal(header.category, "rate_limit");
+  assert.doesNotMatch(header.message, /secret-api-key/);
 });
 
 test("pre-abort prevents dispatch and abort during an uncooperative call returns promptly", async () => {
