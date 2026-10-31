@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { createGunzip } from "node:zlib";
 
 export type RuntimeComponent = "claude" | "cursor" | "encoder";
-interface ComponentArchive { file: string; sha256: string; size: number; url?: string; minimumLibc?: string }
+interface ComponentArchive { file: string; sha256: string; size: number; url?: string; minimumLibc?: string; unavailableReason?: string }
 interface Distribution {
   schemaVersion: number; platform: string; arch: string; nodeMajor: number | string; nodeAbi: string;
   libc: "glibc" | "none"; minimumLibc?: string; development?: boolean;
@@ -66,6 +66,14 @@ function assertComponentLibraries(minimum: unknown, component?: RuntimeComponent
   if (!actual || !versionAtLeast(actual, minimum)) {
     throw new Error(`${name} runtime requires glibc ${minimum} or newer; this host ${actual ? `provides glibc ${actual}` : "does not provide glibc"}. Use a compatible Linux host or choose another engine.`);
   }
+}
+
+function assertComponentAvailable(reason: unknown): void {
+  if (reason === undefined) return;
+  if (typeof reason !== "string" || !reason.trim() || reason.length > 500 || /[\x00-\x1f\x7f-\x9f]/.test(reason)) {
+    throw new Error("Invalid runtime component availability metadata");
+  }
+  throw new Error(reason);
 }
 
 function safePath(input: string): string {
@@ -294,6 +302,7 @@ async function downloadResponse(initial: URL, fetcher: typeof fetch): Promise<Re
 
 export async function installRuntimeComponent(descriptor: ComponentArchive, cacheRoot: string,
   fetcher: typeof fetch = fetch): Promise<string> {
+  assertComponentAvailable(descriptor.unavailableReason);
   if (!/^[a-f0-9]{64}$/.test(descriptor.sha256) || !Number.isSafeInteger(descriptor.size) ||
       descriptor.size <= 0 || descriptor.size > MAX_ARCHIVE) throw new Error("Invalid runtime component descriptor");
   assertComponentLibraries(descriptor.minimumLibc);
@@ -349,6 +358,7 @@ export async function importRuntimeComponent<T = unknown>(component: RuntimeComp
   if (!manifest) return sourceImport ? sourceImport() : import(pathToFileURL(require.resolve(specifier)).href) as Promise<T>;
   const descriptor = manifest.components[component];
   if (!descriptor) throw new Error(`This release does not provide the ${component} runtime`);
+  assertComponentAvailable(descriptor.unavailableReason);
   // Optional engines can require newer libraries than the small core. Check
   // before consulting a cached/pending installation as well as before download.
   assertComponentLibraries(descriptor.minimumLibc === undefined ? manifest.minimumLibc : descriptor.minimumLibc, component);

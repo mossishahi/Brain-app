@@ -249,3 +249,63 @@ test("malformed optional engine library requirements fail before installation on
     await assert.rejects(readdir(f.cache), { code: "ENOENT" });
   } finally { await f.close(); }
 });
+
+test("unavailable optional engines return their release reason without downloading or importing a cached engine", async t => {
+  const f = await fixture(), old = process.env.BRAINSTORM_RUNTIME_COMPONENT_CACHE;
+  try {
+    const { bytes, descriptor } = await f.pack(), app = join(f.root, "app"); await mkdir(app);
+    const unavailableReason = "The local encoder is unavailable on Intel Macs because this ONNX runtime release has no matching native binding.";
+    const unavailable = { ...descriptor, unavailableReason };
+    await writeFile(join(app, ".co-inference-distribution.json"), JSON.stringify({
+      schemaVersion: 2, platform: process.platform, arch: process.arch,
+      nodeMajor: process.versions.node.split(".")[0], nodeAbi: process.versions.modules,
+      libc: process.platform === "linux" ? "glibc" : "none", minimumLibc: "2.28",
+      components: { cursor: descriptor, encoder: unavailable },
+    }));
+    process.env.BRAINSTORM_RUNTIME_COMPONENT_CACHE = f.cache;
+    let downloads = 0;
+    t.mock.method(globalThis, "fetch", async () => { downloads++; return new Response(bytes); });
+    const caller = pathToFileURL(join(app, "entry.mjs")).href;
+    await assert.rejects(importRuntimeComponent("encoder", "onnxruntime-node", caller), { message: unavailableReason });
+    await assert.rejects(installRuntimeComponent(unavailable, f.cache), { message: unavailableReason });
+    assert.equal(downloads, 0);
+    await assert.rejects(readdir(f.cache), { code: "ENOENT" });
+
+    assert.equal((await importRuntimeComponent<{ channel: string }>("cursor", "@cursor/sdk", caller)).channel, "esm",
+      "a descriptor without an unavailability reason remains usable");
+    assert.equal(downloads, 1);
+    await assert.rejects(importRuntimeComponent("encoder", "onnxruntime-node", caller), { message: unavailableReason });
+    await assert.rejects(importRuntimeComponent("encoder", "@huggingface/tokenizers", caller), { message: unavailableReason });
+    await assert.rejects(installRuntimeComponent(unavailable, f.cache), { message: unavailableReason });
+    assert.equal(downloads, 1, "a cached archive must not bypass explicit engine unavailability");
+  } finally {
+    if (old === undefined) delete process.env.BRAINSTORM_RUNTIME_COMPONENT_CACHE;
+    else process.env.BRAINSTORM_RUNTIME_COMPONENT_CACHE = old;
+    await f.close();
+  }
+});
+
+test("invalid optional engine unavailability reasons cannot enter installation or import", async t => {
+  const f = await fixture(), old = process.env.BRAINSTORM_RUNTIME_COMPONENT_CACHE;
+  try {
+    const { descriptor } = await f.pack(), app = join(f.root, "app"); await mkdir(app);
+    process.env.BRAINSTORM_RUNTIME_COMPONENT_CACHE = f.cache;
+    t.mock.method(globalThis, "fetch", async () => { assert.fail("must not download"); });
+    for (const unavailableReason of [null, "", " ", "x".repeat(501), "bad\u0000reason", "bad\nreason", "bad\u007freason", "bad\u0085reason", 123, true, {}, []]) {
+      const invalid = { ...descriptor, unavailableReason } as Parameters<typeof installRuntimeComponent>[0];
+      await assert.rejects(installRuntimeComponent(invalid, f.cache), /Invalid runtime component availability metadata/);
+      await writeFile(join(app, ".co-inference-distribution.json"), JSON.stringify({
+        schemaVersion: 2, platform: process.platform, arch: process.arch,
+        nodeMajor: process.versions.node.split(".")[0], nodeAbi: process.versions.modules,
+        libc: process.platform === "linux" ? "glibc" : "none", minimumLibc: "2.28", components: { encoder: invalid },
+      }));
+      await assert.rejects(importRuntimeComponent("encoder", "onnxruntime-node", pathToFileURL(join(app, "entry.mjs")).href),
+        /Invalid runtime component availability metadata/);
+    }
+    await assert.rejects(readdir(f.cache), { code: "ENOENT" });
+  } finally {
+    if (old === undefined) delete process.env.BRAINSTORM_RUNTIME_COMPONENT_CACHE;
+    else process.env.BRAINSTORM_RUNTIME_COMPONENT_CACHE = old;
+    await f.close();
+  }
+});
