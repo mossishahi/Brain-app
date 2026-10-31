@@ -297,10 +297,6 @@ async function main(): Promise<void> {
     spawned.child?.kill("SIGTERM");
     throw error;
   }
-  reportStartup("ready");
-  console.log(`BRAIN_URL=${running.url}`);
-  if (!args.values.has("no-open")) openBrowser(running.url);
-
   let closing = false;
   const close = (): void => {
     if (closing) return;
@@ -314,6 +310,11 @@ async function main(): Promise<void> {
   };
   process.once("SIGINT", close);
   process.once("SIGTERM", close);
+  // A desktop client can stop us as soon as readiness is published.
+  // Install shutdown handlers first so that stop still closes the server.
+  reportStartup("ready");
+  console.log(`BRAIN_URL=${running.url}`);
+  if (!args.values.has("no-open")) openBrowser(running.url);
 }
 
 main().catch((error: unknown) => {
