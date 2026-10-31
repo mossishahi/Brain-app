@@ -59,7 +59,7 @@ test("desktop compatibility and help work without any launch dependencies, retai
   }
 });
 
-test("launch still loads its application, passes desktop options, and closes on SIGTERM", async () => {
+test("launch passes desktop options and handles SIGTERM as soon as it announces readiness", async () => {
   const root = entryPointFixture();
   const tokenPath = join(root, "token");
   const statusPath = join(root, "startup.json");
@@ -71,6 +71,13 @@ test("launch still loads its application, passes desktop options, and closes on 
     import { readFileSync, writeFileSync } from "node:fs";
     const progress = JSON.parse(readFileSync(process.env.BRAINSTORM_STARTUP_STATUS_FILE, "utf8"));
     if (progress.phase !== "loading" || progress.pid !== process.pid) throw new Error("missing loading progress before application import");
+    // Deliver the same signal as an immediate desktop stop, without relying
+    // on scheduling between the launcher and the parent test process.
+    const log = console.log.bind(console);
+    console.log = (...args) => {
+      log(...args);
+      if (String(args[0]).startsWith("BRAIN_URL=")) process.kill(process.pid, "SIGTERM");
+    };
     export async function startBrainServer(options) {
       options.onStartupPhase("initializing");
       writeFileSync("options.json", JSON.stringify(options));
@@ -116,7 +123,6 @@ test("launch still loads its application, passes desktop options, and closes on 
     assert.equal(status.pid, child.pid);
     assert.equal(status.schemaVersion, 1);
     assert.equal(statSync(statusPath).mode & 0o777, 0o600);
-    child.kill("SIGTERM");
     assert.deepEqual(await exited, [0, null]);
     assert.equal(existsSync(join(root, "closed")), true);
   } finally {

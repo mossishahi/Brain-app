@@ -10,7 +10,6 @@ import {
   statSync,
 } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import {
   execFile,
   spawn,
@@ -62,6 +61,8 @@ import { gameReviewConfiguration, gameReviewEnabled } from "./game-review.js";
 import { LiveTextStore } from "./live-text.js";
 import { readJsonCached, statStamp } from "./read-cache.js";
 import type { JobRecord } from "./model.js";
+import { defaultWorkerPath, ownedLocalWorkerAlive } from "./desktop-update.js";
+export { defaultWorkerPath } from "./desktop-update.js";
 import {
   SettingsStore,
   type AnthropicConnectionValidator,
@@ -198,10 +199,6 @@ export function createJobId(now = new Date()): string {
     `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-` +
     `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
   return `bsa_${stamp}_${randomBytes(3).toString("hex")}`;
-}
-
-export function defaultWorkerPath(): string {
-  return fileURLToPath(new URL("../../../worker/dist/src/main.js", import.meta.url));
 }
 
 function sleep(ms: number): Promise<void> {
@@ -1605,6 +1602,13 @@ export class JobManager {
       );
     return Promise.all(records.map((record) => this.summary(record)));
   }
+
+  /** A settled checkpoint can precede the worker's final telemetry/file writes. */
+  hasLiveLocalWorkers(): boolean {
+    return this.autoResuming.size > 0 || [...this.jobs.values()].some(record =>
+      record.runner === "local" && ownedLocalWorkerAlive(record, this.workspace, this.workerPath));
+  }
+
 
   /** Trashed jobs, newest trash first. View-only: files stay on disk. */
   async listTrashed(): Promise<JobSummary[]> {

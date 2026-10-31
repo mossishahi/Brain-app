@@ -28,6 +28,7 @@ import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { importRuntimeComponent } from "@brainstorm-agentic/core";
 import {
   CreditBlockedError,
   addUsage,
@@ -1801,14 +1802,14 @@ function rejectedOutputSnippet(value: JsonValue | undefined): string[] {
 async function defaultAgentFactory(
   options: CursorSdkAgentOptions,
 ): Promise<CursorSdkAgent> {
-  const sdk = (await import("@cursor/sdk")) as unknown as {
+  const sdk = (await importRuntimeComponent("cursor", "@cursor/sdk", import.meta.url, () => import("@cursor/sdk"))) as unknown as {
     Agent: { create(options: unknown): Promise<CursorSdkAgent> };
   };
   return sdk.Agent.create(options);
 }
 
 async function defaultListModels(apiKey: string): Promise<readonly CursorModelListEntry[]> {
-  const sdk = (await import("@cursor/sdk")) as unknown as {
+  const sdk = (await importRuntimeComponent("cursor", "@cursor/sdk", import.meta.url, () => import("@cursor/sdk"))) as unknown as {
     Cursor: {
       models: { list(options?: { apiKey?: string }): Promise<readonly CursorModelListEntry[]> };
     };

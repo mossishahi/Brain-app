@@ -1,9 +1,18 @@
-import {
-  createSdkMcpServer,
-  query as sdkQuery,
-  SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
-  tool as sdkTool,
-} from "@anthropic-ai/claude-agent-sdk";
+import { importRuntimeComponent } from "@brainstorm-agentic/core";
+type ClaudeSdk = typeof import("@anthropic-ai/claude-agent-sdk");
+let createSdkMcpServer: ClaudeSdk["createSdkMcpServer"];
+let sdkQuery: ClaudeSdk["query"];
+let sdkTool: ClaudeSdk["tool"];
+let SYSTEM_PROMPT_DYNAMIC_BOUNDARY: ClaudeSdk["SYSTEM_PROMPT_DYNAMIC_BOUNDARY"];
+let sdkLoading: Promise<void> | undefined;
+async function loadSdk(): Promise<void> {
+  sdkLoading ??= importRuntimeComponent<ClaudeSdk>("claude", "@anthropic-ai/claude-agent-sdk", import.meta.url,
+    () => import("@anthropic-ai/claude-agent-sdk")).then(sdk => {
+    createSdkMcpServer = sdk.createSdkMcpServer; sdkQuery = sdk.query;
+    sdkTool = sdk.tool; SYSTEM_PROMPT_DYNAMIC_BOUNDARY = sdk.SYSTEM_PROMPT_DYNAMIC_BOUNDARY;
+  }).catch(error => { sdkLoading = undefined; throw error; });
+  await sdkLoading;
+}
 import { z } from "zod";
 import { createHash, randomUUID } from "node:crypto";
 import { lstatSync, mkdirSync, rmSync } from "node:fs";
@@ -2580,6 +2589,9 @@ async function executeQuery(
     throw new Error(`Agent task "${task.taskId}" has no model request`);
   }
 
+  await loadSdk();
+  if (context.signal?.aborted) throw abortError(context.signal.reason);
+
   const controller = new AbortController();
   let rejectCancellation!: (error: Error) => void;
   const cancelled = new Promise<never>((_resolve, reject) => {
@@ -3241,6 +3253,7 @@ export async function validateClaudeSetupToken(
     effort: "low",
     thinking: "disabled",
   });
+  await loadSdk();
   const controller = new AbortController();
   const timeout =
     input.timeoutMs !== undefined

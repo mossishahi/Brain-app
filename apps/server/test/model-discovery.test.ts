@@ -87,6 +87,46 @@ test("a hung provider is aborted and does not prevent a later refresh", async (t
   assert.equal(calls, 2);
 });
 
+test("optional runtime preparation is shared and finishes before the provider deadline starts", async (t) => {
+  let prepared = 0; let discovered = 0; let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const cache = new ModelDiscovery(workspace(t), async () => {
+    discovered++;
+    return { models: [model] };
+  }, 10, async () => { prepared++; await held; });
+  const first = cache.refresh(context);
+  const concurrent = cache.refresh(context);
+  try {
+    await new Promise(resolve => setTimeout(resolve, 30));
+    assert.equal(prepared, 1);
+    assert.equal(discovered, 0, "a provider cannot load until its component is ready");
+    release();
+    const snapshots = await Promise.all([first, concurrent]);
+    assert.ok(snapshots.every(snapshot => !snapshot.stale));
+    assert.equal(discovered, 1);
+  } finally { release(); }
+});
+
+test("failed optional runtime preparation preserves cached models and can retry", async (t) => {
+  let fail = false; let discovered = 0;
+  const cache = new ModelDiscovery(workspace(t), async () => {
+    discovered++; return { models: [model] };
+  }, 15, async () => {
+    if (fail) throw new Error(`Download failed for ${context.secret}`);
+  });
+  const original = await cache.refresh(context);
+  fail = true;
+  const stale = await cache.refresh(context);
+  assert.equal(stale.stale, true);
+  assert.deepEqual(stale.models, original.models);
+  assert.equal(stale.fetchedAt, original.fetchedAt);
+  assert.equal(discovered, 1);
+  assert.equal(JSON.stringify(stale).includes(context.secret), false);
+  fail = false;
+  assert.equal((await cache.refresh(context)).stale, false);
+  assert.equal(discovered, 2);
+});
+
 test("corrupt persisted capabilities cannot enable unsupported controls", (t) => {
   const root = workspace(t);
   const key = new ModelDiscovery(root).key(context);
