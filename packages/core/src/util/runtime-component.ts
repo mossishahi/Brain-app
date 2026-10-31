@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { createGunzip } from "node:zlib";
 
 export type RuntimeComponent = "claude" | "cursor" | "encoder";
-interface ComponentArchive { file: string; sha256: string; size: number; url?: string }
+interface ComponentArchive { file: string; sha256: string; size: number; url?: string; minimumLibc?: string }
 interface Distribution {
   schemaVersion: number; platform: string; arch: string; nodeMajor: number | string; nodeAbi: string;
   libc: "glibc" | "none"; minimumLibc?: string; development?: boolean;
@@ -53,6 +53,19 @@ function versionAtLeast(actual: string, minimum: string): boolean {
   const a = actual.split(".").map(Number), b = minimum.split(".").map(Number);
   for (let index = 0; index < 3; index++) if ((a[index] ?? 0) !== (b[index] ?? 0)) return (a[index] ?? 0) > (b[index] ?? 0);
   return true;
+}
+
+function assertComponentLibraries(minimum: unknown, component?: RuntimeComponent): void {
+  const name = component === "cursor" ? "Cursor" : component === "claude" ? "Claude" : component === "encoder" ? "Local encoder" : "Selected provider";
+  if (minimum === undefined) return;
+  if (typeof minimum !== "string" || !/^\d+\.\d+(?:\.\d+)?$/.test(minimum)) {
+    throw new Error(`Invalid ${name} runtime system library requirement`);
+  }
+  if (process.platform !== "linux") return;
+  const actual = (process.report.getReport() as { header: { glibcVersionRuntime?: string } }).header.glibcVersionRuntime;
+  if (!actual || !versionAtLeast(actual, minimum)) {
+    throw new Error(`${name} runtime requires glibc ${minimum} or newer; this host ${actual ? `provides glibc ${actual}` : "does not provide glibc"}. Use a compatible Linux host or choose another engine.`);
+  }
 }
 
 function safePath(input: string): string {
@@ -283,6 +296,7 @@ export async function installRuntimeComponent(descriptor: ComponentArchive, cach
   fetcher: typeof fetch = fetch): Promise<string> {
   if (!/^[a-f0-9]{64}$/.test(descriptor.sha256) || !Number.isSafeInteger(descriptor.size) ||
       descriptor.size <= 0 || descriptor.size > MAX_ARCHIVE) throw new Error("Invalid runtime component descriptor");
+  assertComponentLibraries(descriptor.minimumLibc);
   const url = secureDownloadUrl(descriptor.url);
   const cache = await prepareCache(cacheRoot);
   const existing = await discoverComponent(cache, descriptor.sha256);
@@ -335,6 +349,9 @@ export async function importRuntimeComponent<T = unknown>(component: RuntimeComp
   if (!manifest) return sourceImport ? sourceImport() : import(pathToFileURL(require.resolve(specifier)).href) as Promise<T>;
   const descriptor = manifest.components[component];
   if (!descriptor) throw new Error(`This release does not provide the ${component} runtime`);
+  // Optional engines can require newer libraries than the small core. Check
+  // before consulting a cached/pending installation as well as before download.
+  assertComponentLibraries(descriptor.minimumLibc === undefined ? manifest.minimumLibc : descriptor.minimumLibc, component);
   const cache = resolve(process.env.BRAINSTORM_RUNTIME_COMPONENT_CACHE ?? join(homedir(), ".brainstorm-agentic", "runtime-components"));
   const key = cache + ":" + descriptor.sha256;
   let installation = pending.get(key);

@@ -194,3 +194,58 @@ test("provider imports reject incompatible system libraries before downloading a
     await assert.rejects(importRuntimeComponent("cursor", "@cursor/sdk", pathToFileURL(join(app, "entry.mjs")).href), /system libraries/);
   } finally { await f.close(); }
 });
+
+test("optional engine library requirements are enforced before download and cached imports while old manifests retain the core floor", { skip: process.platform !== "linux" }, async t => {
+  const f = await fixture(), old = process.env.BRAINSTORM_RUNTIME_COMPONENT_CACHE;
+  try {
+    const { bytes, descriptor } = await f.pack(), app = join(f.root, "app"); await mkdir(app);
+    const metadata = join(app, ".co-inference-distribution.json");
+    const manifest = { schemaVersion: 2, platform: process.platform, arch: process.arch,
+      nodeMajor: process.versions.node.split(".")[0], nodeAbi: process.versions.modules,
+      libc: "glibc", minimumLibc: "2.28", components: { cursor: { ...descriptor, minimumLibc: "2.39" } } };
+    await writeFile(metadata, JSON.stringify(manifest));
+    process.env.BRAINSTORM_RUNTIME_COMPONENT_CACHE = f.cache;
+    let hostVersion = "2.35", downloads = 0;
+    t.mock.method(process.report, "getReport", () => ({ header: { glibcVersionRuntime: hostVersion } }));
+    t.mock.method(globalThis, "fetch", async () => { downloads++; return new Response(bytes); });
+    const load = () => importRuntimeComponent<{ channel: string }>("cursor", "@cursor/sdk", pathToFileURL(join(app, "entry.mjs")).href);
+    await assert.rejects(load(), /Cursor runtime requires glibc 2\.39 or newer; this host provides glibc 2\.35/);
+    assert.equal(downloads, 0);
+    await assert.rejects(readdir(f.cache), { code: "ENOENT" }, "an incompatible engine must not prepare its cache");
+
+    hostVersion = "2.39";
+    assert.equal((await load()).channel, "esm");
+    assert.equal(downloads, 1);
+    hostVersion = "2.38";
+    await assert.rejects(load(), /Cursor runtime requires glibc 2\.39/);
+    await assert.rejects(installRuntimeComponent(manifest.components.cursor, f.cache), /runtime requires glibc 2\.39/);
+    hostVersion = "2.40";
+    assert.equal((await load()).channel, "esm");
+    assert.equal(downloads, 1, "compatible hosts reuse the verified engine");
+
+    for (const minimumLibc of [null, "", "2", "glibc 2.39", 2.39]) {
+      await writeFile(metadata, JSON.stringify({ ...manifest, components: { cursor: { ...descriptor, minimumLibc } } }));
+      await assert.rejects(load(), /Invalid Cursor runtime system library requirement/);
+    }
+    await writeFile(metadata, JSON.stringify({ ...manifest, components: { cursor: descriptor } }));
+    hostVersion = "2.28";
+    assert.equal((await load()).channel, "esm", "old descriptors inherit the core's minimum");
+    hostVersion = "2.27";
+    await assert.rejects(load(), /system libraries/);
+    assert.equal(downloads, 1);
+  } finally {
+    if (old === undefined) delete process.env.BRAINSTORM_RUNTIME_COMPONENT_CACHE;
+    else process.env.BRAINSTORM_RUNTIME_COMPONENT_CACHE = old;
+    await f.close();
+  }
+});
+
+test("malformed optional engine library requirements fail before installation on every platform", async () => {
+  const f = await fixture();
+  try {
+    const { descriptor } = await f.pack();
+    await assert.rejects(installRuntimeComponent({ ...descriptor, minimumLibc: "newest" }, f.cache,
+      (async () => { assert.fail("must not download"); }) as typeof fetch), /Invalid .* runtime system library requirement/);
+    await assert.rejects(readdir(f.cache), { code: "ENOENT" });
+  } finally { await f.close(); }
+});
