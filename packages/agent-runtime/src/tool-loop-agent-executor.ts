@@ -21,8 +21,10 @@ import { randomUUID } from "node:crypto";
 
 import {
   addUsage,
+  CreditBlockedError,
   emptyUsage,
   isCancellation,
+  isCreditBlocked,
   satisfiesRequirements,
   serializeError,
   textBlock,
@@ -128,8 +130,9 @@ const DEFAULT_MAX_TURNS = 8;
 const DEFAULT_MAX_TOOL_CALLS = 32;
 const DEFAULT_TRANSIENT_RETRIES = 2;
 const DEFAULT_RATE_LIMIT_RETRIES = 8;
-/** A rate-limit wait never exceeds one full budget window. */
+/** Cap computed backoff; a provider-declared reset may require a longer wait. */
 const RATE_LIMIT_MAX_DELAY_MS = 60_000;
+const QUOTA_MAX_AUTO_RESUME_DELAY_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_VALIDATION_RETRIES = 1;
 const DEFAULT_INITIAL_DELAY_MS = 100;
 const DEFAULT_MAX_DELAY_MS = 2_000;
@@ -714,6 +717,9 @@ export class ToolLoopAgentExecutor<
       if (context.signal?.aborted) {
         throw new AgentCancelledError(context.signal.reason ?? error);
       }
+      // The workflow runner persists this as a resumable block. Serializing it
+      // into an ordinary task failure would lose its reset time and scheduler.
+      if (isCreditBlocked(error)) throw error;
       return {
         taskId: task.taskId,
         status: "error",
@@ -1241,10 +1247,22 @@ export class ToolLoopAgentExecutor<
         if (context.signal?.aborted) {
           throw new AgentCancelledError(context.signal.reason ?? error);
         }
+        if (isCreditBlocked(error)) throw error;
+        const value = errorProperties(error);
+        if (value.category === "quota_exhausted") {
+          // A daily/account quota cannot recover inside a short retry loop.
+          // Release the worker and let the durable checkpoint own resumption.
+          const now = Date.now();
+          const retryAt = typeof value.retryAt === "number" &&
+            Number.isFinite(value.retryAt) && value.retryAt > now &&
+            value.retryAt <= now + QUOTA_MAX_AUTO_RESUME_DELAY_MS
+              ? value.retryAt : undefined;
+          const message = typeof value.message === "string" ? value.message : "Provider quota exhausted.";
+          throw new CreditBlockedError(retryAt, message, retryAt !== undefined ? "deterministic" : "manual");
+        }
         // Rate limits are deferred capacity, not flakiness: they get their
         // own larger budget, and each wait honors the provider's declared
-        // retry-after (never exceeding one full budget window).
-        const value = errorProperties(error);
+        // retry-after. Only the fallback backoff is capped to a budget window.
         const rateLimited =
           value.category === "rate_limit" ||
           value.status === 429 ||
@@ -1263,10 +1281,7 @@ export class ToolLoopAgentExecutor<
             this.#maxDelayMs,
             this.#initialDelayMs * this.#backoffMultiplier ** rateLimitRetries,
           );
-          const delay = Math.min(
-            RATE_LIMIT_MAX_DELAY_MS,
-            Math.max(declared, backoff),
-          );
+          const delay = Math.max(declared, Math.min(RATE_LIMIT_MAX_DELAY_MS, backoff));
           rateLimitRetries += 1;
           context.reportProgress?.({
             kind: "retry",

@@ -15,10 +15,13 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { loadContent } from "@brainstorm-agentic/content";
-import type { AgentResult, JsonValue, TaxonomyAccess } from "@brainstorm-agentic/core";
+import { Scope, type AgentResult, type JsonValue, type ModelRequest, type TaxonomyAccess, type WebAccess, type WebSearchKind } from "@brainstorm-agentic/core";
+import { prepareCodeWorkspace, webAccessTools } from "@brainstorm-agentic/host-tools";
+import { GeminiModelProvider } from "@brainstorm-agentic/provider-gemini";
 
 import {
   buildRuntime,
+  buildAgentExecutor,
   providerConfigFromEnv,
 } from "../src/wiring.js";
 import { FsArtifactStore, FsCheckpointStore } from "../src/fs-stores.js";
@@ -180,6 +183,170 @@ test("a dismissal reaches the runtime the worker builds", () => {
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("Gemini tasks advertise host code execution only when enabled and prepared", async () => {
+  const root = tempRoot();
+  try {
+    const codeEnvironment = await prepareCodeWorkspace(join(root, "code-env"), {
+      pythonCandidates: [],
+    });
+    for (const scenario of [
+      { name: "enabled and prepared", enabled: true, prepared: true, disabled: false, source: "host" },
+      { name: "preparation failed", enabled: true, prepared: false, disabled: false, source: "unavailable" },
+      { name: "host tool disabled", enabled: false, prepared: true, disabled: false, source: "unavailable" },
+      { name: "capability disabled", enabled: true, prepared: true, disabled: true, source: "unavailable" },
+    ] as const) {
+      const runtime = buildRuntime({
+        providerConfig: {
+          provider: "gemini",
+          defaultModel: "gemini-3.8-flash",
+          geminiApiKey: "unused-test-key",
+          enabledHostToolIds: scenario.enabled ? ["code_execute"] : [],
+          ...(scenario.disabled ? { disabledCapabilities: ["code-execution"] } : {}),
+        },
+        checkpoints: new FsCheckpointStore(root),
+        artifacts: new FsArtifactStore(root, "bsa_test_code_capability"),
+        autoApproveGates: true,
+        attachmentStore: "declared-none",
+        ...(scenario.prepared ? { codeEnvironment } : {}),
+        bundle: registryBundle,
+      });
+      const scope = Scope.root(runtime.compiled.createInput({ prompt: "Check two plus two.", attachments: [] }));
+      const task = await runtime.compiled.functions.taskBuilder("brainstorm.brainstorm.process-input.task")(
+        scope,
+        undefined,
+        { runId: "bsa_test_code_capability", nodePath: "brainstorm-root/process-input", signal: new AbortController().signal },
+      );
+      const operation = task.capabilityPlan?.operations.find((entry) => entry.operationId === "code.execute");
+      assert.equal(operation?.source, scenario.source, scenario.name);
+      assert.deepEqual(operation?.toolNames, scenario.source === "host" ? ["code_execute"] : [], scenario.name);
+      assert.equal(task.tools?.includes("code_execute") ?? false, scenario.source === "host", scenario.name);
+      assert.equal(task.capabilityPlan?.hostToolDefinitions.some((tool) => tool.name === "code_execute"), scenario.source === "host", scenario.name);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("scientific tasks use broker-owned GPU tools while absent and disabled GPU remain optional", async () => {
+  const root = tempRoot();
+  try {
+    const buildTask = async (runtime: ReturnType<typeof buildRuntime>) => {
+      const scope = Scope.root(runtime.compiled.createInput({ prompt: "Explain a mathematical result.", attachments: [] }));
+      const member = { id: "member-1", department: "Mathematics", umbrella: "Algebra", subfields: ["Linear algebra"] };
+      scope.set("input", { title: "A mathematical result", question: "Explain the result.", context: "", attachments: [], assumptions: [], type: "research idea", cotSteps: 3 });
+      scope.set("usefulFiles", { files: [] });
+      scope.set("member", member);
+      scope.set("panel", { members: [member] });
+      return runtime.compiled.functions.taskBuilder("brainstorm.brainstorm.develop-idea.task")(
+        scope, undefined,
+        { runId: "bsa_test_gpu_capability", nodePath: "brainstorm-root/first-pass/0/develop-idea", signal: new AbortController().signal },
+      );
+    };
+    for (const scenario of [
+      { name: "enabled and configured", enabled: true, configured: true, disabled: false, availability: "available" },
+      { name: "no GPU profile", enabled: true, configured: false, disabled: false, availability: "vacant" },
+      { name: "host tool disabled", enabled: false, configured: true, disabled: false, availability: "unwired" },
+      { name: "capability disabled", enabled: true, configured: true, disabled: true, availability: "withheld" },
+    ] as const) {
+      const runtime = buildRuntime({
+        providerConfig: {
+          provider: "gemini", defaultModel: "gemini-3.8-flash", geminiApiKey: "unused-test-key",
+          enabledHostToolIds: scenario.enabled ? ["gpu_run"] : [],
+          ...(scenario.disabled ? { disabledCapabilities: ["gpu-execution"] } : {}),
+        },
+        checkpoints: new FsCheckpointStore(root), artifacts: new FsArtifactStore(root, "bsa_test_gpu_capability"),
+        autoApproveGates: true, attachmentStore: "declared-none", bundle: registryBundle,
+        ...(scenario.configured ? { gpuRun: {
+          template: "#!/bin/bash\n{{AGENT_COMMAND}}\n", timeLimitMinutes: 1, jobsRoot: join(root, "gpu-jobs"),
+          runCommand: async () => { throw new Error("Task construction must never submit a GPU job"); },
+        } } : {}),
+      });
+      const task = await buildTask(runtime);
+      const available = scenario.availability === "available";
+      const operation = task.capabilityPlan?.operations.find(entry => entry.operationId === "gpu.run");
+      assert.equal(operation?.source, available ? "host" : "unavailable", scenario.name);
+      assert.deepEqual(operation?.toolNames, available ? ["gpu_run"] : [], scenario.name);
+      assert.equal(task.capabilityPlan?.capabilities.find(entry => entry.capabilityId === "gpu-execution")?.availability, scenario.availability, scenario.name);
+      assert.equal(task.tools?.filter(name => name === "gpu_run").length ?? 0, available ? 1 : 0, scenario.name);
+      assert.equal(task.capabilityPlan?.hostToolDefinitions.filter(tool => tool.name === "gpu_run").length, available ? 1 : 0, scenario.name);
+      assert.equal(existsSync(join(root, "gpu-jobs")), false, "building a task cannot start GPU work");
+    }
+    const brain = registryBundle.skills.brain!;
+    const required = buildRuntime({
+      providerConfig: { provider: "gemini", defaultModel: "gemini-3.8-flash", geminiApiKey: "unused-test-key", enabledHostToolIds: [] },
+      checkpoints: new FsCheckpointStore(root), artifacts: new FsArtifactStore(root, "bsa_test_gpu_capability"),
+      autoApproveGates: true, attachmentStore: "declared-none",
+      bundle: { ...registryBundle, skills: { ...registryBundle.skills,
+        brain: { ...brain, meta: { ...brain.meta, requiredCapabilities: ["code-execution"] } },
+      } },
+    });
+    await assert.rejects(buildTask(required), error =>
+      error instanceof Error && "code" in error && error.code === "REQUIRED_CAPABILITY_UNAVAILABLE" && /code-execution/.test(error.message),
+    );
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("scientific executor preflight advertises only the web tools its manager registers", async (t) => {
+  const root = tempRoot();
+  const requests: ModelRequest[] = [];
+  t.mock.method(GeminiModelProvider.prototype, "complete", async (request: ModelRequest) => {
+    requests.push(request);
+    throw new Error("Test stopped after executor preflight");
+  });
+  const neverCall = async (): Promise<never> => { throw new Error("Preflight cannot make web requests"); };
+  try {
+    for (const scenario of [
+      { name: "general search absent", kinds: ["scholarly"], papers: true, expected: ["paper_details", "paper_search", "web_fetch"] },
+      { name: "general search unhealthy", kinds: ["scholarly"], papers: true, expected: ["paper_details", "paper_search", "web_fetch"] },
+      { name: "all routes available", kinds: ["general", "news", "scholarly"], papers: true, expected: ["news_search", "paper_details", "paper_search", "web_fetch", "web_search"] },
+      { name: "web capability disabled", kinds: ["general", "news", "scholarly"], papers: true, expected: ["news_search", "paper_details", "paper_search", "web_fetch", "web_search"] },
+      { name: "fetch only", kinds: [], papers: false, expected: ["web_fetch"] },
+    ] as const) {
+      const web: WebAccess = {
+        backedKinds: () => scenario.kinds as readonly WebSearchKind[],
+        backsPapers: () => scenario.papers,
+        search: neverCall, fetch: neverCall, searchPapers: neverCall, paperDetails: neverCall,
+        status: () => [{ id: "searxng", state: scenario.name === "general search unhealthy" ? "unreachable" : "not-configured" }],
+      };
+      const disabled = scenario.name === "web capability disabled";
+      const selectedTools = ["web_search", "news_search", "paper_search", "paper_details", "web_fetch"];
+      const providerConfig = {
+        provider: "gemini" as const, defaultModel: "gemini-3.8-flash", geminiApiKey: "unused-test-key",
+        enabledHostToolIds: [...selectedTools], ...(disabled ? { disabledCapabilities: ["web-search"] } : {}),
+      };
+      const runtime = buildRuntime({
+        providerConfig, web, bundle: registryBundle, autoApproveGates: true,
+        checkpoints: new FsCheckpointStore(root), artifacts: new FsArtifactStore(root, "bsa_test_web_preflight"),
+        attachmentStore: "declared-none",
+      });
+      const scope = Scope.root(runtime.compiled.createInput({ prompt: "Explain a mathematical result.", attachments: [] }));
+      const member = { id: "member-1", department: "Mathematics", umbrella: "Algebra", subfields: ["Linear algebra"] };
+      scope.set("input", { title: "A mathematical result", question: "Explain the result.", context: "", attachments: [], assumptions: [], type: "research idea", cotSteps: 3 });
+      scope.set("usefulFiles", { files: [] });
+      scope.set("member", member);
+      scope.set("panel", { members: [member] });
+      const context = { runId: "bsa_test_web_preflight", nodePath: "brainstorm-root/first-pass/0/develop-idea", signal: new AbortController().signal };
+      const task = await runtime.compiled.functions.taskBuilder("brainstorm.brainstorm.develop-idea.task")(scope, undefined, context);
+      const executor = buildAgentExecutor(providerConfig, [], undefined, undefined, undefined, undefined, web);
+      requests.length = 0;
+      const result = await executor.execute({ ...task, taskId: `${context.runId}:${context.nodePath}` }, context);
+      assert.equal(requests.length, 1, `${scenario.name}: executor must reach the fake provider, not fail tool preflight: ${JSON.stringify(result)}`);
+      assert.equal(result.status, "error");
+      if (result.status === "error") assert.match(result.error.message, /Test stopped after executor preflight/);
+      const registeredNames = webAccessTools(web).map((tool) => tool.definition.name).sort();
+      assert.deepEqual(registeredNames, scenario.expected, scenario.name);
+      const exposedNames = disabled ? [] : registeredNames;
+      assert.deepEqual([...(task.tools ?? [])].sort(), exposedNames, scenario.name);
+      assert.deepEqual(task.capabilityPlan?.hostToolDefinitions.map((tool) => tool.name).sort(), exposedNames, scenario.name);
+      assert.deepEqual(providerConfig.enabledHostToolIds, selectedTools, "availability never changes the user's saved selections");
+      const stepTool = task.metadata?.stepwise;
+      const offered = requests[0]!.tools?.filter((tool) => registeredNames.includes(tool.name)).map((tool) => tool.name).sort();
+      assert.deepEqual(offered, exposedNames, scenario.name);
+      assert.equal(requests[0]!.tools?.length, exposedNames.length + (stepTool ? 1 : 0), "only registered web tools and the executor's step tool may be offered");
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("offline run completes end to end with file-backed stores and auto-approved gate", async () => {

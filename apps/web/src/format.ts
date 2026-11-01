@@ -130,9 +130,9 @@ export function jobStatusLine(job: JobSummary): string {
     case "credit-blocked": {
       const retryAt = job.creditBlock?.retryAt;
       if (retryAt === undefined) {
-        return "credit blocked · top up, then resume";
+        return "provider limit · check quota or billing, then resume";
       }
-      return `credit blocked · resumes in ${formatDuration(Math.max(0, retryAt - Date.now()))}`;
+      return `provider limit · resumes in ${formatDuration(Math.max(0, retryAt - Date.now()))}`;
     }
     case "completed":
       return "completed";

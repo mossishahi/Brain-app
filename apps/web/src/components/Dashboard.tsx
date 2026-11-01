@@ -868,17 +868,20 @@ export function Dashboard({
       {job.status === "credit-blocked" && job.creditBlock && (
         <div className="banner credit-banner">
           <span>
-            <strong>Credit blocked.</strong>{" "}
+            <strong>Provider limit reached.</strong>{" "}
+            {job.creditBlock.providerMessage}{" "}
             {job.creditBlock.retryAt !== undefined ? (
               <>
                 Automatic resume in{" "}
                 {formatDuration(Math.max(0, job.creditBlock.retryAt - now))} at{" "}
-                {formatClock(job.creditBlock.retryAt)}.
+                {new Date(job.creditBlock.retryAt).toLocaleString([], {
+                  month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", timeZoneName: "short",
+                })}.
               </>
             ) : (
               <>
-                The provider announced no reset time — top up your credits,
-                then resume.
+                The provider gave no reset time. Check your provider's quota or
+                billing settings, then resume.
               </>
             )}
             {resumeError && <> Resume failed: {resumeError}.</>}

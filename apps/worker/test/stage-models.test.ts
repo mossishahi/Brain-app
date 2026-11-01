@@ -3,7 +3,7 @@ import test from "node:test";
 import type { ModelCatalogSnapshot } from "@brainstorm-agentic/protocol";
 import { ClaudeAgentExecutor } from "@brainstorm-agentic/executor-claude-agent";
 import { contentRouteResolver, modelCatalogFromEnv, stageSettingsFromEnv } from "../src/stage-models.js";
-import { providerConfigFromEnv } from "../src/wiring.js";
+import { modelsByRouteFromEnv, providerConfigFromEnv } from "../src/wiring.js";
 
 const catalog: ModelCatalogSnapshot = {
   provider: "claude-agent", fetchedAt: 123, source: "provider", stale: false,
@@ -19,6 +19,81 @@ const catalog: ModelCatalogSnapshot = {
 };
 const request = (nodeId: string, logicalRoute = "reasoning") => ({
   nodeId, logicalRoute, traits: ["extended-reasoning"], skill: "brain", capabilities: [],
+});
+
+const geminiRouteCatalog: ModelCatalogSnapshot = {
+  provider: "gemini", fetchedAt: 123, source: "provider", stale: false,
+  models: [
+    { id: "gemini-flash", label: "Flash" },
+    { id: "gemini-pro", label: "Pro", aliases: ["gemini-pro-latest"] },
+  ],
+};
+
+test("an explicit route snapshot clears inherited legacy models while preserving Gemini stage choices", async () => {
+  const config = providerConfigFromEnv({
+    BRAINSTORM_AGENTIC_PROVIDER: "gemini",
+    BRAINSTORM_AGENTIC_MODEL: "gemini-flash",
+    BRAINSTORM_AGENTIC_MODEL_REASONING: "claude-sonnet-5",
+    BRAINSTORM_AGENTIC_MODEL_WRITING: "claude-sonnet-5",
+    BRAINSTORM_AGENTIC_MODELS_BY_ROUTE: "{}",
+    BRAINSTORM_AGENTIC_MODEL_CATALOG: JSON.stringify(geminiRouteCatalog),
+    BRAINSTORM_AGENTIC_STAGE_SETTINGS: JSON.stringify({ "develop-idea": { model: "gemini-pro-latest" } }),
+  }, false);
+  assert.equal(config.models, undefined);
+  const resolver = contentRouteResolver(config);
+  assert.equal((await resolver.resolve(request("process-input"))).modelId, "gemini-flash");
+  assert.equal((await resolver.resolve(request("synthesize-proposal", "writing"))).modelId, "gemini-flash");
+  assert.equal((await resolver.resolve(request("develop-idea"))).modelId, "gemini-pro-latest");
+});
+
+test("nonempty route snapshots replace legacy variables; legacy CLI launches keep their routing", async () => {
+  const legacy = {
+    BRAINSTORM_AGENTIC_MODEL_REASONING: "large",
+    BRAINSTORM_AGENTIC_MODEL_WRITING: "small",
+  };
+  assert.deepEqual(modelsByRouteFromEnv(legacy), { reasoning: "large", writing: "small" });
+  assert.deepEqual(modelsByRouteFromEnv({ ...legacy,
+    BRAINSTORM_AGENTIC_MODELS_BY_ROUTE: '{"custom-route":"gemini-pro"}',
+  }), { "custom-route": "gemini-pro" });
+  const config = providerConfigFromEnv({ ...legacy, BRAINSTORM_AGENTIC_PROVIDER: "anthropic" }, false);
+  assert.equal((await contentRouteResolver(config).resolve(request("process-input"))).modelId, "large");
+  assert.equal((await contentRouteResolver(config).resolve(request("synthesize-proposal", "writing"))).modelId, "small");
+});
+
+test("every effective model must belong to the launch catalog before an API request", async () => {
+  for (const selection of [
+    { defaultModel: "claude-sonnet-5" },
+    { defaultModel: "gemini-flash", models: { reasoning: "claude-sonnet-5" } },
+    { defaultModel: "gemini-flash", stageSettings: { "process-input": { model: "claude-sonnet-5" } } },
+  ]) {
+    const resolver = contentRouteResolver({ provider: "gemini", modelCatalog: geminiRouteCatalog, ...selection });
+    await assert.rejects(async () => resolver.resolve(request("process-input")), /claude-sonnet-5.*gemini provider's launch catalog/);
+  }
+  const resolver = contentRouteResolver({ provider: "gemini", defaultModel: "gemini-flash",
+    models: { reasoning: "gemini-pro" }, modelCatalog: geminiRouteCatalog,
+    stageSettings: { "process-input": { model: "gemini-flash" } },
+  });
+  assert.equal((await resolver.resolve(request("process-input"))).modelId, "gemini-flash");
+  assert.equal((await resolver.resolve(request("develop-idea"))).modelId, "gemini-pro");
+  const discoveryUnavailable = contentRouteResolver({ provider: "gemini", defaultModel: "gemini-new",
+    modelCatalog: { ...geminiRouteCatalog, source: "fallback", stale: true, models: [] },
+  });
+  assert.equal((await discoveryUnavailable.resolve(request("process-input"))).modelId, "gemini-new");
+});
+
+test("stale provider catalogs preserve inherited model choices while retaining explicit-stage validation", async () => {
+  const staleCatalog = { ...geminiRouteCatalog, stale: true };
+  for (const selection of [
+    { defaultModel: "gemini-new" },
+    { defaultModel: "gemini-flash", models: { reasoning: "gemini-new" } },
+  ]) {
+    const resolver = contentRouteResolver({ provider: "gemini", modelCatalog: staleCatalog, ...selection });
+    assert.equal((await resolver.resolve(request("process-input"))).modelId, "gemini-new");
+  }
+  const resolver = contentRouteResolver({ provider: "gemini", defaultModel: "gemini-flash", modelCatalog: staleCatalog,
+    stageSettings: { "process-input": { model: "gemini-new" } },
+  });
+  await assert.rejects(async () => resolver.resolve(request("process-input")), /Stage.*gemini-new.*launch catalog/);
 });
 
 test("different workflow stages sharing a route get independent models and execution controls", async () => {

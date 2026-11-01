@@ -53,25 +53,19 @@ export interface OrchestrationCommandOptions {
 }
 
 function modelEnvironment(settings: ServerSettings): string[] {
-  if (settings.llm.provider === "offline") return [];
+  // The complete map also clears legacy route variables inherited from a
+  // scheduler or login shell when the snapshot has no route overrides.
   const entries: string[] = [
-    `BRAINSTORM_AGENTIC_PROVIDER=${shellQuote(settings.llm.provider)}`,
+    `BRAINSTORM_AGENTIC_MODELS_BY_ROUTE=${shellQuote(JSON.stringify(settings.llm.modelsByRoute ?? {}))}`,
   ];
+  if (settings.llm.provider === "offline") return entries;
+  entries.push(`BRAINSTORM_AGENTIC_PROVIDER=${shellQuote(settings.llm.provider)}`);
   if (settings.llm.model) {
     entries.push(`BRAINSTORM_AGENTIC_MODEL=${shellQuote(settings.llm.model)}`);
   }
   for (const [route, model] of Object.entries(settings.llm.modelsByRoute ?? {})) {
     const name = `BRAINSTORM_AGENTIC_MODEL_${route.toUpperCase().replace(/[^A-Z0-9_]/g, "_")}`;
     entries.push(`${name}=${shellQuote(model)}`);
-  }
-  // The JSON form is authoritative for the worker: it round-trips any route
-  // name losslessly (the per-route variables above mangle non-alphanumerics
-  // and remain only for older resume scripts).
-  const modelsByRoute = settings.llm.modelsByRoute ?? {};
-  if (Object.keys(modelsByRoute).length > 0) {
-    entries.push(
-      `BRAINSTORM_AGENTIC_MODELS_BY_ROUTE=${shellQuote(JSON.stringify(modelsByRoute))}`,
-    );
   }
   return entries;
 }

@@ -73,6 +73,7 @@ import {
 import {
   ALL_HOST_TOOL_MANIFESTS,
   ATTACHMENT_MANIFESTS,
+  CODE_EXECUTION_MANIFESTS,
   FACT_MANIFESTS,
   GPU_RUN_MANIFESTS,
   NOTES_MANIFESTS,
@@ -87,6 +88,7 @@ import {
   taxonomyTools,
   webAccessTools,
   webFetchTools,
+  webToolNames,
   type CodeRuntimeEnvironment,
   type GpuRunConfig,
   type WebSearchRuntimeConfig,
@@ -812,6 +814,14 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
       enabledHostToolIds.delete(manifest.toolId);
     }
   }
+  // Enabling host code execution does not guarantee that its scratch
+  // workspace could be prepared. Without that environment no executable tool
+  // is registered, so the broker must not advertise one to the model.
+  if (options.codeEnvironment === undefined) {
+    for (const manifest of CODE_EXECUTION_MANIFESTS) {
+      enabledHostToolIds.delete(manifest.toolId);
+    }
+  }
   // And for GPU runs: without a completed submission template there is
   // nothing to submit through, so the broker must resolve gpu-execution
   // unavailable (its whenUnavailable prose tells the agent GPU runs need
@@ -822,14 +832,15 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
     }
   }
   // The web tools follow the same deployment-resource rule as taxonomy: the
-  // web is host-owned (no backend offers web.search/web.fetch natively any
-  // more), so whenever a web manager is wired the tools are enabled — they
-  // are the ONLY thing that can satisfy the web-search capability — and when
-  // none is wired they are removed so the broker's verdict stays truthful.
+  // web is host-owned, so expose only the tools the manager can register.
+  // A scholarly-only manager still serves paper search/details and fetch,
+  // but cannot register general/news search. Use the executor's same selector
+  // so every name the broker advertises has a backing implementation.
   // A submitter still switches search off per run through the capability
   // override, which resolves every web operation "withheld" plan-wide.
+  const availableWebTools = new Set<string>(options.web ? webToolNames(options.web) : []);
   for (const manifest of WEB_SEARCH_MANIFESTS) {
-    if (options.web) enabledHostToolIds.add(manifest.toolId);
+    if (availableWebTools.has(manifest.toolId)) enabledHostToolIds.add(manifest.toolId);
     else enabledHostToolIds.delete(manifest.toolId);
   }
   // Agents' own web tools (webSearch.mode "agent"): the backend searches
@@ -997,6 +1008,8 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
     capabilityTools: new StaticCapabilityToolResolver({
       "web-search": [],
       "code-execution": [],
+      // The broker exposes gpu_run only for an enabled, configured GPU profile.
+      "gpu-execution": [],
       "attachment-access": anthropicAttachmentTools,
       "taxonomy-access": anthropicTaxonomyTools,
       "notes-access": [],
@@ -1126,6 +1139,10 @@ export function modelsByRouteFromEnv(env: NodeJS.ProcessEnv): Record<string, str
     try {
       const parsed: unknown = JSON.parse(json);
       if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+        // This is the complete launch snapshot, including an explicitly empty
+        // map. Merging legacy variables inherited from the server's shell can
+        // resurrect a previous provider's models after the user switches APIs.
+        for (const route of Object.keys(models)) delete models[route];
         for (const [route, model] of Object.entries(parsed)) {
           if (typeof model === "string" && model.trim().length > 0) {
             models[route] = model.trim();

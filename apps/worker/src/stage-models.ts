@@ -129,8 +129,16 @@ export function contentRouteResolver(config: StageRoutingConfig): BrainstormRout
         };
       }
       const model = config.modelCatalog?.models.find((entry) => entry.id === modelId || entry.aliases?.includes(modelId));
-      if (stage?.model !== undefined && config.modelCatalog?.source === "provider" && model === undefined) {
-        throw new Error(`Stage "${request.nodeId}" selects model "${modelId}", which is absent from the provider's launch catalog`);
+      // The stage inherits a concrete route/default model as well as explicit
+      // stage choices. Validate all of them: an older host environment can
+      // otherwise send a former provider's route model to the selected API.
+      // A failed catalog refresh may retain an old provider list. Preserve the
+      // existing explicit-stage validation, but do not reject a newly available
+      // inherited model merely because it is absent from that stale list.
+      if (modelId && config.modelCatalog?.source === "provider" &&
+        (stage?.model !== undefined || !config.modelCatalog.stale) && model === undefined) {
+        const selection = stage?.model !== undefined ? `Stage "${request.nodeId}"` : `Route "${request.logicalRoute}"`;
+        throw new Error(`${selection} selects model "${modelId}", which is absent from the ${config.provider} provider's launch catalog`);
       }
       const capabilities = model?.capabilities;
       if (stage?.effort !== undefined && !capabilities?.effortLevels.includes(stage.effort)) {

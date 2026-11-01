@@ -241,14 +241,19 @@ export class ModelDiscovery {
 }
 
 export function validateStageCapabilities(settings: ServerSettings, stages: Readonly<Record<string, StageModelSettings>>, catalog: ModelCatalogSnapshot, options: readonly StageOption[]): void {
-  for (const [id, selection] of Object.entries(stages)) {
-    const stage = options.find((entry) => entry.id === id);
-    // Settings from a newer bundle remain stored, but do not affect this workflow.
-    if (!stage) continue;
+  // Every active stage inherits a model even without an explicit override.
+  // Settings from a newer bundle stay stored but do not affect this workflow.
+  for (const stage of options) {
+    const selection = stages[stage.id] ?? {};
     const modelId = selection.model ?? (stage.route ? settings.llm.modelsByRoute?.[stage.route] : undefined)
       ?? settings.llm.model ?? settings.llm.modelsByRoute?.reasoning ?? (settings.llm.provider === "cursor-agent" ? "auto" : undefined);
     const model = catalog.models.find((entry) => entry.id === modelId || entry.aliases?.includes(modelId ?? ""));
-    if (selection.model && !model) throw new Error(`${stage.label}: model ${selection.model} is not available for this provider. Select a model from the current catalog.`);
+    // A successful discovery is authoritative for inherited route/default
+    // choices too. A stale or fallback catalog cannot disprove those choices.
+    if (modelId && !model && (selection.model ||
+        (settings.llm.provider !== "offline" && catalog.source === "provider" && !catalog.stale))) {
+      throw new Error(`${stage.label}: model ${modelId} is not available for this provider. Select a model from the current catalog.`);
+    }
     if (selection.effort && !model?.capabilities?.effortLevels.includes(selection.effort)) throw new Error(`${stage.label}: ${modelId ?? "the default model"} does not advertise ${selection.effort} effort. Choose a supported effort or inherit the default.`);
     if (selection.thinking === "adaptive" && model?.capabilities?.adaptiveThinking !== true) throw new Error(`${stage.label}: ${modelId ?? "the default model"} does not advertise adaptive thinking. Choose a supported model or inherit the default.`);
     if (selection.thinking === "disabled" && model?.capabilities?.thinkingCanBeDisabled !== true) throw new Error(`${stage.label}: ${modelId ?? "the default model"} does not advertise disabling thinking. Choose a supported model or inherit the default.`);
