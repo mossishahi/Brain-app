@@ -88,6 +88,7 @@ import {
   taxonomyTools,
   webAccessTools,
   webFetchTools,
+  webToolNames,
   type CodeRuntimeEnvironment,
   type GpuRunConfig,
   type WebSearchRuntimeConfig,
@@ -831,14 +832,15 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
     }
   }
   // The web tools follow the same deployment-resource rule as taxonomy: the
-  // web is host-owned (no backend offers web.search/web.fetch natively any
-  // more), so whenever a web manager is wired the tools are enabled — they
-  // are the ONLY thing that can satisfy the web-search capability — and when
-  // none is wired they are removed so the broker's verdict stays truthful.
+  // web is host-owned, so expose only the tools the manager can register.
+  // A scholarly-only manager still serves paper search/details and fetch,
+  // but cannot register general/news search. Use the executor's same selector
+  // so every name the broker advertises has a backing implementation.
   // A submitter still switches search off per run through the capability
   // override, which resolves every web operation "withheld" plan-wide.
+  const availableWebTools = new Set<string>(options.web ? webToolNames(options.web) : []);
   for (const manifest of WEB_SEARCH_MANIFESTS) {
-    if (options.web) enabledHostToolIds.add(manifest.toolId);
+    if (availableWebTools.has(manifest.toolId)) enabledHostToolIds.add(manifest.toolId);
     else enabledHostToolIds.delete(manifest.toolId);
   }
   // Agents' own web tools (webSearch.mode "agent"): the backend searches

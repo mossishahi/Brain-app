@@ -15,11 +15,13 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { loadContent } from "@brainstorm-agentic/content";
-import { Scope, type AgentResult, type JsonValue, type TaxonomyAccess } from "@brainstorm-agentic/core";
-import { prepareCodeWorkspace } from "@brainstorm-agentic/host-tools";
+import { Scope, type AgentResult, type JsonValue, type ModelRequest, type TaxonomyAccess, type WebAccess, type WebSearchKind } from "@brainstorm-agentic/core";
+import { prepareCodeWorkspace, webAccessTools } from "@brainstorm-agentic/host-tools";
+import { GeminiModelProvider } from "@brainstorm-agentic/provider-gemini";
 
 import {
   buildRuntime,
+  buildAgentExecutor,
   providerConfigFromEnv,
 } from "../src/wiring.js";
 import { FsArtifactStore, FsCheckpointStore } from "../src/fs-stores.js";
@@ -283,6 +285,67 @@ test("scientific tasks use broker-owned GPU tools while absent and disabled GPU 
     await assert.rejects(buildTask(required), error =>
       error instanceof Error && "code" in error && error.code === "REQUIRED_CAPABILITY_UNAVAILABLE" && /code-execution/.test(error.message),
     );
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("scientific executor preflight advertises only the web tools its manager registers", async (t) => {
+  const root = tempRoot();
+  const requests: ModelRequest[] = [];
+  t.mock.method(GeminiModelProvider.prototype, "complete", async (request: ModelRequest) => {
+    requests.push(request);
+    throw new Error("Test stopped after executor preflight");
+  });
+  const neverCall = async (): Promise<never> => { throw new Error("Preflight cannot make web requests"); };
+  try {
+    for (const scenario of [
+      { name: "general search absent", kinds: ["scholarly"], papers: true, expected: ["paper_details", "paper_search", "web_fetch"] },
+      { name: "general search unhealthy", kinds: ["scholarly"], papers: true, expected: ["paper_details", "paper_search", "web_fetch"] },
+      { name: "all routes available", kinds: ["general", "news", "scholarly"], papers: true, expected: ["news_search", "paper_details", "paper_search", "web_fetch", "web_search"] },
+      { name: "web capability disabled", kinds: ["general", "news", "scholarly"], papers: true, expected: ["news_search", "paper_details", "paper_search", "web_fetch", "web_search"] },
+      { name: "fetch only", kinds: [], papers: false, expected: ["web_fetch"] },
+    ] as const) {
+      const web: WebAccess = {
+        backedKinds: () => scenario.kinds as readonly WebSearchKind[],
+        backsPapers: () => scenario.papers,
+        search: neverCall, fetch: neverCall, searchPapers: neverCall, paperDetails: neverCall,
+        status: () => [{ id: "searxng", state: scenario.name === "general search unhealthy" ? "unreachable" : "not-configured" }],
+      };
+      const disabled = scenario.name === "web capability disabled";
+      const selectedTools = ["web_search", "news_search", "paper_search", "paper_details", "web_fetch"];
+      const providerConfig = {
+        provider: "gemini" as const, defaultModel: "gemini-3.8-flash", geminiApiKey: "unused-test-key",
+        enabledHostToolIds: [...selectedTools], ...(disabled ? { disabledCapabilities: ["web-search"] } : {}),
+      };
+      const runtime = buildRuntime({
+        providerConfig, web, bundle: registryBundle, autoApproveGates: true,
+        checkpoints: new FsCheckpointStore(root), artifacts: new FsArtifactStore(root, "bsa_test_web_preflight"),
+        attachmentStore: "declared-none",
+      });
+      const scope = Scope.root(runtime.compiled.createInput({ prompt: "Explain a mathematical result.", attachments: [] }));
+      const member = { id: "member-1", department: "Mathematics", umbrella: "Algebra", subfields: ["Linear algebra"] };
+      scope.set("input", { title: "A mathematical result", question: "Explain the result.", context: "", attachments: [], assumptions: [], type: "research idea", cotSteps: 3 });
+      scope.set("usefulFiles", { files: [] });
+      scope.set("member", member);
+      scope.set("panel", { members: [member] });
+      const context = { runId: "bsa_test_web_preflight", nodePath: "brainstorm-root/first-pass/0/develop-idea", signal: new AbortController().signal };
+      const task = await runtime.compiled.functions.taskBuilder("brainstorm.brainstorm.develop-idea.task")(scope, undefined, context);
+      const executor = buildAgentExecutor(providerConfig, [], undefined, undefined, undefined, undefined, web);
+      requests.length = 0;
+      const result = await executor.execute({ ...task, taskId: `${context.runId}:${context.nodePath}` }, context);
+      assert.equal(requests.length, 1, `${scenario.name}: executor must reach the fake provider, not fail tool preflight: ${JSON.stringify(result)}`);
+      assert.equal(result.status, "error");
+      if (result.status === "error") assert.match(result.error.message, /Test stopped after executor preflight/);
+      const registeredNames = webAccessTools(web).map((tool) => tool.definition.name).sort();
+      assert.deepEqual(registeredNames, scenario.expected, scenario.name);
+      const exposedNames = disabled ? [] : registeredNames;
+      assert.deepEqual([...(task.tools ?? [])].sort(), exposedNames, scenario.name);
+      assert.deepEqual(task.capabilityPlan?.hostToolDefinitions.map((tool) => tool.name).sort(), exposedNames, scenario.name);
+      assert.deepEqual(providerConfig.enabledHostToolIds, selectedTools, "availability never changes the user's saved selections");
+      const stepTool = task.metadata?.stepwise;
+      const offered = requests[0]!.tools?.filter((tool) => registeredNames.includes(tool.name)).map((tool) => tool.name).sort();
+      assert.deepEqual(offered, exposedNames, scenario.name);
+      assert.equal(requests[0]!.tools?.length, exposedNames.length + (stepTool ? 1 : 0), "only registered web tools and the executor's step tool may be offered");
+    }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
