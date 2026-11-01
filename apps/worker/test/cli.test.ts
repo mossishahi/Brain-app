@@ -227,6 +227,65 @@ test("Gemini tasks advertise host code execution only when enabled and prepared"
   }
 });
 
+test("scientific tasks use broker-owned GPU tools while absent and disabled GPU remain optional", async () => {
+  const root = tempRoot();
+  try {
+    const buildTask = async (runtime: ReturnType<typeof buildRuntime>) => {
+      const scope = Scope.root(runtime.compiled.createInput({ prompt: "Explain a mathematical result.", attachments: [] }));
+      const member = { id: "member-1", department: "Mathematics", umbrella: "Algebra", subfields: ["Linear algebra"] };
+      scope.set("input", { title: "A mathematical result", question: "Explain the result.", context: "", attachments: [], assumptions: [], type: "research idea", cotSteps: 3 });
+      scope.set("usefulFiles", { files: [] });
+      scope.set("member", member);
+      scope.set("panel", { members: [member] });
+      return runtime.compiled.functions.taskBuilder("brainstorm.brainstorm.develop-idea.task")(
+        scope, undefined,
+        { runId: "bsa_test_gpu_capability", nodePath: "brainstorm-root/first-pass/0/develop-idea", signal: new AbortController().signal },
+      );
+    };
+    for (const scenario of [
+      { name: "enabled and configured", enabled: true, configured: true, disabled: false, availability: "available" },
+      { name: "no GPU profile", enabled: true, configured: false, disabled: false, availability: "vacant" },
+      { name: "host tool disabled", enabled: false, configured: true, disabled: false, availability: "unwired" },
+      { name: "capability disabled", enabled: true, configured: true, disabled: true, availability: "withheld" },
+    ] as const) {
+      const runtime = buildRuntime({
+        providerConfig: {
+          provider: "gemini", defaultModel: "gemini-3.8-flash", geminiApiKey: "unused-test-key",
+          enabledHostToolIds: scenario.enabled ? ["gpu_run"] : [],
+          ...(scenario.disabled ? { disabledCapabilities: ["gpu-execution"] } : {}),
+        },
+        checkpoints: new FsCheckpointStore(root), artifacts: new FsArtifactStore(root, "bsa_test_gpu_capability"),
+        autoApproveGates: true, attachmentStore: "declared-none", bundle: registryBundle,
+        ...(scenario.configured ? { gpuRun: {
+          template: "#!/bin/bash\n{{AGENT_COMMAND}}\n", timeLimitMinutes: 1, jobsRoot: join(root, "gpu-jobs"),
+          runCommand: async () => { throw new Error("Task construction must never submit a GPU job"); },
+        } } : {}),
+      });
+      const task = await buildTask(runtime);
+      const available = scenario.availability === "available";
+      const operation = task.capabilityPlan?.operations.find(entry => entry.operationId === "gpu.run");
+      assert.equal(operation?.source, available ? "host" : "unavailable", scenario.name);
+      assert.deepEqual(operation?.toolNames, available ? ["gpu_run"] : [], scenario.name);
+      assert.equal(task.capabilityPlan?.capabilities.find(entry => entry.capabilityId === "gpu-execution")?.availability, scenario.availability, scenario.name);
+      assert.equal(task.tools?.filter(name => name === "gpu_run").length ?? 0, available ? 1 : 0, scenario.name);
+      assert.equal(task.capabilityPlan?.hostToolDefinitions.filter(tool => tool.name === "gpu_run").length, available ? 1 : 0, scenario.name);
+      assert.equal(existsSync(join(root, "gpu-jobs")), false, "building a task cannot start GPU work");
+    }
+    const brain = registryBundle.skills.brain!;
+    const required = buildRuntime({
+      providerConfig: { provider: "gemini", defaultModel: "gemini-3.8-flash", geminiApiKey: "unused-test-key", enabledHostToolIds: [] },
+      checkpoints: new FsCheckpointStore(root), artifacts: new FsArtifactStore(root, "bsa_test_gpu_capability"),
+      autoApproveGates: true, attachmentStore: "declared-none",
+      bundle: { ...registryBundle, skills: { ...registryBundle.skills,
+        brain: { ...brain, meta: { ...brain.meta, requiredCapabilities: ["code-execution"] } },
+      } },
+    });
+    await assert.rejects(buildTask(required), error =>
+      error instanceof Error && "code" in error && error.code === "REQUIRED_CAPABILITY_UNAVAILABLE" && /code-execution/.test(error.message),
+    );
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("offline run completes end to end with file-backed stores and auto-approved gate", async () => {
   const root = tempRoot();
   try {

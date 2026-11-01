@@ -1006,6 +1006,8 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
     capabilityTools: new StaticCapabilityToolResolver({
       "web-search": [],
       "code-execution": [],
+      // The broker exposes gpu_run only for an enabled, configured GPU profile.
+      "gpu-execution": [],
       "attachment-access": anthropicAttachmentTools,
       "taxonomy-access": anthropicTaxonomyTools,
       "notes-access": [],
