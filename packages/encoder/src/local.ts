@@ -114,6 +114,7 @@ export async function createLocalEncoder(options: LocalEncoderOptions): Promise<
   if (!variant) throw new Error(`${id}: manifest.json has no ${precision} variant`);
   const docGraph = variant.graphs.doc;
   if (!docGraph) throw new Error(`${id}: manifest.json names no doc graph`);
+  if (id === "specter2" && !variant.graphs.query) throw new Error(`${id}: manifest.json names no query graph`);
   const queryGraph = variant.graphs.query ?? docGraph;
   if (options.verifyChecksums !== false) {
     for (const graph of new Set([docGraph, queryGraph])) {
@@ -153,8 +154,13 @@ export async function createLocalEncoder(options: LocalEncoderOptions): Promise<
     graphOptimizationLevel: "all",
   };
   const docSession = await ort.InferenceSession.create(join(dir, docGraph.file), sessionOptions);
-  const querySession =
-    queryGraph === docGraph ? docSession : await ort.InferenceSession.create(join(dir, queryGraph.file), sessionOptions);
+  let querySession: OrtSession;
+  try {
+    querySession = queryGraph === docGraph ? docSession : await ort.InferenceSession.create(join(dir, queryGraph.file), sessionOptions);
+  } catch (error) {
+    await docSession.release?.();
+    throw error;
+  }
 
   const manifest: EncoderManifest = {
     id: file.id,

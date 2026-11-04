@@ -201,7 +201,7 @@ test("probeAll probes every tool through the injected fetch, records logs and la
     const service = new AvailabilityService({
       workspace,
       settings: store,
-      env: {},
+      env: { BRAINSTORM_AGENTIC_ENCODER_DIR: join(workspace, "missing-encoders") },
       fetchImpl: net.fetch,
       now: clock.now,
       sleep: async () => undefined,
@@ -272,8 +272,8 @@ test("probeAll probes every tool through the injected fetch, records logs and la
     assert.deepEqual(lookup.configured, ["searxng", "openalex", "crossref", "semantic-scholar", "arxiv", "brave"]);
     assert.deepEqual(lookup.effective, ["crossref", "semantic-scholar", "arxiv"]);
     const embedding = purpose(report, "embedding");
-    assert.deepEqual(embedding.configured, ["encoder:specter2", "encoder:hash-ngram-v1"]);
-    assert.deepEqual(embedding.effective, ["encoder:hash-ngram-v1"]);
+    assert.deepEqual(embedding.configured, ["encoder:specter2"]);
+    assert.deepEqual(embedding.effective, []);
     assert.deepEqual(purpose(report, "citation-hop").effective, ["semantic-scholar", "opencitations"]);
     assert.equal(report.demoteDegraded, true);
     // Persisted atomically at <workspace>/availability.json, and reloaded by a new service.
@@ -287,6 +287,32 @@ test("probeAll probes every tool through the injected fetch, records logs and la
     assert.equal(tool(reloaded.report(), "tavily").log.length, tavily.log.length);
     service.close();
   } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("managed encoder preparation remains pending without routing embeddings to hash", async () => {
+  const workspace = tempRoot();
+  const store = new SettingsStore(workspace);
+  let state: "missing" | "preparing" | "prepared" | "failed" | "ready" = "missing";
+  const service = new AvailabilityService({ workspace, settings: store, env: {}, encoderReadiness: async () => ({
+    selected: "specter2", selectedAvailable: state === "ready", encoders: [
+      { id: "specter2", available: state === "ready", managed: true, state, detail: `Local model: ${state}` },
+      { id: "hash-ngram-v1", available: true, managed: false, state: "ready", detail: "Explicit lexical option" },
+    ],
+  }) });
+  try {
+    for (const next of ["missing", "preparing", "prepared", "failed", "ready"] as const) {
+      state = next;
+      const report = await service.probe(["encoder:specter2"], { reason: "manual" });
+      assert.equal(tool(report, "encoder:specter2").state, state === "ready" ? "available" : state === "failed" ? "unreachable" : "unchecked");
+      assert.deepEqual(purpose(report, "embedding").configured, ["encoder:specter2"]);
+      assert.ok(!purpose(report, "embedding").effective.includes("encoder:hash-ngram-v1"));
+    }
+    await store.put({ llm: { provider: "offline" }, panelComposition: { params: { encoder: "hash-ngram-v1" } } });
+    assert.deepEqual(service.configuredOrders().embedding, ["encoder:hash-ngram-v1"], "hash remains available as an explicit choice");
+  } finally {
+    service.close();
     rmSync(workspace, { recursive: true, force: true });
   }
 });

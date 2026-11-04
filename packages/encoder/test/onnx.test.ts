@@ -4,6 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -29,13 +30,16 @@ for (const id of ["specter2", "bge-base-en-v1.5"]) {
       assert.ok(Math.abs(Math.sqrt(norm) - 1) < 1e-4);
     }
     assert.equal((await encoder.embed([], "doc")).length, 0);
-    const int8 = await createLocalEncoder({ modelDir: MODEL_DIR!, id, threads: 4, precision: "int8" });
-    try {
-      assert.notEqual(int8.manifest.models["onnx:doc"], encoder.manifest.models["onnx:doc"]);
-      const conformance = await checkConformance(int8);
-      assert.equal(conformance.ok, true, JSON.stringify(conformance.failures));
-    } finally {
-      await int8.release();
+    const manifest = JSON.parse(await readFile(join(MODEL_DIR!, id, "manifest.json"), "utf8"));
+    if (manifest.variants?.int8) {
+      const int8 = await createLocalEncoder({ modelDir: MODEL_DIR!, id, threads: 4, precision: "int8" });
+      try {
+        assert.notEqual(int8.manifest.models["onnx:doc"], encoder.manifest.models["onnx:doc"]);
+        const conformance = await checkConformance(int8);
+        assert.equal(conformance.ok, true, JSON.stringify(conformance.failures));
+      } finally {
+        await int8.release();
+      }
     }
   });
 }

@@ -12,8 +12,9 @@
  * - `panel.compose` — Steps 6-11 over the literature (see panel-compose.ts).
  * - `panel.seat` — the first k seats as the existing panel artifact.
  *
- * Without web access the retrieval returns an empty record noting it;
- * without a neural encoder it falls back to hash-ngram-v1 and records it.
+ * Without web access the retrieval returns an empty record noting it.
+ * The selected encoder must be available: a missing semantic encoder must
+ * never silently change the scientific meaning of paper/topic similarity.
  */
 import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
@@ -65,7 +66,7 @@ export interface LiteratureActivityDeps {
   readonly web?: WebAccess;
   /** The shared taxonomy: hierarchy, revision and topic names. */
   readonly taxonomy?: TaxonomyAccess;
-  /** Neural encoders and node vectors; absent = the hash-ngram-v1 fallback. */
+  /** Neural encoders and node vectors; absent = only explicitly selected hash-ngram-v1 is available. */
   readonly encoders?: EncoderProvider;
   /** The bundle's node texts (catalog/taxonomy-texts.json). */
   readonly nodeTexts?: NodeTextsAccess;
@@ -1254,28 +1255,27 @@ function embeddingText(paper: { title: string; abstract?: string }, manifest: En
   return formatDocument(manifest, paper.title, paper.abstract ?? "");
 }
 
-/** The run's encoder: the named one, else hash-ngram-v1 (recorded). */
+/** The run's selected encoder. Hashing is allowed only when explicitly selected. */
 async function resolveEncoder(
   provider: EncoderProvider,
   id: string,
-  notes: string[],
 ): Promise<TextEncoder> {
   try {
     const named = await provider.encoder(id);
-    if (!("unavailable" in named)) return named;
-    notes.push(`encoder "${id}" unavailable (${named.unavailable}); fell back to ${EMBEDDER_ID}`);
-  } catch (error) {
-    notes.push(`encoder "${id}" failed (${error instanceof Error ? error.message : String(error)}); fell back to ${EMBEDDER_ID}`);
-  }
-  if (id !== EMBEDDER_ID) {
-    try {
-      const fallback = await provider.encoder(EMBEDDER_ID);
-      if (!("unavailable" in fallback)) return fallback;
-    } catch {
-      // the built-in adapter below
+    if ("unavailable" in named) throw new Error(named.unavailable);
+    if (named.manifest.id !== id) {
+      throw new Error(`the host returned encoder "${named.manifest.id}" instead`);
     }
+    return named;
+  } catch (error) {
+    if (id === EMBEDDER_ID) return hashNgramTextEncoder();
+    throw new Error(
+      `Panel encoder "${id}" is unavailable: ${error instanceof Error ? error.message : String(error)}. ` +
+      "Retry after the encoder is prepared, or correct the host's BRAINSTORM_AGENTIC_ENCODER_DIR setting. " +
+      "Committee composition cannot continue with a different encoder.",
+      { cause: error },
+    );
   }
-  return hashNgramTextEncoder();
 }
 
 /** The topic vector space of a run: node texts (bundle) over the taxonomy's topics. */
@@ -1383,8 +1383,14 @@ async function retrieveLiterature(
   const notes: string[] = [];
   const sources = initialSourceStates(params, deps.web, deps.keyedSources);
   const provider = deps.encoders ?? hashNgramEncoderProvider();
-  const encoder = await resolveEncoder(provider, params.encoder, notes);
+  const encoder = await resolveEncoder(provider, params.encoder);
   const { space, revision, textsSha256 } = await topicSpace(deps, provider, encoder, notes);
+  if (encoder.manifest.id !== EMBEDDER_ID && (space === undefined || space.index.ids.length === 0)) {
+    throw new Error(
+      `Panel encoder "${params.encoder}" could not prepare the taxonomy vectors. ` +
+      `${notes.join("; ")}. Retry after the host's encoder and taxonomy are available.`,
+    );
+  }
   const encoderRecord: JsonObject = {
     id: encoder.manifest.id,
     dim: encoder.manifest.dim,
@@ -1792,8 +1798,11 @@ async function labelOnlyShares(
   const encoderId = isRecord(literature.encoder) && typeof literature.encoder.id === "string" && literature.encoder.id !== ""
     ? literature.encoder.id
     : EMBEDDER_ID;
-  const encoder = await resolveEncoder(provider, encoderId, notes);
+  const encoder = await resolveEncoder(provider, encoderId);
   const { space } = await topicSpace(deps, provider, encoder, notes);
+  if (encoder.manifest.id !== EMBEDDER_ID && (space === undefined || space.index.ids.length === 0)) {
+    throw new Error(`Panel encoder "${encoderId}" could not prepare taxonomy vectors for committee composition. ${notes.join("; ")}`);
+  }
   if (space === undefined) return undefined;
   const needs = asList(literature.needs).filter(isRecord);
   const out: Array<Array<{ topic: string; pi: number }>> = [];
@@ -1842,6 +1851,14 @@ export function literatureActivities(
     if (literature === undefined) throw new Error("panel.compose needs the literature record");
     const screen = isRecord(input.screen) ? (input.screen as JsonObject) : undefined;
     const params = panelCompositionParams(input.config);
+    const recordedEncoder = isRecord(literature.encoder) ? literature.encoder.id : undefined;
+    if (recordedEncoder !== params.encoder) {
+      throw new Error(
+        `Saved literature used encoder "${typeof recordedEncoder === "string" ? recordedEncoder : "unknown"}", ` +
+        `but this run requires "${params.encoder}". Rebuild the literature and committee with the selected encoder; ` +
+        "the previous placements cannot be reused safely.",
+      );
+    }
     const loaded = await loadHierarchy();
     const base = composeInputFromLiterature(literature, screen);
     const notes: string[] = loaded.note !== undefined ? [loaded.note] : [];
@@ -1872,4 +1889,3 @@ export function literatureActivities(
     "panel.seat": seat,
   };
 }
-

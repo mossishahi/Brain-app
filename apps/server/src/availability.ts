@@ -466,7 +466,7 @@ export interface AvailabilityServiceOptions {
     readonly env: NodeJS.ProcessEnv;
     readonly openRouterKeyConfigured: boolean;
     readonly selected?: string;
-  }) => EncoderReadiness;
+  }) => EncoderReadiness | Promise<EncoderReadiness>;
   /** The app-launched SearXNG's live state (the launcher's status()). */
   readonly searxngStatus?: () => SearxngStatus;
   /** The readiness checks, live, for llm, code and slurm (their outcome is mirrored). */
@@ -702,7 +702,7 @@ export class AvailabilityService {
       "paper-topic": routes["paper-topic"] ?? preset["paper-topic"],
       "paper-details": routes["paper-details"] ?? preset["paper-details"],
       "citation-hop": routes["citation-hop"] ?? DEFAULT_CITATION_HOP_ROUTE,
-      embedding: routes.embedding ?? [...new Set([selectedId, `encoder:${BUILTIN_ENCODER_ID}`])],
+      embedding: routes.embedding ?? [selectedId],
     };
   }
 
@@ -1046,7 +1046,7 @@ export class AvailabilityService {
   }
 
   private async probeEncoder(encoderId: string, context: ProbeContext): Promise<ProbeOutcome> {
-    const inventory = (this.options.encoderReadiness ?? defaultEncoderReadiness)({
+    const inventory = await (this.options.encoderReadiness ?? defaultEncoderReadiness)({
       env: context.env,
       openRouterKeyConfigured: context.settings.creditRecovery.openRouterKeyConfigured === true,
       selected: selectedEncoder(context.settings),
@@ -1054,7 +1054,9 @@ export class AvailabilityService {
     const entry = inventory.encoders.find((encoder) => encoder.id === encoderId);
     if (entry === undefined) return { state: "unchecked", detail: `no inventory entry for ${encoderId}` };
     context.log.info(`${encoderId}: ${entry.detail}`);
-    return entry.available ? { state: "available", detail: entry.detail } : { state: "unreachable", detail: entry.detail };
+    if (entry.available) return { state: "available", detail: entry.detail };
+    if (entry.state === "prepared" || (entry.managed && (entry.state === "missing" || entry.state === "preparing"))) return { state: "unchecked", detail: entry.detail };
+    return { state: "unreachable", detail: entry.detail };
   }
 
   /**

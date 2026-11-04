@@ -38,8 +38,24 @@ export interface EncoderReadinessView {
   readonly modelDir?: string;
   readonly selected: string;
   readonly selectedAvailable: boolean;
-  readonly fallback: string;
-  readonly encoders: readonly { readonly id: string; readonly available: boolean; readonly detail: string }[];
+  readonly encoders: readonly {
+    readonly id: string;
+    readonly available: boolean;
+    readonly detail: string;
+    readonly state?: "ready" | "prepared" | "missing" | "preparing" | "failed" | "unavailable";
+    readonly managed?: boolean;
+  }[];
+}
+
+/** An unavailable scientific encoder is never presented as a usable hash substitute. */
+export function encoderPreparationMessage(report: EncoderReadinessView): string | undefined {
+  if (report.selectedAvailable) return undefined;
+  const entry = report.encoders.find(encoder => encoder.id === report.selected);
+  if (entry?.state === "prepared") return `${report.selected} model files are present. Runtime checks will finish before research first uses this encoder.`;
+  if (entry?.managed && entry.state === "missing") return `${report.selected} will be downloaded and checked automatically when research first needs it. Opening settings does not start the download.`;
+  if (entry?.managed && entry.state === "preparing") return `${report.selected} is being prepared on this host. Research will use it after preparation succeeds.`;
+  if (entry?.managed && entry.state === "failed") return `${report.selected} preparation failed. Research cannot use this encoder until preparation succeeds; it will not silently switch to a different encoder.`;
+  return `The selected encoder (${report.selected}) is unavailable. Research that needs it cannot continue until it is available, or you explicitly choose another encoder.`;
 }
 
 /** The value a run would use for a param. */

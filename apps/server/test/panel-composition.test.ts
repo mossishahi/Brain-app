@@ -159,32 +159,58 @@ test("the settings store keeps panel composition overrides and the CORE key", as
   }
 });
 
-test("encoder readiness reports the local exports, the built-in fallback and OpenRouter", () => {
+test("encoder readiness reports local exports and explicit hash/OpenRouter choices without an implicit fallback", async () => {
   const dir = mkdtempSync(join(tmpdir(), "brain-encoders-"));
   try {
     mkdirSync(join(dir, "specter2"));
     for (const file of ["doc.onnx", "query.onnx", "tokenizer.json", "tokenizer_config.json", "manifest.json"]) {
       writeFileSync(join(dir, "specter2", file), "x");
     }
+    writeFileSync(join(dir, "specter2", "manifest.json"), JSON.stringify({ id: "specter2", graphs: { doc: { file: "doc.onnx" }, query: { file: "query.onnx" } } }));
     mkdirSync(join(dir, "bge-base-en-v1.5"));
     writeFileSync(join(dir, "bge-base-en-v1.5", "doc.onnx"), "x");
-    const report = encoderReadiness({ env: { BRAINSTORM_AGENTIC_ENCODER_DIR: dir }, openRouterKeyConfigured: false });
+    const report = await encoderReadiness({ env: { BRAINSTORM_AGENTIC_ENCODER_DIR: dir }, openRouterKeyConfigured: false });
     const byId = new Map(report.encoders.map((encoder) => [encoder.id, encoder]));
     assert.equal(report.selected, "specter2");
-    assert.equal(report.selectedAvailable, true);
-    assert.equal(byId.get("specter2")!.available, true);
+    assert.equal(report.selectedAvailable, false);
+    assert.equal(byId.get("specter2")!.available, false);
+    assert.equal(byId.get("specter2")!.state, "prepared");
     assert.equal(byId.get("bge-base-en-v1.5")!.available, false);
-    assert.match(byId.get("bge-base-en-v1.5")!.detail, /missing tokenizer\.json, tokenizer_config\.json, manifest\.json/);
+    assert.match(byId.get("bge-base-en-v1.5")!.detail, /missing a complete encoder export/);
+    assert.equal(byId.get("bge-base-en-v1.5")!.state, "unavailable");
+    assert.equal(byId.get("specter2")!.managed, false);
     assert.equal(byId.get("hash-ngram-v1")!.available, true);
     assert.equal(byId.get("openrouter:<model>")!.available, false);
 
-    const unset = encoderReadiness({ env: {}, openRouterKeyConfigured: true, selected: "openrouter:m" });
-    assert.equal(unset.modelDir, undefined);
+    const unset = await encoderReadiness({ env: { HOME: dir }, openRouterKeyConfigured: true, selected: "openrouter:m" });
     assert.equal(unset.selectedAvailable, true);
-    assert.match(unset.encoders[0]!.detail, /BRAINSTORM_AGENTIC_ENCODER_DIR is not set/);
-    assert.equal(unset.fallback, "hash-ngram-v1");
+    assert.equal(Object.hasOwn(unset, "fallback"), false);
+    assert.equal(unset.encoders[0]!.managed, true);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("encoder readiness reports managed preparation states without provisioning from a read", async () => {
+  for (const state of ["missing", "preparing", "prepared", "failed", "ready"] as const) {
+    const calls: string[] = [];
+    const env = { HOME: "/test-read-only-home" };
+    const inventory = await encoderReadiness({ env, openRouterKeyConfigured: false, inspect: async (id, options) => {
+      calls.push(id);
+      assert.equal(options?.env, env);
+      return id === "specter2" ? { state, managed: true, modelDir: "/test-cache", detail: state === "failed" ? "Download interrupted" : undefined }
+        : { state: "unavailable", managed: true, detail: "No managed export is published" };
+    } });
+    assert.deepEqual(calls, ["specter2", "bge-base-en-v1.5"]);
+    assert.equal(inventory.selectedAvailable, state === "ready");
+    const specter = inventory.encoders.find(entry => entry.id === "specter2")!;
+    assert.equal(specter.state, state);
+    assert.equal(specter.managed, true);
+    assert.equal(Object.hasOwn(inventory, "fallback"), false);
+    if (state === "missing") assert.match(specter.detail, /automatically on first use/);
+    if (state === "preparing") assert.match(specter.detail, /Preparing/);
+    if (state === "prepared") assert.match(specter.detail, /runtime checks run before first use/);
+    if (state === "failed") assert.match(specter.detail, /Download interrupted/);
   }
 });
 

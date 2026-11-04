@@ -9,6 +9,10 @@
     ".": {
       "types": "./dist/src/index.d.ts",
       "import": "./dist/src/index.js"
+    },
+    "./provision": {
+      "types": "./dist/src/model-artifacts.d.ts",
+      "import": "./dist/src/model-artifacts.js"
     }
   },
   "files": [

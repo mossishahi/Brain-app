@@ -12,6 +12,7 @@ import test from "node:test";
 
 import { artifactSchemas, embeddingInputSchema } from "@brainstorm-agentic/content";
 import type {
+  EncoderProvider,
   JsonObject,
   JsonValue,
   NodeVectorIndex,
@@ -614,7 +615,7 @@ test("literatureActivities end to end: retrieval record, compose, seat — schem
     keyedSources: new Set(),
   });
   const context = { runId: "r1", nodePath: "retrieve-literature", signal: new AbortController().signal };
-  const config = { ...PANEL_COMPOSITION_DEFAULTS, maxCalls: 60, encoder: "specter2" } as unknown as JsonValue;
+  const config = { ...PANEL_COMPOSITION_DEFAULTS, maxCalls: 60, encoder: "hash-ngram-v1" } as unknown as JsonValue;
   const literature = (await activities["literature.retrieve"]!({ classification: { embeddingInput: EI } as unknown as JsonValue, input: {}, config }, context)) as JsonObject;
   const parsed = artifactSchemas.literature.safeParse(literature);
   assert.ok(parsed.success, JSON.stringify(parsed.success ? "" : parsed.error.issues.slice(0, 3)));
@@ -625,10 +626,10 @@ test("literatureActivities end to end: retrieval record, compose, seat — schem
   assert.equal(calls.filter((call) => call.sources?.[0] === "crossref").length, 1, "a blocked source is probed once");
   assert.equal(calls.filter((call) => call.sources?.[0] === "openalex").length, 0, "OpenAlex is never called keyless");
   const encoder = literature.encoder as unknown as { id: string; taxonomyRevision: number };
-  assert.equal(encoder.id, "hash-ngram-v1", "specter2 is not installed here: the record names the fallback");
+  assert.equal(encoder.id, "hash-ngram-v1", "the explicitly selected test encoder is recorded");
   assert.equal(encoder.taxonomyRevision, 3);
   const flags = literature.flags as unknown as { notes: string[]; budgetExhausted: boolean };
-  assert.ok(flags.notes.some((note) => note.includes("fell back to hash-ngram-v1")));
+  assert.ok(!flags.notes.some((note) => note.includes("fell back")));
   assert.ok((literature.calls as unknown as unknown[]).length <= 60, "the call budget holds");
   const papers = literature.papers as unknown as Array<{ decision: string; placement?: unknown[]; needSims?: number[]; rounds: number[] }>;
   const eligible = papers.filter((entry) => entry.decision === "eligible");
@@ -651,14 +652,76 @@ test("literatureActivities end to end: retrieval record, compose, seat — schem
 test("literature.retrieve without web access returns an empty record noting it; compose falls back to label-only shares", async () => {
   const activities = literatureActivities({ taxonomy: new FakeTaxonomy(), encoders: hashNgramEncoderProvider() });
   const context = { runId: "r1", nodePath: "n", signal: new AbortController().signal };
-  const literature = (await activities["literature.retrieve"]!({ classification: { embeddingInput: EI } as unknown as JsonValue, input: {}, config: {} }, context)) as JsonObject;
+  const config = { encoder: "hash-ngram-v1" };
+  const literature = (await activities["literature.retrieve"]!({ classification: { embeddingInput: EI } as unknown as JsonValue, input: {}, config }, context)) as JsonObject;
   assert.ok(artifactSchemas.literature.safeParse(literature).success);
   assert.equal(((literature.flags as JsonObject).notes as string[])[0], "no web access");
   assert.deepEqual(literature.papers, []);
-  const evidence = (await activities["panel.compose"]!({ literature, screen: { decisions: [] }, config: {} }, context)) as JsonObject;
+  const evidence = (await activities["panel.compose"]!({ literature, screen: { decisions: [] }, config }, context)) as JsonObject;
   assert.ok(artifactSchemas.panelEvidence.safeParse(evidence).success);
   const notes = ((evidence.flags as JsonObject).notes ?? []) as string[];
   assert.ok(notes.some((note) => note.startsWith("no literature evidence")));
+});
+
+test("unavailable or failed semantic encoders stop before any literature search", async () => {
+  const context = { runId: "encoder-failure", nodePath: "retrieve-literature", signal: new AbortController().signal };
+  for (const failure of ["missing", "provision-failed", "wrong-encoder"] as const) {
+    const calls: PaperSearchQuery[] = [];
+    const requested: string[] = [];
+    const hash = hashNgramEncoderProvider();
+    const encoders: EncoderProvider = {
+      async encoder(id) {
+        requested.push(id);
+        if (failure === "missing") return { unavailable: "no encoder model directory" };
+        if (failure === "provision-failed") throw new Error("model download checksum mismatch");
+        return hash.encoder("hash-ngram-v1");
+      },
+      async nodeIndex() { throw new Error("must not build vectors after an encoder failure"); },
+    };
+    const activities = literatureActivities({ web: fakeWeb(calls), taxonomy: new FakeTaxonomy(), encoders });
+    await assert.rejects(
+      Promise.resolve(activities["literature.retrieve"]!({ classification: { embeddingInput: EI } as unknown as JsonValue, config: { encoder: "specter2" } }, context)),
+      /Panel encoder "specter2" is unavailable:.*Committee composition cannot continue with a different encoder/,
+      failure,
+    );
+    assert.deepEqual(requested, ["specter2"], "the failure must not trigger a hash encoder request");
+    assert.equal(calls.length, 0, "do not retrieve papers using a substituted embedding space");
+  }
+});
+
+test("semantic taxonomy-vector failure cannot become empty evidence or a label-only committee", async () => {
+  const calls: PaperSearchQuery[] = [];
+  const hash = hashNgramEncoderProvider();
+  const original = await hash.encoder("hash-ngram-v1");
+  assert.ok(!("unavailable" in original));
+  const activities = literatureActivities({
+    web: fakeWeb(calls), taxonomy: new FakeTaxonomy(),
+    encoders: {
+      async encoder() { return { ...original, manifest: { ...original.manifest, id: "specter2" } }; },
+      async nodeIndex() { throw new Error("corrupt model graph"); },
+    },
+  });
+  await assert.rejects(
+    Promise.resolve(activities["literature.retrieve"]!({ classification: { embeddingInput: EI } as unknown as JsonValue, config: { encoder: "specter2" } }, { runId: "vectors-failure", nodePath: "retrieve", signal: new AbortController().signal })),
+    /could not prepare the taxonomy vectors.*corrupt model graph/,
+  );
+  assert.equal(calls.length, 0);
+});
+
+test("compose rejects saved hash placements when a semantic encoder was requested", async () => {
+  const activities = literatureActivities({ taxonomy: new FakeTaxonomy(), encoders: hashNgramEncoderProvider() });
+  const context = { runId: "saved-fallback", nodePath: "compose", signal: new AbortController().signal };
+  const literature = (await activities["literature.retrieve"]!({ classification: { embeddingInput: EI } as unknown as JsonValue, config: { encoder: "hash-ngram-v1" } }, context)) as JsonObject;
+  for (const papers of [[], [{ pid: "P1", cid: "paper", decision: "eligible", rrf: 1, sources: ["arxiv"], hits: [], placement: [{ topic: "T1", sim: 0.61, pi: 1 }], needSims: [0.6] }]]) {
+    await assert.rejects(
+      Promise.resolve(activities["panel.compose"]!({ literature: { ...literature, papers }, config: { encoder: "specter2" } }, context)),
+      /Saved literature used encoder "hash-ngram-v1".*requires "specter2".*Rebuild the literature and committee/,
+    );
+  }
+  await assert.rejects(
+    Promise.resolve(activities["panel.compose"]!({ literature: { ...literature, encoder: {} }, config: { encoder: "specter2" } }, context)),
+    /Saved literature used encoder "unknown"/,
+  );
 });
 
 test("a screened-out paper leaves the evidence and is counted", () => {

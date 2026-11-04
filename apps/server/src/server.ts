@@ -1385,15 +1385,15 @@ export async function startBrainServer(
         );
         return;
       }
-      // Which text encoders this host can run (informational; a run falls
-      // back to hash-ngram-v1 and records it).
+      // Read-only inventory. Managed models are downloaded by first use in the
+      // worker; this settings request never starts a download or substitutes hash.
       if (req.method === "GET" && path === "/api/readiness/encoders") {
         const settings = manager.settings.get();
         const selected = panelCompositionOf(settings)?.params.encoder;
         sendJson(
           res,
           200,
-          encoderReadiness({
+          await encoderReadiness({
             env: options.env ?? process.env,
             openRouterKeyConfigured: settings.creditRecovery.openRouterKeyConfigured === true,
             ...(typeof selected === "string" ? { selected } : {}),
