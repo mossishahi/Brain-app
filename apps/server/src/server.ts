@@ -26,6 +26,7 @@ import {
   type ServerSettings,
   type CursorModelCatalogEntry,
   type ModelOptionsResponse,
+  type ModelCatalogSnapshot,
   type AvailabilityServerEvent,
   type ReadinessCheckId,
   type ServerEvent,
@@ -94,6 +95,7 @@ import {
   ServerFileError,
 } from "./server-files.js";
 import {
+  SettingsVerificationTimeoutError,
   validateAnthropicConnection,
   validateClaudeAgentConnection,
   validateCursorAgentConnection,
@@ -733,7 +735,7 @@ export async function startBrainServer(
     await prepareProviderRuntime(context);
   });
   let manager!: JobManager;
-  let modelRefresh: Promise<unknown> | undefined;
+  const modelRefreshes = new Map<string, Promise<ModelCatalogSnapshot>>();
   const discoveryContext = (settings: ServerSettings): DiscoveryContext => ({
     provider: settings.llm.provider,
     secret: settings.llm.provider === "claude-agent" ? manager.settings.getClaudeSetupToken()
@@ -744,10 +746,14 @@ export async function startBrainServer(
   });
   const refreshModelOptions = async (settings: ServerSettings) => {
     const { url, bundle, version } = settings.contentRegistry;
-    const work = Promise.all([modelDiscovery.refresh(discoveryContext(settings)), routeCatalog.refresh(url, bundle, version)]);
-    modelRefresh = work;
-    try { return (await work)[0]; }
-    finally { if (modelRefresh === work) modelRefresh = undefined; }
+    const context = discoveryContext(settings);
+    const key = modelDiscovery.key(context);
+    const existing = modelRefreshes.get(key);
+    if (existing) return existing;
+    const work = Promise.all([modelDiscovery.refresh(context), routeCatalog.refresh(url, bundle, version)]).then(([catalog]) => catalog);
+    modelRefreshes.set(key, work);
+    try { return await work; }
+    finally { if (modelRefreshes.get(key) === work) modelRefreshes.delete(key); }
   };
   let readiness!: ReadinessService;
   const broadcastJobs = (): void => {
@@ -831,8 +837,8 @@ export async function startBrainServer(
       : {}),
     onChange: broadcast,
   });
-  // Begin discovery independently of HTTP readiness. A first picker read awaits
-  // this bounded work; later reads use the persisted snapshot without refetching.
+  // Begin discovery independently of HTTP readiness. Picker reads always use
+  // the saved snapshot, including while a slow provider refresh is in progress.
   void refreshModelOptions(manager.settings.get()).catch(() => undefined);
   readiness = new ReadinessService({
     workspace: options.workspace,
@@ -1191,6 +1197,7 @@ export async function startBrainServer(
         return;
       }
       if (req.method === "PUT" && path === "/api/settings") {
+        const signal = requestAbortSignal(res);
         try {
           const body = await readJson(req);
           const before = manager.settings.get();
@@ -1198,9 +1205,11 @@ export async function startBrainServer(
           if (body && typeof body === "object" && "gpu" in body && gpuSetup.report().phase === "probing") {
             throw new HttpError(409, "Cancel or finish the GPU probe before changing its profile");
           }
-          const settings = await manager.settings.put(body);
+          const settings = await manager.settings.put(body, signal);
           if (modelDiscovery.key(discoveryContext(settings)) !== beforeModelConnection) {
-            await refreshModelOptions(settings);
+            // The verified change is already saved. Metadata downloads and
+            // registry health must not hold its confirmation response hostage.
+            void refreshModelOptions(settings).catch(() => undefined);
           }
           gpuSetup.settingsChanged();
           broadcast();
@@ -1237,8 +1246,9 @@ export async function startBrainServer(
           }
           sendJson(res, 200, settings);
         } catch (error) {
+          if (signal.aborted) return;
           throw new HttpError(
-            error instanceof HttpError ? error.status : 400,
+            error instanceof SettingsVerificationTimeoutError ? 504 : error instanceof HttpError ? error.status : 400,
             error instanceof Error ? error.message : String(error),
           );
         }
@@ -1324,7 +1334,6 @@ export async function startBrainServer(
         return;
       }
       if (req.method === "GET" && path === "/api/model-options") {
-        await modelRefresh;
         const settings = manager.settings.get();
         const stages = routeCatalog.cachedStages(settings.contentRegistry.url, settings.contentRegistry.bundle, settings.contentRegistry.version);
         const cachedCatalog = modelDiscovery.read(discoveryContext(settings));
@@ -1338,6 +1347,7 @@ export async function startBrainServer(
           settings.contentRegistry.version,
         );
         const response: ModelOptionsResponse = {
+          refreshing: modelRefreshes.has(modelDiscovery.key(discoveryContext(settings))),
           provider: settings.llm.provider,
           taskTypes,
           models: catalog.models,
@@ -1402,13 +1412,16 @@ export async function startBrainServer(
         return;
       }
       if (req.method === "PUT" && path === "/api/settings/models-by-route") {
+        const signal = requestAbortSignal(res);
         try {
           const settings = await manager.settings.putModelsByRoute(
             await readJson(req),
+            signal,
           );
           broadcast();
           sendJson(res, 200, settings);
         } catch (error) {
+          if (signal.aborted) return;
           throw new HttpError(
             400,
             error instanceof Error ? error.message : String(error),
@@ -1417,14 +1430,16 @@ export async function startBrainServer(
         return;
       }
       if (req.method === "PUT" && path === "/api/settings/stage-models") {
+        const signal = requestAbortSignal(res);
         try {
           const settings = await manager.settings.putStageModels(await readJson(req), (current, stages) => {
             const { url, bundle, version } = current.contentRegistry;
             validateStageCapabilities(current, stages, modelDiscovery.read(discoveryContext(current)), routeCatalog.cachedStages(url, bundle, version));
-          });
+          }, signal);
           broadcast();
           sendJson(res, 200, settings);
         } catch (error) {
+          if (signal.aborted) return;
           throw new HttpError(400, error instanceof Error ? error.message : String(error));
         }
         return;

@@ -400,7 +400,7 @@ function ToolsAndProvidersFull({
   const [saving, setSaving] = useState(false);
   const { report } = state;
   if (report === null) {
-    return state.error ? <p className="error-text">{state.error}</p> : <p className="dim small">loading the tool availability table…</p>;
+    return state.error ? <div><p className="error-text" role="alert">{state.error}</p><button type="button" className="btn btn-small" onClick={state.reload}>Retry loading tools</button></div> : <p className="dim small" role="status">Loading the tool availability table…</p>;
   }
   const summary = summarizeAvailability(report.tools);
   return (

@@ -72,7 +72,7 @@ export function WorkspaceControls({ open, onOpenChange, onOpenSettings }: { open
     const s = state.data;
     const action = (id: string, label: string, onSelect: () => void, extra: Partial<QuickControlItem> = {}): QuickControlItem => ({ kind: 'action', id, label, onSelect, ...extra } as QuickControlItem);
     const editorAction = (id: QuickEditorId, label: string, value?: string): QuickControlItem => action(`edit-${id}`, label, () => edit(id), { value });
-    const setup = (category: SettingsCategory, label: string): QuickControlItem => action(`configure-${category}`, label, () => configure(category));
+    const setup = (category: SettingsCategory, label: string): QuickControlItem => action(`configure-${category}-${label}`, label, () => configure(category));
     const toggle = (id: QuickSetting, label: string, checked: boolean, description?: string, scope = '', disabled = false, reason?: string): QuickControlItem => ({
       kind: 'toggle', id, label, checked, description, scope, disabled, reason, ...state.status[id], onChange: value => { void changeQuickSetting(id, value); },
     });

@@ -81,6 +81,47 @@ export function isAbortError(error: unknown): boolean {
 }
 
 async function request<T>(path: string, init?: RequestInit, measure?: (value: T, bytes: number) => void): Promise<T> {
+  const timeoutMs = settingsRequestTimeout(path, init);
+  if (timeoutMs === undefined) return requestBody(path, init, measure);
+  const controller = new AbortController();
+  const abort = () => controller.abort(init?.signal?.reason);
+  if (init?.signal?.aborted) abort();
+  else init?.signal?.addEventListener('abort', abort, { once: true });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    // Bound both headers and body decoding. The explicit race also recovers
+    // when a transport or stalled response body does not honor cancellation.
+    return await Promise.race([
+      requestBody<T>(path, { ...init, signal: controller.signal }, measure),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          reject(new ApiError(init?.method && init.method !== 'GET'
+            ? 'The save request timed out. It may have reached the server. Check the saved settings before retrying.'
+            : 'The settings request timed out. Check your connection and retry.', 408));
+          controller.abort();
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+    init?.signal?.removeEventListener('abort', abort);
+  }
+}
+
+function settingsRequestTimeout(path: string, init?: RequestInit): number | undefined {
+  const endpoint = path.split('?')[0];
+  if (!/^\/(?:settings(?:\/.*)?|model-options|health|capabilities|panel-composition|readiness\/encoders|availability(?:\/.*)?|update-check|gpu(?:\/.*)?)$/.test(endpoint)) return undefined;
+  if (!init?.method || init.method === 'GET') return 15_000;
+  if (endpoint === '/settings' && typeof init.body === 'string') {
+    const patch = JSON.parse(init.body) as ServerSettingsUpdate;
+    // Credential verification (including optional runtime preparation) has
+    // its own 75-second server deadline; ordinary preferences stay quicker.
+    if (patch.llm?.provider !== undefined || patch.llm?.apiKey || patch.llm?.setupToken || patch.llm?.cursorApiKey || patch.llm?.geminiApiKey) return 90_000;
+  }
+  return endpoint.startsWith('/gpu/') ? 90_000 : 30_000;
+}
+
+async function requestBody<T>(path: string, init?: RequestInit, measure?: (value: T, bytes: number) => void): Promise<T> {
   let res: Response;
   try {
     res = await fetch(`${API_BASE}${path}`, init);
@@ -128,6 +169,7 @@ export const approveGpuProbe = (approval: GpuProbeApproval): Promise<GpuSetupRep
 export const cancelGpuProbe = (): Promise<GpuSetupReport> => request("/gpu/cancel", jsonInit("POST", {}));
 
 const settingsResource = new SerializedResource<ServerSettings>();
+export const cachedSettings = settingsResource.getSnapshot;
 function publishSettings(settings: ServerSettings): void {
   window.dispatchEvent(new CustomEvent('brain-settings-updated', { detail: settings }));
   void refreshModelOptions().catch(() => undefined);
@@ -140,28 +182,54 @@ export const getSettings = (): Promise<ServerSettings> => settingsResource.read(
   return settings;
 });
 
+function mutateSettings(write: () => Promise<ServerSettings>): Promise<ServerSettings> {
+  return settingsResource.mutate(write, publishSettings).catch((error: unknown) => {
+    // A dropped response does not prove that the server rejected the write.
+    // Reconcile once in the background; never replay a credential or save.
+    if (error instanceof ApiError && (error.status === 0 || error.status === 408)) {
+      void getSettings().then(publishSettings).catch(() => undefined);
+    }
+    throw error;
+  });
+}
+
 export const putSettings = (settings: ServerSettingsUpdate): Promise<ServerSettings> =>
-  settingsResource.mutate(() => request("/settings", jsonInit("PUT", settings)), publishSettings);
+  mutateSettings(() => request("/settings", jsonInit("PUT", settings)));
 
 /** Build dependent field updates after earlier edits finish, against the current server state. */
 export const updateSettings = (build: (current: ServerSettings) => ServerSettingsUpdate): Promise<ServerSettings> =>
-  settingsResource.mutate(async () => {
+  mutateSettings(async () => {
     const current = await request<ServerSettings>("/settings");
     return request("/settings", jsonInit("PUT", build(current)));
-  }, publishSettings);
+  });
 
 const modelOptionsResource = new CachedResource<ModelOptionsResponse>(() => request("/model-options"));
 export const getModelOptions = modelOptionsResource.read;
-export const refreshModelOptions = modelOptionsResource.refresh;
+let modelPollTimer: ReturnType<typeof setTimeout> | undefined;
+let modelPollUntil: number | undefined;
+modelOptionsResource.subscribe(() => {
+  const snapshot = modelOptionsResource.getSnapshot();
+  clearTimeout(modelPollTimer);
+  if (snapshot.loading) return;
+  if (snapshot.error || !snapshot.value?.refreshing) { modelPollUntil = undefined; return; }
+  modelPollUntil ??= Date.now() + 90_000;
+  if (Date.now() < modelPollUntil) {
+    modelPollTimer = setTimeout(() => { void modelOptionsResource.refresh().catch(() => undefined); }, 1_000);
+  }
+});
+export const refreshModelOptions = (): Promise<ModelOptionsResponse> => {
+  modelPollUntil = undefined;
+  return modelOptionsResource.refresh();
+};
 export const useModelOptions = () => useSyncExternalStore(modelOptionsResource.subscribe, modelOptionsResource.getSnapshot);
 
 export const putStageModels = (update: StageModelsUpdate): Promise<ServerSettings> =>
-  settingsResource.mutate(() => request("/settings/stage-models", jsonInit("PUT", update)), publishSettings);
+  mutateSettings(() => request("/settings/stage-models", jsonInit("PUT", update)));
 
 export const putModelsByRoute = (
   update: ModelsByRouteUpdate,
 ): Promise<ServerSettings> =>
-  settingsResource.mutate(() => request("/settings/models-by-route", jsonInit("PUT", update)), publishSettings);
+  mutateSettings(() => request("/settings/models-by-route", jsonInit("PUT", update)));
 
 /*
  * Module-level caches so navigating between the landing page and a dashboard

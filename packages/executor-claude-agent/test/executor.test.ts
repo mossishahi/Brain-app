@@ -1584,6 +1584,34 @@ test("setup-token validation performs a real-shaped one-turn query", async () =>
   );
 });
 
+test("setup-token validation cancellation during SDK preparation never starts a query", async () => {
+  const controller = new AbortController();
+  const captured: ClaudeAgentQueryInput[] = [];
+  const check = validateClaudeSetupToken({ token: "synthetic-token", signal: controller.signal, queryFn: successQuery(captured, "OK") });
+  controller.abort("settings request cancelled");
+  await assert.rejects(check, { name: "AbortError", message: "settings request cancelled" });
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(captured.length, 0);
+});
+
+test("setup-token validation forwards cancellation into a running SDK query", async () => {
+  const controller = new AbortController();
+  let captured: ClaudeAgentQueryInput | undefined;
+  const check = validateClaudeSetupToken({
+    token: "synthetic-token", signal: controller.signal, timeoutMs: 5_000,
+    queryFn: input => {
+      captured = input;
+      queueMicrotask(() => controller.abort("settings request cancelled"));
+      return {
+        [Symbol.asyncIterator]: () => ({ next: () => new Promise<IteratorResult<unknown>>(() => {}) }),
+        interrupt: async () => undefined,
+      };
+    },
+  });
+  await assert.rejects(check, { name: "AbortError", message: "settings request cancelled" });
+  assert.equal((captured!.options.abortController as AbortController).signal.aborted, true);
+});
+
 test("setup tokens copied across terminal lines are normalized for validation and execution", async () => {
   const wrapped = " \t sk-ant-oat01-synthetic\r\n\u00a0-token\n-value \u00a0";
   const normalized = "sk-ant-oat01-synthetic-token-value";

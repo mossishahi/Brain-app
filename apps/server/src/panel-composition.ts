@@ -10,7 +10,7 @@
  * (`panelComposition`); old clients never see or send them.
  */
 import type { ServerSettings } from "@brainstorm-agentic/protocol";
-import { ContentRegistryClient } from "@brainstorm-agentic/registry-client";
+import { readSettingsRegistry, type SettingsRegistryReadOptions } from "./settings-registry-read.js";
 
 export type PanelParamType = "int" | "number" | "bool" | "string";
 export type PanelParamValue = number | boolean | string;
@@ -249,6 +249,9 @@ const CACHE_TTL_MS = 5 * 60_000;
  */
 export class WorkflowParamsCatalog {
   readonly #cache = new Map<string, { readonly at: number; readonly value: DeclaredWorkflowParams }>();
+  readonly #pending = new Map<string, Promise<DeclaredWorkflowParams | undefined>>();
+
+  constructor(private readonly readOptions: SettingsRegistryReadOptions = {}) {}
 
   async declared(
     registryUrl: string,
@@ -258,9 +261,17 @@ export class WorkflowParamsCatalog {
     const key = `${registryUrl}\u0000${bundle}\u0000${version ?? ""}`;
     const hit = this.#cache.get(key);
     if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.value;
+    const pending = this.#pending.get(key);
+    if (pending) return pending;
+    const work = this.refresh(registryUrl, bundle, version, key, hit?.value);
+    this.#pending.set(key, work);
+    try { return await work; }
+    finally { if (this.#pending.get(key) === work) this.#pending.delete(key); }
+  }
+
+  private async refresh(registryUrl: string, bundle: string, version: string | undefined, key: string, previous?: DeclaredWorkflowParams): Promise<DeclaredWorkflowParams | undefined> {
     try {
-      const client = new ContentRegistryClient(registryUrl);
-      try {
+      const value = await readSettingsRegistry(registryUrl, async client => {
         const pin = await client.resolvePin(bundle, version);
         const root = `bundles/${bundle}/${pin.version}`;
         const manifest = JSON.parse(await client.readText(`${root}/bundle.json`)) as {
@@ -278,13 +289,12 @@ export class WorkflowParamsCatalog {
           version: pin.version,
           params: declaredParams(workflow.params),
         };
-        this.#cache.set(key, { at: Date.now(), value });
         return value;
-      } finally {
-        await client.close().catch(() => undefined);
-      }
+      }, this.readOptions);
+      this.#cache.set(key, { at: Date.now(), value });
+      return value;
     } catch {
-      return hit?.value;
+      return previous;
     }
   }
 }

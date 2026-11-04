@@ -334,12 +334,12 @@ async function waitFor(
 }
 
 async function waitUntil(
-  predicate: () => boolean,
-  timeoutMs: number,
+  predicate: () => boolean | Promise<boolean>,
+  timeoutMs = 2000,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (predicate()) return;
+    if (await predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error("timed out waiting for condition");
@@ -592,7 +592,8 @@ test("Anthropic settings are connection-tested, redacted, and transactional", as
     workspace,
     port: 0,
     validateAnthropic: async (input) => {
-      attempts.push(input);
+      const { signal: _signal, ...connection } = input;
+      attempts.push(connection);
       if (input.apiKey === "bad-key") {
         throw new Error("authentication failed");
       }
@@ -680,7 +681,8 @@ test("Claude Agent SDK setup tokens are verified, redacted, and transactional", 
     workspace,
     port: 0,
     validateClaudeAgent: async (input) => {
-      attempts.push(input);
+      const { signal: _signal, ...connection } = input;
+      attempts.push(connection);
       if (input.token === "bad-setup-token") {
         throw new Error("setup token rejected");
       }
@@ -1819,7 +1821,7 @@ test("model options serve the account's LIVE Cursor catalog when cursor-agent is
   }
 });
 
-test("stage model options await startup discovery, stay cached on reads, and refresh before each new job snapshot", async () => {
+test("stage model options serve cached data during startup discovery and refresh before each new job snapshot", async () => {
   const workspace = tempRoot();
   const worker = join(workspace, "empty-worker.mjs");
   writeFileSync(worker, "process.exit(0);\n");
@@ -1842,12 +1844,14 @@ test("stage model options await startup discovery, stay cached on reads, and ref
     readinessProbes: { llm: async () => ({}), code: async () => ({}), internet: async () => ({}), slurm: async () => ({}), capabilities: async () => ({}) },
   });
   try {
-    let optionsAnswered = false;
-    const opening = requestJson<ModelOptionsResponse>(server, "/api/model-options").then((answer) => { optionsAnswered = true; return answer; });
+    const opening = await requestJson<ModelOptionsResponse>(server, "/api/model-options", { signal: AbortSignal.timeout(1000) });
     assert.equal((await requestJson(server, "/api/health")).status, 200, "metadata discovery does not block the service");
-    assert.equal(optionsAnswered, false, "initial picker read waits for already-started discovery");
+    assert.equal(opening.status, 200, "picker reads do not wait for startup discovery");
+    assert.equal(opening.value.refreshing, true);
+    assert.equal(opening.value.catalog!.stale, true);
     release();
-    const initial = await opening;
+    await waitUntil(async () => (await requestJson<ModelOptionsResponse>(server, "/api/model-options")).value.refreshing === false);
+    const initial = await requestJson<ModelOptionsResponse>(server, "/api/model-options");
     assert.equal(initial.value.models[0]!.label, "Discovery 1");
     assert.ok(initial.value.stages!.some((stage) => stage.id === "classify-input"));
     assert.ok(initial.value.stages!.some((stage) => stage.id === "fact-verification"));
@@ -1878,6 +1882,93 @@ test("stage model options await startup discovery, stay cached on reads, and ref
     assert.match(rejected.value.message, /Classify input.*low effort/);
     assert.equal(discoveries, 4);
     assert.equal(readdirSync(join(workspace, "workspace", "jobs")).length, countBefore, "unsupported explicit choices fail before job creation");
+  } finally { release(); await server.close(); await removeWorkspace(workspace); }
+});
+
+test("provider saves return before metadata discovery and older refreshes cannot delay the current provider", async () => {
+  const workspace = tempRoot();
+  await new SettingsStore(workspace).put({ llm: { provider: "offline" } });
+  const held = new Map<string, () => void>();
+  const discoveries: string[] = [];
+  const server = await startTestBrainServer({
+    workspace, port: 0,
+    validateAnthropic: async () => undefined,
+    validateGemini: async () => undefined,
+    discoverModels: async ({ provider }) => {
+      discoveries.push(provider);
+      if (provider !== "offline") await new Promise<void>(resolve => { held.set(provider, resolve); });
+      return { models: provider === "offline" ? [] : [{ id: `${provider}-test`, label: `${provider} catalog` }] };
+    },
+    readinessProbes: { llm: async () => ({}), code: async () => ({}), internet: async () => ({}), slurm: async () => ({}), capabilities: async () => ({}) },
+  });
+  try {
+    const first = await requestJson<ServerSettings>(server, "/api/settings", {
+      method: "PUT", body: JSON.stringify({ llm: { provider: "anthropic", model: "anthropic-test", apiKey: "test-key" } }),
+      signal: AbortSignal.timeout(1000),
+    });
+    assert.equal(first.status, 200, "a saved provider change must not wait for its catalog");
+    assert.equal(first.value.llm.provider, "anthropic");
+    const firstOptions = await requestJson<ModelOptionsResponse>(server, "/api/model-options", { signal: AbortSignal.timeout(1000) });
+    assert.equal(firstOptions.value.provider, "anthropic");
+    assert.equal(firstOptions.value.refreshing, true);
+    const second = await requestJson<ServerSettings>(server, "/api/settings", {
+      method: "PUT", body: JSON.stringify({ llm: { provider: "gemini", model: "gemini-test", geminiApiKey: "gemini-key" } }),
+      signal: AbortSignal.timeout(1000),
+    });
+    assert.equal(second.status, 200);
+    held.get("gemini")!();
+    await waitUntil(async () => (await requestJson<ModelOptionsResponse>(server, "/api/model-options")).value.refreshing === false);
+    const current = await requestJson<ModelOptionsResponse>(server, "/api/model-options");
+    assert.equal(current.value.provider, "gemini");
+    assert.equal(current.value.models[0]!.id, "gemini-test");
+    held.get("anthropic")!();
+    await new Promise<void>(resolve => setImmediate(resolve));
+    const afterOld = await requestJson<ModelOptionsResponse>(server, "/api/model-options");
+    assert.equal(afterOld.value.provider, "gemini");
+    assert.equal(afterOld.value.refreshing, false);
+    assert.equal(afterOld.value.models[0]!.id, "gemini-test");
+    assert.equal(discoveries.filter(provider => provider === "gemini").length, 1, "reads only inspect the cache");
+  } finally {
+    for (const release of held.values()) release();
+    await server.close();
+    await removeWorkspace(workspace);
+  }
+});
+
+test("closing a settings request cancels verification and keeps later edits usable", async () => {
+  const workspace = tempRoot();
+  await new SettingsStore(workspace).put({ llm: { provider: "offline" } });
+  let started!: () => void;
+  const verifying = new Promise<void>(resolve => { started = resolve; });
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  let providerSignal: AbortSignal | undefined;
+  const server = await startTestBrainServer({
+    workspace, port: 0,
+    validateClaudeAgent: async ({ signal }) => { providerSignal = signal; started(); await held; },
+    discoverModels: async () => ({ models: [] }),
+    readinessProbes: { llm: async () => ({}), code: async () => ({}), internet: async () => ({}), slurm: async () => ({}), capabilities: async () => ({}) },
+  });
+  try {
+    const controller = new AbortController();
+    const cancelled = assert.rejects(requestJson(server, "/api/settings", {
+      method: "PUT", body: JSON.stringify({ llm: { provider: "claude-agent", setupToken: "abandoned-token" } }), signal: controller.signal,
+    }), { name: "AbortError" });
+    await verifying;
+    controller.abort();
+    await cancelled;
+    await waitUntil(() => providerSignal?.aborted === true);
+    const later = await requestJson<ServerSettings>(server, "/api/settings", {
+      method: "PUT", body: JSON.stringify({ gateAutoApprove: false }), signal: AbortSignal.timeout(1000),
+    });
+    assert.equal(later.status, 200);
+    assert.equal(later.value.llm.provider, "offline");
+    assert.equal(later.value.gateAutoApprove, false);
+    release();
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(server.manager.settings.getClaudeSetupToken(), undefined);
+    assert.equal(server.manager.settings.get().llm.provider, "offline");
+    assert.equal(server.manager.settings.get().gateAutoApprove, false);
   } finally { release(); await server.close(); await removeWorkspace(workspace); }
 });
 
@@ -5302,7 +5393,8 @@ test("a per-section settings save keeps every other section and re-verifies noth
       if (forbidden) {
         throw new Error("re-verified a connection that did not change");
       }
-      attempts.push(input);
+      const { signal: _signal, ...connection } = input;
+      attempts.push(connection);
     },
     // The readiness llm check drives the SAME validator on its own schedule,
     // so it is stubbed out here: this test counts what the SAVES verify.
@@ -5480,7 +5572,8 @@ test("a new credential and a changed model each re-verify the connection for rea
     workspace,
     port: 0,
     validateClaudeAgent: async (input) => {
-      attempts.push(input);
+      const { signal: _signal, ...connection } = input;
+      attempts.push(connection);
       if (input.model === "unreachable") throw new Error("model not available");
     },
     readinessProbes: { llm: async () => ({ message: "stubbed" }) },

@@ -334,6 +334,7 @@ export interface ValidateCursorApiKeyInput {
   readonly agentFactory?: CursorAgentFactory;
   readonly listModels?: CursorModelLister;
   readonly timeoutMs?: number;
+  readonly signal?: AbortSignal;
 }
 
 /**
@@ -2818,6 +2819,7 @@ export async function validateCursorApiKey(
   input: ValidateCursorApiKeyInput,
 ): Promise<void> {
   const controller = new AbortController();
+  const signal = input.signal ? AbortSignal.any([controller.signal, input.signal]) : controller.signal;
   const timeout =
     input.timeoutMs !== undefined
       ? setTimeout(
@@ -2834,6 +2836,7 @@ export async function validateCursorApiKey(
     maxTurns: 4,
   });
   try {
+    if (signal.aborted) throw abortError(signal.reason);
     const result = await executor.execute(
       {
         taskId: "validate-cursor-api-key",
@@ -2848,7 +2851,7 @@ export async function validateCursorApiKey(
       {
         runId: "connection-validation",
         nodePath: "connection-validation",
-        signal: controller.signal,
+        signal,
       },
     );
     if (result.status === "error") {

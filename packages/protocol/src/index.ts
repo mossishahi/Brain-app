@@ -1816,6 +1816,8 @@ export interface TaskTypeOption {
 
 /** GET /api/model-options: cached stage choices and provider-declared controls. */
 export interface ModelOptionsResponse {
+  /** Metadata is refreshing in the background; cached options remain usable. */
+  readonly refreshing?: boolean;
   readonly provider: LlmSettings["provider"];
   /** Task types from the pinned bundle's route catalog, in declared order. */
   readonly taskTypes: readonly TaskTypeOption[];

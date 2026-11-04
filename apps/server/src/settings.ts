@@ -135,6 +135,41 @@ const CONNECTION_TIMEOUT_MS = 15_000;
 // SDK validation starts a subprocess before its one-turn model request. Its
 // cold-start budget must be independent of the direct HTTP-provider timeout.
 const CLAUDE_SDK_CONNECTION_TIMEOUT_MS = 60_000;
+// Includes optional SDK acquisition and every verification in one settings
+// mutation. A provider that ignores its own abort must not lock the write queue.
+const SETTINGS_VERIFICATION_TIMEOUT_MS = 75_000;
+
+export class SettingsVerificationTimeoutError extends Error {
+  constructor() {
+    super("Connection verification timed out. Your existing settings and credentials were kept. Check the connection and retry.");
+    this.name = "SettingsVerificationTimeoutError";
+  }
+}
+
+async function verifyBeforeSave(
+  verify: (signal: AbortSignal) => Promise<void>,
+  timeoutMs: number,
+  parentSignal?: AbortSignal,
+): Promise<void> {
+  parentSignal?.throwIfAborted();
+  const controller = new AbortController();
+  const cancel = (): void => controller.abort(parentSignal?.reason);
+  parentSignal?.addEventListener("abort", cancel, { once: true });
+  const timer = setTimeout(() => controller.abort(new SettingsVerificationTimeoutError()), timeoutMs);
+  let rejectAborted!: () => void;
+  const aborted = new Promise<never>((_, reject) => {
+    rejectAborted = () => reject(controller.signal.reason);
+    controller.signal.addEventListener("abort", rejectAborted, { once: true });
+  });
+  try {
+    await Promise.race([verify(controller.signal), aborted]);
+    controller.signal.throwIfAborted();
+  } finally {
+    clearTimeout(timer);
+    controller.signal.removeEventListener("abort", rejectAborted);
+    parentSignal?.removeEventListener("abort", cancel);
+  }
+}
 export const DEFAULT_CLAUDE_AGENT_SETTINGS: ClaudeAgentSettings = {
   maxTurns: 100,
   effort: "high",
@@ -267,6 +302,7 @@ export interface AnthropicConnectionInput {
   readonly apiKey: string;
   readonly model: string;
   readonly baseUrl?: string;
+  readonly signal?: AbortSignal;
 }
 
 export type AnthropicConnectionValidator = (
@@ -276,6 +312,7 @@ export type AnthropicConnectionValidator = (
 export interface ClaudeAgentConnectionInput {
   readonly token: string;
   readonly model?: string;
+  readonly signal?: AbortSignal;
 }
 
 export type ClaudeAgentConnectionValidator = (
@@ -285,6 +322,7 @@ export type ClaudeAgentConnectionValidator = (
 export interface CursorAgentConnectionInput {
   readonly apiKey: string;
   readonly model?: string;
+  readonly signal?: AbortSignal;
 }
 
 export type CursorAgentConnectionValidator = (
@@ -295,6 +333,7 @@ export interface GeminiConnectionInput {
   readonly apiKey: string;
   readonly model: string;
   readonly baseUrl?: string;
+  readonly signal?: AbortSignal;
 }
 export type GeminiConnectionValidator = (input: GeminiConnectionInput) => Promise<void>;
 
@@ -302,6 +341,7 @@ export interface WebSearchConnectionInput {
   readonly provider: "tavily" | "brave" | "searxng";
   readonly apiKey?: string;
   readonly searxngBaseUrl?: string;
+  readonly signal?: AbortSignal;
 }
 
 export type WebSearchConnectionValidator = (
@@ -320,11 +360,14 @@ export interface SettingsStoreOptions {
   readonly validateOpenRouter?: (
     apiKey: string,
     model: string,
+    signal?: AbortSignal,
   ) => Promise<void>;
   /** Verifies a search provider with one real one-result query. */
   readonly validateWebSearch?: WebSearchConnectionValidator;
   /** The deployment's registry endpoint (launch-time CLI/env override). */
   readonly defaultContentRegistryUrl?: string;
+  /** Upper bound for the complete verification phase, including SDK startup. */
+  readonly verificationTimeoutMs?: number;
 }
 
 export const DEFAULT_SLURM_TEMPLATE = `#!/usr/bin/env bash
@@ -1383,7 +1426,7 @@ export async function validateWebSearchConnection(
     query: "connectivity check",
     kind: "general",
     maxResults: 1,
-    signal: timeout,
+    signal: input.signal ? AbortSignal.any([timeout, input.signal]) : timeout,
   });
 }
 
@@ -1406,7 +1449,7 @@ export async function validateAnthropicConnection(
         maxOutputTokens: 8,
         temperature: 0,
       },
-      { signal: controller.signal },
+      { signal: input.signal ? AbortSignal.any([controller.signal, input.signal]) : controller.signal },
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -1426,6 +1469,7 @@ export async function validateClaudeAgentConnection(
       token: normalizeClaudeSetupToken(input.token),
       ...(input.model !== undefined ? { model: input.model } : {}),
       timeoutMs: CLAUDE_SDK_CONNECTION_TIMEOUT_MS,
+      ...(input.signal ? { signal: input.signal } : {}),
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -1443,6 +1487,7 @@ export async function validateCursorAgentConnection(
       apiKey: input.apiKey,
       ...(input.model !== undefined ? { model: input.model } : {}),
       timeoutMs: CONNECTION_TIMEOUT_MS,
+      ...(input.signal ? { signal: input.signal } : {}),
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -1455,6 +1500,7 @@ export async function validateCursorAgentConnection(
 export async function validateOpenRouterConnection(
   apiKey: string,
   model: string,
+  signal?: AbortSignal,
 ): Promise<void> {
   try {
     const response = await fetch(
@@ -1472,7 +1518,7 @@ export async function validateOpenRouterConnection(
           max_tokens: 4,
           temperature: 0,
         }),
-        signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+        signal: signal ? AbortSignal.any([AbortSignal.timeout(CONNECTION_TIMEOUT_MS), signal]) : AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
       },
     );
     if (!response.ok) {
@@ -1489,7 +1535,8 @@ export async function validateOpenRouterConnection(
 /** Metadata-only validation: never purchases a generated response. */
 export async function validateGeminiConnection(input: GeminiConnectionInput): Promise<void> {
   try {
-    const models = await discoverGeminiModels({ apiKey: input.apiKey, ...(input.baseUrl ? { baseURL: input.baseUrl } : {}), signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS) });
+    const timeout = AbortSignal.timeout(CONNECTION_TIMEOUT_MS);
+    const models = await discoverGeminiModels({ apiKey: input.apiKey, ...(input.baseUrl ? { baseURL: input.baseUrl } : {}), signal: input.signal ? AbortSignal.any([timeout, input.signal]) : timeout });
     const id = input.model.replace(/^models\//, "");
     if (!models.some((model) => model.id.replace(/^models\//, "") === id)) throw new Error("model unavailable");
   } catch {
@@ -1537,14 +1584,17 @@ export class SettingsStore {
   private readonly openRouterValidator: (
     apiKey: string,
     model: string,
+    signal?: AbortSignal,
   ) => Promise<void>;
   private readonly webSearchValidator: WebSearchConnectionValidator;
+  private readonly verificationTimeoutMs: number;
 
   constructor(
     readonly workspace: string,
     options: SettingsStoreOptions = {},
   ) {
     this.searxngInstanceId = options.searxngInstanceId;
+    this.verificationTimeoutMs = options.verificationTimeoutMs ?? SETTINGS_VERIFICATION_TIMEOUT_MS;
     this.path = join(workspace, "settings.json");
     this.credentialsPath = join(workspace, "credentials.json");
     this.deploymentRegistryUrl =
@@ -2074,8 +2124,8 @@ export class SettingsStore {
    * re-verification; entries with an empty model string mean "use the
    * default model" and are dropped.
    */
-  putModelsByRoute(value: unknown): Promise<ServerSettings> {
-    return this.enqueueWrite(() => this.putModelsByRouteExclusive(value));
+  putModelsByRoute(value: unknown, signal?: AbortSignal): Promise<ServerSettings> {
+    return this.enqueueWrite(() => { signal?.throwIfAborted(); return this.putModelsByRouteExclusive(value); });
   }
 
   /** Discovery and launch snapshots share the write queue so account/settings cannot race. */
@@ -2086,8 +2136,10 @@ export class SettingsStore {
   putStageModels(
     value: unknown,
     validate: (settings: ServerSettings, stages: Readonly<Record<string, StageModelSettings>>) => void,
+    signal?: AbortSignal,
   ): Promise<ServerSettings> {
     return this.enqueueWrite(() => {
+      signal?.throwIfAborted();
       const body = object(value, "stage model update");
       const settings = this.get();
       if (body.provider !== settings.llm.provider) throw new Error("The active provider changed. Reload settings before saving stage models.");
@@ -2147,8 +2199,8 @@ export class SettingsStore {
     return run;
   }
 
-  put(value: unknown): Promise<ServerSettings> {
-    return this.enqueueWrite(() => this.putExclusive(value));
+  put(value: unknown, signal?: AbortSignal): Promise<ServerSettings> {
+    return this.enqueueWrite(() => this.putExclusive(value, signal));
   }
 
   /** Called only by the approved probe service, serialized with ordinary edits. */
@@ -2165,148 +2217,175 @@ export class SettingsStore {
     });
   }
 
-  private async putExclusive(value: unknown): Promise<ServerSettings> {
+  private async putExclusive(value: unknown, signal?: AbortSignal): Promise<ServerSettings> {
+    signal?.throwIfAborted();
     const update = validateSettingsUpdate(this.mergeOverStored(value));
     const currentSettings = this.get();
-    const currentKey = this.getAnthropicApiKey();
-    const currentSetupToken = this.getClaudeSetupToken();
-    const currentCursorKey = this.getCursorApiKey();
-    const currentGeminiKey = this.getGeminiApiKey();
     const currentOpenRouterKey = this.getOpenRouterApiKey();
-    const candidateKey = update.submittedApiKey ?? currentKey;
-    const candidateGeminiKey = update.submittedGeminiApiKey ?? currentGeminiKey;
-    const candidateSetupToken =
-      update.submittedSetupToken ?? currentSetupToken;
-    const candidateCursorKey =
-      update.submittedCursorApiKey ?? currentCursorKey;
-    /**
-     * Whether this update actually changes the model connection. Verification
-     * is a real request to the provider and costs seconds, so it runs when — and
-     * only when — something it could disprove has changed: a freshly submitted
-     * secret, or a different provider, model, or base URL.
-     *
-     * Verifying unconditionally is what made every unrelated save slow and
-     * mislabelled: changing the review-round budget re-tested the Claude token
-     * and then reported "token verified" as if that had been the edit.
-     */
-    const connectionChanged =
-      update.submittedApiKey !== undefined ||
-      update.submittedSetupToken !== undefined ||
-      update.submittedCursorApiKey !== undefined ||
-      update.submittedGeminiApiKey !== undefined ||
-      update.settings.llm.provider !== currentSettings.llm.provider ||
-      update.settings.llm.model !== currentSettings.llm.model ||
-      update.settings.llm.baseUrl !== currentSettings.llm.baseUrl;
-    if (update.settings.llm.provider === "anthropic") {
-      // The credential REQUIREMENT is checked either way: selecting a provider
-      // with nothing to authenticate as must fail loudly, verified or not.
-      if (!candidateKey) {
-        throw new Error("An Anthropic API key is required");
-      }
-      if (connectionChanged) {
-        await this.connectionValidator({
-          apiKey: candidateKey,
-          model: update.settings.llm.model!,
-          ...(update.settings.llm.baseUrl !== undefined
-            ? { baseUrl: update.settings.llm.baseUrl }
-            : {}),
-        });
-      }
-    }
-    if (update.settings.llm.provider === "gemini") {
-      if (!candidateGeminiKey) throw new Error("A Gemini API key is required");
-      if (connectionChanged) await this.geminiValidator({ apiKey: candidateGeminiKey, model: update.settings.llm.model!, ...(update.settings.llm.baseUrl ? { baseUrl: update.settings.llm.baseUrl } : {}) });
-    }
-    if (update.settings.llm.provider === "claude-agent") {
-      if (!candidateSetupToken) {
-        throw new Error("A Claude setup token is required");
-      }
-      if (connectionChanged) {
-        await this.claudeAgentValidator({
-          token: candidateSetupToken,
-          ...(update.settings.llm.model !== undefined
-            ? { model: update.settings.llm.model }
-            : {}),
-        });
-      }
-    }
-    if (update.settings.llm.provider === "cursor-agent") {
-      if (!candidateCursorKey) {
-        throw new Error("A Cursor API key is required");
-      }
-      if (connectionChanged) {
-        await this.cursorAgentValidator({
-          apiKey: candidateCursorKey,
-          ...(update.settings.llm.model !== undefined
-            ? { model: update.settings.llm.model }
-            : {}),
-        });
-      }
-    }
-    if (update.submittedOpenRouterApiKey !== undefined) {
-      await this.openRouterValidator(
-        update.submittedOpenRouterApiKey,
-        update.settings.creditRecovery.openRouterModel,
-      );
-    }
-    // The general-search connection is verified exactly like the LLM one:
-    // when — and only when — something a real request could disprove has
-    // changed (a newly submitted key, a different provider, a different
-    // SearXNG base URL). The scholarly keys (Semantic Scholar, OpenAlex) are
-    // optional rate-limit raisers over keyless services and are stored
-    // without a live call.
-    {
-      const webSettings = update.settings.webSearch ?? {
-        provider: "none" as const,
-        scholarly: true,
-        cacheEnabled: false,
+    // Only validation runs in the raced operation. Persistence remains below
+    // the await, so a timed-out validator can never commit a late result.
+    await verifyBeforeSave(async (verificationSignal) => {
+      const verify = async (operation: () => Promise<void>): Promise<void> => {
+        verificationSignal.throwIfAborted();
+        await operation();
+        verificationSignal.throwIfAborted();
       };
-      const currentWeb = currentSettings.webSearch;
-      const provider = webSettings.provider;
-      // "searxng-local" is deliberately NOT verified here: its first start
-      // may download and convert the search image for minutes, and a
-      // settings save must never block that long. The launcher owns its
-      // health — the save selects it, the server starts it in the
-      // background, and the readiness panel reports its state.
-      if (provider === "tavily" || provider === "brave" || provider === "searxng") {
-        const submittedKey =
-          provider === "tavily"
-            ? update.submittedTavilyApiKey
-            : provider === "brave"
-              ? update.submittedBraveApiKey
-              : undefined;
-        const currentKey =
-          provider === "tavily"
-            ? this.getTavilyApiKey()
-            : provider === "brave"
-              ? this.getBraveApiKey()
-              : undefined;
-        const candidateWebKey = submittedKey ?? currentKey;
-        if (provider !== "searxng" && candidateWebKey === undefined) {
-          throw new Error(
-            `A ${provider === "tavily" ? "Tavily" : "Brave Search"} API key is required`,
-          );
+      const currentKey = this.getAnthropicApiKey();
+      const currentSetupToken = this.getClaudeSetupToken();
+      const currentCursorKey = this.getCursorApiKey();
+      const currentGeminiKey = this.getGeminiApiKey();
+      const candidateKey = update.submittedApiKey ?? currentKey;
+      const candidateGeminiKey = update.submittedGeminiApiKey ?? currentGeminiKey;
+      const candidateSetupToken =
+        update.submittedSetupToken ?? currentSetupToken;
+      const candidateCursorKey =
+        update.submittedCursorApiKey ?? currentCursorKey;
+      /**
+       * Whether this update actually changes the model connection. Verification
+       * is a real request to the provider and costs seconds, so it runs when — and
+       * only when — something it could disprove has changed: a freshly submitted
+       * secret, or a different provider, model, or base URL.
+       *
+       * Verifying unconditionally is what made every unrelated save slow and
+       * mislabelled: changing the review-round budget re-tested the Claude token
+       * and then reported "token verified" as if that had been the edit.
+       */
+      const connectionChanged =
+        update.submittedApiKey !== undefined ||
+        update.submittedSetupToken !== undefined ||
+        update.submittedCursorApiKey !== undefined ||
+        update.submittedGeminiApiKey !== undefined ||
+        update.settings.llm.provider !== currentSettings.llm.provider ||
+        update.settings.llm.model !== currentSettings.llm.model ||
+        update.settings.llm.baseUrl !== currentSettings.llm.baseUrl;
+      if (update.settings.llm.provider === "anthropic") {
+        // The credential REQUIREMENT is checked either way: selecting a provider
+        // with nothing to authenticate as must fail loudly, verified or not.
+        if (!candidateKey) {
+          throw new Error("An Anthropic API key is required");
         }
-        const webConnectionChanged =
-          submittedKey !== undefined ||
-          provider !== (currentWeb?.provider ?? "none") ||
-          webSettings.searxngBaseUrl !== currentWeb?.searxngBaseUrl;
-        if (webConnectionChanged) {
-          await this.webSearchValidator({
-            provider,
-            ...(candidateWebKey !== undefined ? { apiKey: candidateWebKey } : {}),
-            ...(webSettings.searxngBaseUrl !== undefined
-              ? { searxngBaseUrl: webSettings.searxngBaseUrl }
+        if (connectionChanged) {
+          await verify(() => this.connectionValidator({
+            signal: verificationSignal,
+            apiKey: candidateKey,
+            model: update.settings.llm.model!,
+            ...(update.settings.llm.baseUrl !== undefined
+              ? { baseUrl: update.settings.llm.baseUrl }
               : {}),
-          });
+          }));
         }
       }
-      // The paid fallback's key, submitted without selecting Brave as the
-      // provider, is verified the same way before it is stored.
-      if (provider !== "brave" && update.submittedBraveApiKey !== undefined) {
-        await this.webSearchValidator({ provider: "brave", apiKey: update.submittedBraveApiKey });
+      if (update.settings.llm.provider === "gemini") {
+        if (!candidateGeminiKey) throw new Error("A Gemini API key is required");
+        if (connectionChanged) {
+          await verify(() => this.geminiValidator({
+            signal: verificationSignal,
+            apiKey: candidateGeminiKey,
+            model: update.settings.llm.model!,
+            ...(update.settings.llm.baseUrl ? { baseUrl: update.settings.llm.baseUrl } : {}),
+          }));
+        }
       }
-    }
+      if (update.settings.llm.provider === "claude-agent") {
+        if (!candidateSetupToken) {
+          throw new Error("A Claude setup token is required");
+        }
+        if (connectionChanged) {
+          await verify(() => this.claudeAgentValidator({
+            signal: verificationSignal,
+            token: candidateSetupToken,
+            ...(update.settings.llm.model !== undefined
+              ? { model: update.settings.llm.model }
+              : {}),
+          }));
+        }
+      }
+      if (update.settings.llm.provider === "cursor-agent") {
+        if (!candidateCursorKey) {
+          throw new Error("A Cursor API key is required");
+        }
+        if (connectionChanged) {
+          await verify(() => this.cursorAgentValidator({
+            signal: verificationSignal,
+            apiKey: candidateCursorKey,
+            ...(update.settings.llm.model !== undefined
+              ? { model: update.settings.llm.model }
+              : {}),
+          }));
+        }
+      }
+      if (update.submittedOpenRouterApiKey !== undefined) {
+        await verify(() => this.openRouterValidator(
+          update.submittedOpenRouterApiKey!,
+          update.settings.creditRecovery.openRouterModel,
+          verificationSignal,
+        ));
+      }
+      // The general-search connection is verified exactly like the LLM one:
+      // when — and only when — something a real request could disprove has
+      // changed (a newly submitted key, a different provider, a different
+      // SearXNG base URL). The scholarly keys (Semantic Scholar, OpenAlex) are
+      // optional rate-limit raisers over keyless services and are stored
+      // without a live call.
+      {
+        const webSettings = update.settings.webSearch ?? {
+          provider: "none" as const,
+          scholarly: true,
+          cacheEnabled: false,
+        };
+        const currentWeb = currentSettings.webSearch;
+        const provider = webSettings.provider;
+        // "searxng-local" is deliberately NOT verified here: its first start
+        // may download and convert the search image for minutes, and a
+        // settings save must never block that long. The launcher owns its
+        // health — the save selects it, the server starts it in the
+        // background, and the readiness panel reports its state.
+        if (provider === "tavily" || provider === "brave" || provider === "searxng") {
+          const submittedKey =
+            provider === "tavily"
+              ? update.submittedTavilyApiKey
+              : provider === "brave"
+                ? update.submittedBraveApiKey
+                : undefined;
+          const currentKey =
+            provider === "tavily"
+              ? this.getTavilyApiKey()
+              : provider === "brave"
+                ? this.getBraveApiKey()
+                : undefined;
+          const candidateWebKey = submittedKey ?? currentKey;
+          if (provider !== "searxng" && candidateWebKey === undefined) {
+            throw new Error(
+              `A ${provider === "tavily" ? "Tavily" : "Brave Search"} API key is required`,
+            );
+          }
+          const webConnectionChanged =
+            submittedKey !== undefined ||
+            provider !== (currentWeb?.provider ?? "none") ||
+            webSettings.searxngBaseUrl !== currentWeb?.searxngBaseUrl;
+          if (webConnectionChanged) {
+            await verify(() => this.webSearchValidator({
+              signal: verificationSignal,
+              provider,
+              ...(candidateWebKey !== undefined ? { apiKey: candidateWebKey } : {}),
+              ...(webSettings.searxngBaseUrl !== undefined
+                ? { searxngBaseUrl: webSettings.searxngBaseUrl }
+                : {}),
+            }));
+          }
+        }
+        // The paid fallback's key, submitted without selecting Brave as the
+        // provider, is verified the same way before it is stored.
+        if (provider !== "brave" && update.submittedBraveApiKey !== undefined) {
+          await verify(() => this.webSearchValidator({
+            signal: verificationSignal,
+            provider: "brave",
+            apiKey: update.submittedBraveApiKey!,
+          }));
+        }
+      }
+    }, this.verificationTimeoutMs, signal);
+    signal?.throwIfAborted();
 
     // Persist only after every validation (including the real provider call)
     // succeeded. Secrets are never written to settings.json. An update that

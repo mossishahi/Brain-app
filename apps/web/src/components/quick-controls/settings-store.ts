@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from 'react';
 import type { ServerSettings } from '@brainstorm-agentic/protocol';
-import { errorMessage, getSettings, updateSettings } from '../../api';
+import { cachedSettings, errorMessage, getSettings, updateSettings } from '../../api';
 import { projectQuickSetting, quickSettingsPatch, type QuickCommand, type QuickSetting, type QuickValue } from './settings-commands';
 
 type Status = { pending?: boolean; error?: string };
@@ -30,6 +30,7 @@ function subscribe(listener: () => void) {
 export function useQuickSettings() { return useSyncExternalStore(subscribe, () => snapshot); }
 export function loadQuickSettings(): Promise<void> {
   if (read) return read;
+  confirmed = cachedSettings() ?? confirmed;
   publish({ loading: true, error: undefined });
   read = getSettings().then(data => { confirmed = data; publish({ loading: false, error: undefined }); }, error => publish({ loading: false, error: errorMessage(error) })).finally(() => { read = undefined; });
   return read;

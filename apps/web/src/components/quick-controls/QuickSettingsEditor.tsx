@@ -2,7 +2,7 @@ import { useEffect, useId, useState } from 'react';
 import { Popover } from '@base-ui/react/popover';
 import { LuX } from 'react-icons/lu';
 import type { HealthResponse, ModelOptionsResponse, ServerSettings } from '@brainstorm-agentic/protocol';
-import { errorMessage, getHealth, getModelOptions, putModelsByRoute } from '../../api';
+import { errorMessage, getHealth, getModelOptions, putModelsByRoute, refreshModelOptions } from '../../api';
 import { agentDefaults, type QuickValue } from './settings-commands';
 import { changeQuickSetting, useQuickSettings } from './settings-store';
 import './quick-editor.css';
@@ -36,13 +36,15 @@ export function QuickSettingsEditor({ id, settings, onClose }: { id: QuickEditor
   const [models, setModels] = useState<ModelOptionsResponse | null>(null);
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const state = useQuickSettings();
   useEffect(() => {
     let live = true;
+    setLoadError(null);
     if (id === 'model' || id === 'modelsByTask') {
-      void getModelOptions().then(value => {
+      void (loadAttempt ? refreshModelOptions() : getModelOptions()).then(value => {
         if (!live) return;
         setModels(value);
         if (id === 'modelsByTask') setDraft({ ...value.modelsByRoute });
@@ -50,7 +52,7 @@ export function QuickSettingsEditor({ id, settings, onClose }: { id: QuickEditor
     }
     if (id === 'appInfo') void getHealth().then(value => { if (live) setHealth(value); }, error => { if (live) setLoadError(errorMessage(error)); });
     return () => { live = false; };
-  }, [id]);
+  }, [id, loadAttempt]);
   const update = (name: string, value: string) => setDraft(current => ({ ...current, [name]: value }));
   async function apply() {
     if (saving) return;
@@ -76,7 +78,7 @@ export function QuickSettingsEditor({ id, settings, onClose }: { id: QuickEditor
         <Popover.Description>{spec.description}</Popover.Description>
         <form onSubmit={event => { event.preventDefault(); void apply(); }}>
           <div className="quick-editor-body">
-            {loadError && <p className="quick-editor-error" role="alert">{loadError}</p>}
+            {loadError && <div><p className="quick-editor-error" role="alert">{loadError}</p><button type="button" onClick={() => setLoadAttempt(attempt => attempt + 1)}>Retry loading</button></div>}
             {spec.fields.map(field => <div className="quick-editor-field" key={field.name}>
               <label htmlFor={`${prefix}-${field.name}`}>{field.label}</label>
               <input id={`${prefix}-${field.name}`} type={field.type ?? 'text'} value={draft[field.name] ?? ''} onChange={event => update(field.name, event.target.value)} min={field.min} max={field.max} step={field.step} disabled={saving} list={id === 'model' ? `${prefix}-models` : undefined} autoComplete="off" />
