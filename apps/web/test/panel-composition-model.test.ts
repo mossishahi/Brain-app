@@ -3,9 +3,11 @@ import test from "node:test";
 
 import {
   effectiveValue,
+  encoderPreparationMessage,
   nextOverrides,
   parseParamInput,
   type PanelParamView,
+  type EncoderReadinessView,
 } from "../src/components/settings/panel-composition-model.js";
 
 function param(partial: Partial<PanelParamView> & Pick<PanelParamView, "name" | "type" | "effectiveDefault">): PanelParamView {
@@ -40,4 +42,19 @@ test("a save sends only the values that differ from the bundle defaults", () => 
   assert.deepEqual(nextOverrides(params, "relevanceScreen", false), {});
   assert.equal(effectiveValue(params[2]!), true);
   assert.equal(effectiveValue(params[0]!), 150);
+});
+
+test("encoder guidance distinguishes managed preparation from an unavailable explicit installation", () => {
+  const report = (state: "ready" | "prepared" | "missing" | "preparing" | "failed" | "unavailable", managed = true): EncoderReadinessView => ({
+    selected: "specter2", selectedAvailable: state === "ready",
+    encoders: [{ id: "specter2", available: state === "ready", state, managed, detail: "Test installation" }],
+  });
+  assert.match(encoderPreparationMessage(report("missing"))!, /downloaded and checked automatically when research first needs it/);
+  assert.match(encoderPreparationMessage(report("missing"))!, /Opening settings does not start the download/);
+  assert.match(encoderPreparationMessage(report("preparing"))!, /is being prepared/);
+  assert.match(encoderPreparationMessage(report("prepared"))!, /model files are present.*Runtime checks/);
+  assert.match(encoderPreparationMessage(report("prepared", false))!, /model files are present.*Runtime checks/);
+  assert.match(encoderPreparationMessage(report("failed"))!, /will not silently switch/);
+  assert.match(encoderPreparationMessage(report("unavailable", false))!, /explicitly choose another encoder/);
+  assert.equal(encoderPreparationMessage(report("ready")), undefined);
 });

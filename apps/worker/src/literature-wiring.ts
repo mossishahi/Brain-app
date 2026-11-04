@@ -1,7 +1,7 @@
 /**
  * Worker wiring of the paper-based panel composition: the encoder provider
- * (@brainstorm-agentic/encoder when that package is installed, the runtime's
- * hash-ngram-v1 fallback otherwise), node vectors served by the registry,
+ * (@brainstorm-agentic/encoder when that package is installed; only explicitly
+ * selected hash-ngram-v1 otherwise), node vectors served by the registry,
  * the bundle's node texts, which key-gated sources have keys, and the run's
  * retrieval cache.
  */
@@ -33,8 +33,8 @@ export interface EncoderProviderOptions {
 
 /**
  * An EncoderProvider that resolves the encoder package on first use. When the
- * package cannot be imported (not installed in this deployment) every call
- * goes to the hash-ngram-v1 fallback, announced once.
+ * package cannot be imported, explicitly selected hash-ngram-v1 remains
+ * available. Semantic encoder requests remain unavailable, announced once.
  */
 export function lazyEncoderProvider(options: EncoderProviderOptions = {}): EncoderProvider & {
   readonly origin: () => Promise<"package" | "fallback">;
@@ -64,7 +64,7 @@ export function lazyEncoderProvider(options: EncoderProviderOptions = {}): Encod
       } catch (error) {
         log(
           `[encoder] ${ENCODER_PACKAGE} is unavailable (${error instanceof Error ? error.message : String(error)}); ` +
-            "the panel composition embeds with hash-ngram-v1",
+            "semantic panel encoders cannot run; hash-ngram-v1 is available only when explicitly selected",
         );
         return { provider: hashNgramEncoderProvider(), origin: "fallback" as const };
       }

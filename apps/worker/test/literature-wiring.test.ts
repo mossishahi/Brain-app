@@ -1,6 +1,6 @@
 /**
  * The worker's literature wiring: the lazily resolved encoder package with
- * its hash-ngram-v1 fallback, registry-served node vectors, node texts from
+ * its explicitly selected hash-ngram-v1 option, registry-served node vectors, node texts from
  * the bundle, keyed sources and the run's cache locations.
  */
 import assert from "node:assert/strict";
@@ -24,7 +24,7 @@ function isEncoder(value: TextEncoder | { readonly unavailable: string }): value
   return "embed" in value;
 }
 
-test("without the encoder package every call goes to hash-ngram-v1, announced once", async () => {
+test("without the encoder package only explicitly requested hash-ngram-v1 works, announced once", async () => {
   const lines: string[] = [];
   const asked: string[] = [];
   const provider = lazyEncoderProvider({
@@ -51,7 +51,7 @@ test("without the encoder package every call goes to hash-ngram-v1, announced on
   assert.equal(index.vectors.length, 2 * hash.manifest.dim);
   assert.deepEqual(asked, [ENCODER_PACKAGE], "the import is attempted once");
   assert.equal(lines.length, 1);
-  assert.match(lines[0]!, /hash-ngram-v1/);
+  assert.match(lines[0]!, /semantic panel encoders cannot run; hash-ngram-v1 is available only when explicitly selected/);
 });
 
 test("a package without createEncoderProvider also falls back", async () => {

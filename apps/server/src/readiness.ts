@@ -58,6 +58,7 @@ import {
   paidWebSearchFallbackAvailable,
 } from "./settings.js";
 import type { ContentRegistryRuntimeStatus } from "./model.js";
+import { inspectModelProvision } from "@brainstorm-agentic/encoder/provision";
 import { BUILTIN_ENCODER_ID, LOCAL_ENCODER_IDS } from "./panel-composition.js";
 import type {
   AnthropicConnectionValidator,
@@ -84,56 +85,56 @@ export interface EncoderAvailability {
   readonly id: string;
   readonly available: boolean;
   readonly detail: string;
+  readonly state: "ready" | "prepared" | "missing" | "preparing" | "failed" | "unavailable";
+  readonly managed: boolean;
 }
 
 /** Response of GET /api/readiness/encoders. */
 export interface EncoderReadiness {
-  /** BRAINSTORM_AGENTIC_ENCODER_DIR as this server sees it. */
+  /** The explicit model directory or the managed cache on this host. */
   readonly modelDir?: string;
   /** The encoder new runs ask for: the panel-composition override, else the spec default. */
   readonly selected: string;
   readonly selectedAvailable: boolean;
-  /** What a run uses (and records) when the selected encoder is unavailable. */
-  readonly fallback: string;
   readonly encoders: readonly EncoderAvailability[];
 }
 
-/** The files a local encoder export needs (contract G); specter2 adds query.onnx. */
-const ENCODER_MODEL_FILES = ["doc.onnx", "tokenizer.json", "tokenizer_config.json", "manifest.json"];
-
 /**
- * Which encoders a run could use: the local ONNX exports present under
- * BRAINSTORM_AGENTIC_ENCODER_DIR, the built-in hash-ngram fallback, and
- * openrouter:<model> when an OpenRouter key is configured. Informational: an
- * unavailable encoder never holds submissions, because a run falls back to
- * hash-ngram-v1 and records it.
+ * Read-only encoder inventory. Managed models are prepared when research first
+ * uses them, never from a settings/readiness request. The selected scientific
+ * encoder must be available before its work proceeds; hash is an explicit
+ * choice and is never an automatic substitute.
  */
-export function encoderReadiness(input: {
+export async function encoderReadiness(input: {
   readonly env: NodeJS.ProcessEnv;
   readonly openRouterKeyConfigured: boolean;
   readonly selected?: string;
-}): EncoderReadiness {
-  const raw = input.env.BRAINSTORM_AGENTIC_ENCODER_DIR?.trim();
-  const modelDir = raw !== undefined && raw !== "" ? raw : undefined;
-  const encoders: EncoderAvailability[] = LOCAL_ENCODER_IDS.map((id): EncoderAvailability => {
-    if (modelDir === undefined) {
-      return { id, available: false, detail: "BRAINSTORM_AGENTIC_ENCODER_DIR is not set" };
-    }
-    const files = [...ENCODER_MODEL_FILES, ...(id === "specter2" ? ["query.onnx"] : [])];
-    const missing = files.filter((file) => !existsSync(join(modelDir, id, file)));
-    return missing.length === 0
-      ? { id, available: true, detail: join(modelDir, id) }
-      : { id, available: false, detail: `missing ${missing.join(", ")} under ${join(modelDir, id)}` };
-  });
+  readonly inspect?: typeof inspectModelProvision;
+}): Promise<EncoderReadiness> {
+  let modelDir: string | undefined;
+  const encoders: EncoderAvailability[] = await Promise.all(LOCAL_ENCODER_IDS.map(async (id): Promise<EncoderAvailability> => {
+    const status = await (input.inspect ?? inspectModelProvision)(id, { env: input.env });
+    modelDir ??= status.modelDir;
+    const description = status.state === "ready" ? "Available on this host"
+      : status.state === "prepared" ? "Model files are present; runtime checks run before first use"
+      : status.managed && status.state === "missing" ? "Downloaded and checked automatically on first use"
+        : status.managed && status.state === "preparing" ? "Preparing the local model"
+          : status.state === "failed" ? "Model preparation failed"
+            : "The configured local model is unavailable";
+    return { id, available: status.state === "ready", state: status.state, managed: status.managed,
+      detail: `${description}${status.detail ? `: ${status.detail}` : ""}` };
+  }));
   encoders.push({
     id: BUILTIN_ENCODER_ID,
     available: true,
-    detail: "built-in dependency-free fallback",
+    state: "ready", managed: false,
+    detail: "Built-in lexical encoder; used only when explicitly selected",
   });
   const selected = input.selected ?? "specter2";
   encoders.push({
     id: selected.startsWith("openrouter:") ? selected : "openrouter:<model>",
     available: input.openRouterKeyConfigured,
+    state: input.openRouterKeyConfigured ? "ready" : "unavailable", managed: false,
     detail: input.openRouterKeyConfigured
       ? "OpenRouter embeddings API (key configured)"
       : "needs the OpenRouter API key (Recovery settings)",
@@ -142,7 +143,6 @@ export function encoderReadiness(input: {
     ...(modelDir !== undefined ? { modelDir } : {}),
     selected,
     selectedAvailable: encoders.find((encoder) => encoder.id === selected)?.available ?? false,
-    fallback: BUILTIN_ENCODER_ID,
     encoders,
   };
 }

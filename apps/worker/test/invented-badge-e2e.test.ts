@@ -52,7 +52,7 @@ const PENALTY_PARAM = {
   description: "In game review, reject a critic report that cites a badge [F:n] never issued in the run's fact table and record -175, the lowest score a round can produce, against that critic's private balance. Badges that appear in the reviewed chain or the task input are exempt. When false, rejection carries no penalty.",
   default: true,
 };
-const GAME_PARAMS = { gamifiedReview: true, gameDecisionRule: "chair-decisive", gameLeaveOneOut: true, panelSize: 2, maxReviewRounds: 2 };
+const GAME_PARAMS = { encoder: "hash-ngram-v1", gamifiedReview: true, gameDecisionRule: "chair-decisive", gameLeaveOneOut: true, panelSize: 2, maxReviewRounds: 2 };
 /** The prompt reaches every critic's task input (input.title, input.question), never the reviewed chain. */
 const SUBMISSION = { prompt: "Check whether the stated absolute-value inference [F:998] holds and repair any missing sign condition.", attachments: [] };
 const HOST_TEXT = "invented badge F:999 never issued in this run's fact table; penalty -175";

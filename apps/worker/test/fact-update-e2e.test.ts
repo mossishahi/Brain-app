@@ -60,8 +60,8 @@ const SKIP = supported ? false : "the Brain content's fact table declares no upd
 
 const CHAIN_SEAT = "member-1";
 const REPORT_SEAT = "member-2";
-const GAME_PARAMS = { gamifiedReview: true, gameDecisionRule: "chair-decisive", gameLeaveOneOut: true, panelSize: 2, maxReviewRounds: 2 };
-const STANDARD_PARAMS = { gamifiedReview: false, panelSize: 2, maxReviewRounds: 2 };
+const GAME_PARAMS = { encoder: "hash-ngram-v1", gamifiedReview: true, gameDecisionRule: "chair-decisive", gameLeaveOneOut: true, panelSize: 2, maxReviewRounds: 2 };
+const STANDARD_PARAMS = { encoder: "hash-ngram-v1", gamifiedReview: false, panelSize: 2, maxReviewRounds: 2 };
 const SUBMISSION = { prompt: "Check whether the stated absolute-value inference holds and repair any missing sign condition.", attachments: [] };
 const CONDITIONS = "real inputs under the stated sign condition";
 const DELETED_TEXT = "deleted badge F:1 cited after its deletion from this run's fact table; penalty -175";

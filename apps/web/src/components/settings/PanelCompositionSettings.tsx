@@ -7,12 +7,13 @@
  * Only values that differ from the bundle's defaults are saved; new runs carry
  * them to the worker as BRAINSTORM_AGENTIC_WORKFLOW_PARAMS.
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { ServerSettings, ServerSettingsUpdate } from "@brainstorm-agentic/protocol";
 import { errorMessage, getEncoderReadiness, getPanelComposition } from "../../api";
 import { SettingsToggle } from "./SettingsToggle";
 import {
   effectiveValue,
+  encoderPreparationMessage,
   nextOverrides,
   parseParamInput,
   type EncoderReadinessView,
@@ -147,21 +148,44 @@ export function PanelCompositionSettings({
 }) {
   const [view, setView] = useState<PanelCompositionView | null>(null);
   const [encoders, setEncoders] = useState<EncoderReadinessView | null>(null);
+  const [encoderError, setEncoderError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [coreKey, setCoreKey] = useState("");
+  const live = useRef(true);
+  const encoderRequest = useRef<Promise<void> | null>(null);
+  useEffect(() => { live.current = true; return () => { live.current = false; }; }, []);
+
+  // This endpoint only inspects the installation; opening settings or polling
+  // progress must never download a model or load its native runtime.
+  const reloadEncoders = useCallback(() => {
+    if (encoderRequest.current) return encoderRequest.current;
+    const request = getEncoderReadiness().then(next => {
+      if (!live.current) return;
+      setEncoders(next); setEncoderError(null);
+    }, (error: unknown) => { if (live.current) setEncoderError(errorMessage(error)); });
+    encoderRequest.current = request;
+    void request.finally(() => { if (encoderRequest.current === request) encoderRequest.current = null; });
+    return request;
+  }, []);
 
   const reload = useCallback(() => {
     getPanelComposition().then(
       (next) => {
+        if (!live.current) return;
         setView(next);
         setLoadError(null);
       },
-      (error: unknown) => setLoadError(errorMessage(error)),
+      (error: unknown) => { if (live.current) setLoadError(errorMessage(error)); },
     );
-    getEncoderReadiness().then(setEncoders, () => setEncoders(null));
-  }, []);
+    void reloadEncoders();
+  }, [reloadEncoders]);
   useEffect(() => reload(), [reload]);
+  const preparing = encoders?.encoders.some(encoder => encoder.state === "preparing");
+  useEffect(() => {
+    const timer = window.setInterval(() => { void reloadEncoders(); }, preparing ? 3_000 : 15_000);
+    return () => window.clearInterval(timer);
+  }, [preparing, reloadEncoders]);
 
   const send = async (patch: CompositionPatch) => {
     setBusy(true);
@@ -182,6 +206,7 @@ export function PanelCompositionSettings({
   if (!view) return <p className="dim small">loading the panel composition params…</p>;
   const overrides = view.params.filter((param) => param.override !== undefined);
   const webProvider = loaded?.webSearch?.provider ?? "none";
+  const encoderMessage = encoders ? encoderPreparationMessage(encoders) : undefined;
   return (
     <div className="panel-composition-settings">
       <span className="field-note">
@@ -293,20 +318,17 @@ export function PanelCompositionSettings({
         <ul className="panel-composition-encoders">
           {encoders.encoders.map((encoder) => (
             <li key={encoder.id} className={encoder.available ? undefined : "dim"}>
-              {encoder.available ? "✓" : "✗"} {encoder.id}
+              {encoder.available ? "✓" : encoder.state === "prepared" || encoder.managed && (encoder.state === "missing" || encoder.state === "preparing") ? "…" : "✗"} {encoder.id}
               {encoder.id === encoders.selected ? " (selected)" : ""} — {encoder.detail}
             </li>
           ))}
-          {!encoders.selectedAvailable && (
-            <li className="error-text">
-              The selected encoder ({encoders.selected}) is not available here; runs fall back to{" "}
-              {encoders.fallback} and record it.
-            </li>
-          )}
+          {encoderMessage && <li className="field-note" role="status">{encoderMessage}</li>}
         </ul>
       ) : (
-        <p className="dim small">encoder availability unavailable</p>
+        <p className="dim small" role="status">{encoderError ? "Encoder availability could not be checked." : "Checking encoder availability…"}</p>
       )}
+      {encoderError && <p className="error-text" role="alert">{encoderError}</p>}
+      <button type="button" className="btn btn-small" onClick={() => { void reloadEncoders(); }}>Refresh encoder status</button>
     </div>
   );
 }

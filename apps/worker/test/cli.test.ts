@@ -34,6 +34,9 @@ function tempRoot(): string {
   return mkdtempSync(join(tmpdir(), "bsa-cli-"));
 }
 
+/** The CLI fixtures choose hashing explicitly and never provision a real model. */
+const offlineEnv = { ...process.env, BRAINSTORM_AGENTIC_WORKFLOW_PARAMS: JSON.stringify({ encoder: "hash-ngram-v1" }) };
+
 /** The bundle-seeded local taxonomy the deterministic activities run over. */
 function testTaxonomy(root: string): { taxonomy: TaxonomyAccess } | Record<string, never> {
   const seed = localTaxonomySeedPath(registryContentDir);
@@ -364,6 +367,7 @@ test("offline run completes end to end with file-backed stores and auto-approved
     const result = await runtime.run({
       runId,
       submission: { prompt: "Can KNN graph construction be made differentiable?", attachments: [] },
+      params: { encoder: "hash-ngram-v1" },
     });
     assert.equal(result.status, "completed");
     assert.ok(result.status === "completed" && result.output !== undefined);
@@ -400,7 +404,7 @@ for (const gamifiedReview of [false, true]) {
         const result = await runtime.run({
           runId,
           submission: { prompt: "Can KNN graph construction be made differentiable?", attachments: [] },
-          params: { panelSize: 2, maxReviewRounds: 1, gamifiedReview },
+          params: { panelSize: 2, maxReviewRounds: 1, gamifiedReview, encoder: "hash-ngram-v1" },
         });
         assert.equal(result.status, "completed");
         assert.ok(result.output !== undefined, "the final deliverable is produced");
@@ -459,6 +463,7 @@ test("manual gate suspends; resume across a fresh runtime instance completes fro
     let result = await first.run({
       runId,
       submission: { prompt: "A topic that pauses at the panel gate", attachments: [] },
+      params: { encoder: "hash-ngram-v1" },
     });
     assert.equal(result.status, "suspended");
 
@@ -517,6 +522,7 @@ test("gate shrink action reduces the seated panel before the first pass", async 
     let suspended = await runtime.run({
       runId,
       submission: { prompt: "Shrink the panel to two members", attachments: [] },
+      params: { encoder: "hash-ngram-v1" },
     });
     assert.equal(suspended.status, "suspended");
     // Split-classification bundles (>= 0.14.0) pause at the classification
@@ -566,7 +572,7 @@ test("an explicit gate answer wins over --auto-approve on resume", () => {
     const started = spawnSync(
       process.execPath,
       [cli.pathname, "run", "--topic", "Shrink must survive auto-approve", ...common],
-      { encoding: "utf8" },
+      { encoding: "utf8", env: offlineEnv },
     );
     assert.equal(started.status, 0, started.stderr);
     let checkpoint = JSON.parse(
@@ -579,7 +585,7 @@ test("an explicit gate answer wins over --auto-approve on resume", () => {
       const approved = spawnSync(
         process.execPath,
         [cli.pathname, "resume", ...common, "--gate", "confirm-classification=approve"],
-        { encoding: "utf8" },
+        { encoding: "utf8", env: offlineEnv },
       );
       assert.equal(approved.status, 0, approved.stderr);
       checkpoint = JSON.parse(
@@ -599,7 +605,7 @@ test("an explicit gate answer wins over --auto-approve on resume", () => {
         "--gate",
         `${gateKey}=shrink:member-1,member-2`,
       ],
-      { encoding: "utf8" },
+      { encoding: "utf8", env: offlineEnv },
     );
     assert.equal(resumed.status, 0, resumed.stderr);
     const finished = JSON.parse(
@@ -644,7 +650,7 @@ test("an unwritable events log never fails the run", () => {
         "--content-dir",
         registryContentDir,
       ],
-      { encoding: "utf8" },
+      { encoding: "utf8", env: offlineEnv },
     );
     assert.equal(finished.status, 0, finished.stderr);
     assert.match(finished.stderr, /\[events\] append/, "the outage is narrated once");
@@ -674,7 +680,7 @@ test("run and resume accept content-dir and append JSONL events", () => {
     const cli = new URL("../src/main.js", import.meta.url);
     const spawnOptions = {
       encoding: "utf8",
-      env: { ...process.env, BRAINSTORM_AGENTIC_TELEMETRY: "on" },
+      env: { ...offlineEnv, BRAINSTORM_AGENTIC_TELEMETRY: "on" },
     } as const;
     const common = [
       "--offline",

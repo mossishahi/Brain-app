@@ -1,3 +1,4 @@
+import { hashLiteratureActivities } from "./fixture-literature.js";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -46,7 +47,6 @@ import {
   BrainstormRuntime,
   StaticBrainstormRouteResolver,
   taxonomyActivities,
-  literatureActivities,
   hashNgramEncoderProvider,
 } from "../src/index.js";
 
@@ -814,7 +814,7 @@ function literatureFixtureActivities() {
     paperDetails: async (query) => ({ papers: [], notFound: [...query.ids], providers: [] }),
   };
   return {
-    ...literatureActivities({
+    ...hashLiteratureActivities({
         web, taxonomy, encoders: hashNgramEncoderProvider(), now: () => 0,
         nodeTexts: { texts: async () => ({ sha256: "0".repeat(64), entries: nodes.filter((node) => node.level === "topic").map((node) => ({ id: node.id, text: `${node.name}. ${node.name} for graph distributions and message passing.` })) }) },
     }),
@@ -3010,7 +3010,7 @@ function gameRuntime(
     readGameEvidence: async () => ({ facts, approvals: [...approvals.values()] }),
     activities: {
       ...taxonomyActivities(taxonomy),
-      ...literatureActivities({
+      ...hashLiteratureActivities({
         web, taxonomy, encoders: hashNgramEncoderProvider(), now: () => 0,
         nodeTexts: { texts: async () => ({ sha256: "0".repeat(64), entries: nodes.filter((node) => node.level === "topic").map((node) => ({ id: node.id, text: `${node.name}. ${node.name} for graph distributions and message passing.` })) }) },
       }),
