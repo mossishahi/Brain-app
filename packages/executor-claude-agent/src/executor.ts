@@ -221,6 +221,7 @@ export interface ValidateClaudeSetupTokenInput {
   readonly env?: NodeJS.ProcessEnv;
   readonly queryFn?: ClaudeAgentQueryFn;
   readonly timeoutMs?: number;
+  readonly signal?: AbortSignal;
 }
 
 /**
@@ -3253,13 +3254,23 @@ export async function validateClaudeSetupToken(
     effort: "low",
     thinking: "disabled",
   });
-  await loadSdk();
   const controller = new AbortController();
+  const signal = input.signal ? AbortSignal.any([controller.signal, input.signal]) : controller.signal;
   const timeout =
     input.timeoutMs !== undefined
       ? setTimeout(() => controller.abort("connection validation timed out"), input.timeoutMs)
       : undefined;
+  let rejectAborted!: () => void;
+  const aborted = new Promise<never>((_, reject) => {
+    rejectAborted = () => reject(abortError(signal.reason));
+    signal.addEventListener("abort", rejectAborted, { once: true });
+  });
   try {
+    if (signal.aborted) throw abortError(signal.reason);
+    // SDK acquisition can be slow on a fresh host. Never start a paid query
+    // after its caller has timed out or closed the settings request.
+    await Promise.race([loadSdk(), aborted]);
+    if (signal.aborted) throw abortError(signal.reason);
     const result = await executor.execute(
       {
         taskId: "validate-claude-setup-token",
@@ -3278,7 +3289,7 @@ export async function validateClaudeSetupToken(
       {
         runId: `connection-validation-${randomUUID()}`,
         nodePath: "connection-validation",
-        signal: controller.signal,
+        signal,
       },
     );
     if (result.status === "error") {
@@ -3286,5 +3297,6 @@ export async function validateClaudeSetupToken(
     }
   } finally {
     if (timeout !== undefined) clearTimeout(timeout);
+    signal.removeEventListener("abort", rejectAborted);
   }
 }

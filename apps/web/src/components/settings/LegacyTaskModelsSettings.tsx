@@ -6,7 +6,7 @@ import "./research-controls.css";
 const taskLabel = (id: string) => id.replace(/[-_]/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 
 /** Uses the route-only endpoint, leaving provider and credential drafts alone. */
-export function LegacyTaskModelsSettings({ settings }: { settings: ServerSettings }) {
+export function LegacyTaskModelsSettings({ settings, onDirtyChange }: { settings: ServerSettings; onDirtyChange?: (dirty: boolean) => void }) {
   const prefix = useId();
   const [options, setOptions] = useState<ModelOptionsResponse | null>(null);
   const [draft, setDraft] = useState<Record<string, string>>({});
@@ -34,6 +34,7 @@ export function LegacyTaskModelsSettings({ settings }: { settings: ServerSetting
 
   const dirty = options !== null && [...new Set([...Object.keys(draft), ...Object.keys(options.modelsByRoute)])]
     .some((id) => (draft[id] ?? "") !== (options.modelsByRoute[id] ?? ""));
+  useEffect(() => { onDirtyChange?.(dirty); return () => onDirtyChange?.(false); }, [dirty, onDirtyChange]);
 
   async function save() {
     if (!options || saving || !dirty) return;

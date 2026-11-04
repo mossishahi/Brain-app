@@ -24,7 +24,7 @@ import type {
   ServerSettings,
   ServerSettingsUpdate,
 } from "@brainstorm-agentic/protocol";
-import { errorMessage, getHealth, getSettings, postUpdateCheck, useModelOptions } from "../api";
+import { cachedSettings, errorMessage, getHealth, getSettings, postUpdateCheck, useModelOptions } from "../api";
 import { TrashIcon, XIcon } from "./Icons";
 import { categorySections, settingsCategories, settingsCategory, type SettingsCategory } from "./settings/catalog";
 import { SettingsCategoryContext, SettingsSection as Section, SaveStatus } from "./settings/SettingsSection";
@@ -67,11 +67,15 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
   const contentRef = useRef<HTMLDivElement>(null);
   const afterClose = useRef<(() => void) | null>(null);
   const [loaded, setLoaded] = useState<ServerSettings | null>(null);
+  const confirmedSettings = useRef<ServerSettings | null>(null);
+  const stageDraftPresent = useRef(false);
+  const [stageModelsVisited, setStageModelsVisited] = useState(() => settingsCategory(initialSection) === "stageModels");
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [checkingUpdates, setCheckingUpdates] = useState(false);
   const [updateStatus, setUpdateStatus] = useState<string | null>(null);
-  const { save, reject, reset, saveSoon, flushPending, saveState, saveError, builders } = useSettingsSaves((settings) => {
-    setLoaded(settings);
+  const { save, reject, reset, saveSoon, retry, canRetry, flushPending, saveState, saveError, builders } = useSettingsSaves((settings) => {
+    receiveSettings(settings);
   });
 
   const [runner, setRunner] = useState<RunnerKind>("slurm");
@@ -195,8 +199,10 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
     const allSaved = await flushPending();
     // Let successful saves update the draft comparison before asking to discard.
     await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
-    if (!discardDrafts && (draftPresent.current || !allSaved)) {
-      setCloseWarning(draftPresent.current
+    if (!discardDrafts && (draftPresent.current || stageDraftPresent.current || !allSaved)) {
+      setCloseWarning(stageDraftPresent.current
+        ? "You have stage model choices that have not been saved. Keep editing to save them, or discard the draft."
+        : draftPresent.current
         ? "You have connection details that have not been saved. Keep editing to save them, or discard the draft."
         : "Some changes could not be saved. Keep editing to correct them, or close with the previous saved values.");
       setClosing(false);
@@ -227,61 +233,71 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
     }
   };
 
+  /** Refresh saved values without replacing a draft typed while a request was pending. */
+  function receiveSettings(s: ServerSettings) {
+    const previous = confirmedSettings.current;
+    confirmedSettings.current = s;
+    setLoaded(s);
+    setLoadError(null);
+    setRunner(current => !previous || current === (previous.runner) ? (s.runner) : current);
+    setTemplate(current => !previous || current === (previous.slurmTemplate) ? (s.slurmTemplate) : current);
+    setProvider(current => !previous || current === (previous.llm.provider) ? (s.llm.provider) : current);
+    setTranscript(current => !previous || current === (previous.llm.transcript) ? (s.llm.transcript) : current);
+    setModel(current => !previous || current === (previous.llm.model ?? "") ? (s.llm.model ?? "") : current);
+    setBaseUrl(current => !previous || current === (previous.llm.baseUrl ?? "") ? (s.llm.baseUrl ?? "") : current);
+    setAgentMaxTurns(current => !previous || current === (String(previous.llm.agentSdk?.maxTurns ?? 100)) ? (String(s.llm.agentSdk?.maxTurns ?? 100)) : current);
+    setAgentMaxBudgetUsd(current => !previous || current === (previous.llm.agentSdk?.maxBudgetUsd !== undefined ? String(previous.llm.agentSdk.maxBudgetUsd) : "") ? (s.llm.agentSdk?.maxBudgetUsd !== undefined ? String(s.llm.agentSdk.maxBudgetUsd) : "") : current);
+    setAgentEffort(current => !previous || current === (previous.llm.agentSdk?.effort ?? "high") ? (s.llm.agentSdk?.effort ?? "high") : current);
+    setAgentThinking(current => !previous || current === (previous.llm.agentSdk?.thinking ?? "adaptive") ? (s.llm.agentSdk?.thinking ?? "adaptive") : current);
+    setAgentFallbackModel(current => !previous || current === (previous.llm.agentSdk?.fallbackModel ?? "") ? (s.llm.agentSdk?.fallbackModel ?? "") : current);
+    setConfirmation(current => !previous || current === (previous.panelConfirmation) ? (s.panelConfirmation) : current);
+    setGateAutoApprove(current => !previous || current === (previous.gateAutoApprove !== false) ? (s.gateAutoApprove !== false) : current);
+    setGamifiedReview(current => !previous || current === (previous.gamifiedReview === true) ? (s.gamifiedReview === true) : current);
+    setGameThreshold(current => !previous || current === (String(previous.gameReview?.threshold ?? 0.5)) ? (String(s.gameReview?.threshold ?? 0.5)) : current);
+    setGamePointsMode(current => !previous || current === (previous.gameReview?.initialPoints === undefined ? "auto" : "custom") ? (s.gameReview?.initialPoints === undefined ? "auto" : "custom") : current);
+    setGameInitialPoints(current => !previous || current === (String(previous.gameReview?.initialPoints ?? 100)) ? (String(s.gameReview?.initialPoints ?? 100)) : current);
+    setGameDecisionRule(current => !previous || current === (previous.gameReview?.decisionRule ?? "chair-decisive") ? (s.gameReview?.decisionRule ?? "chair-decisive") : current);
+    setGameLeaveOneOut(current => !previous || current === (previous.gameReview?.leaveOneOut !== false) ? (s.gameReview?.leaveOneOut !== false) : current);
+    setReviewMaxRounds(current => !previous || current === (previous.review?.maxRounds !== undefined ? String(previous.review.maxRounds) : "") ? (s.review?.maxRounds !== undefined ? String(s.review.maxRounds) : "") : current);
+    setPanelSize(current => !previous || current === (previous.panel?.size !== undefined ? String(previous.panel.size) : "") ? (s.panel?.size !== undefined ? String(s.panel.size) : "") : current);
+    setInterdisciplinarySeat(current => !previous || current === (previous.panel?.interdisciplinarySeat !== false) ? (s.panel?.interdisciplinarySeat !== false) : current);
+    setAutoResume(current => !previous || current === (previous.creditRecovery.autoResume) ? (s.creditRecovery.autoResume) : current);
+    setResumeInterrupted(current => !previous || current === (previous.interruptedRecovery?.autoResume ?? true) ? (s.interruptedRecovery?.autoResume ?? true) : current);
+    setSafetyBufferSeconds(current => !previous || current === (String(previous.creditRecovery.safetyBufferSeconds)) ? (String(s.creditRecovery.safetyBufferSeconds)) : current);
+    setOpenRouterModel(current => !previous || current === (previous.creditRecovery.openRouterModel) ? (s.creditRecovery.openRouterModel) : current);
+    setUpdateCheck(current => !previous || current === (previous.updateCheck ?? "notify") ? (s.updateCheck ?? "notify") : current);
+    setWebProvider(current => !previous || current === (previous.webSearch?.provider ?? "none") ? (s.webSearch?.provider ?? "none") : current);
+    setSearxngBaseUrl(current => !previous || current === (previous.webSearch?.searxngBaseUrl ?? "") ? (s.webSearch?.searxngBaseUrl ?? "") : current);
+    setWebScholarly(current => !previous || current === (previous.webSearch?.scholarly !== false) ? (s.webSearch?.scholarly !== false) : current);
+    setWebCacheEnabled(current => !previous || current === (previous.webSearch?.cacheEnabled === true) ? (s.webSearch?.cacheEnabled === true) : current);
+    setWebContactEmail(current => !previous || current === (previous.webSearch?.contactEmail ?? "") ? (s.webSearch?.contactEmail ?? "") : current);
+    setWebMode(current => !previous || current === (previous.webSearch?.mode ?? "host") ? (s.webSearch?.mode ?? "host") : current);
+    setBraveFallbackEnabled(current => !previous || current === (previous.webSearch?.braveFallback?.enabled === true) ? (s.webSearch?.braveFallback?.enabled === true) : current);
+    setBraveMaxPerRun(current => !previous || current === (String(previous.webSearch?.braveFallback?.maxRequestsPerRun ?? 300)) ? (String(s.webSearch?.braveFallback?.maxRequestsPerRun ?? 300)) : current);
+    setBraveMaxPerMonth(current => !previous || current === (String(previous.webSearch?.braveFallback?.maxRequestsPerMonth ?? 1000)) ? (String(s.webSearch?.braveFallback?.maxRequestsPerMonth ?? 1000)) : current);
+    setEnabledHostTools(current => !previous || JSON.stringify(current) === JSON.stringify(previous.hostTools?.enabledToolIds ?? ["attachment_list", "attachment_read"])
+      ? [...(s.hostTools?.enabledToolIds ?? ["attachment_list", "attachment_read"])] : current);
+  }
+
+  // Shared settings announcements keep both entry points in sync; drafts stay local.
+  const receiveSettingsRef = useRef(receiveSettings);
+  receiveSettingsRef.current = receiveSettings;
+  useEffect(() => {
+    const receive = (event: Event) => receiveSettingsRef.current((event as CustomEvent<ServerSettings>).detail);
+    window.addEventListener("brain-settings-updated", receive);
+    return () => window.removeEventListener("brain-settings-updated", receive);
+  }, []);
+
   useEffect(() => {
     let live = true;
-    getSettings()
-      .then((s) => {
-        if (!live) return;
-        setLoaded(s);
-        setRunner(s.runner);
-        setTemplate(s.slurmTemplate);
-        setProvider(s.llm.provider);
-        setTranscript(s.llm.transcript);
-        setModel(s.llm.model ?? "");
-        setBaseUrl(s.llm.baseUrl ?? "");
-        setAgentMaxTurns(String(s.llm.agentSdk?.maxTurns ?? 100));
-        setAgentMaxBudgetUsd(
-          s.llm.agentSdk?.maxBudgetUsd !== undefined
-            ? String(s.llm.agentSdk.maxBudgetUsd)
-            : "",
-        );
-        setAgentEffort(s.llm.agentSdk?.effort ?? "high");
-        setAgentThinking(s.llm.agentSdk?.thinking ?? "adaptive");
-        setAgentFallbackModel(s.llm.agentSdk?.fallbackModel ?? "");
-        setConfirmation(s.panelConfirmation);
-        setGateAutoApprove(s.gateAutoApprove !== false);
-        setGamifiedReview(s.gamifiedReview === true);
-        setGameThreshold(String(s.gameReview?.threshold ?? 0.5));
-        setGamePointsMode(s.gameReview?.initialPoints === undefined ? "auto" : "custom");
-        setGameInitialPoints(String(s.gameReview?.initialPoints ?? 100));
-        setGameDecisionRule(s.gameReview?.decisionRule ?? "chair-decisive");
-        setGameLeaveOneOut(s.gameReview?.leaveOneOut !== false);
-        setReviewMaxRounds(
-          s.review?.maxRounds !== undefined ? String(s.review.maxRounds) : "",
-        );
-        setPanelSize(s.panel?.size !== undefined ? String(s.panel.size) : "");
-        setInterdisciplinarySeat(s.panel?.interdisciplinarySeat !== false);
-        setAutoResume(s.creditRecovery.autoResume);
-        setResumeInterrupted(s.interruptedRecovery?.autoResume ?? true);
-        setSafetyBufferSeconds(String(s.creditRecovery.safetyBufferSeconds));
-        setOpenRouterModel(s.creditRecovery.openRouterModel);
-        setUpdateCheck(s.updateCheck ?? "notify");
-        if (s.hostTools?.enabledToolIds) {
-          setEnabledHostTools([...s.hostTools.enabledToolIds]);
-        }
-        setWebProvider(s.webSearch?.provider ?? "none");
-        setSearxngBaseUrl(s.webSearch?.searxngBaseUrl ?? "");
-        setWebScholarly(s.webSearch?.scholarly !== false);
-        setWebCacheEnabled(s.webSearch?.cacheEnabled === true);
-        setWebContactEmail(s.webSearch?.contactEmail ?? "");
-        setWebMode(s.webSearch?.mode ?? "host");
-        setBraveFallbackEnabled(s.webSearch?.braveFallback?.enabled === true);
-        setBraveMaxPerRun(String(s.webSearch?.braveFallback?.maxRequestsPerRun ?? 300));
-        setBraveMaxPerMonth(String(s.webSearch?.braveFallback?.maxRequestsPerMonth ?? 1000));
-      })
-      .catch((e: unknown) => {
-        if (live) setLoadError(errorMessage(e));
-      });
+    setLoadError(null);
+    const cached = cachedSettings();
+    if (cached) receiveSettingsRef.current(cached);
+    getSettings().then(s => {
+      if (live) receiveSettingsRef.current(s);
+    }, (error: unknown) => {
+      if (live) setLoadError(errorMessage(error));
+    });
     getHealth()
       .then((health) => {
         if (!live) return;
@@ -308,7 +324,7 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
     return () => {
       live = false;
     };
-  }, []);
+  }, [loadAttempt]);
 
   /* ------------------------------------------------------ section payloads */
 
@@ -386,15 +402,13 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
     const added = toolIds.filter(id => !enabledHostTools.includes(id));
     const removed = new Set(enabledHostTools.filter(id => !toolIds.includes(id)));
     setEnabledHostTools([...toolIds]);
-    void save("tools", current => ({ hostTools: { enabledToolIds: [...new Set([...(current.hostTools?.enabledToolIds ?? []).filter(id => !removed.has(id)), ...added])] } })).then(
-      (saved) => {
-        // The server enables attachment_search alongside attachment_read, so the
-        // stored list can differ from the one submitted; follow it.
-        if (saved?.hostTools?.enabledToolIds) {
-          setEnabledHostTools([...saved.hostTools.enabledToolIds]);
-        }
-      },
-    );
+    void save("tools", current => ({ hostTools: { enabledToolIds: [...new Set([...(current.hostTools?.enabledToolIds ?? []).filter(id => !removed.has(id)), ...added])] } })).then(saved => {
+      if (!saved?.hostTools?.enabledToolIds) return;
+      // Accept server normalization only if this is still the displayed edit.
+      // An earlier response must not undo a later toggle while it is queued.
+      setEnabledHostTools(current => JSON.stringify(current) === JSON.stringify(toolIds)
+        ? [...saved.hostTools!.enabledToolIds] : current);
+    });
   };
 
   /** The recovery section as shown, without the OpenRouter key. */
@@ -501,7 +515,7 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
       >
         {saveState.credential === "saving" ? "Verifying…" : "Save"}
       </button>
-      <SaveStatus state={saveState.credential} error={saveError.credential} />
+      <SaveStatus state={saveState.credential} error={saveError.credential} onRetry={canRetry("credential") ? () => void retry("credential") : undefined} />
     </div>
   );
 
@@ -521,7 +535,7 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
                 const Icon = categoryIcons[item.id];
                 const hasError = categorySections[item.id].some((section) => saveState[section] === "error");
                 const saving = categorySections[item.id].some((section) => saveState[section] === "saving");
-                return <button key={item.id} id={`settings-category-${item.id}`} type="button" aria-current={item.id === activeCategory ? "page" : undefined} className="settings-category" onClick={() => { setActiveCategory(item.id); afterClose.current = null; setCloseWarning(null); contentRef.current?.scrollTo({ top: 0 }); }}>
+                return <button key={item.id} id={`settings-category-${item.id}`} type="button" aria-current={item.id === activeCategory ? "page" : undefined} className="settings-category" onClick={() => { setActiveCategory(item.id); if (item.id === "stageModels") setStageModelsVisited(true); afterClose.current = null; setCloseWarning(null); contentRef.current?.scrollTo({ top: 0 }); }}>
                   <Icon aria-hidden /><span>{item.label}</span>{hasError ? <span className="settings-category-error" aria-label="Changes not saved">!</span> : saving ? <span className="save-spinner" aria-label="Saving" /> : null}
                 </button>;
               })}
@@ -529,8 +543,10 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
             <div className="settings-content" ref={contentRef} aria-label={category.label}>
               <div className="settings-category-heading"><h2>{category.label}</h2><p>{category.description}</p></div>
               <SettingsCategoryContext.Provider value={activeCategory}>
-                {activeCategory === "appearance" ? <AppearanceSettings /> : loadError ? <p className="error-text" role="alert">{loadError}</p> : !loaded ? <p className="dim" role="status">Loading settings…</p> : <>
-            <Section category="updates" title="Application updates" state={saveState.updates} error={saveError.updates}>
+                {activeCategory === "appearance" ? <AppearanceSettings /> : <>
+                {loadError && <div><p className="error-text" role="alert">{loaded ? `Could not refresh settings. Your last saved settings and drafts are still available. ${loadError}` : loadError}</p><button type="button" className="btn btn-small" onClick={() => setLoadAttempt(attempt => attempt + 1)}>Retry loading settings</button></div>}
+                {!loaded ? !loadError && <p className="dim" role="status">Loading settings…</p> : <>
+            <Section category="updates" title="Application updates" state={saveState.updates} error={saveError.updates} onRetry={canRetry("updates") ? () => void retry("updates") : undefined}>
 
               <div className="inline-actions">
                 <button
@@ -564,7 +580,7 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
               category="execution"
               title="Execution"
               state={saveState.execution}
-              error={saveError.execution}
+              error={saveError.execution} onRetry={canRetry("execution") ? () => void retry("execution") : undefined}
             >
               <div className="field">
                 <label className="field-label" htmlFor="settings-runner">
@@ -668,7 +684,7 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
               category="connections"
               title="Model connection"
               state={saveState.model}
-              error={saveError.model}
+              error={saveError.model} onRetry={canRetry("model") ? () => void retry("model") : undefined}
             >
               <div className="field">
                 <label className="field-label" htmlFor="settings-provider">
@@ -1013,15 +1029,12 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
               )}
             </Section>
 
-            <Section category="stageModels" title="Models by workflow stage" summary={`Provider: ${providerLabels[loaded.llm.provider]}`}>
-              {activeCategory === "stageModels" && <TaskModelsSettings settings={loaded} />}
-            </Section>
 
             <Section
               category="research"
               title="Panel confirmation"
               state={saveState.confirmation}
-              error={saveError.confirmation}
+              error={saveError.confirmation} onRetry={canRetry("confirmation") ? () => void retry("confirmation") : undefined}
             >
               <SettingsToggle
                 label={askBeforeApprovalLabel}
@@ -1057,7 +1070,7 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
               category="research"
               title="Review"
               state={saveState.review}
-              error={saveError.review}
+              error={saveError.review} onRetry={canRetry("review") ? () => void retry("review") : undefined}
             >
               <SettingsToggle
                 label="Gamified review"
@@ -1153,7 +1166,7 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
               category="research"
               title="Panel"
               state={saveState.panel}
-              error={saveError.panel}
+              error={saveError.panel} onRetry={canRetry("panel") ? () => void retry("panel") : undefined}
             >
               <div className="field">
                 <label className="field-label" htmlFor="settings-panel-size">
@@ -1212,7 +1225,7 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
               category="research"
               title="Panel composition"
               state={saveState.panelComposition}
-              error={saveError.panelComposition}
+              error={saveError.panelComposition} onRetry={canRetry("panelComposition") ? () => void retry("panelComposition") : undefined}
             >
               <PanelCompositionSettings
                 loaded={loaded}
@@ -1232,7 +1245,7 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
               category="tools"
               title="Capabilities & host tools"
               state={saveState.tools}
-              error={saveError.tools}
+              error={saveError.tools} onRetry={canRetry("tools") ? () => void retry("tools") : undefined}
             >
               <span className="field-note" style={{ marginBottom: "0.5rem", display: "block" }}>
                 Tools that run on your machine. Switch off a capability to disable it for all pipeline roles.
@@ -1284,7 +1297,7 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
               category="tools"
               title="Web search"
               state={saveState.webSearch}
-              error={saveError.webSearch}
+              error={saveError.webSearch} onRetry={canRetry("webSearch") ? () => void retry("webSearch") : undefined}
             >
               <span className="field-note" style={{ display: "block", marginBottom: "0.5rem" }}>
                 By default every agent searches through the app's own tools —
@@ -1715,7 +1728,7 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
               category="tools"
               title="Tools and providers"
               state={saveState.availability}
-              error={saveError.availability}
+              error={saveError.availability} onRetry={canRetry("availability") ? () => void retry("availability") : undefined}
             >
               <ToolsAndProviders onSave={(patch) => save("availability", patch)} />
             </Section>
@@ -1724,7 +1737,7 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
               category="recovery"
               title="Recovery"
               state={saveState.recovery}
-              error={saveError.recovery}
+              error={saveError.recovery} onRetry={canRetry("recovery") ? () => void retry("recovery") : undefined}
             >
               <h3 className="settings-subheading">Interrupted jobs</h3>
               <SettingsToggle
@@ -1859,7 +1872,8 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
                 readable.
               </span>
             </Section>
-                </>}
+                </>}</>}
+                {loaded && stageModelsVisited && <div hidden={activeCategory !== "stageModels"}><section className="settings-section"><div className="settings-section-heading"><h3>Models by workflow stage</h3><span className="settings-section-summary">Provider: {providerLabels[loaded.llm.provider]}</span></div><div className="settings-section-content"><TaskModelsSettings settings={loaded} onDirtyChange={dirty => { stageDraftPresent.current = dirty; }} /></div></section></div>}
               </SettingsCategoryContext.Provider>
             </div>
           </div>

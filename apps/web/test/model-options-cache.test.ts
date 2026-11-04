@@ -42,14 +42,13 @@ test('refresh failure preserves the snapshot and opening a picker does not retry
   assert.equal(await resource.refresh(), 3);
 });
 
-test('failed initial discovery is retried only through an explicit refresh', async () => {
+test('failed initial discovery releases its request so reopening can recover', async () => {
   let calls = 0;
   const error = new Error('offline');
   const resource = new CachedResource(async () => { if (++calls === 1) throw error; return 'ready'; });
   await assert.rejects(resource.read(), error);
-  await assert.rejects(resource.read(), error);
   assert.equal(calls, 1);
-  assert.equal(await resource.refresh(), 'ready');
+  assert.equal(await resource.read(), 'ready');
   assert.equal(await resource.read(), 'ready');
   assert.equal(calls, 2);
 });

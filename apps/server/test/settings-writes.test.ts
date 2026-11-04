@@ -208,3 +208,63 @@ test("invalid routing does not poison later writes and clearing routing retains 
     rmSync(workspace, { recursive: true, force: true });
   }
 });
+
+test("a hung verification expires without changing credentials or blocking later saves", async (t) => {
+  const workspace = mkdtempSync(join(tmpdir(), "brain-settings-timeout-"));
+  t.after(() => rmSync(workspace, { recursive: true, force: true }));
+  const started = deferred();
+  const release = deferred();
+  let hang = false;
+  let validationSignal: AbortSignal | undefined;
+  let extraChecks = 0;
+  const store = new SettingsStore(workspace, {
+    verificationTimeoutMs: 25,
+    validateAnthropic: async ({ signal }) => {
+      if (hang) { validationSignal = signal; started.resolve(); await release.promise; }
+    },
+    validateOpenRouter: async () => { extraChecks++; },
+  });
+  await store.put({ llm: { provider: "anthropic", model: "verified-model", apiKey: "verified-secret" } });
+  hang = true;
+  const failed = assert.rejects(store.put({
+    llm: { model: "new-model", apiKey: "replacement-secret" },
+    creditRecovery: { openRouterApiKey: "must-not-be-checked-after-timeout" },
+  }), /verification timed out.*existing settings and credentials were kept/i);
+  await started.promise;
+  const later = store.put({ gateAutoApprove: false });
+  await failed;
+  assert.equal(validationSignal?.aborted, true, "the deadline reaches the actual provider request");
+  assert.equal((await later).gateAutoApprove, false, "the timed-out writer releases the queue");
+  assert.equal(store.get().llm.model, "verified-model");
+  assert.equal(store.getAnthropicApiKey(), "verified-secret");
+  release.resolve();
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(store.get().llm.model, "verified-model", "late success cannot commit");
+  assert.equal(store.getAnthropicApiKey(), "verified-secret");
+  assert.equal(store.get().gateAutoApprove, false);
+  assert.equal(extraChecks, 0, "expired saves cannot start further provider calls");
+});
+
+test("abandoned settings requests cannot commit or keep the write queue occupied", async (t) => {
+  const workspace = mkdtempSync(join(tmpdir(), "brain-settings-cancel-"));
+  t.after(() => rmSync(workspace, { recursive: true, force: true }));
+  const started = deferred();
+  const release = deferred();
+  const store = new SettingsStore(workspace, { validateClaudeAgent: async () => { started.resolve(); await release.promise; } });
+  await store.put({ llm: { provider: "offline" } });
+  const controller = new AbortController();
+  const rejected = assert.rejects(store.put({ llm: { provider: "claude-agent", setupToken: "new-secret" } }, controller.signal), /aborted/);
+  await started.promise;
+  const queuedController = new AbortController();
+  const cancelledRouting = assert.rejects(store.putModelsByRoute({ modelsByRoute: { reasoning: "cancelled" } }, queuedController.signal), /aborted/);
+  queuedController.abort();
+  const later = store.put({ gateAutoApprove: false });
+  controller.abort();
+  await Promise.all([rejected, cancelledRouting, later]);
+  release.resolve();
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(store.get().llm.provider, "offline");
+  assert.equal(store.getClaudeSetupToken(), undefined);
+  assert.equal(store.get().llm.modelsByRoute, undefined);
+  assert.equal(store.get().gateAutoApprove, false);
+});

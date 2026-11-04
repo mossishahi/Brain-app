@@ -16,7 +16,7 @@ import { dismissTransientOnNavigation } from './shell/transient-navigation';
 import { parseRoute, resolveRoute, routeHash, withPanel, selectJob, type LibrarySection, type Route } from './shell/routes';
 import { ViewBoundary } from './shell/ViewBoundary';
 import { LuSquarePen } from 'react-icons/lu';
-import { getModelOptions } from './api';
+import { getModelOptions, getSettings } from './api';
 
 const Dashboard = memo(lazy(() => import('./components/Dashboard').then(m => ({ default: m.Dashboard }))));
 const SettingsDrawer = lazy(() => import('./components/SettingsDrawer').then(m => ({ default: m.SettingsDrawer })));
@@ -25,7 +25,10 @@ const AmbientBackground = memo(BackgroundLayer);
 function ViewLoading() { return <div className="canvas-loading" role="status"><span />Opening workspace…</div>; }
 
 export function App() {
-  useEffect(() => { void getModelOptions().catch(() => undefined); }, []);
+  useEffect(() => {
+    void getSettings().catch(() => undefined);
+    void getModelOptions().catch(() => undefined);
+  }, []);
   const [route, setRoute] = useState(() => parseRoute(window.location.hash));
   const routeRef = useRef(route);
   const cancelLibraryHover = useRef<() => void>(() => {});

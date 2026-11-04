@@ -195,7 +195,8 @@ export class ModelDiscovery {
   private readonly pending = new Map<string, Promise<ModelCatalogSnapshot>>();
   private readonly path: string;
   constructor(private readonly workspace: string, private readonly discover: ModelDiscoverer = discoverProviderModels, private readonly timeoutMs = 15_000,
-    private readonly prepare: ((context: DiscoveryContext) => Promise<void>) | undefined = discover === discoverProviderModels ? prepareProviderRuntime : undefined) {
+    private readonly prepare: ((context: DiscoveryContext) => Promise<void>) | undefined = discover === discoverProviderModels ? prepareProviderRuntime : undefined,
+    private readonly preparationTimeoutMs = 60_000) {
     this.path = join(workspace, "model-options-cache.json");
     try {
       const disk = object(readJsonFile<unknown>(this.path));
@@ -219,7 +220,12 @@ export class ModelDiscovery {
     const controller = new AbortController(); let timer: ReturnType<typeof setTimeout> | undefined;
     const work = (async () => {
       try {
-        if (this.prepare) await this.prepare(context);
+        if (this.prepare) {
+          await Promise.race([this.prepare(context), new Promise<never>((_, reject) => {
+            timer = setTimeout(() => { controller.abort(); reject(new Error("runtime preparation timeout")); }, this.preparationTimeoutMs);
+          })]);
+          clearTimeout(timer);
+        }
         const discovered = await Promise.race([this.discover(context, controller.signal), new Promise<never>((_, reject) => {
           timer = setTimeout(() => { controller.abort(); reject(new Error("discovery timeout")); }, this.timeoutMs);
         })]);

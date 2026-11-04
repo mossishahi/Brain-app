@@ -163,11 +163,9 @@ test('a rejected research launch refreshes stored model information without open
   await page.goto('/');
   await expect(page.getByRole('button', { name: 'Open settings menu', exact: true })).toBeVisible({ timeout: 20_000 });
   await expect.poll(() => requests(brain)).toBe(1);
-  await page.evaluate(async () => {
-    // Exercise the shared launch API; all requests stay inside this local fixture.
-    const api = await import('/src/api.ts');
-    await api.submitJob('A research question').catch(() => undefined);
-  });
+  await page.getByRole('textbox', { name: 'What do you want to think through?', exact: true }).fill('A research question');
+  await page.getByRole('button', { name: 'send', exact: true }).click();
+  await expect(page.getByText('The selected model is no longer available.', { exact: true })).toBeVisible();
   await expect.poll(() => requests(brain)).toBe(2);
   await openSettings(page);
   expect(requests(brain)).toBe(2);

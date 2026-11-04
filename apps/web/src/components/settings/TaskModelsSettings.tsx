@@ -6,22 +6,35 @@ import { SettingsToggle } from './SettingsToggle';
 import { changeStageModel, findModel, inheritedStageModel, sameStageSettings, updateStage, type StageSettingsMap } from './stage-models-model';
 import './research-controls.css';
 
-export function TaskModelsSettings({ settings }: { settings: ServerSettings }) {
+export function TaskModelsSettings({ settings, onDirtyChange }: { settings: ServerSettings; onDirtyChange?: (dirty: boolean) => void }) {
   const snapshot = useModelOptions();
   const options = snapshot.value;
-  if (!options || options.provider !== settings.llm.provider) return <div className="settings-research-controls">
-    {snapshot.error ? <><p className="error-text" role="alert">{errorMessage(snapshot.error)}</p><button type="button" className="btn btn-small" onClick={() => { void refreshModelOptions().catch(() => undefined); }}>Retry models</button></>
-      : <p className="field-note" role="status">Loading models…</p>}
-  </div>;
-  if (!options.stages) return <LegacyTaskModelsSettings settings={settings} />;
-  if (options.provider === 'offline') return <p className="field-note">The offline provider is deterministic; model selection does not apply.</p>;
+  // A connection can change in the toolbar or another window. Retain each
+  // visited provider's editor until the drawer closes, including while its
+  // catalog is being refreshed, so switching providers cannot erase a draft.
+  const editors = useRef(new Map<string, { options: ModelOptionsResponse; settings: ServerSettings }>());
+  const dirtyProviders = useRef(new Set<string>());
+  if (options?.provider === settings.llm.provider) editors.current.set(options.provider, { options, settings });
+  const current = editors.current.get(settings.llm.provider);
+  const updateDirty = (provider: string, dirty: boolean) => {
+    if (dirty) dirtyProviders.current.add(provider); else dirtyProviders.current.delete(provider);
+    onDirtyChange?.(dirtyProviders.current.size > 0);
+  };
   return <>
-    {snapshot.error && <p className="field-note" role="status">Model information could not be refreshed. Your saved choices are still available. <button type="button" className="btn btn-small" onClick={() => { void refreshModelOptions().catch(() => undefined); }}>Retry models</button></p>}
-    <StageModelsSettings key={options.provider} options={options} />
+    {!current && <div className="settings-research-controls">
+      {snapshot.error ? <><p className="error-text" role="alert">{errorMessage(snapshot.error)}</p><button type="button" className="btn btn-small" onClick={() => { void refreshModelOptions().catch(() => undefined); }}>Retry models</button></>
+        : <p className="field-note" role="status">Loading models…</p>}
+    </div>}
+    {current && snapshot.error && <p className="field-note" role="status">Model information could not be refreshed. Your saved choices are still available. <button type="button" className="btn btn-small" onClick={() => { void refreshModelOptions().catch(() => undefined); }}>Retry models</button></p>}
+    {[...editors.current].map(([provider, entry]) => <div key={provider} hidden={provider !== settings.llm.provider}>
+      {provider === 'offline' ? <p className="field-note">The offline provider is deterministic; model selection does not apply.</p>
+        : entry.options.stages ? <StageModelsSettings options={entry.options} onDirtyChange={dirty => updateDirty(provider, dirty)} />
+          : <LegacyTaskModelsSettings settings={entry.settings} onDirtyChange={dirty => updateDirty(provider, dirty)} />}
+    </div>)}
   </>;
 }
 
-function StageModelsSettings({ options }: { options: ModelOptionsResponse }) {
+function StageModelsSettings({ options, onDirtyChange }: { options: ModelOptionsResponse; onDirtyChange?: (dirty: boolean) => void }) {
   const prefix = useId();
   const [baseline, setBaseline] = useState<StageSettingsMap>(options.stageSettings ?? {});
   const [draft, setDraft] = useState<StageSettingsMap>(options.stageSettings ?? {});
@@ -32,6 +45,7 @@ function StageModelsSettings({ options }: { options: ModelOptionsResponse }) {
   const previousSettings = useRef(options.stageSettings);
   useEffect(() => { live.current = true; return () => { live.current = false; }; }, []);
   const dirty = !sameStageSettings(draft, baseline);
+  useEffect(() => { onDirtyChange?.(dirty); return () => onDirtyChange?.(false); }, [dirty, onDirtyChange]);
   useEffect(() => {
     // Background settings refreshes must not discard a stage draft.
     if (previousSettings.current === options.stageSettings) return;

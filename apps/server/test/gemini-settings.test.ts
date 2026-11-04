@@ -27,7 +27,8 @@ test("Gemini credentials are verified before private persistence and never expos
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const verified: GeminiConnectionInput[] = [];
   const store = new SettingsStore(dir, { validateGemini: async (input) => {
-    verified.push(input);
+    const { signal: _signal, ...connection } = input;
+    verified.push(connection);
     if (input.apiKey === "rejected-key") throw new Error("verification failed");
   } });
   const saved = await store.put({ llm: { provider: "gemini", model: "gemini-3.8-flash", geminiApiKey: " test-gemini-key ", baseUrl: "https://gateway.example", transcript: "off" } });

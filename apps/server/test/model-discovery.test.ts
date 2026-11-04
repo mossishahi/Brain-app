@@ -127,6 +127,26 @@ test("failed optional runtime preparation preserves cached models and can retry"
   assert.equal(discovered, 2);
 });
 
+test("hung runtime preparation expires and late completion cannot replace a newer catalog", async (t) => {
+  let preparations = 0; let discoveries = 0; let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const cache = new ModelDiscovery(workspace(t), async () => {
+    discoveries++;
+    return { models: [{ ...model, label: `Discovery ${discoveries}` }] };
+  }, 15, async () => { if (++preparations === 2) await held; }, 20);
+  const original = await cache.refresh(context);
+  const stale = await cache.refresh(context);
+  assert.equal(stale.stale, true);
+  assert.deepEqual(stale.models, original.models);
+  const newer = await cache.refresh(context);
+  assert.equal(newer.stale, false);
+  assert.equal(newer.models[0]!.label, "Discovery 2");
+  release();
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(discoveries, 2, "timed-out preparation must not start a provider call later");
+  assert.deepEqual(cache.read(context), newer);
+});
+
 test("corrupt persisted capabilities cannot enable unsupported controls", (t) => {
   const root = workspace(t);
   const key = new ModelDiscovery(root).key(context);

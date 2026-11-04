@@ -1731,6 +1731,25 @@ test("validateCursorApiKey runs one plain-text task through the factory", async 
   assert.deepEqual(state.options[0]!.tools, []);
 });
 
+test("validateCursorApiKey cancellation during model lookup never starts an agent", async () => {
+  const controller = new AbortController();
+  const state = newState();
+  let started!: () => void;
+  const lookupStarted = new Promise<void>(resolve => { started = resolve; });
+  let release!: () => void;
+  const lookup = new Promise<void>(resolve => { release = resolve; });
+  const check = validateCursorApiKey({
+    apiKey: "cursor-key", model: "composer-2.5", signal: controller.signal,
+    listModels: async () => { started(); await lookup; return CATALOG; },
+    agentFactory: fakeFactory([{ result: finished("OK.") }], state),
+  });
+  await lookupStarted;
+  controller.abort("settings request cancelled");
+  release();
+  await assert.rejects(check, { name: "AbortError" });
+  assert.equal(state.prompts.length, 0);
+});
+
 test("cursorOutputSchema flattens a top-level object union and strips $schema", () => {
   const flattened = cursorOutputSchema({
     $schema: "https://json-schema.org/draft/2020-12/schema",

@@ -35,6 +35,8 @@ export class CachedResource<T> {
       throw error;
     });
     this.pending = pending;
+    // A rejected initial request must not poison every later reader.
+    void pending.finally(() => { if (this.pending === pending) this.pending = undefined; }).catch(() => undefined);
     return pending;
   };
 }

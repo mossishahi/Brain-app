@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { ServerEvent } from '@brainstorm-agentic/protocol';
 import { SerializedResource } from '../src/data/serialized-resource.js';
+import { CachedResource } from '../src/data/cached-resource.js';
 import { BoundedCache } from '../src/data/bounded-cache.js';
 import { compactEvents, isServerEvent } from '../src/data/event-batch.js';
 import { parseRoute } from '../src/shell/routes.js';
@@ -27,6 +28,52 @@ test('a read that overlaps a write never restores stale settings; simultaneous r
   const a = resource.read(load); const b = resource.read(load); assert.equal(a, b);
   await tick(); await resource.mutate(async () => 2, () => {}); stale.resolve(1);
   assert.equal(await a, 2); assert.equal(count, 2);
+});
+
+test('opening another editor can read saved settings while a provider save is pending', async () => {
+  const resource = new SerializedResource<number>();
+  assert.equal(await resource.read(async () => 1), 1);
+  const provider = deferred<number>();
+  const save = resource.mutate(() => provider.promise, () => {});
+  let readSettled = false;
+  const read = resource.read(async () => 1).then(value => { readSettled = true; return value; });
+  await tick();
+  assert.equal(readSettled, true, 'a read must not queue behind credential verification');
+  assert.equal(await read, 1);
+  assert.equal(resource.getSnapshot(), 1);
+  provider.resolve(2); await save;
+  assert.equal(resource.getSnapshot(), 2);
+});
+
+test('a read begun after a queued write cannot overwrite its later committed snapshot', async () => {
+  const resource = new SerializedResource<number>();
+  const provider = deferred<number>(); const oldRead = deferred<number>();
+  const save = resource.mutate(() => provider.promise, () => {});
+  let count = 0;
+  const read = resource.read(() => ++count === 1 ? oldRead.promise : Promise.resolve(2));
+  provider.resolve(2); await save;
+  oldRead.resolve(1);
+  assert.equal(await read, 2);
+  assert.equal(resource.getSnapshot(), 2);
+});
+
+test('a failed catalog load is retryable and late refreshes cannot replace newer results', async () => {
+  let attempts = 0;
+  const old = deferred<number>();
+  const resource = new CachedResource(() => {
+    attempts += 1;
+    if (attempts === 1) return Promise.reject(new Error('offline'));
+    if (attempts === 2) return old.promise;
+    return Promise.resolve(3);
+  });
+  await assert.rejects(resource.read(), /offline/);
+  const retry = resource.read();
+  await tick();
+  assert.equal(attempts, 2);
+  await resource.refresh();
+  old.resolve(2); await retry;
+  assert.equal(resource.getSnapshot().value, 3);
+  assert.equal(resource.getSnapshot().loading, false);
 });
 
 test('job snapshots obey byte/count/age budgets and oversized jobs do not remain cached', () => {
