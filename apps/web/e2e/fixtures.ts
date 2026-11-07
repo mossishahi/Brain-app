@@ -121,6 +121,7 @@ export async function mockBrain(page: Page, options: { jobs?: readonly JobSummar
       return json(state.gpuSetup);
     }
     if (path === '/update-check') return json({ version: '0.1.0', selfUpdateEnabled: false });
+    if (path === '/readiness/encoders') return json({ selected: 'specter2', selectedAvailable: true, encoders: [{ id: 'specter2', available: true, managed: true, state: 'ready', detail: 'Model ready' }] });
     if (path.startsWith('/readiness')) return json(state.readiness);
     if (path === '/model-options') return json({ defaultModel: 'auto', taskTypes: [{ id: 'review', description: 'Scientific review' }, { id: 'synthesis', description: 'Combine perspectives' }], models: [{ id: 'auto', label: 'Auto', capabilities: { effortLevels: ['low', 'medium', 'high'], adaptiveThinking: true, thinkingCanBeDisabled: true } }, { id: 'review-model', label: 'Review model' }],
       ...state.modelOptions, provider: state.settings.llm.provider, modelsByRoute: state.settings.llm.modelsByRoute ?? {},

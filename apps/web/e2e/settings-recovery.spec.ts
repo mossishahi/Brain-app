@@ -99,12 +99,12 @@ test('stage model drafts survive category navigation and need an explicit discar
     models: [{ id: 'auto', label: 'Default model' }, { id: 'fast', label: 'Fast model' }],
   } });
   await page.goto('/');
-  const dialog = await openSettings(page, 'Stage models');
+  const dialog = await openSettings(page, 'Pipeline models');
   await dialog.getByRole('combobox', { name: 'First pass model', exact: true }).selectOption('fast');
   for (const category of ['Models & connections', 'Appearance', 'Research']) {
     await dialog.getByRole('button', { name: category, exact: true }).click();
     await expect(dialog.getByRole('combobox', { name: 'First pass model', exact: true })).not.toBeVisible();
-    await dialog.getByRole('button', { name: 'Stage models', exact: true }).click();
+    await dialog.getByRole('button', { name: 'Pipeline models', exact: true }).click();
     await expect(dialog.getByRole('combobox', { name: 'First pass model', exact: true })).toHaveValue('fast');
   }
   await dialog.getByRole('button', { name: 'Done', exact: true }).click();
@@ -124,12 +124,12 @@ test('a provider change preserves the previous provider stage draft and close wa
     models: [{ id: 'auto', label: 'Default model' }, { id: 'fast', label: 'Fast model' }],
   } });
   await page.goto('/');
-  const dialog = await openSettings(page, 'Stage models');
+  const dialog = await openSettings(page, 'Pipeline models');
   await dialog.getByRole('combobox', { name: 'First pass model', exact: true }).selectOption('fast');
   await dialog.getByRole('button', { name: 'Models & connections', exact: true }).click();
   await dialog.getByLabel('Provider', { exact: true }).selectOption('anthropic');
   await expect.poll(() => brain.settings.llm.provider).toBe('anthropic');
-  await dialog.getByRole('button', { name: 'Stage models', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Pipeline models', exact: true }).click();
   await expect(dialog.getByRole('combobox', { name: 'First pass model', exact: true })).toHaveValue('');
   await dialog.getByRole('button', { name: 'Done', exact: true }).click();
   await expect(dialog.getByText('You have stage model choices that have not been saved. Keep editing to save them, or discard the draft.')).toBeVisible();
@@ -137,7 +137,7 @@ test('a provider change preserves the previous provider stage draft and close wa
   await dialog.getByRole('button', { name: 'Models & connections', exact: true }).click();
   await dialog.getByLabel('Provider', { exact: true }).selectOption('cursor-agent');
   await expect.poll(() => brain.settings.llm.provider).toBe('cursor-agent');
-  await dialog.getByRole('button', { name: 'Stage models', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Pipeline models', exact: true }).click();
   await expect(dialog.getByRole('combobox', { name: 'First pass model', exact: true })).toHaveValue('fast');
   await dialog.getByRole('button', { name: 'Save models', exact: true }).click();
   await expect.poll(() => brain.settings.llm.stageSettingsByProvider?.['cursor-agent']?.['first-pass']?.model).toBe('fast');

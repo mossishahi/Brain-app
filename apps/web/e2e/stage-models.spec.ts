@@ -20,13 +20,72 @@ async function openSettings(page: Page) {
   await page.getByRole('button', { name: 'Open settings menu', exact: true }).click();
   await page.getByRole('menuitem', { name: 'All settings…', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: 'Settings', exact: true });
-  await dialog.getByRole('button', { name: 'Stage models', exact: true }).click();
-  await expect(dialog.getByRole('button', { name: 'Stage models', exact: true })).toHaveAttribute('aria-current', 'page');
+  await dialog.getByRole('button', { name: 'Pipeline models', exact: true }).click();
+  await expect(dialog.getByRole('button', { name: 'Pipeline models', exact: true })).toHaveAttribute('aria-current', 'page');
   await expect(dialog.getByRole('button', { name: 'Models & connections', exact: true })).not.toHaveAttribute('aria-current', 'page');
-  await expect(dialog.getByRole('heading', { name: 'Models by workflow stage', exact: true })).toBeVisible();
+  await expect(dialog.getByRole('heading', { name: 'Models by pipeline stage', exact: true })).toBeVisible();
   return dialog;
 }
 const requests = (brain: Awaited<ReturnType<typeof mockBrain>>) => brain.requests.filter(request => request.path === '/model-options').length;
+
+test('pipeline choices are independent by stage and persist after reload and provider changes', async ({ page }) => {
+  const settings = defaultTestSettings();
+  settings.llm = { ...settings.llm, apiKeyConfigured: true,
+    stageSettingsByProvider: { anthropic: { 'classify-input': { model: 'opus', effort: 'max', thinking: 'adaptive' } } } };
+  const brain = await mockBrain(page, { settings, modelOptions });
+  await page.goto('/');
+  let dialog = await openSettings(page);
+  await dialog.getByRole('combobox', { name: 'Classify input model', exact: true }).selectOption('auto');
+  await dialog.getByRole('combobox', { name: 'Classify input thinking mode', exact: true }).selectOption('disabled');
+  await dialog.getByRole('combobox', { name: 'Classify input reasoning effort', exact: true }).selectOption('low');
+  await dialog.getByRole('combobox', { name: 'Classify input thinking transcript', exact: true }).selectOption('if-available');
+  await dialog.getByRole('combobox', { name: 'First pass model', exact: true }).selectOption('opus');
+  await dialog.getByRole('combobox', { name: 'First pass thinking mode', exact: true }).selectOption('adaptive');
+  await dialog.getByRole('combobox', { name: 'First pass reasoning effort', exact: true }).selectOption('max');
+  await dialog.getByRole('combobox', { name: 'First pass thinking transcript', exact: true }).selectOption('off');
+  await dialog.getByRole('button', { name: 'Save models', exact: true }).click();
+  const expected = {
+    'classify-input': { model: 'auto', thinking: 'disabled', effort: 'low', transcript: 'if-available' },
+    'first-pass': { model: 'opus', thinking: 'adaptive', effort: 'max', transcript: 'off' },
+  };
+  await expect.poll(() => brain.settings.llm.stageSettingsByProvider?.['cursor-agent']).toEqual(expected);
+  expect(brain.settings.llm.agentSdk).toEqual({ maxTurns: 80, effort: 'high', thinking: 'adaptive' });
+  await page.reload();
+  dialog = await openSettings(page);
+  await expect(dialog.getByRole('combobox', { name: 'Classify input thinking mode', exact: true })).toHaveValue('disabled');
+  await expect(dialog.getByRole('combobox', { name: 'First pass thinking mode', exact: true })).toHaveValue('adaptive');
+  await expect(dialog.getByRole('combobox', { name: 'First pass reasoning effort', exact: true })).toHaveValue('max');
+  await expect(dialog.getByRole('combobox', { name: 'First pass thinking transcript', exact: true })).toHaveValue('off');
+  await dialog.getByRole('button', { name: 'Models & connections', exact: true }).click();
+  await dialog.getByRole('combobox', { name: 'Provider', exact: true }).selectOption('anthropic');
+  await expect.poll(() => brain.settings.llm.provider).toBe('anthropic');
+  await dialog.getByRole('button', { name: 'Pipeline models', exact: true }).click();
+  await expect(dialog.getByRole('combobox', { name: 'Classify input model', exact: true })).toHaveValue('opus');
+  await expect(dialog.getByRole('combobox', { name: 'Classify input thinking mode', exact: true })).toHaveValue('adaptive');
+  await expect(dialog.getByRole('combobox', { name: 'First pass model', exact: true })).toHaveValue('');
+  await dialog.getByRole('button', { name: 'Models & connections', exact: true }).click();
+  await dialog.getByRole('combobox', { name: 'Provider', exact: true }).selectOption('cursor-agent');
+  await expect.poll(() => brain.settings.llm.provider).toBe('cursor-agent');
+  await dialog.getByRole('button', { name: 'Pipeline models', exact: true }).click();
+  await expect(dialog.getByRole('combobox', { name: 'Classify input thinking mode', exact: true })).toHaveValue('disabled');
+  await expect(dialog.getByRole('combobox', { name: 'First pass reasoning effort', exact: true })).toHaveValue('max');
+  expect(brain.settings.llm.stageSettingsByProvider?.['cursor-agent']).toEqual(expected);
+  expect(brain.unhandled).toEqual([]);
+});
+
+test('a model that requires thinking does not offer disabled mode', async ({ page }) => {
+  const settings = defaultTestSettings();
+  settings.llm.agentSdk = { ...settings.llm.agentSdk!, thinking: 'disabled' };
+  await mockBrain(page, { settings, modelOptions: { ...modelOptions, models: [
+    { id: 'auto', label: 'Required thinking', capabilities: { effortLevels: ['high'], adaptiveThinking: true, thinkingCanBeDisabled: false } },
+  ] } });
+  await page.goto('/');
+  const dialog = await openSettings(page);
+  const thinking = dialog.getByRole('combobox', { name: 'Classify input thinking mode', exact: true });
+  await expect(thinking.locator('option')).toHaveText(['Default (adaptive, required by model)', 'Adaptive']);
+  await expect(dialog.getByText('This model requires adaptive thinking.')).toHaveCount(stages.length);
+  await expect(dialog.getByRole('combobox', { name: 'Classify input thinking transcript', exact: true })).toBeEnabled();
+});
 
 test('Gemini reasoning and transcript controls are independent, including unknown models', async ({ page }) => {
   const settings = defaultTestSettings();
@@ -37,7 +96,7 @@ test('Gemini reasoning and transcript controls are independent, including unknow
   ] } });
   await page.goto('/');
   const dialog = await openSettings(page);
-  await expect(dialog.getByRole('switch', { name: 'Classify input Adaptive thinking', exact: true })).toHaveCount(0);
+  await expect(dialog.getByRole('combobox', { name: 'Classify input thinking mode', exact: true })).toBeDisabled();
   const effort = dialog.getByRole('combobox', { name: 'Classify input reasoning effort', exact: true });
   await expect(effort.locator('option')).toHaveText(['Default (model decides)', 'Minimal', 'Low', 'Medium', 'High']);
   await effort.selectOption('minimal');
@@ -65,7 +124,7 @@ test('changing transcript recording updates stage defaults without changing reas
   await dialog.getByRole('button', { name: 'Models & connections', exact: true }).click();
   await dialog.getByRole('switch', { name: 'Record thinking transcripts when available', exact: true }).click();
   await expect.poll(() => brain.settings.llm.transcript).toBe('off');
-  await dialog.getByRole('button', { name: 'Stage models', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Pipeline models', exact: true }).click();
   const transcript = dialog.getByRole('combobox', { name: 'Classify input thinking transcript', exact: true });
   await expect(transcript.locator('option').first()).toHaveText('Default (off)');
   await expect(transcript).toHaveValue('if-available');
@@ -83,16 +142,17 @@ test('launch loads one shared catalog and stage controls follow selected model c
   const dialog = await openSettings(page);
   const model = dialog.getByRole('combobox', { name: 'Classify input model', exact: true });
   const effort = dialog.getByRole('combobox', { name: 'Classify input reasoning effort', exact: true });
-  const thinking = dialog.getByRole('switch', { name: 'Classify input Adaptive thinking', exact: true });
+  const thinking = dialog.getByRole('combobox', { name: 'Classify input thinking mode', exact: true });
   await expect(effort.locator('option')).toHaveText(['Default (high)', 'Low', 'Medium', 'High']);
   await expect(thinking).toBeEnabled();
   await model.selectOption('opus');
   await expect(effort.locator('option')).toHaveText(['Default (high)', 'Low', 'Medium', 'High', 'Max']);
-  await expect(thinking).toBeChecked();
-  await expect(thinking).toBeDisabled();
+  await expect(thinking.locator('option')).toHaveText(['Default (adaptive)', 'Adaptive']);
+  await expect(thinking).toBeEnabled();
   await model.selectOption('fast');
   await expect(effort.locator('option')).toHaveText(['Default (model decides)', 'Low']);
-  await expect(thinking).toHaveCount(0);
+  await expect(thinking).toBeDisabled();
+  await expect(thinking.locator('option')).toHaveText(['Default (model controlled)']);
   await model.selectOption('custom');
   await expect(effort).toBeDisabled();
   await expect(dialog.getByText('Reasoning controls are unavailable until this model’s capabilities are known.')).toBeVisible();
@@ -115,7 +175,7 @@ test('stage saves preserve hidden choices, clear incompatible reasoning, and res
   const model = dialog.getByRole('combobox', { name: 'Classify input model', exact: true });
   const effort = dialog.getByRole('combobox', { name: 'Classify input reasoning effort', exact: true });
   await effort.selectOption('high');
-  await dialog.getByRole('switch', { name: 'Classify input Adaptive thinking', exact: true }).click();
+  await dialog.getByRole('combobox', { name: 'Classify input thinking mode', exact: true }).selectOption('disabled');
   await dialog.getByRole('button', { name: 'Save models', exact: true }).click();
   await expect(dialog.getByText('Models saved', { exact: true })).toBeVisible();
   await expect.poll(() => brain.settings.llm.stageSettingsByProvider?.['cursor-agent']?.['classify-input']).toEqual({ effort: 'high', thinking: 'disabled' });
@@ -148,7 +208,7 @@ test('failed saves retain the draft and provider changes load that provider’s 
   await dialog.getByRole('button', { name: 'Models & connections', exact: true }).click();
   await dialog.getByRole('combobox', { name: 'Provider', exact: true }).selectOption('anthropic');
   await expect.poll(() => brain.settings.llm.provider).toBe('anthropic');
-  await dialog.getByRole('button', { name: 'Stage models', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Pipeline models', exact: true }).click();
   await expect(model).toHaveValue('opus');
   await expect(dialog.getByRole('combobox', { name: 'Classify input reasoning effort', exact: true })).toHaveValue('max');
   expect(requests(brain)).toBe(2);
@@ -177,12 +237,14 @@ test('unknown off support never claims thinking is mandatory and saved overrides
   const brain = await mockBrain(page, { settings, modelOptions });
   await page.goto('/');
   const dialog = await openSettings(page);
-  const thinking = dialog.getByRole('switch', { name: 'Classify input Adaptive thinking', exact: true });
-  await expect(thinking).toBeDisabled();
-  await expect(thinking).not.toBeChecked();
-  await expect(thinking).toContainText('The provider has not reported whether thinking can be disabled.');
+  const thinking = dialog.getByRole('combobox', { name: 'Classify input thinking mode', exact: true });
+  await expect(thinking).toBeEnabled();
+  await expect(thinking).toHaveValue('disabled');
+  await expect(thinking.locator('option[value="disabled"]')).toBeDisabled();
+  await expect(thinking.locator('option').first()).toHaveText('Default (model controlled)');
+  await expect(dialog.getByText('The provider has not reported whether thinking can be disabled.')).toBeVisible();
   await expect(dialog.getByText('The saved thinking override is not confirmed as supported by this model. Use the default or choose another model.')).toBeVisible();
-  await dialog.getByRole('button', { name: 'Use default thinking for Classify input', exact: true }).click();
+  await thinking.selectOption('');
   await dialog.getByRole('button', { name: 'Save models', exact: true }).click();
   await expect.poll(() => brain.settings.llm.stageSettingsByProvider?.['cursor-agent']?.['classify-input']).toEqual({ model: 'opus' });
 });
@@ -193,6 +255,23 @@ test('an unavailable workflow explains when its stage list will refresh', async 
   const dialog = await openSettings(page);
   await expect(dialog.getByText('Workflow stages are unavailable. They will be checked at the next research launch.')).toBeVisible();
   await expect(dialog.getByRole('button', { name: 'Save models', exact: true })).toBeDisabled();
+});
+
+test('unsupported saved reasoning can be reset without discarding model or transcript preferences', async ({ page }) => {
+  const settings = defaultTestSettings();
+  settings.llm = { ...settings.llm, stageSettingsByProvider: { 'cursor-agent': { 'classify-input': { model: 'custom', effort: 'max', thinking: 'adaptive', transcript: 'off' } } } };
+  const brain = await mockBrain(page, { settings, modelOptions });
+  await page.goto('/');
+  const dialog = await openSettings(page);
+  const effort = dialog.getByRole('combobox', { name: 'Classify input reasoning effort', exact: true });
+  const thinking = dialog.getByRole('combobox', { name: 'Classify input thinking mode', exact: true });
+  await expect(effort).toBeEnabled();
+  await expect(effort.locator('option[value="max"]')).toBeDisabled();
+  await expect(thinking).toBeEnabled();
+  await effort.selectOption('');
+  await thinking.selectOption('');
+  await dialog.getByRole('button', { name: 'Save models', exact: true }).click();
+  await expect.poll(() => brain.settings.llm.stageSettingsByProvider?.['cursor-agent']?.['classify-input']).toEqual({ model: 'custom', transcript: 'off' });
 });
 
 test('a provider changed in another window refreshes the shared catalog once', async ({ page }) => {
@@ -214,7 +293,7 @@ test('the workflow panel remains usable with a full workflow on desktop and mobi
   await mockBrain(page, { modelOptions: { ...modelOptions, stages: names.map((label, index) => ({ id: `stage-${index}`, label, description: `${label} for this research workflow.` })) } });
   await page.goto('/');
   const dialog = await openSettings(page);
-  await dialog.getByRole('heading', { name: 'Models by workflow stage', exact: true }).evaluate(element => {
+  await dialog.getByRole('heading', { name: 'Models by pipeline stage', exact: true }).evaluate(element => {
     const content = element.closest<HTMLElement>('.settings-content')!;
     content.scrollTop += element.getBoundingClientRect().top - content.getBoundingClientRect().top - 16;
   });

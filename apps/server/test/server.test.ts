@@ -1853,24 +1853,37 @@ test("stage model options serve cached data during startup discovery and refresh
     await waitUntil(async () => (await requestJson<ModelOptionsResponse>(server, "/api/model-options")).value.refreshing === false);
     const initial = await requestJson<ModelOptionsResponse>(server, "/api/model-options");
     assert.equal(initial.value.models[0]!.label, "Discovery 1");
-    assert.ok(initial.value.stages!.some((stage) => stage.id === "classify-input"));
-    assert.ok(initial.value.stages!.some((stage) => stage.id === "fact-verification"));
+    const stageIds = initial.value.stages!.map((stage) => stage.id);
+    assert.equal(new Set(stageIds).size, stageIds.length, "nested loops must not duplicate stage selectors");
+    for (const id of [
+      "process-input", "classify-input", "annotate-code", "screen-literature", "develop-idea",
+      "game-comment-step-bridge", "game-comment-step", "chair-step", "game-chair-reassess", "game-redevelop-idea",
+      "comment-step-bridge", "comment-step", "judge-step", "judge-reassess", "redevelop-idea",
+      "bridge-audit", "synthesize-proposal", "fact-verification", "fact-consultation", "fact-update",
+    ]) assert.ok(stageIds.includes(id), `the stage picker must expose ${id}`);
     const registryReads = server.registryReads.length;
     await requestJson(server, "/api/model-options");
     await requestJson(server, "/api/model-options");
     assert.equal(discoveries, 1);
     assert.equal(server.registryReads.length, registryReads, "picker reads never re-fetch the workflow");
+    const selections = Object.fromEntries(stageIds.map((id) => [id, {
+      model: "model-a", effort: id === "classify-input" ? "low" : "high",
+      thinking: id === "classify-input" ? "disabled" : "adaptive",
+    }]));
     const saved = await requestJson(server, "/api/settings/stage-models", { method: "PUT", body: JSON.stringify({
-      provider: "cursor-agent", stageSettings: { "classify-input": { model: "model-a", effort: "low", thinking: "disabled" } },
+      provider: "cursor-agent", stageSettings: selections,
     }) });
     assert.equal(saved.status, 200);
     assert.equal(discoveries, 1, "selection saves never discover models");
+    assert.deepEqual((await requestJson<ModelOptionsResponse>(server, "/api/model-options")).value.stageSettings, selections,
+      "every displayed stage retains its independent controls");
     const first = await requestJson<{ jobId: string }>(server, "/api/jobs", { method: "POST", body: JSON.stringify({ topic: "First cached model selection" }) });
     assert.equal(first.status, 200);
     assert.equal(discoveries, 2);
     const firstRecord = JSON.parse(readFileSync(join(server.manager.jobDir(first.value.jobId), "job.json"), "utf8")) as { executionSettings: ServerSettings };
     assert.equal(firstRecord.executionSettings.llm.modelCatalog!.models[0]!.label, "Discovery 2");
     assert.equal(firstRecord.executionSettings.llm.stageSettingsByProvider?.["cursor-agent"]?.["classify-input"]?.effort, "low");
+    assert.deepEqual(firstRecord.executionSettings.llm.stageSettingsByProvider?.["cursor-agent"], selections);
     const second = await requestJson<{ jobId: string }>(server, "/api/jobs", { method: "POST", body: JSON.stringify({ topic: "Second cached model selection" }) });
     assert.equal(second.status, 200);
     assert.equal(discoveries, 3);

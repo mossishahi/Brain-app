@@ -131,6 +131,49 @@ test("unknown and fallback capability metadata never synthesize effort or adapti
   }
 });
 
+test("stage choices reach the Claude SDK without changing the existing task limits or other stage defaults", async () => {
+  const config = providerConfigFromEnv({
+    BRAINSTORM_AGENTIC_PROVIDER: "claude-agent", BRAINSTORM_AGENTIC_MODEL: "large",
+    BRAINSTORM_AGENTIC_AGENT_MAX_TURNS: "500", BRAINSTORM_AGENTIC_AGENT_EFFORT: "max",
+    BRAINSTORM_AGENTIC_AGENT_THINKING: "adaptive", BRAINSTORM_AGENTIC_TRANSCRIPT: "if-available",
+    BRAINSTORM_AGENTIC_MODEL_CATALOG: JSON.stringify(catalog),
+    BRAINSTORM_AGENTIC_STAGE_SETTINGS: JSON.stringify({
+      "classify-input": { model: "small", effort: "low", thinking: "disabled" },
+      "screen-literature": { model: "small", effort: "medium", thinking: "disabled" },
+      "fact-verification": { model: "large", effort: "high", thinking: "adaptive" },
+    }),
+  }, false);
+  const resolver = contentRouteResolver(config);
+  const calls: Record<string, unknown>[] = [];
+  const executor = new ClaudeAgentExecutor({ token: "test-token", ...config.agentSdk,
+    effort: config.agentSdk?.effort === "minimal" ? undefined : config.agentSdk?.effort,
+    queryFn: (input) => ({ async *[Symbol.asyncIterator]() {
+      calls.push(input.options);
+      yield { type: "result", subtype: "success", is_error: false, result: '{"answer":"ok"}', structured_output: { answer: "ok" } };
+    } }),
+  });
+  for (const [id, route, model, effort, thinking] of [
+    ["classify-input", "reasoning", "small", "low", "disabled"],
+    ["screen-literature", "balanced", "small", "medium", "disabled"],
+    ["fact-verification", "reasoning", "large", "high", "adaptive"],
+    ["develop-idea", "reasoning", "large", "max", "adaptive"],
+    ["synthesize-proposal", "writing", "large", "max", "adaptive"],
+  ] as const) {
+    const resolved = await resolver.resolve(request(id, route));
+    const result = await executor.execute({ taskId: `stage:${id}`, kind: id, input: {},
+      modelRequest: { modelId: resolved.modelId, execution: resolved.execution,
+        messages: [{ role: "user", content: [{ type: "text", text: "Complete this task." }] }] },
+    }, { runId: "stage-config", nodePath: `root/${id}` });
+    assert.equal(result.status, "ok", id);
+    const called = calls.at(-1)!;
+    assert.equal(called.model, model, id);
+    assert.equal(called.effort, effort, id);
+    assert.deepEqual(called.thinking, thinking === "disabled" ? { type: "disabled" } : { type: "adaptive", display: "summarized" }, id);
+    assert.equal(called.maxTurns, 500, "stage model settings must not impose a separate turn limit");
+  }
+  assert.equal(calls.length, 5);
+});
+
 test("explicit unsupported settings and unknown provider models fail before execution", async () => {
   for (const override of [
     { model: "small", effort: "max" as const },

@@ -60,12 +60,13 @@ npm run build
 npm test
 ```
 
-### Models and reasoning by workflow stage
+### Models and reasoning by pipeline stage
 
-In **Settings → Stage models**, the panel lets each agent
-stage use its own model, reasoning effort, supported thinking controls, and
-thinking-transcript policy for the
-selected provider. For example, input classification and proposal synthesis can
+In **Settings → Pipeline models**, each agent stage has separate selectors for
+its model, thinking mode, and reasoning effort, plus an independent
+thinking-transcript policy for the selected provider. Thinking mode offers
+**Default**, **Adaptive**, and **Disabled** where the model supports them.
+Choose **Save models** to save the changes. For example, input classification and proposal synthesis can
 use different settings even though both use the same underlying reasoning route.
 Choices are retained separately for each provider. An unset stage option inherits
 the existing route or connection default, subject to the selected model's reported
