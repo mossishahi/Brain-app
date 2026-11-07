@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ModelOptionsResponse, StageModelSettings } from '@brainstorm-agentic/protocol';
-import { changeStageModel, findModel, inheritedStageModel, sameStageSettings, updateStage } from '../src/components/settings/stage-models-model.js';
+import { changeStageModel, findModel, inheritedStageModel, inheritedThinkingLabel, sameStageSettings, updateStage } from '../src/components/settings/stage-models-model.js';
 
 const stage = { id: 'classify-input', label: 'Classify input', description: 'Classify the research question', route: 'balanced' };
 const options: ModelOptionsResponse = {
@@ -16,6 +16,15 @@ test('inherited model follows route overrides and model aliases find capabilitie
   assert.equal(inheritedStageModel(options, stage), 'balanced-model');
   assert.equal(inheritedStageModel(options, { ...stage, route: undefined }), 'default-model');
   assert.equal(findModel(options.models, 'capable-alias')?.id, 'capable');
+});
+test('inherited thinking labels never claim unsupported global overrides will run', () => {
+  const configured = { ...options, defaults: { thinking: 'disabled' as const } };
+  assert.equal(inheritedThinkingLabel(configured, 'capable-alias'), 'disabled');
+  assert.equal(inheritedThinkingLabel(configured, 'limited'), 'model controlled');
+  assert.equal(inheritedThinkingLabel(configured, 'unknown'), 'capabilities unavailable');
+  assert.equal(inheritedThinkingLabel({ ...options, defaults: { thinking: 'adaptive' } }, 'limited'), 'adaptive');
+  const required = { ...configured, models: [{ id: 'required', label: 'Required', capabilities: { effortLevels: [], adaptiveThinking: true, thinkingCanBeDisabled: false } }] };
+  assert.equal(inheritedThinkingLabel(required, 'required'), 'adaptive, required by model');
 });
 test('changing a model clears unsupported reasoning and preserves unrelated stages', () => {
   const initial: Record<string, StageModelSettings> = { [stage.id]: { model: 'capable', effort: 'high', thinking: 'disabled' }, hidden: { model: 'custom' } };

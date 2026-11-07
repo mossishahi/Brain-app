@@ -1873,12 +1873,12 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
               </span>
             </Section>
                 </>}</>}
-                {loaded && stageModelsVisited && <div hidden={activeCategory !== "stageModels"}><section className="settings-section"><div className="settings-section-heading"><h3>Models by workflow stage</h3><span className="settings-section-summary">Provider: {providerLabels[loaded.llm.provider]}</span></div><div className="settings-section-content"><TaskModelsSettings settings={loaded} onDirtyChange={dirty => { stageDraftPresent.current = dirty; }} /></div></section></div>}
+                {loaded && stageModelsVisited && <div hidden={activeCategory !== "stageModels"}><section className="settings-section"><div className="settings-section-heading"><h3>Models by pipeline stage</h3><span className="settings-section-summary">Provider: {providerLabels[loaded.llm.provider]}</span></div><div className="settings-section-content"><TaskModelsSettings settings={loaded} onDirtyChange={dirty => { stageDraftPresent.current = dirty; }} /></div></section></div>}
               </SettingsCategoryContext.Provider>
             </div>
           </div>
           <footer className="settings-footer">
-            {closeWarning ? <div className="settings-close-warning" role="alert"><p>{closeWarning}</p><div><button type="button" className="btn" onClick={() => { afterClose.current = null; setCloseWarning(null); }}>Keep editing</button><button type="button" className="btn" disabled={closing} onClick={() => void requestClose(true)}>Discard unsaved changes</button></div></div> : <><span>Most changes save automatically. Credentials and stage models need Save.</span><button type="button" className="btn" disabled={closing} onClick={() => void requestClose()}>{closing ? "Saving…" : "Done"}</button></>}
+            {closeWarning ? <div className="settings-close-warning" role="alert"><p>{closeWarning}</p><div><button type="button" className="btn" onClick={() => { afterClose.current = null; setCloseWarning(null); }}>Keep editing</button><button type="button" className="btn" disabled={closing} onClick={() => void requestClose(true)}>Discard unsaved changes</button></div></div> : <><span>Most changes save automatically. Credentials and pipeline models need Save.</span><button type="button" className="btn" disabled={closing} onClick={() => void requestClose()}>{closing ? "Saving…" : "Done"}</button></>}
           </footer>
         </Dialog.Popup>
       </Dialog.Portal>

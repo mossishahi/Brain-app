@@ -251,7 +251,7 @@ test('attachment menus restore focus and Settings task-model saves preserve unre
   await page.keyboard.press('ArrowDown');
   await page.keyboard.press('Escape');
   await expect(attachments).toBeFocused();
-  const models = await openSettings(page, 'Stage models');
+  const models = await openSettings(page, 'Pipeline models');
   await models.getByRole('combobox', { name: 'Review', exact: true }).selectOption('review-model');
   await expect(models.getByRole('combobox', { name: 'Synthesis', exact: true })).toHaveValue('retained-custom-model');
   await models.getByRole('button', { name: 'Save models', exact: true }).click();
@@ -262,7 +262,7 @@ test('attachment menus restore focus and Settings task-model saves preserve unre
   await expect(models).not.toBeVisible();
   await expect(page.locator('#canvas-settings-trigger')).toBeFocused();
   await expect(question(page)).toHaveValue('A draft that stays while models are configured');
-  await openSettings(page, 'Stage models');
+  await openSettings(page, 'Pipeline models');
   await expect(models.getByRole('combobox', { name: 'Review', exact: true })).toHaveValue('review-model');
   await expect(models.getByRole('combobox', { name: 'Synthesis', exact: true })).toHaveValue('retained-custom-model');
   await models.getByRole('button', { name: 'Done', exact: true }).click();
@@ -313,7 +313,7 @@ for (const viewport of [{ width: 320, height: 740 }, { width: 390, height: 844 }
     expect(bounds!.x).toBeGreaterThanOrEqual(0);
     expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(viewport.width + 1);
     await page.keyboard.press('Escape');
-    const models = await openSettings(page, 'Models & connections');
+    const models = await openSettings(page, 'Pipeline models');
     await expect(models.getByRole('combobox', { name: 'Review', exact: true })).toBeVisible();
     const panelBounds = await models.boundingBox();
     expect(panelBounds!.x).toBeGreaterThanOrEqual(0);

@@ -72,7 +72,7 @@ test('model discovery failure is retryable and background refresh finishes witho
   });
   await page.goto('/');
   const dialog = await openDrawer(page);
-  await dialog.getByRole('button', { name: 'Stage models', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Pipeline models', exact: true }).click();
   await expect(dialog.getByText('Model discovery is unavailable', { exact: true })).toBeVisible();
   fail = false; refreshing = true;
   const before = reads;

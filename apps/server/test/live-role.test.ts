@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { LIVE_NODE_SKILLS } from "../src/job-manager.js";
 import { activityAnnotation, liveIdentityPanel } from "../src/stage-mapper.js";
@@ -23,33 +25,39 @@ import { activityAnnotation, liveIdentityPanel } from "../src/stage-mapper.js";
  * why this asserts they agree rather than asserting either one alone.
  */
 
-// Compiled to apps/server/dist/test/, so four levels up is the app repository
-// and five is the umbrella that holds app/ and brain/ side by side.
-const appRoot = new URL("../../../../", import.meta.url).pathname;
-const umbrellaRoot = new URL("../../../../../", import.meta.url).pathname;
+const brainRepoRoot = fileURLToPath(new URL("../../../../../brain/", import.meta.url));
+let materialized = false;
 
-/** The bundle version the suite is pinned to, from the app repository root. */
-function pinnedBundleVersion(): string {
-  const pin = JSON.parse(
-    readFileSync(join(appRoot, "test-bundle.json"), "utf8"),
-  ) as { readonly version: string };
-  return pin.version;
+/** Match the server suite's pin, candidate-release, and floating canary inputs. */
+function workflowContentDir(): string {
+  if (process.env.BRAIN_TEST_CONTENT_DIR) return process.env.BRAIN_TEST_CONTENT_DIR;
+  const registryRoot = process.env.BRAIN_TEST_REGISTRY_DIR ?? join(brainRepoRoot, ".registry-store");
+  if (!process.env.BRAIN_TEST_REGISTRY_DIR && !materialized) {
+    execFileSync(process.execPath, [join(brainRepoRoot, "scripts", "materialize-store.mjs"), "--quiet"], { stdio: "inherit" });
+    materialized = true;
+  }
+  const override = process.env.BRAIN_TEST_BUNDLE_VERSION;
+  let version: string;
+  if (override === "latest") {
+    const index = JSON.parse(readFileSync(join(registryRoot, "index.json"), "utf8")) as {
+      bundles: Array<{ id: string; latest: string }>;
+    };
+    const entry = index.bundles.find((bundle) => bundle.id === "brainstorm");
+    assert.ok(entry, "the registry index publishes the brainstorm bundle");
+    version = entry.latest;
+  } else {
+    version = override ?? (JSON.parse(
+      readFileSync(new URL("../../../../test-bundle.json", import.meta.url), "utf8"),
+    ) as { version: string }).version;
+  }
+  return join(registryRoot, "bundles", "brainstorm", version);
 }
 
-/** Every agent node of the pinned workflow, as `{ id, skill }`. */
+/** Every agent node of the selected workflow, as `{ id, skill }`. */
 function agentNodes(): readonly { readonly id: string; readonly skill: string }[] {
   const workflow = JSON.parse(
     readFileSync(
-      join(
-        umbrellaRoot,
-        "brain",
-        ".registry-store",
-        "bundles",
-        "brainstorm",
-        pinnedBundleVersion(),
-        "workflows",
-        "brainstorm.workflow.json",
-      ),
+      join(workflowContentDir(), "workflows", "brainstorm.workflow.json"),
       "utf8",
     ),
   ) as Record<string, unknown>;

@@ -7,6 +7,15 @@ export function findModel(models: readonly ModelOption[], id: string | undefined
 export function inheritedStageModel(options: ModelOptionsResponse, stage: StageOption): string | undefined {
   return (stage.route ? options.modelsByRoute[stage.route] : undefined) || options.defaults?.model || options.defaultModel;
 }
+/** Only describe an inherited mode when the selected model can accept it. */
+export function inheritedThinkingLabel(options: ModelOptionsResponse, model: string | undefined): string {
+  const capabilities = findModel(options.models, model)?.capabilities;
+  if (!capabilities) return 'capabilities unavailable';
+  if (options.defaults?.thinking === 'adaptive' && capabilities.adaptiveThinking) return 'adaptive';
+  if (options.defaults?.thinking === 'disabled' && capabilities.thinkingCanBeDisabled === true) return 'disabled';
+  if (capabilities.adaptiveThinking && capabilities.thinkingCanBeDisabled === false) return 'adaptive, required by model';
+  return 'model controlled';
+}
 export function updateStage(settings: StageSettingsMap, id: string, next: StageModelSettings): StageSettingsMap {
   const result = { ...settings };
   const clean: StageModelSettings = {

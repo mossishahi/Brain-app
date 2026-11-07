@@ -1,7 +1,7 @@
 /** Settings navigation is independent of the forms and their storage scopes. */
 export const settingsCategories = [
   { id: "connections", label: "Models & connections", description: "Choose a provider and configure how models work." },
-  { id: "stageModels", label: "Stage models", description: "Choose a model and reasoning settings for each stage of research." },
+  { id: "stageModels", label: "Pipeline models", description: "Choose the model, thinking mode, and reasoning effort for each pipeline stage." },
   { id: "research", label: "Research", description: "Set your review defaults and approval preferences." },
   { id: "tools", label: "Tools & sources", description: "Manage search, attachments, and execution capabilities." },
   { id: "execution", label: "Execution", description: "Configure where research tasks and GPU jobs run." },

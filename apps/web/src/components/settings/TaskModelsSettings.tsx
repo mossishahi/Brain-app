@@ -2,8 +2,7 @@ import { useEffect, useId, useRef, useState } from 'react';
 import type { ClaudeAgentEffort, ModelOptionsResponse, ServerSettings } from '@brainstorm-agentic/protocol';
 import { errorMessage, putStageModels, refreshModelOptions, useModelOptions } from '../../api';
 import { LegacyTaskModelsSettings } from './LegacyTaskModelsSettings';
-import { SettingsToggle } from './SettingsToggle';
-import { changeStageModel, findModel, inheritedStageModel, sameStageSettings, updateStage, type StageSettingsMap } from './stage-models-model';
+import { changeStageModel, findModel, inheritedStageModel, inheritedThinkingLabel, sameStageSettings, updateStage, type StageSettingsMap } from './stage-models-model';
 import './research-controls.css';
 
 export function TaskModelsSettings({ settings, onDirtyChange }: { settings: ServerSettings; onDirtyChange?: (dirty: boolean) => void }) {
@@ -66,7 +65,8 @@ function StageModelsSettings({ options, onDirtyChange }: { options: ModelOptions
     finally { if (live.current) setSaving(false); }
   }
   return <div className="settings-research-controls">
-    <p className="field-note">Choose models, reasoning settings, and optional thinking transcripts for future research. Reviewable argument steps are always kept. Existing runs keep their saved settings.</p>
+    <p className="field-note">Choose a model, thinking mode, and reasoning effort for each pipeline stage. Defaults follow your model connection settings where supported. Choices are saved separately for each provider and apply to new research; existing runs keep their saved settings.</p>
+    {!!options.stages?.length && <p className="field-note">{options.stages.length} pipeline stages. Available options depend on the selected model.</p>}
     {(options.catalog?.stale || options.catalog?.source === 'fallback') && <p className="field-note">Using saved model information. Controls are available where the model’s capabilities are known.</p>}
     {options.stages?.length === 0 && <p className="field-note" role="status">Workflow stages are unavailable. They will be checked at the next research launch.</p>}
     {saveError && <p className="error-text" role="alert">{saveError}</p>}
@@ -85,8 +85,6 @@ function StageModelsSettings({ options, onDirtyChange }: { options: ModelOptions
         const defaultEffort = inheritedEffort && effortLevels.includes(inheritedEffort) ? inheritedEffort : undefined;
         const adaptive = capabilities?.adaptiveThinking === true;
         const canDisable = capabilities?.thinkingCanBeDisabled === true;
-        const thinking = selected.thinking ?? options.defaults?.thinking;
-        const checked = adaptive && (capabilities?.thinkingCanBeDisabled === false || thinking !== 'disabled');
         const unconfirmedThinking = selected.thinking === 'adaptive' ? !adaptive : selected.thinking === 'disabled' && !canDisable;
         const modelId = `${prefix}-${stage.id}`;
         return <section className="settings-stage-model" key={stage.id} aria-labelledby={`${modelId}-title`}>
@@ -104,8 +102,20 @@ function StageModelsSettings({ options, onDirtyChange }: { options: ModelOptions
               </select>
             </div>
             <div className="field">
+              <label className="field-label" htmlFor={`${modelId}-thinking`}>Thinking mode</label>
+              <select id={`${modelId}-thinking`} aria-label={`${stage.label} thinking mode`} value={selected.thinking ?? ''} disabled={saving || (!adaptive && !canDisable && !selected.thinking)}
+                onChange={event => change(updateStage(draft, stage.id, { ...selected, thinking: (event.target.value as 'adaptive' | 'disabled') || undefined }))}>
+                <option value="">Default ({inheritedThinkingLabel(options, selected.model || inherited)})</option>
+                {adaptive && <option value="adaptive">Adaptive</option>}
+                {canDisable && <option value="disabled">Disabled</option>}
+                {unconfirmedThinking && <option disabled value={selected.thinking}>{selected.thinking === 'adaptive' ? 'Adaptive' : 'Disabled'} (saved; unavailable)</option>}
+              </select>
+              {capabilities?.thinkingCanBeDisabled === false && adaptive && <p className="field-note">This model requires adaptive thinking.</p>}
+              {adaptive && capabilities?.thinkingCanBeDisabled === undefined && <p className="field-note">The provider has not reported whether thinking can be disabled.</p>}
+            </div>
+            <div className="field">
               <label className="field-label" htmlFor={`${modelId}-effort`}>Reasoning effort</label>
-              <select id={`${modelId}-effort`} aria-label={`${stage.label} reasoning effort`} value={selected.effort ?? ''} disabled={saving || !effortLevels.length} onChange={event => change(updateStage(draft, stage.id, { ...selected, effort: (event.target.value as ClaudeAgentEffort) || undefined }))}>
+              <select id={`${modelId}-effort`} aria-label={`${stage.label} reasoning effort`} value={selected.effort ?? ''} disabled={saving || (!effortLevels.length && !selected.effort)} onChange={event => change(updateStage(draft, stage.id, { ...selected, effort: (event.target.value as ClaudeAgentEffort) || undefined }))}>
                 <option value="">{effortLevels.length ? `Default${defaultEffort ? ` (${defaultEffort})` : ' (model decides)'}` : capabilities ? 'Model controlled' : 'Capabilities unavailable'}</option>
                 {selected.effort && !effortLevels.includes(selected.effort) && <option disabled value={selected.effort}>{selected.effort} (saved; unavailable)</option>}
                 {effortLevels.map(effort => <option key={effort} value={effort}>{effort === 'xhigh' ? 'Extra high' : effort[0]!.toUpperCase() + effort.slice(1)}</option>)}
@@ -120,18 +130,9 @@ function StageModelsSettings({ options, onDirtyChange }: { options: ModelOptions
               <option value="if-available">Record when available</option>
               <option value="off">Off</option>
             </select>
-            <p className="field-note">Optional provider-supplied summaries. This does not change reasoning effort or remove argument steps.</p>
+            <p className="field-note">Optional provider-supplied summaries. Recording is separate from thinking mode and effort. Reviewable argument steps are always kept.</p>
           </div>
-          {adaptive && <SettingsToggle label={<><span className="settings-stage-model-sr">{stage.label} </span>Adaptive thinking</>} checked={checked} disabled={saving || !canDisable} onCheckedChange={value => change(updateStage(draft, stage.id, { ...selected, thinking: value ? 'adaptive' : 'disabled' }))} description={capabilities.thinkingCanBeDisabled === false ? 'This model requires adaptive thinking.' : !canDisable ? 'The provider has not reported whether thinking can be disabled.' : selected.thinking ? 'Custom setting for this stage.' : 'Using the default for this model.'} />}
-          {!adaptive && canDisable && <div className="field">
-            <label className="field-label" htmlFor={`${modelId}-thinking`}>Internal thinking</label>
-            <select id={`${modelId}-thinking`} aria-label={`${stage.label} internal thinking`} value={selected.thinking ?? ''} disabled={saving}
-              onChange={event => change(updateStage(draft, stage.id, { ...selected, thinking: event.target.value === 'disabled' ? 'disabled' : undefined }))}>
-              <option value="">Default (model controlled)</option><option value="disabled">Disabled</option>
-            </select>
-          </div>}
           {unconfirmedThinking && <p className="field-note">The saved thinking override is not confirmed as supported by this model. Use the default or choose another model.</p>}
-          {selected.thinking && <div><button type="button" className="btn btn-small" aria-label={`Use default thinking for ${stage.label}`} disabled={saving} onClick={() => change(updateStage(draft, stage.id, { ...selected, thinking: undefined }))}>Use default thinking</button></div>}
           {!capabilities && <p className="field-note">Reasoning controls are unavailable until this model’s capabilities are known.</p>}
         </section>;
       })}
