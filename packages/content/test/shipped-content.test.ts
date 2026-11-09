@@ -99,6 +99,7 @@ test("workflow phases appear in the canonical order", () => {
       "bridge-audit",
       ...(hasFactUpdates ? ["apply-fact-updates-before-synthesis"] : []),
       "synthesize-proposal",
+      ...(bundle.factTable?.accessMode === "supreme-dialogue/v2" ? ["finalize-fact-updates"] : []),
       "done",
     ],
   );
@@ -842,10 +843,11 @@ test("skills split into the expected roles and its techniques, with clean prompt
       "processor",
       ...(hasReconsideration ? ["reconsider-chain", "reconsider-comment", "reconsider-game-report"] : []),
       "redeveloper",
+      ...(bundle.factTable?.accessMode === "supreme-dialogue/v2" ? ["revoker"] : []),
       ...(hasGameReview && !hasCommittee ? ["review-chair"] : []),
       // The fact table's verifier ships with the fact table (catalog/fact-table.json).
       ...(bundle.skills["supreme_judge"] ? ["supreme_judge"] : []),
-      ...(bundle.factTable?.accessMode === "supreme-mediated/v1" ? ["supreme_judge_consult"] : []),
+      ...(bundle.factTable?.consultation !== undefined ? ["supreme_judge_consult"] : []),
     ].sort(),
   );
   assert.deepEqual(

@@ -522,7 +522,9 @@ function taskPath(taskId: string): string {
  * update (`fact-update:<key>:<attempt>`) and anything it requested.
  */
 function factUsageStage(taskId: string): StageId | undefined {
-  return taskId.startsWith("fact-update:") ? "review-members" : stageForPath(taskPath(taskId));
+  if (taskId.startsWith("fact-finalization:bridge:")) return "bridge-audit";
+  if (taskId.startsWith("fact-finalization:proposal:")) return "synthesize-proposal";
+  return /^(?:fact-update|revoker|recovery):/.test(taskId) ? "review-members" : stageForPath(taskPath(taskId));
 }
 
 /**
@@ -663,6 +665,7 @@ const SELECT_PANEL_SUBNODES = ["weave-panel", "seat-panel"] as const;
 const FACT_UPDATE_ROOT_NODES: ReadonlyMap<string, StageId> = new Map<string, StageId>([
   ["apply-fact-updates-after-review", "bridge-audit"],
   ["apply-fact-updates-before-synthesis", "synthesize-proposal"],
+  ["finalize-fact-updates", "synthesize-proposal"],
 ]);
 
 export function stageForPath(path: string): StageId | undefined {
@@ -2822,7 +2825,7 @@ function buildReviews(
     // Fact-update merges, in journal order, between the agent results they edit.
     const factMerge = factMergeOf(entry);
     if (factMerge !== undefined) {
-      if (/^(?:game-)?apply-fact-updates(?:-after-review|-before-synthesis)?$/.test(factMerge.node)) applyChainMerge(entry, factMerge.value);
+      if (factMerge.node === "finalize-fact-updates" || /^(?:game-)?apply-fact-updates(?:-after-review|-before-synthesis)?$/.test(factMerge.node)) applyChainMerge(entry, factMerge.value);
       else applyReportMerge(entry, factMerge.node, factMerge.value);
       continue;
     }
@@ -3776,13 +3779,16 @@ export function buildJobDetailWithActivity(input: MapperInput): JobDetailWithAct
       ...activityAnnotation(row.path, row.taskKind, finalPanel, editRounds),
     }));
   }
+  const finalized = object(object(journalNodeOutput(entries, "finalize-fact-updates", "factUpdates"))?.finalOutputs);
   const bridgeOutput =
+    bridgeReport(finalized?.bridge) ??
     bridgeReport(artifact(artifacts, "bridgeReport")) ??
     bridgeReport(journalAgent(entries, (key) =>
       key.includes("/bridge-audit") &&
       /\/bridge-audit(?:\/bridge-audit-execute)?::result$/.test(key)
     ));
   const proposalOutput =
+    proposal(finalized?.proposal) ??
     proposal(artifact(artifacts, "finalProposal")) ??
     proposal(journalAgent(entries, (key) =>
       key.includes("/synthesize-proposal") &&

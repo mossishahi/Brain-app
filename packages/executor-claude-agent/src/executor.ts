@@ -62,7 +62,7 @@ import {
   gpuRunTools,
   ATTACHMENT_LIST_MANIFEST,
   ATTACHMENT_SEARCH_MANIFEST,
-  FACT_TABLE_DEFINITION,
+  factTableDefinition,
   GPU_RUN_MANIFEST,
   NOTES_SEARCH_DEFINITION,
   WebAccessError,
@@ -851,14 +851,15 @@ function factsServer(
   context: AgentExecutionContext,
   watchdog: SessionWatchdog,
 ): ReturnType<typeof createSdkMcpServer> {
+  const definition = factTableDefinition(facts.accessMode);
   return createSdkMcpServer({
     name: FACTS_SERVER,
     version: "1.0.0",
     tools: [
       sdkTool(
         "fact_table",
-        FACT_TABLE_DEFINITION.description,
-        zodShape(FACT_TABLE_DEFINITION.inputSchema),
+        definition.description,
+        zodShape(definition.inputSchema),
         watchdog.held(async (args) => {
           try {
             const result = await runFactTable(
@@ -2409,9 +2410,10 @@ function offeredTools(
     });
   }
   if (config.facts !== undefined && factScopeFor(task) !== undefined) {
+    const definition = factTableDefinition(config.facts.accessMode);
     described.set(`mcp__${FACTS_SERVER}__fact_table`, {
-      description: FACT_TABLE_DEFINITION.description,
-      input: Object.keys(FACT_TABLE_DEFINITION.inputSchema.properties),
+      description: definition.description,
+      input: Object.keys(definition.inputSchema.properties),
     });
   }
   if (config.taxonomy !== undefined && taskUsesTaxonomy(task)) {

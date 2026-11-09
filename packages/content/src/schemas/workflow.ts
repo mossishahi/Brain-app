@@ -616,7 +616,7 @@ function definitionsOf<Names extends readonly string[]>(names: Names) {
 export const factTableCatalogSchema = z
   .object({
     version: semver,
-    accessMode: z.literal("supreme-mediated/v1").optional(),
+    accessMode: z.enum(["supreme-mediated/v1", "supreme-dialogue/v2"]).optional(),
     consultation: z.object({ skill: identifier, route: identifier, output: z.literal("factConsultation") }).strict().optional(),
     verifier: z
       .object({
@@ -631,6 +631,7 @@ export const factTableCatalogSchema = z
         chain: z.object({ skill: identifier, route: identifier, output: z.literal("chainReconsiderationParts") }).strict(),
         gameReport: z.object({ skill: identifier, route: identifier, output: z.literal("gameReportReconsideration") }).strict(),
         comment: z.object({ skill: identifier, route: identifier, output: z.literal("commentReconsideration") }).strict(),
+        revoker: z.object({ skill: identifier, route: identifier, output: z.literal("revokerPlan") }).strict().optional(),
       })
       .strict()
       .optional(),
@@ -656,6 +657,12 @@ export const factTableCatalogSchema = z
     }
     if ((control.updates !== undefined) !== (control.reconsideration !== undefined)) {
       ctx.addIssue({ code: "custom", path: ["reconsideration"], message: "fact updates and their reconsideration roles must be configured together" });
+    }
+    if (control.accessMode === "supreme-dialogue/v2" && control.reconsideration?.revoker === undefined) {
+      ctx.addIssue({ code: "custom", path: ["reconsideration", "revoker"], message: "shared fact dialogue requires its Revoker recovery planner" });
+    }
+    if (control.accessMode !== "supreme-dialogue/v2" && control.reconsideration?.revoker !== undefined) {
+      ctx.addIssue({ code: "custom", path: ["reconsideration", "revoker"], message: "Revoker recovery belongs to the supreme-dialogue/v2 protocol" });
     }
   });
 

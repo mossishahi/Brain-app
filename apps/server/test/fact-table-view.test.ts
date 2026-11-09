@@ -305,3 +305,30 @@ test("the Done stage detail cache refreshes when only the fact-update journal ch
     assert.deepEqual(done(await manager.detail(jobId)).factTable?.updates?.[0]?.subscribers.map((subscriber) => subscriber.state), ["unchanged"]);
   } finally { rmSync(workspace, { recursive: true, force: true }); }
 });
+
+test("v2 usage retains consultation and recovery spend without retaining a dialogue", () => {
+  const session = mkdtempSync(join(tmpdir(), "fact-view-v2-"));
+  try {
+    const requesterTaskId = "job:brainstorm-root/first-pass/develop-idea-execute";
+    const consultation = { type: "consultation-usage", requesterTaskId,
+      taskIds: ["fact-consultation:a", "fact-consultation:b"], usage: { inputTokens: 30, outputTokens: 4 }, at: 1 };
+    writeFileSync(join(session, "facts.jsonl"), line({ type: "transaction", records: [consultation,
+      { type: "verification-usage", requesterTaskId, verifierTaskId: "fact-verification:S:1", usage: { inputTokens: 40, outputTokens: 5 }, at: 2 },
+    ] }));
+    const recovery = { type: "recovery-result", taskId: "revoker:hash", output: { changes: [] }, usage: { inputTokens: 20, outputTokens: 3 }, at: 2 };
+    writeFileSync(join(session, "fact-updates.jsonl"), line(recovery) + line(recovery));
+    assert.deepEqual(factCallUsage(session), [
+      { taskId: requesterTaskId, usage: { inputTokens: 30, outputTokens: 4 } },
+      { taskId: requesterTaskId, usage: { inputTokens: 40, outputTokens: 5 } },
+      { taskId: "revoker:hash", usage: { inputTokens: 20, outputTokens: 3 } },
+    ]);
+    assert.deepEqual(readFactTableView(session)?.entries, []);
+    appendFileSync(join(session, "fact-updates.jsonl"),
+      line({ type: "recovery-call", taskId: "recovery:repair" }) +
+      line({ type: "recovery-result", taskId: "recovery:repair", status: "error", usage: { inputTokens: 5, outputTokens: 1 } }) +
+      line({ type: "recovery-call", taskId: "recovery:repair" }) +
+      line({ type: "recovery-result", taskId: "recovery:repair", output: {}, usage: { inputTokens: 7, outputTokens: 2 } }));
+    assert.deepEqual(factCallUsage(session).filter(call => call.taskId === "recovery:repair").map(call => call.usage.inputTokens), [5, 7],
+      "a rejected output and its actual retry both cost tokens; cached replay adds no spend");
+  } finally { rmSync(session, { recursive: true, force: true }); }
+});

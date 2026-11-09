@@ -152,7 +152,7 @@ export function readFactUpdateJournal(sessionDir: string): FactUpdateJournal {
 
 /** The merge nodes of the fact-update design (6.3); their journaled outputs name the tasks a merge discarded. */
 const FACT_MERGE_NODES = new Set(["game-apply-fact-updates", "apply-fact-updates", "apply-fact-updates-after-review",
-  "apply-fact-updates-before-synthesis", "game-apply-report-updates", "game-apply-late-report-updates",
+  "apply-fact-updates-before-synthesis", "finalize-fact-updates", "game-apply-report-updates", "game-apply-late-report-updates",
   "apply-comment-updates", "apply-late-comment-updates"]);
 
 /** A fact-update merge node's journaled output (schema factUpdateMerge), or undefined for any other entry. */
@@ -287,7 +287,24 @@ export function factCallUsage(sessionDir: string): FactCallUsage[] {
       }
     }
     const verifications = new Set<string>();
+    const consultations = new Set<string>();
     for (const record of records) {
+      if (record.type === "verification-usage") {
+        const usage = usageOf(record.usage);
+        if (!usage || typeof record.requesterTaskId !== "string" || typeof record.verifierTaskId !== "string" || verifications.has(record.verifierTaskId)) continue;
+        verifications.add(record.verifierTaskId);
+        calls.push({ taskId: record.requesterTaskId, usage });
+        continue;
+      }
+      if (record.type === "consultation-usage") {
+        const usage = usageOf(record.usage);
+        const ids = strings(record.taskIds);
+        const key = JSON.stringify(ids);
+        if (!usage || ids.length === 0 || consultations.has(key)) continue;
+        consultations.add(key);
+        calls.push({ taskId: typeof record.requesterTaskId === "string" ? record.requesterTaskId : ids[0]!, usage });
+        continue;
+      }
       if (record.type !== "submission" && record.type !== "consultation") continue;
       const usage = usageOf(record.usage);
       const requester = object(record.requester) && typeof record.requester.taskId === "string" ? record.requester.taskId : undefined;
@@ -308,6 +325,23 @@ export function factCallUsage(sessionDir: string): FactCallUsage[] {
   }
   for (const task of readFactUpdateJournal(sessionDir).tasks) {
     if (task.result?.usage) calls.push({ taskId: task.taskId, usage: task.result.usage });
+  }
+  // V2 records each actual model call separately from the recovery coordinator's
+  // result, including the shared Revoker plan and regenerated final outputs.
+  const recoveries = new Set<string>();
+  const recoveryAttempts = new Map<string, number>();
+  for (const record of readJsonlCached(join(sessionDir, "fact-updates.jsonl"))) {
+    if (!object(record) || typeof record.taskId !== "string") continue;
+    if (record.type === "recovery-call") {
+      recoveryAttempts.set(record.taskId, (recoveryAttempts.get(record.taskId) ?? 0) + 1);
+      continue;
+    }
+    const attempt = `${record.taskId}:${recoveryAttempts.get(record.taskId) ?? 0}`;
+    if (record.type !== "recovery-result" || recoveries.has(attempt)) continue;
+    const usage = usageOf(record.usage);
+    if (!usage) continue;
+    recoveries.add(attempt);
+    calls.push({ taskId: record.taskId, usage });
   }
   return calls;
 }

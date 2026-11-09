@@ -20,6 +20,7 @@ import { createHash } from "node:crypto";
 
 import { factCitationsOf, type JsonObject, type JsonValue } from "@brainstorm-agentic/core";
 
+import { recoveryText } from "./fact-recovery-text.js";
 import { factIdsInValue } from "./game-ledger.js";
 
 /** The control value that turns fact updates on (catalog/fact-table.json `updates`). */
@@ -236,6 +237,9 @@ export interface FactUpdateRunData {
   readonly input?: JsonValue;
   readonly files?: JsonValue;
   readonly panel?: JsonValue;
+  readonly params?: JsonValue;
+  readonly proposal?: JsonValue;
+  readonly bridge?: JsonValue;
 }
 
 interface RunIndex {
@@ -245,6 +249,7 @@ interface RunIndex {
   /** Per key, the notices a merge point merged or discarded. */
   readonly consumed: Map<string, Set<string>>;
   readonly consumedTasks: Set<string>;
+  readonly recoveryVersions: Map<string, string>;
   /** `<kind>:<seat>:<step>:<round>` of every round whose late merge has folded. */
   readonly closedRounds: Set<string>;
   closed: boolean;
@@ -259,13 +264,13 @@ interface RunIndex {
 export class FactUpdateIndex {
   private readonly runs = new Map<string, RunIndex>();
 
-  constructor(private readonly dismissed: ReadonlySet<string> = new Set()) {}
+  constructor(private readonly dismissed: ReadonlySet<string> = new Set(), readonly sharedRecovery = false) {}
 
   private run(runId: string): RunIndex {
     let run = this.runs.get(runId);
     if (run === undefined) {
       run = { data: {}, ideas: new Map(), reports: new Map(), consumed: new Map(), consumedTasks: new Set(),
-        closedRounds: new Set(), closed: false };
+        closedRounds: new Set(), recoveryVersions: new Map(), closed: false };
       this.runs.set(runId, run);
     }
     return run;
@@ -281,6 +286,9 @@ export class FactUpdateIndex {
       ...(state.input !== undefined ? { input: state.input } : {}),
       ...(files !== undefined ? { files } : {}),
       ...(state.panel !== undefined ? { panel: state.panel } : {}),
+      ...(state.params !== undefined ? { params: state.params } : {}),
+      ...(state.proposal !== undefined ? { proposal: state.proposal } : {}),
+      ...(state.bridge !== undefined ? { bridge: state.bridge } : {}),
     };
   }
 
@@ -343,6 +351,11 @@ export class FactUpdateIndex {
         const notices = run.consumed.get(item.key) ?? new Set<string>();
         for (const notice of Array.isArray(item.notices) ? item.notices : []) if (typeof notice === "string") notices.add(notice);
         run.consumed.set(item.key, notices);
+        if (isRecord(item.recovery) && typeof item.recovery.artifactHash === "string") {
+          for (const notice of Array.isArray(item.notices) ? item.notices : []) if (typeof notice === "string") {
+            run.recoveryVersions.set(`${item.key}:${notice}`, item.recovery.artifactHash);
+          }
+        }
       }
     }
   }
@@ -361,6 +374,10 @@ export class FactUpdateIndex {
 
   report(runId: string, key: string): FactIndexedReport | undefined {
     return this.runs.get(runId)?.reports.get(key);
+  }
+
+  recoveryReports(runId: string, seat: string): FactIndexedReport[] {
+    return [...(this.runs.get(runId)?.reports.values() ?? [])].filter((entry) => entry.seat === seat);
   }
 
   /** The unsettled reports of one round (any phase but closed). */
@@ -402,11 +419,23 @@ export class FactUpdateIndex {
     if (parsed.kind === "chain") {
       const idea = this.idea(runId, parsed.seat);
       if (idea === undefined) return [];
+      if (this.sharedRecovery) {
+        // Conceptual dependencies need not repeat a badge token. Every new authored
+        // version is assessed against withdrawals; explicit unaffected findings are cached.
+        const versions = this.run(runId).recoveryVersions;
+        const hash = factUpdateDigest(recoveryText(idea));
+        return deletions.filter((deletion) => versions.get(`${key}:N:${deletion.seq}`) !== hash).map((deletion) => deletion.id);
+      }
       const ids = factIdsInValue({ cot: idea.cot ?? null, output: idea.output ?? null, novelty: idea.novelty ?? null });
       return deletions.filter((deletion) => ids.includes(deletion.id)).map((deletion) => deletion.id);
     }
     const report = this.report(runId, key);
     if (report === undefined || report.phase === "closed" || this.dismissed.has(report.critic)) return [];
+    if (this.sharedRecovery) {
+      const versions = this.run(runId).recoveryVersions;
+      const hash = factUpdateDigest(recoveryText(report.report));
+      return deletions.filter((deletion) => versions.get(`${key}:N:${deletion.seq}`) !== hash).map((deletion) => deletion.id);
+    }
     const ids = factIdsInValue(report.report);
     return deletions
       .filter((deletion) => ids.includes(deletion.id) &&
@@ -432,18 +461,25 @@ export class FactUpdateIndex {
         const cites = factIdsInValue({ cot: idea.cot ?? null, output: idea.output ?? null, novelty: idea.novelty ?? null }).includes(factId);
         const submitted = submitter !== undefined && CHAIN_SUBMITTERS.has(submitter.role) && (submitter.seat ?? submitter.agent) === seat;
         if (submitted) submitterMapped = true;
-        if (!cites && !submitted) continue;
+        if (!this.sharedRecovery && !cites && !submitted) continue;
         const key = chainSubscriberKey(seat);
         found.set(key, { key, kind: "chain", seat, agent: seat, citedAt: citedSteps(idea.cot, factId) });
       }
       for (const report of run.reports.values()) {
-        if (report.phase === "closed" || this.dismissed.has(report.seat) || this.dismissed.has(report.critic)) continue;
-        if (report.kind === "game-report" && report.epoch !== undefined && report.epoch >= seq) continue;
+        if (this.dismissed.has(report.seat) || this.dismissed.has(report.critic)) continue;
+        if (report.phase === "closed") {
+          if (this.sharedRecovery && factIdsInValue(report.report).includes(factId)) {
+            const key = chainSubscriberKey(report.seat);
+            found.set(key, { key, kind: "chain", seat: report.seat, agent: report.seat, citedAt: [report.step] });
+          }
+          continue;
+        }
+        if (!this.sharedRecovery && report.kind === "game-report" && report.epoch !== undefined && report.epoch >= seq) continue;
         const roles = report.kind === "game-report" ? GAME_REPORT_SUBMITTERS : COMMENT_SUBMITTERS;
         const submitted = submitter !== undefined && roles.has(submitter.role) && submitter.agent === report.critic &&
           submitter.seat === report.seat && submitter.step === report.step;
         if (submitted) submitterMapped = true;
-        if (!submitted && !factIdsInValue(report.report).includes(factId)) continue;
+        if (!this.sharedRecovery && !submitted && !factIdsInValue(report.report).includes(factId)) continue;
         found.set(report.key, { key: report.key, kind: report.kind, seat: report.seat, agent: report.critic,
           step: report.step, round: report.round, citedAt: citedSteps(report.prefix as JsonValue, factId) });
       }

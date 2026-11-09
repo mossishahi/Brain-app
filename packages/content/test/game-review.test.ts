@@ -52,7 +52,7 @@ test("Supreme mediation catalog and consultation schema reject incomplete or inv
 
 test("mediated catalog checks the consultation role's exact host bindings and prevents recursive capabilities", () => {
   const bundle = freshBundle();
-  if (bundle.factTable?.accessMode !== "supreme-mediated/v1") return;
+  if (bundle.factTable?.accessMode !== "supreme-mediated/v1" && bundle.factTable?.accessMode !== "supreme-dialogue/v2") return;
   const consultation = bundle.factTable.consultation!;
   const skill = bundle.skills[consultation.skill]!;
   assert.deepEqual(validateBundle(bundle), []);
@@ -301,7 +301,7 @@ test("committee workflow keeps private feedback and factual state host-owned and
   const critic = findAgent(workflow.root, "game-comment-step");
   const chair = findAgent(workflow.root, "chair-step");
   assert.ok(bundle.skills[critic.skill]!.meta.payload.includes("criticState"));
-  assert.equal(bundle.skills[chair.skill]!.meta.payload.includes("verifiedFacts"), bundle.factTable?.accessMode !== "supreme-mediated/v1");
+  assert.equal(bundle.skills[chair.skill]!.meta.payload.includes("verifiedFacts"), bundle.factTable?.accessMode === undefined);
   assert.equal(critic.bind?.criticState, undefined);
   assert.equal(chair.bind?.verifiedFacts, undefined);
   const repair = findAgent(workflow.root, "game-redevelop-idea");

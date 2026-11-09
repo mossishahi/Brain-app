@@ -40,6 +40,12 @@
  * chair without changing other critics' snapshots; allocation lines reserve
  * unique identifiers across those private journals.
  *
+ * New content pinned to supreme-dialogue/v2 delegates to SharedFactDialogue:
+ * one live shared table, immutable verified records, temporary requester-owned
+ * conversations, ordered ready writes and parallel committed-snapshot reads.
+ * The private publication and pending reconciliation rules above remain only
+ * for legacy bundles; they are never applied to v2.
+ *
  * Blindness: the supreme judge is shown the claim, its conditions, the
  * evidence and the related entries as any agent may see them, never who
  * asked; requesters live on the entries and in the log only.
@@ -59,6 +65,7 @@ import {
   isFactId,
   type AgentExecutionContext,
   type FactAccess,
+  type FactAccessMode,
   type FactConsultQuery,
   type FactDeletion,
   type FactEvidenceSnapshot,
@@ -84,6 +91,7 @@ import { factEntryView, formatFactOutcome, normalizeFactText, rankFacts } from "
 
 import { DEFAULT_FS_DEADLINE_MS, readFileIfExists, withFsDeadline } from "./fs-stores.js";
 import { consultSnapshot, publicFactBadge, supremeFactView, type FactConsultant } from "./fact-consultation.js";
+import { SharedFactDialogue } from "./fact-dialogue.js";
 
 /** One verification the table asks of the supreme judge. */
 export interface FactVerificationRequest {
@@ -120,7 +128,7 @@ export interface FactVerification {
 export type FactVerifier = (request: FactVerificationRequest) => Promise<FactVerification>;
 
 export interface FileFactTableOptions {
-  readonly accessMode?: "supreme-mediated/v1";
+  readonly accessMode?: FactAccessMode;
   /** The run's log, `<session>/<runId>/facts.jsonl`; the first write creates it. */
   readonly logPath: string;
   /** The control's budgets (catalog/fact-table.json `limits`). */
@@ -451,7 +459,8 @@ interface Revision {
 }
 
 export class FileFactTable implements FactAccess {
-  readonly accessMode: "supreme-mediated/v1" | undefined;
+  readonly accessMode: FactAccessMode | undefined;
+  private readonly dialogue?: SharedFactDialogue;
   private readonly logPath: string;
   private readonly limits: FactTableLimits;
   private readonly now: () => number;
@@ -505,10 +514,11 @@ export class FileFactTable implements FactAccess {
     this.limits = options.limits;
     this.now = options.now ?? Date.now;
     this.accessMode = options.accessMode;
-    this.strictWrites = options.accessMode === "supreme-mediated/v1" || (options.strictWrites ?? false);
+    this.strictWrites = options.accessMode !== undefined || (options.strictWrites ?? false);
     this.allocation = options.allocation;
     this.updates = options.updates;
-    this.loaded = this.load();
+    this.dialogue = options.accessMode === "supreme-dialogue/v2" ? new SharedFactDialogue(options) : undefined;
+    this.loaded = this.dialogue ? Promise.resolve() : this.load();
     // Every call awaits the load; this only keeps a failed one from also
     // surfacing as an unhandled rejection before the first call arrives.
     this.loaded.catch(() => undefined);
@@ -516,10 +526,12 @@ export class FileFactTable implements FactAccess {
 
   /** The supreme judge; the wiring attaches it once the runtime exists. */
   attachVerifier(verifier: FactVerifier): void {
+    this.dialogue?.attachVerifier(verifier);
     this.verifier = verifier;
   }
 
   attachConsultant(consultant: FactConsultant): void {
+    this.dialogue?.attachConsultant(consultant);
     this.consultant = consultant;
   }
 
@@ -529,16 +541,19 @@ export class FileFactTable implements FactAccess {
    * reconsiderations listens here; a private view has no listener.
    */
   onUpdate(listener: FactUpdateListener): void {
+    this.dialogue?.onUpdate(listener);
     this.updateListeners.push(listener);
   }
 
   /** The deletion epoch: how many deletions this table's own log records. */
   async deletionEpoch(): Promise<number> {
+    if (this.dialogue) return this.dialogue.deletionEpoch();
     await this.loaded;
     return this.ownDeletions().length;
   }
 
   async deletions(signal?: AbortSignal): Promise<readonly FactDeletion[]> {
+    if (this.dialogue) return this.dialogue.deletions(signal);
     await (signal !== undefined ? abortable(this.loaded, signal) : this.loaded);
     if (this.persistenceError !== undefined) throw this.persistenceError;
     return this.deletionList();
@@ -551,6 +566,7 @@ export class FileFactTable implements FactAccess {
    * between a deletion and its notice kept from its journal (design 6.7).
    */
   async updateEvents(): Promise<readonly FactUpdateEvent[]> {
+    if (this.dialogue) return this.dialogue.updateEvents();
     await this.loaded;
     return this.ownDeletions().flatMap((deletion): FactUpdateEvent[] => {
       const entry = this.lastStanding.get(deletion.id);
@@ -582,6 +598,7 @@ export class FileFactTable implements FactAccess {
   }
 
   async evidence(): Promise<FactEvidenceSnapshot> {
+    if (this.dialogue) return this.dialogue.evidence();
     await this.loaded;
     return this.locked(async () => ({ facts: this.list(), approvals: [...this.approvals.values()],
       ...(this.updates !== undefined ? { deletions: this.deletionList() } : {}) }));
@@ -594,6 +611,7 @@ export class FileFactTable implements FactAccess {
 
   /** The only public query path for new bundles; raw snapshots go to Supreme tasks only. */
   async consult(requester: FactRequester, query: FactConsultQuery, context: FactSubmitContext): Promise<JsonObject> {
+    if (this.dialogue) return this.dialogue.consult(requester, query, context);
     if (this.accessMode !== "supreme-mediated/v1") throw new Error("This table uses the legacy fact interface.");
     await this.entries(context.signal);
     const signal = this.consultationSignal(context);
@@ -817,6 +835,7 @@ export class FileFactTable implements FactAccess {
   }
 
   async entries(signal?: AbortSignal): Promise<readonly FactEntry[]> {
+    if (this.dialogue) return this.dialogue.entries(signal);
     await (signal !== undefined ? abortable(this.loaded, signal) : this.loaded);
     if (this.persistenceError !== undefined) throw this.persistenceError;
     return this.list();
@@ -828,6 +847,7 @@ export class FileFactTable implements FactAccess {
    * duplicate lookup, so submit cannot disclose a peer's new facts.
    */
   async forTask(taskId: string, scope: FactScope): Promise<FactAccess> {
+    if (this.dialogue) return this;
     if (scope.blindReview === undefined) return this;
     await this.loaded;
     if (this.persistenceError !== undefined) throw this.persistenceError;
@@ -1046,6 +1066,7 @@ export class FileFactTable implements FactAccess {
     submission: FactSubmission,
     context: FactSubmitContext,
   ): Promise<FactSubmissionOutcome> {
+    if (this.dialogue) throw new Error("Start with lookup and reply with a justification in its fact conversation.");
     return this.submitChecked(requester, submission, context, true);
   }
 

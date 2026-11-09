@@ -11,6 +11,7 @@ export * from "./dismissal.js";
 export * from "./state.js";
 export * from "./compiler.js";
 export * from "./fact-updates.js";
+export * from "./fact-recovery.js";
 export * from "./taxonomy-activities.js";
 export * from "./panel-compose.js";
 export * from "./literature-activities.js";

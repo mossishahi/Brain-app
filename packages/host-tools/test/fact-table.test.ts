@@ -401,3 +401,78 @@ test("fact updates: a refuted ruling records nothing, and an incumbent the rulin
   assert.equal("deleted" in (formatFactOutcome({ ...replaced, conflicts: [standing] }).conflicts as JsonObject[])[0]!, false,
     "an incumbent that stays in the table is not marked");
 });
+
+const DIALOGUE = "supreme-dialogue/v2" as const;
+const HASH = `sha256:${"a".repeat(64)}`;
+
+test("v2 begins with a claim-only lookup and requires an explicit structured reply", () => {
+  assert.deepEqual(parseFactInput({ claim: "The strip has nineteen lower length modes." }, DIALOGUE), {
+    mode: "lookup", claim: "The strip has nineteen lower length modes.",
+  });
+  for (const field of ["conditions", "evidence", "message", "kind", "purpose", "max_results", "conversationId"]) {
+    assert.throws(() => parseFactInput({ mode: "lookup", claim: "Claim", [field]: "not yet" }, DIALOGUE), /only `claim`/);
+  }
+  assert.throws(() => parseFactInput({ mode: "submit", claim: "Claim", conditions: "none", evidence: "Proof", kind: "math" }, DIALOGUE), /lookup conversation/);
+  assert.throws(() => parseFactInput({ mode: "reply", action: "close" }, DIALOGUE), /conversationId/);
+  assert.throws(() => parseFactInput({ mode: "reply", conversationId: "C:1", action: "invent" }, DIALOGUE), /action/);
+  assert.deepEqual(parseFactInput({ mode: "reply", conversationId: "C:1", action: "close" }, DIALOGUE), {
+    mode: "reply", conversationId: "C:1", action: "close",
+  });
+  assert.throws(() => parseFactInput({ mode: "reply", conversationId: "C:1", action: "close", evidence: "Must not be ignored" }, DIALOGUE), /does not accept/);
+});
+
+test("v2 justification and challenge retain exact dependencies and reject incomplete or ambiguous evidence", () => {
+  const justify: JsonObject = { mode: "reply", conversationId: "C:1", action: "justify", claim: "Claim", conditions: "x >= 0",
+    evidence: "An independently checkable proof", kind: "math", dependencies: [{ id: "F:1", badgeHash: HASH }] };
+  assert.deepEqual(parseFactInput(justify, DIALOGUE), justify);
+  for (const key of ["claim", "conditions", "evidence", "kind"]) {
+    const incomplete = { ...justify }; delete incomplete[key];
+    assert.throws(() => parseFactInput(incomplete, DIALOGUE), /needs/);
+  }
+  const challenge: JsonObject = { ...justify, action: "challenge", factId: "F:2", badgeHash: HASH };
+  assert.deepEqual(parseFactInput(challenge, DIALOGUE), challenge);
+  const { factId: _id, ...untargeted } = challenge;
+  assert.throws(() => parseFactInput(untargeted, DIALOGUE), /factId/);
+  assert.throws(() => parseFactInput({ ...challenge, badgeHash: "guessed" }, DIALOGUE), /exact sha256/);
+  for (const dependencies of [[{ id: "F:1" }], [{ id: "F:1", badgeHash: "old" }],
+    [{ id: "F:1", badgeHash: HASH }, { id: "F:1", badgeHash: HASH }], [{ id: "F:1", badgeHash: HASH, evidence: "forged" }]]) {
+    assert.throws(() => parseFactInput({ ...justify, dependencies }, DIALOGUE), /dependency|dependencies/);
+  }
+});
+
+test("v2 badge selection and clarification cannot silently carry a different claim", () => {
+  const badge: JsonObject = { mode: "reply", conversationId: "C:1", action: "badge", factId: "F:1", badgeHash: HASH };
+  assert.deepEqual(parseFactInput(badge, DIALOGUE), badge);
+  assert.throws(() => parseFactInput({ ...badge, claim: "A stronger result" }, DIALOGUE), /does not accept/);
+  assert.throws(() => parseFactInput({ mode: "reply", conversationId: "C:1", action: "clarify" }, DIALOGUE), /message/);
+  const clarify: JsonObject = { mode: "reply", conversationId: "C:1", action: "clarify", message: "Which boundary conditions are assumed?" };
+  assert.deepEqual(parseFactInput(clarify, DIALOGUE), clarify);
+});
+
+test("v2 always consults the shared judge and preserves full selected evidence in its answer", async () => {
+  const calls: unknown[] = [];
+  const evidence = "Independent proof. ".repeat(1000);
+  const access: FactAccess = {
+    accessMode: DIALOGUE,
+    forTask: async () => { throw new Error("v2 must not create a private fact table"); },
+    entries: async () => { throw new Error("caller must not directly read the database"); },
+    submit: async () => { throw new Error("caller must not directly submit to the database"); },
+    consult: async (requester, query) => {
+      assert.equal(requester.taskId, "shared-critic"); calls.push(query);
+      return { conversationId: "C:1", facts: [{ id: "F:1", evidence }] };
+    },
+  };
+  const result = await runFactTable(access, { ...SCOPE, blindReview: "old-runtime-scope" }, "shared-critic", { mode: "lookup", claim: "Claim" });
+  assert.deepEqual(result.output, { conversationId: "C:1", facts: [{ id: "F:1", evidence }] });
+  await runFactTable(access, SCOPE, "shared-critic", { mode: "reply", conversationId: "C:1", action: "close" });
+  assert.deepEqual(calls, [{ mode: "lookup", claim: "Claim" }, { mode: "reply", conversationId: "C:1", action: "close" }]);
+  const denied = await runFactTable(access, SCOPE, "shared-critic", { mode: "approve", factId: "F:1", badgeHash: HASH, criticId: "critic" });
+  assert.equal(denied.isError, true, "only a committee chair may approve another report's use");
+});
+
+test("legacy runs keep direct submit and reject v2 dialogue fields", () => {
+  const submit: JsonObject = { mode: "submit", claim: "Claim", conditions: "none", evidence: "Proof", kind: "math" };
+  assert.deepEqual(parseFactInput(submit, "supreme-mediated/v1"), submit);
+  assert.throws(() => parseFactInput({ mode: "reply", conversationId: "C:1", action: "close" }, "supreme-mediated/v1"), /Unknown argument/);
+  assert.throws(() => parseFactInput({ ...submit, dependencies: [] }, "supreme-mediated/v1"), /Unknown argument/);
+});

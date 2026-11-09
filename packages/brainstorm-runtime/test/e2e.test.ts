@@ -2983,7 +2983,8 @@ function gameRuntime(
   const mediatedExecutor: AgentExecutor = {
     execute: async (task, context) => {
       const result = await executor.execute(task, context);
-      if (bundle.factTable?.accessMode !== "supreme-mediated/v1" || task.outputSchema?.name !== "gameCommitteeDecision" || result.status !== "ok") return result;
+      const mediated = bundle.factTable?.accessMode === "supreme-mediated/v1" || bundle.factTable?.accessMode === "supreme-dialogue/v2";
+      if (!mediated || task.outputSchema?.name !== "gameCommitteeDecision" || result.status !== "ok") return result;
       const review = factSubmitContextOf(task, context).review!;
       const output = object(result.output, "committee output");
       const reports = Object.fromEntries(Object.entries(object(output.reports, "reports")).map(([criticId, raw]) => {
@@ -3045,7 +3046,7 @@ for (const mode of ["reject", "cap"] as const) {
   });
 }
 
-test("game reviews run blind across seats, score before repair, and replay effects once", { skip: !supportsGame() }, async () => {
+test("game reviews keep reports private across seats, score before repair, and replay effects once", { skip: !supportsGame() }, async () => {
   const executor = new GameBrainstormExecutor("repair", true);
   const app = gameRuntime(executor);
   const first = await app.run({ runId: "game-replay", submission: "Review and revise the mechanism", params: { panelSize: 2, gamifiedReview: true, maxReviewRounds: 2 } });
@@ -3064,18 +3065,25 @@ test("game reviews run blind across seats, score before repair, and replay effec
   assert.ok(critics.length > 0);
   assert.equal(scoreEntries.length, chairs.length);
   const groupCritics = new Map<string, Set<string>>();
+  const sharedFacts = loadContent(registryContentDir).factTable?.accessMode === "supreme-dialogue/v2";
   for (const critic of critics) {
     for (const key of ["comments", "history", "record", "feedback", "scores", "decision"]) assert.equal(critic.bindings[key], undefined);
     assert.equal(critic.task.metadata?.notesScope, undefined);
     assert.equal(critic.task.allowedCapabilities?.includes("notes-access"), false);
     const scope = object(critic.task.metadata?.factScope, "fact scope");
-    assert.equal(typeof scope.blindReview, "string");
-    const group = String(scope.blindReview);
-    const ids = groupCritics.get(group) ?? new Set<string>(); ids.add(critic.agentId); groupCritics.set(group, ids);
-    assert.equal(JSON.parse(group)[3], gameReviewVersion(critic.bindings.chain!, Number(critic.bindings.currentStep)));
+    if (sharedFacts) {
+      assert.equal(scope.blindReview, undefined, "v2 critics share committed facts while their reports remain private");
+    } else {
+      assert.equal(typeof scope.blindReview, "string");
+      const group = String(scope.blindReview);
+      const ids = groupCritics.get(group) ?? new Set<string>(); ids.add(critic.agentId); groupCritics.set(group, ids);
+      assert.equal(JSON.parse(group)[3], gameReviewVersion(critic.bindings.chain!, Number(critic.bindings.currentStep)));
+    }
   }
-  assert.ok(groupCritics.size > 1, "different seats and reviewed versions have different groups");
-  assert.ok([...groupCritics.values()].every((ids) => ids.size >= 2), "same-round peers share the frozen fact view");
+  if (!sharedFacts) {
+    assert.ok(groupCritics.size > 1, "different seats and reviewed versions have different groups");
+    assert.ok([...groupCritics.values()].every((ids) => ids.size >= 2), "same-round peers share the legacy frozen fact view");
+  }
   for (const chair of chairs) {
     assert.equal(object(chair.task.metadata?.factScope, "chair fact scope").blindReview, undefined);
     const format = chair.task.modelRequest?.responseFormat;
@@ -3361,7 +3369,7 @@ for (const mode of ["pass", "repair"] as const) {
       assert.ok(reviewer.task.skills?.includes("claim-evidence"), "review tasks receive the shared claim-level evidence technique");
     }
     for (const chair of executor.tasks("committee-chair")) {
-      assert.deepEqual(chair.bindings.verifiedFacts, loadContent(registryContentDir).factTable?.accessMode === "supreme-mediated/v1" ? undefined : [], "the test injects no badge or fact evidence");
+      assert.deepEqual(chair.bindings.verifiedFacts, loadContent(registryContentDir).factTable?.accessMode !== undefined ? undefined : [], "the test injects no badge or fact evidence, and mediated chairs never receive raw table contents");
       for (const critique of Object.values(object(chair.bindings.comments, "comments"))) {
         assert.doesNotMatch(String(object(critique, "critique").justification), /\[F:/);
       }

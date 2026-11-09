@@ -38,6 +38,9 @@ const CONTROL_STAGES: readonly StageOption[] = [
   { id: "fact-verification", label: "Fact verification", description: "Verify shared scientific facts.", route: "reasoning" },
   { id: "fact-consultation", label: "Fact consultation", description: "Consult shared facts while an agent works.", route: "reasoning" },
   { id: "fact-update", label: "Fact updates", description: "Reconsider work affected by updated facts.", route: "reasoning" },
+  { id: "fact-revoker", label: "Revoker", description: "Decide which reasoning needs repair after a verified fact is withdrawn.", route: "reasoning" },
+  { id: "fact-recovery-review", label: "Recovery review", description: "Review repaired reasoning against its current supporting facts.", route: "reasoning" },
+  { id: "fact-recovery-chair", label: "Recovery review chair", description: "Validate renewed reviews before repaired reasoning is used.", route: "reasoning" },
 ];
 
 const STAGE_PRESENTATION: Readonly<Record<string, readonly [string, string]>> = {

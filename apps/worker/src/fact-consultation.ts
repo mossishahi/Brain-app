@@ -36,6 +36,7 @@ export function supremeFactView(entry: FactEntry): JsonObject {
     id: entry.id, status: entry.status, kind: entry.kind, claim: entry.claim,
     conditions: entry.conditions, method: entry.method, evidence: entry.evidence,
     badgeHash: factBadgeHash(entry), reason: factIssuanceReason(entry),
+    ...(entry.dependencies !== undefined ? { dependencies: entry.dependencies.map(ref => ({ ...ref })) } : {}),
     ...(entry.supersededBy !== undefined ? { supersededBy: entry.supersededBy } : {}),
   };
 }

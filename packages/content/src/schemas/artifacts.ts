@@ -2492,6 +2492,8 @@ export const factUpdateMergeSchema = z
           output: z.record(z.string(), z.unknown()),
           /** Game reports only: the deletion epoch the revision was requested at. */
           epoch: z.number().int().min(0).optional(),
+          /** V2 host recovery receipt: Revoker decision, generation and retained review certificates. */
+          recovery: z.record(z.string(), z.unknown()).optional(),
         })
         .strict(),
     ),
@@ -2507,6 +2509,11 @@ export const factUpdateMergeSchema = z
     ),
     /** Late merges only: true when a report or comment the chair or judge already had was revised or withdrawn. */
     reassess: z.boolean().optional(),
+    /** V2 finalization regenerates these after late fact repairs instead of publishing stale text. */
+    finalOutputs: z.object({
+      bridge: z.lazy(() => bridgeReportSchema).optional(),
+      proposal: z.lazy(() => finalProposalSchema),
+    }).strict().optional(),
   })
   .strict();
 
@@ -2607,12 +2614,59 @@ export const gameCommitteeDecisionSchema = z.object({
 
 export type GameCommitteeDecision = z.infer<typeof gameCommitteeDecisionSchema>;
 
+/** Exact verified premises; their order does not change an implication's meaning. */
+export const factDependencySchema = z.object({
+  id: z.string().regex(/^F:[1-9][0-9]*$/),
+  badgeHash: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+}).strict();
+const factDependenciesSchema = z.array(factDependencySchema).superRefine((dependencies, ctx) => {
+  if (new Set(dependencies.map((dependency) => dependency.id)).size !== dependencies.length) {
+    ctx.addIssue({ code: "custom", message: "each dependent premise is named once" });
+  }
+});
+
+/** A Revoker plan addresses only versioned targets supplied by the host. */
+export const revokerPlanSchema = z.object({
+  changes: z.array(z.object({
+    targetKey: nonEmpty,
+    base: z.object({ artifactHash: nonEmpty }).strict(),
+    action: z.enum(["substitute", "redevelop", "restart"]),
+    steps: z.array(z.number().int().min(1)),
+    sections: z.array(nonEmpty),
+    rationale: nonEmpty,
+    replacementFactId: z.string().regex(/^F:[1-9][0-9]*$/).optional(),
+  }).strict().superRefine((change, ctx) => {
+    if (change.action === "substitute" && change.replacementFactId === undefined) {
+      ctx.addIssue({ code: "custom", path: ["replacementFactId"], message: "substitution names the verified replacement fact" });
+    }
+    if (new Set(change.steps).size !== change.steps.length) {
+      ctx.addIssue({ code: "custom", path: ["steps"], message: "name each affected step once" });
+    }
+    if (new Set(change.sections).size !== change.sections.length) {
+      ctx.addIssue({ code: "custom", path: ["sections"], message: "name each affected section once" });
+    }
+  })),
+  unaffected: z.array(z.object({
+    targetKey: nonEmpty,
+    base: z.object({ artifactHash: nonEmpty }).strict(),
+    rationale: nonEmpty,
+  }).strict()).optional(),
+  reason: nonEmpty,
+}).strict().superRefine((plan, ctx) => {
+  const targets = [...plan.changes, ...(plan.unaffected ?? [])].map((target) => target.targetKey);
+  if (new Set(targets).size !== targets.length) {
+    ctx.addIssue({ code: "custom", path: ["changes"], message: "each target receives exactly one affected or unaffected decision" });
+  }
+});
+export type RevokerPlan = z.infer<typeof revokerPlanSchema>;
+
 /** Supreme-only semantic consultation over a host-selected scoped table batch. */
 export const factConsultationSchema = z.object({
   answer: nonEmpty,
   matches: z.array(z.object({
     factId: z.string().regex(/^F:[1-9][0-9]*$/),
     relation: z.enum(["equivalent", "supports", "conflicts", "related"]),
+    conditionsRelation: z.enum(["same", "different", "unspecified"]).optional(),
     reason: nonEmpty,
   }).strict()),
   approval: z.object({ approved: z.boolean(), targetFactId: z.string().regex(/^F:[1-9][0-9]*$/).optional(), reason: nonEmpty }).strict().optional(),
@@ -3406,6 +3460,14 @@ const factConflictSchema = z
     resolution: z.enum(FACT_VERDICT_RESOLUTIONS),
     /** For "both-narrowed": the conditions the entry holds under from now on. */
     conditions: z.string().min(1).max(1200).optional(),
+    /** V2 replaces the incumbent with a new immutable proposition and conditions. */
+    replacement: z.object({
+      claim: z.string().min(1).max(600),
+      conditions: z.string().min(1).max(1200),
+      method: z.enum(FACT_VERDICT_METHODS).refine((method) => method !== "none", { message: "a replacement fact must be verified" }),
+      evidence: z.string().min(1).max(8000).refine((evidence) => evidence.trim().length > 0),
+      dependencies: factDependenciesSchema.optional(),
+    }).strict().optional(),
     explanation: z.string().min(1).max(1200),
   })
   .strict();
@@ -3438,6 +3500,7 @@ export const factVerdictSchema = z
     method: z.enum(FACT_VERDICT_METHODS),
     /** What the supreme judge did and found: the script and its output, the quote and its source, the file and line. */
     evidence: z.string().max(8000),
+    dependencies: factDependenciesSchema.optional(),
     /** Addressed to the requester: what was found and why the case follows. */
     explanation: z.string().min(1).max(2000),
     /** For "justified": the entry that already covers the claim. */
@@ -3524,6 +3587,12 @@ export const factVerdictSchema = z
     }
     const seen = new Set<string>();
     verdict.conflicts.forEach((conflict, index) => {
+      if (conflict.replacement !== undefined && conflict.resolution !== "both-narrowed") {
+        ctx.addIssue({ code: "custom", path: ["conflicts", index, "replacement"], message: "an incumbent replacement is issued by both-narrowed" });
+      }
+      if (conflict.replacement !== undefined && conflict.conditions !== conflict.replacement.conditions) {
+        ctx.addIssue({ code: "custom", path: ["conflicts", index, "replacement", "conditions"], message: "replacement conditions must match the narrowed conditions" });
+      }
       if (conflict.resolution === "both-narrowed" && conflict.conditions === undefined) {
         ctx.addIssue({
           code: "custom",
@@ -3577,6 +3646,7 @@ export const artifactSchemas = {
   gameChairDecision: gameChairDecisionSchema,
   gameCommitteeDecision: gameCommitteeDecisionSchema,
   factConsultation: factConsultationSchema,
+  revokerPlan: revokerPlanSchema,
   gameSettlement: gameSettlementSchema,
   redevelopmentPatchParts: redevelopmentPatchPartsSchema,
   finalProposal: finalProposalSchema,

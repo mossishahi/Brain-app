@@ -69,7 +69,7 @@ import {
   gpuRunTools,
   ATTACHMENT_LIST_MANIFEST,
   ATTACHMENT_SEARCH_MANIFEST,
-  FACT_TABLE_DEFINITION,
+  factTableDefinition,
   GPU_RUN_MANIFEST,
   NOTES_SEARCH_DEFINITION,
   WebAccessError,
@@ -1388,10 +1388,11 @@ function factCustomTools(
   context: AgentExecutionContext,
   hold: StallHold,
 ): CustomToolMap {
+  const definition = factTableDefinition(facts.accessMode);
   return {
     fact_table: {
-      description: FACT_TABLE_DEFINITION.description,
-      inputSchema: FACT_TABLE_DEFINITION.inputSchema,
+      description: definition.description,
+      inputSchema: definition.inputSchema,
       execute: hold.held(
         reported("fact_table", context, async (args) => {
           const result = await runFactTable(

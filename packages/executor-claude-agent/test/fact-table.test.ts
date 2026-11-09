@@ -17,9 +17,10 @@ import type {
   FactRequester,
   FactSubmission,
   FactSubmitContext,
+  JsonObject,
   PromptRecord,
 } from "@brainstorm-agentic/core";
-import { FACT_TABLE_DEFINITION } from "@brainstorm-agentic/host-tools";
+import { FACT_TABLE_DEFINITION, FACT_TABLE_DIALOGUE_DEFINITION } from "@brainstorm-agentic/host-tools";
 
 import {
   ClaudeAgentExecutor,
@@ -395,4 +396,45 @@ test("a held fact_table call that outlasts stallTimeoutMs does not stall the ses
   assert.equal(result.status, "ok");
   assert.equal(captured.length, 1, "no fresh-session restart while the submission was in flight");
   assert.equal(answerJson(answer).case, "justified-new");
+});
+
+test("Claude offers v2 reply actions and routes even blind scopes to the single shared judge", async () => {
+  const captured: ClaudeAgentQueryInput[] = [];
+  const records: PromptRecord[] = [];
+  const queries: unknown[] = [];
+  const evidence = "Full checked evidence. ".repeat(1000);
+  const facts: FactAccess = {
+    accessMode: "supreme-dialogue/v2",
+    forTask: async () => { throw new Error("private fact view must not be created in v2"); },
+    entries: async () => { throw new Error("a caller cannot directly read the database"); },
+    submit: async () => { throw new Error("a caller cannot bypass the dialogue"); },
+    consult: async (requester, query): Promise<JsonObject> => {
+      assert.equal(requester.taskId, factTask.taskId);
+      queries.push(query);
+      return query.mode === "lookup" ? { conversationId: "C:1", facts: [{ id: "F:1", evidence }] } : { closed: true };
+    },
+  };
+  const result = await new ClaudeAgentExecutor({
+    token: "synthetic-token", facts,
+    queryFn: factQuery(captured, async (call) => {
+      const lookup = answerJson(await call({ mode: "lookup", claim: CLAIM }));
+      assert.deepEqual(lookup, { conversationId: "C:1", facts: [{ id: "F:1", evidence }] });
+      assert.deepEqual(answerJson(await call({ mode: "reply", conversationId: "C:1", action: "close" })), { closed: true });
+      assert.equal((await call(SUBMIT)).isError, true);
+    }),
+  }).execute({ ...factTask, metadata: { factScope: { ...SCOPE, blindReview: "old-scope" } } }, {
+    runId: "run-dialogue", nodePath: "root/review", reportPrompt: (record) => records.push(record),
+  });
+  assert.equal(result.status, "ok");
+  assert.deepEqual(queries, [{ mode: "lookup", claim: CLAIM }, { mode: "reply", conversationId: "C:1", action: "close" }]);
+  const offered = records[0]!.sections.find((section) => section.title.startsWith("Tools offered"))!;
+  const listed = (JSON.parse(offered.body) as { name: string; description: string; input: string[] }[]).find((tool) => tool.name === TOOL)!;
+  assert.equal(listed.description, FACT_TABLE_DIALOGUE_DEFINITION.description);
+  assert.ok(listed.input.includes("conversationId") && listed.input.includes("action"));
+  const servers = captured[0]!.options.mcpServers as Record<string, { instance: { _registeredTools: Record<string, {
+    inputSchema: { safeParse(value: unknown): { success: boolean } };
+  }> } }>;
+  const schema = servers.facts!.instance._registeredTools.fact_table!.inputSchema;
+  assert.equal(schema.safeParse({ mode: "reply", conversationId: "C:1", action: "close" }).success, true);
+  assert.equal(schema.safeParse(SUBMIT).success, false, "the SDK must not advertise legacy direct submit in v2");
 });

@@ -83,6 +83,7 @@ import { applyGateDecision, autoApproveDecision, type HumanGateMode } from "./ga
 import { gameChairContextIssues, gameReviewVersion, settleGameReview } from "./game-review.js";
 import { committeeContextIssues, committeeFactView, factIdsInValue, GameReviewLedger, type ReadGameFacts, type ReadGameEvidence } from "./game-ledger.js";
 import { artifactSchemaToJsonSchema } from "./json-schema.js";
+import { recoveryText, type RecoveryChoice } from "./fact-recovery.js";
 import { selectPanel, weavePanel } from "./panel.js";
 import { compileSkillPrompt, type PayloadEntry } from "./prompts.js";
 import {
@@ -253,6 +254,41 @@ export interface CompiledContentWorkflow {
   readonly bindFactUpdateRun?: (signal: AbortSignal) => void;
   /** Builds one subscriber's reconsideration task, with the hashes of what it saw (design 5, 6.1). */
   readonly factReconsiderationTask?: (request: FactReconsiderationTaskRequest) => Promise<FactReconsiderationTask>;
+  readonly factRevokerTask?: (request: { runId: string; taskId: string; notices: readonly FactNotice[]; targets: readonly JsonObject[] }) => Promise<AgentTask>;
+  readonly factRecoveryReviewTask?: (request: FactRecoveryReviewRequest) => Promise<AgentTask>;
+  readonly factRecoveryCritics?: (runId: string) => readonly string[];
+  readonly factRecoveryAssess?: (request: FactRecoveryAssessmentRequest) => Promise<JsonObject>;
+  readonly factFinalizationTask?: (request: FactFinalizationRequest) => Promise<AgentTask>;
+}
+
+export interface FactRecoveryReviewRequest {
+  readonly runId: string;
+  readonly taskId: string;
+  readonly kind: "critic" | "chair";
+  readonly seat: string;
+  readonly idea: JsonObject;
+  readonly step: number;
+  readonly criticId?: string;
+  readonly reports?: JsonObject;
+}
+
+export interface FactRecoveryAssessmentRequest {
+  readonly runId: string;
+  readonly generation: string;
+  readonly chairTaskId: string;
+  readonly idea: JsonObject;
+  readonly step: number;
+  readonly reports: JsonObject;
+  readonly chair: JsonObject;
+  readonly epochs: JsonObject;
+}
+
+export interface FactFinalizationRequest {
+  readonly runId: string;
+  readonly taskId: string;
+  readonly stage: "bridge" | "proposal";
+  readonly ideas: JsonObject;
+  readonly bridge?: JsonObject;
 }
 
 /**
@@ -286,6 +322,7 @@ export interface FactReconsiderationTaskRequest {
   readonly taskId: string;
   readonly key: string;
   readonly notices: readonly FactNotice[];
+  readonly recoveryPlan?: RecoveryChoice;
 }
 
 /** A reconsideration task and the hashes of exactly what it saw (design 6.1 `base`). */
@@ -1628,7 +1665,7 @@ class ContentCompiler {
     this.readGameFacts = options.readGameFacts ?? (async () => []);
     this.readGameEvidence = options.readGameEvidence ?? (async () => ({ facts: [], approvals: [] }));
     this.factUpdates = this.bundle.factTable?.updates === FACT_UPDATES_RULE;
-    this.factUpdateIndex = new FactUpdateIndex(new Set(options.dismissedMembers ?? []));
+    this.factUpdateIndex = new FactUpdateIndex(new Set(options.dismissedMembers ?? []), this.bundle.factTable?.accessMode === "supreme-dialogue/v2");
     this.factEpoch = options.factEpoch;
     this.routeResolver = options.routeResolver ?? new ExecutorOwnedRouteResolver();
     this.capabilityTools = options.capabilityTools ?? new LogicalCapabilityToolResolver();
@@ -1639,7 +1676,7 @@ class ContentCompiler {
           : {}),
       }),
       "review.committeeSettle": async (input, context) => {
-        const mediated = this.bundle.factTable?.accessMode === "supreme-mediated/v1";
+        const mediated = this.bundle.factTable?.accessMode !== undefined;
         // With fact updates the evidence is read in both access modes: the
         // settlement is bound the run's deletions (design 6.6, section 7).
         const evidence = mediated || this.factUpdates ? await this.readGameEvidence() : undefined;
@@ -1717,7 +1754,7 @@ class ContentCompiler {
         ? {
             factVerificationTask: (request: FactVerificationTaskRequest) =>
               this.factVerificationTask(factTable, request),
-            ...(factTable.accessMode === "supreme-mediated/v1" ? {
+            ...(factTable.accessMode !== undefined ? {
               factConsultationTask: (request: FactConsultationTaskRequest) => this.factVerificationTask(factTable, request, true),
             } : {}),
             ...(this.factUpdates ? {
@@ -1730,6 +1767,22 @@ class ContentCompiler {
               },
               factReconsiderationTask: (request: FactReconsiderationTaskRequest) =>
                 this.factReconsiderationTask(factTable, request),
+              ...(factTable.accessMode === "supreme-dialogue/v2" ? {
+                factRevokerTask: (request: { runId: string; taskId: string; notices: readonly FactNotice[]; targets: readonly JsonObject[] }) =>
+                  this.controlRoleTask({ declaration: factTable.reconsideration!.revoker!, label: "the fact Revoker", taskId: request.taskId,
+                    nodeId: "fact-revoker", bindings: { input: this.factUpdateIndex.runData(request.runId).input ?? null,
+                      files: this.factUpdateIndex.runData(request.runId).files ?? null,
+                      factUpdates: structuredClone(request.notices) as unknown as JsonValue, targets: [...request.targets] },
+                    reconsideration: { agentId: "revoker", factScope: { role: "revoker", agent: "revoker" }, narrow: (schema) => schema } }),
+                factRecoveryReviewTask: (request: FactRecoveryReviewRequest) => this.factRecoveryReviewTask(request),
+                factRecoveryCritics: (runId: string) => {
+                  const panel = this.factUpdateIndex.runData(runId).panel;
+                  return isJsonRecord(panel) && Array.isArray(panel.members) ? panel.members.filter(isJsonRecord)
+                    .map((member) => String(member.id)).filter((id) => !this.factUpdateIndex.isDismissed(id) && !this.gameReviewLedger.isExcluded(runId, id)) : [];
+                },
+                factRecoveryAssess: (request: FactRecoveryAssessmentRequest) => this.factRecoveryAssess(request),
+                factFinalizationTask: (request: FactFinalizationRequest) => this.factFinalizationTask(request),
+              } : {}),
             } : {}),
           }
         : {}),
@@ -1792,7 +1845,7 @@ class ContentCompiler {
     const step = resolveDataReference("stepIndex", scope, stateFrom(scope), { required: false });
     const cited = factCitationsOf(chain);
     let blindReview: string | undefined;
-    if (node.output.schema === "gameCritique") {
+    if (node.output.schema === "gameCritique" && this.bundle.factTable?.accessMode !== "supreme-dialogue/v2") {
       const round = resolveDataReference("reviews[member.id].round", scope, stateFrom(scope), { required: true });
       if (typeof seat !== "string" || typeof step !== "number" || !Array.isArray(chain) || chain.length !== step ||
           typeof round !== "number" || !Number.isSafeInteger(round) || round < 1) {
@@ -1969,7 +2022,7 @@ class ContentCompiler {
           node.bind.comments, scope, stateFrom(scope), this.roots,
         );
       }
-      if (node.output.schema === "gameCommitteeDecision" && this.bundle.factTable?.accessMode !== "supreme-mediated/v1") {
+      if (node.output.schema === "gameCommitteeDecision" && this.bundle.factTable?.accessMode === undefined) {
         (bindings as Record<string, JsonValue>).verifiedFacts = committeeFactView(asObject(bindings.comments, "committee reports"), await this.readGameFacts());
       }
       if (committeeCritic && declaredVars.has("criticState")) {
@@ -2646,7 +2699,7 @@ class ContentCompiler {
         context,
         this.roots,
       );
-      if (node.output.schema === "gameCommitteeDecision" && this.bundle.factTable?.accessMode === "supreme-mediated/v1") {
+      if (node.output.schema === "gameCommitteeDecision" && this.bundle.factTable?.accessMode !== undefined) {
         // A re-assessment (fact updates, D12) keeps the round's earlier chair
         // task ids aside: settlement still accepts their receipts.
         const earlier = this.chairTaskIdsOf(scope, written);
@@ -2748,6 +2801,7 @@ class ContentCompiler {
     readonly bindings: JsonObject;
     /** The node id the task's metadata carries. */
     readonly nodeId: string;
+    readonly instructions?: string;
     /** Reconsiderations only (design section 5). */
     readonly reconsideration?: {
       readonly agentId: string;
@@ -2888,6 +2942,7 @@ class ContentCompiler {
     ];
     const system: SystemPromptSegment[] = [
       ...prompt.system,
+      ...(spec.instructions ? [{ text: spec.instructions }] : []),
       ...(capabilityPlan.unavailableInstructions
         ? [{ text: capabilityPlan.unavailableInstructions }]
         : []),
@@ -3012,7 +3067,7 @@ class ContentCompiler {
    * unless the bundle declares fact updates with mediated access.
    */
   private chairTaskIdsOf(scope: ScopeReader, state: JsonObject = stateFrom(scope)): string[] {
-    if (!this.factUpdates || this.bundle.factTable?.accessMode !== "supreme-mediated/v1") return [];
+    if (!this.factUpdates || this.bundle.factTable?.accessMode === undefined) return [];
     const earlier = resolveDataReference("reviews[member.id].current.gameChairEarlierTaskIds", scope, state, { required: false });
     const current = resolveDataReference("reviews[member.id].current.gameChairTaskId", scope, state, { required: false });
     return [
@@ -3081,8 +3136,13 @@ class ContentCompiler {
         }
         const revision = validateArtifact("chainReconsiderationParts", nodeId, entry.output!);
         const applied = applyChainReconsideration(next, key.seat, revision, nodeId);
-        if (applied.state === next) continue;
+        const changed = applied.state !== next;
         next = applied.state;
+        if (entry.recovery !== undefined) {
+          next = await persistArtifact(next, `recovery.${String(entry.taskId)}`, "factUpdateMerge", nodeId,
+            { merged: [entry], discarded: [] }, context);
+        }
+        if (!changed) continue;
         const revisedIdea = validateArtifact("brainIdeaParts", nodeId, asObject(next.ideas, "ideas")[key.seat]!);
         assertDevelopedOutputFitsRun(
           asObject(asObject(revisedIdea, "revised idea").output, "revised idea output"),
@@ -3094,7 +3154,18 @@ class ContentCompiler {
         next = await persistArtifact(next, `ideas.${key.seat}`, "brainIdeaParts", nodeId, revisedIdea, context);
         index.setIdea(runId, key.seat, asObject(revisedIdea, "revised idea"));
       }
+      if (point === "close" && isJsonRecord(merge.finalOutputs)) {
+        if (merge.finalOutputs.bridge !== undefined) {
+          const bridge = validateArtifact("bridgeReport", nodeId, merge.finalOutputs.bridge);
+          next = { ...next, bridge };
+          next = await persistArtifact(next, "bridge", "bridgeReport", nodeId, bridge, context);
+        }
+        const proposal = validateArtifact("finalProposal", nodeId, merge.finalOutputs.proposal!);
+        next = { ...next, proposal };
+        next = await persistArtifact(next, "proposal", "finalProposal", nodeId, proposal, context);
+      }
       if (point === "close") index.closeRun(runId);
+      index.noteRunData(runId, next);
       return next;
     }
     const kind = point === "game-reports" || point === "late-game-reports" ? "game-report" : "comment";
@@ -3146,6 +3217,7 @@ class ContentCompiler {
     dispatch: JsonValue | undefined,
   ): JsonObject {
     const schema = node.output.schema;
+    this.factUpdateIndex.noteRunData(context.runId, state);
     const chainWriter = THOUGHT_SCHEMAS.has(schema);
     if (!chainWriter && schema !== "gameCritique" && schema !== "commentParts") return state;
     const runId = context.runId;
@@ -3236,6 +3308,7 @@ class ContentCompiler {
       Object.fromEntries(Object.entries(bindings).map(([name, value]) => [name, strip(value)]));
     const notices = structuredClone(request.notices) as unknown as JsonValue;
     const files = data.files ?? null;
+    const recovery: JsonObject = factTable.accessMode === "supreme-dialogue/v2" ? { recoveryPlan: request.recoveryPlan ?? null } : {};
     const shape = type !== undefined ? inputTypes.shapes[type] ?? null : null;
     if (subscriber.kind === "chain") {
       const idea = index.idea(request.runId, subscriber.seat);
@@ -3271,6 +3344,7 @@ class ContentCompiler {
           shapeGuide: type !== undefined ? inputTypes.shapeGuides[type] ?? null : null,
         }),
         board,
+        ...recovery,
       };
       const task = await this.controlRoleTask({
         declaration: roles.chain,
@@ -3278,6 +3352,7 @@ class ContentCompiler {
         taskId: request.taskId,
         bindings,
         nodeId: FACT_UPDATE_NODE,
+        ...(factTable.accessMode === "supreme-dialogue/v2" ? { instructions: "The Revoker recoveryPlan is final. Preserve every unselected step and section exactly. In newly authored text, use bracket badge syntax only for current support. Mention a withdrawn historical identifier in plain text when explaining a rejected premise." } : {}),
         reconsideration: {
           agentId: subscriber.seat,
           factScope: { role: roles.chain.skill, agent: subscriber.seat, seat: subscriber.seat, ...citedScope(idea.cot) },
@@ -3324,7 +3399,7 @@ class ContentCompiler {
         declaration: roles.gameReport,
         label: "the fact table's game-report reconsideration role",
         taskId: request.taskId,
-        bindings: stripped({ ...common, report: report.report, factUpdates: notices }),
+        bindings: stripped({ ...common, report: report.report, factUpdates: notices, ...recovery }),
         nodeId: FACT_UPDATE_NODE,
         reconsideration: {
           agentId: report.critic,
@@ -3333,7 +3408,7 @@ class ContentCompiler {
           factScope: {
             role: roles.gameReport.skill,
             agent: report.critic,
-            blindReview: JSON.stringify([report.seat, report.step, report.round, gameReviewVersion([...report.prefix], report.step)]),
+            ...(factTable.accessMode !== "supreme-dialogue/v2" ? { blindReview: JSON.stringify([report.seat, report.step, report.round, gameReviewVersion([...report.prefix], report.step)]) } : {}),
             ...prefixScope,
           },
           narrow: (schema) => schema,
@@ -3350,6 +3425,7 @@ class ContentCompiler {
         ...common,
         comment: report.report,
         factUpdates: notices,
+        ...recovery,
         verdictOptions: allowed,
         verdictCatalog: structuredClone(this.bundle.catalogs.verdicts.verdicts) as unknown as JsonValue,
       }),
@@ -3379,6 +3455,71 @@ class ContentCompiler {
       },
     });
     return { task, base: reportBase(report.report) };
+  }
+
+  /** Revalidation is a new scientific certificate, never a new scoring event. */
+  private async factRecoveryReviewTask(request: FactRecoveryReviewRequest): Promise<AgentTask> {
+    const data = this.factUpdateIndex.runData(request.runId);
+    const input = isJsonRecord(data.input) ? data.input : {};
+    const type = typeof input.type === "string" ? input.type : "";
+    const members = isJsonRecord(data.panel) && Array.isArray(data.panel.members)
+      ? data.panel.members.filter(isJsonRecord).filter((member) => !this.factUpdateIndex.isDismissed(String(member.id))) : [];
+    const chain = recoveryText(Array.isArray(request.idea.cot) ? request.idea.cot.slice(0, request.step) : []);
+    const common: JsonObject = { input: Object.fromEntries(Object.entries(input).filter(([name]) => !["files", "cotSteps"].includes(name))),
+      files: data.files ?? null, chain, currentStep: request.step, type,
+      shape: this.bundle.catalogs.inputTypes.shapes[type] ?? null };
+    const critic = members.find((member) => member.id === request.criticId);
+    if (request.kind === "critic" && critic === undefined) throw new Error("Recovery critic is not a seated panel member");
+    const interdisciplinary = critic?.seat === "interdisciplinary";
+    const skill = request.kind === "chair" ? "committee-chair" : interdisciplinary ? "game-interdisciplinary-commentor" : "game-commentor";
+    const params = isJsonRecord(data.params) ? data.params : {};
+    const privateState = request.kind === "critic" ? this.gameReviewLedger.dispatch(request.runId, request.taskId,
+      request.criticId!, data.panel, params.gameInitialPoints) : undefined;
+    const bindings: JsonObject = request.kind === "chair"
+      ? { ...common, comments: request.reports ?? {}, typeGuidance: this.bundle.catalogs.inputTypes.guidance[type] ?? null }
+      : { ...common, department: critic!.department ?? null, umbrella: critic!.umbrella ?? null, subfields: critic!.subfields ?? null,
+          ...(interdisciplinary ? { roster: members } : {}), criticState: { ...privateState, recovery: true, unscored: true } };
+    return this.controlRoleTask({ declaration: { skill, route: "reasoning", output: request.kind === "chair" ? "gameCommitteeDecision" : "gameCritique" },
+      label: "the recovery revalidation role", taskId: request.taskId, nodeId: request.kind === "chair" ? "fact-recovery-chair" : "fact-recovery-review",
+      bindings, instructions: "This is an UNSCORED recovery revalidation after a fact withdrawal. Independently validate the revised argument under the current shared facts. Historical settlements and balances are immutable; this task awards no points. Return the normal scientific report/assessment. The following developed output is supplied only to check consequences of this repair; future argument steps remain withheld.\n" + JSON.stringify(recoveryText(request.idea.output ?? {})),
+      reconsideration: { agentId: request.criticId ?? "committee-chair", factScope: { role: skill, agent: request.criticId ?? "committee-chair",
+        seat: request.seat, step: request.step, ...citedScope(chain) }, narrow: (schema) => schema } });
+  }
+
+  private async factRecoveryAssess(request: FactRecoveryAssessmentRequest): Promise<JsonObject> {
+    const data = this.factUpdateIndex.runData(request.runId);
+    const params = isJsonRecord(data.params) ? data.params : {};
+    const evidence = await this.readGameEvidence();
+    // Isolated validator: no commit and no mutation of the live points ledger.
+    const assessment = new GameReviewLedger().settle(request.runId, request.generation, {
+      panel: data.panel ?? null, initialPoints: params.gameInitialPoints ?? -1,
+      threshold: params.gameDecisionThreshold ?? 0.5, decisionRule: params.gameDecisionRule ?? "chair-decisive",
+      leaveOneOut: params.gameLeaveOneOut ?? false, critiques: request.reports, chair: request.chair,
+      chain: Array.isArray(request.idea.cot) ? request.idea.cot.slice(0, request.step) : [],
+      chairTaskId: request.chairTaskId, factAccessMode: "supreme-mediated/v1", reportEpochs: request.epochs,
+      deletions: structuredClone(evidence.deletions ?? []) as unknown as JsonValue,
+    }, evidence.facts, evidence);
+    return { generation: request.generation, version: assessment.version!, step: request.step, unscored: true,
+      status: assessment.status === "settled" && assessment.y === 0 ? "validated" : assessment.y === 1 ? "blocked" : "unresolved",
+      decision: assessment.decision!, reports: Array.isArray(assessment.rows) ? assessment.rows.map((row) => isJsonRecord(row)
+        ? Object.fromEntries(Object.entries(row).filter(([key]) => ["criticId", "admissible", "admissionReason", "label", "q", "justification", "reason"].includes(key))) : row) : [],
+      admittedCount: assessment.admittedCount! };
+  }
+
+  private async factFinalizationTask(request: FactFinalizationRequest): Promise<AgentTask> {
+    const data = this.factUpdateIndex.runData(request.runId);
+    const input = isJsonRecord(data.input) ? data.input : {};
+    const type = typeof input.type === "string" ? input.type : "";
+    const skill = request.stage === "bridge" ? "integrator" : "chair";
+    const ideas = Object.fromEntries(Object.entries(request.ideas).filter(([id]) => !this.factUpdateIndex.isDismissed(id)).map(([id, idea]) => [id,
+      isJsonRecord(idea) ? Object.fromEntries(Object.entries(idea).filter(([key]) => (request.stage === "bridge" ? ["output", "novelty", "literature"] : ["output", "novelty"]).includes(key))) : idea]));
+    return this.controlRoleTask({ declaration: { skill, route: request.stage === "bridge" ? "reasoning" : "writing", output: request.stage === "bridge" ? "bridgeReport" : "finalProposal" },
+      label: "the recovered final synthesis", taskId: request.taskId, nodeId: request.stage === "bridge" ? "bridge-audit" : "synthesize-proposal",
+      instructions: "Use bracket badge citation syntax only for currently valid supporting facts. A withdrawn badge mentioned as historical or rejected evidence must be written as a plain identifier without citation brackets. Resolve support through Supreme before claiming it.",
+      bindings: { input: Object.fromEntries(Object.entries(input).filter(([key]) => key !== "files")), files: data.files ?? null,
+        roster: isJsonRecord(data.panel) && Array.isArray(data.panel.members) ? data.panel.members.filter((entry) => isJsonRecord(entry) && !this.factUpdateIndex.isDismissed(String(entry.id))) : [],
+        ideas, type, ...(request.stage === "proposal" ? { bridge: request.bridge ?? null, shape: this.bundle.catalogs.inputTypes.shapes[type] ?? null } : {}) },
+      reconsideration: { agentId: skill, factScope: { role: skill, agent: skill }, narrow: (schema) => schema } });
   }
 
   /** Registers (once per node) the activity that stamps a seat's review phase. */
@@ -3413,7 +3554,7 @@ class ContentCompiler {
         // settlement exactly: committee mean, every report scored against y.
         bindings = { ...bindings, threshold: params.gameDecisionThreshold!, initialPoints: params.gameInitialPoints!, panel: state.panel!,
           decisionRule: params.gameDecisionRule ?? "committee-mean", leaveOneOut: params.gameLeaveOneOut ?? false,
-          ...(this.bundle.factTable?.accessMode === "supreme-mediated/v1" ? {
+          ...(this.bundle.factTable?.accessMode !== undefined ? {
             factAccessMode: "supreme-mediated/v1",
             chairTaskId: resolveDataReference("reviews[member.id].current.gameChairTaskId", scope, state, { required: true })!,
           } : {}),
@@ -3432,7 +3573,7 @@ class ContentCompiler {
             reportEpochs: resolveDataReference("reviews[member.id].current.gameReportEpochs", scope, state, { required: false }) ?? {},
             badgeSourceIds: factIdsInValue([...this.gameCriticInputBindings.values()].map((binding) => resolveBindValue(binding, scope, state, this.roots))),
             ...(params.gameInventedBadgePenalty === true ? { deletionPenalty: true } : {}),
-            ...(this.bundle.factTable?.accessMode === "supreme-mediated/v1" ? { chairTaskIds: this.chairTaskIdsOf(scope, state) } : {}),
+            ...(this.bundle.factTable?.accessMode !== undefined ? { chairTaskIds: this.chairTaskIdsOf(scope, state) } : {}),
           } : {}),
         };
       }

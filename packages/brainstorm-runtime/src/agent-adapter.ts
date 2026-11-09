@@ -596,8 +596,12 @@ function reconsiderationIssues(
   }
   if (schemaName !== "chainReconsiderationParts" || task === undefined || !isObjectValue(value)) return [];
   const deleted = noticeDeletedIds(task);
+  const input = task.input;
+  const bindings = isObjectValue(input) ? input.bindings : undefined;
+  const revokerDirected = isObjectValue(bindings) && isObjectValue(bindings.recoveryPlan);
   const base = task.revisionBase;
   if (value.decision !== "revised") {
+    if (revokerDirected) return [];
     const work = isObjectValue(base) ? { cot: base.cot ?? null, output: base.output ?? null, novelty: base.novelty ?? null } : null;
     const cited = factIdsInValue(work);
     const still = deleted.filter((id) => cited.includes(id));
@@ -614,7 +618,9 @@ function reconsiderationIssues(
   if (mergeIssues.length > 0) return mergeIssues;
   const merged = mergedChainReconsideration(patch, base);
   if (merged === undefined) return [];
-  const cited = factIdsInValue(merged);
+  // The Revoker may preserve a rejected historical premise outside the selected
+  // repair. Only newly authored text is forbidden from presenting withdrawn support.
+  const cited = factIdsInValue(revokerDirected ? patch as unknown as JsonValue : merged);
   const still = deleted.filter((id) => cited.includes(id));
   return still.length > 0
     ? [`the revision still cites ${still.join(", ")}, deleted from the fact table: rebuild or remove every citation of ${still.length > 1 ? "them" : "it"}`]

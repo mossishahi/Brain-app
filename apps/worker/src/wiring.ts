@@ -34,6 +34,7 @@ import {
   type CheckpointStore,
   type EncoderProvider,
   type FactAccess,
+  type FactAccessMode,
   type FactVerdict,
   type JsonObject,
   type JsonValue,
@@ -332,7 +333,7 @@ export function buildAgentExecutor(
   nativeWeb = false,
   notes?: { readonly access: NotesAccess; readonly scopes: NotesScopeRegistry },
   facts?: { readonly access: FactAccess; readonly scopes: FactScopeRegistry },
-  factAccessMode?: "supreme-mediated/v1",
+  factAccessMode?: FactAccessMode,
 ): AgentExecutor {
   if (config.provider === "offline") {
     return new OfflineBrainstormExecutor({ ...(inputTypes ? { inputTypes } : {}),
@@ -1078,7 +1079,7 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
         ...(result.usage ? { usage: result.usage } : {}),
       };
     });
-    if (factTable.accessMode === "supreme-mediated/v1") {
+    if (factTable.accessMode !== undefined) {
       factTable.attachConsultant(async ({ consultation, bindings, execution, signal }) => {
         const build = runtime.compiled.factConsultationTask;
         if (build === undefined) throw new Error("this bundle declares no supreme consultation role");

@@ -467,9 +467,12 @@ function validateFactTable(
     // that they may consult the table (they revise work that cites it).
     ...(control.reconsideration !== undefined
       ? (["chain", "gameReport", "comment"] as const).map((key) => ({
-          label: `reconsideration.${key}`, declaration: control.reconsideration![key], vars: FACT_RECONSIDERATION_VARS[key], reconsideration: key,
+          label: `reconsideration.${key}`, declaration: control.reconsideration![key],
+          vars: [...FACT_RECONSIDERATION_VARS[key], ...(control.accessMode === "supreme-dialogue/v2" ? ["recoveryPlan"] : [])], reconsideration: key,
         }))
       : []),
+    ...(control.reconsideration?.revoker !== undefined ? [{ label: "reconsideration.revoker", declaration: control.reconsideration.revoker,
+      vars: ["input", "files", "factUpdates", "targets"], reconsideration: "revoker" }] : []),
   ];
   for (const { label, declaration, vars, reconsideration } of roles) {
     const at = `catalog fact-table > ${label}`;

@@ -34,14 +34,15 @@ import type {
   ToolExecutionContext,
   ToolResult,
 } from "@brainstorm-agentic/core";
-import { DEFAULT_FACT_TABLE_LIMITS, FACT_KINDS, factDeletionAlert, factRequesterOf, isFactId } from "@brainstorm-agentic/core";
+import { DEFAULT_FACT_TABLE_LIMITS, FACT_DIALOGUE_ACTIONS, FACT_KINDS, factDeletionAlert, factRequesterOf, isFactId,
+  type FactAccessMode, type FactDependency, type FactDialogueAction } from "@brainstorm-agentic/core";
 
 import { rankFacts } from "./facts/rank.js";
 
 const lines = (...text: readonly string[]): string => text.join("\n");
 
 export const FACT_TABLE_MODES = ["lookup", "status", "submit", "approve"] as const;
-export type FactTableMode = (typeof FACT_TABLE_MODES)[number];
+export type FactTableMode = (typeof FACT_TABLE_MODES)[number] | "reply";
 
 /** Field ceilings: a claim is one sentence, evidence is what a checker needs, never a whole file. */
 const MAX_CLAIM_CHARS = 600;
@@ -129,10 +130,61 @@ export const FACT_TABLE_DEFINITION = {
   },
 } as const;
 
+/** V2 keeps the conversation at the host; callers never create private fact databases. */
+const { max_results: _legacyResultLimit, ...DIALOGUE_COMMON_PROPERTIES } = FACT_TABLE_DEFINITION.inputSchema.properties;
+export const FACT_TABLE_DIALOGUE_DEFINITION = {
+  name: "fact_table",
+  description: lines(
+    "Consult the supreme judge through the run's single shared fact database. Only the judge verifies and changes facts; callers receive selected facts and their complete evidence.",
+    "Start with lookup and only claim: state what you need to know, without justification or evidence. The answer opens a conversation and explains any relevant facts, their conditions, and evidence. It does not automatically certify your proposed claim.",
+    "Continue with reply, conversationId, and action: close ends the conversation and removes its retained dialogue; badge explicitly selects factId and its exact badgeHash within that fact's stated conditions; justify supplies claim, conditions, evidence, and kind for verification; challenge supplies those fields plus the factId and badgeHash being challenged; clarify supplies a message to continue the discussion.",
+    "Different conditions define a different fact. A narrower or broader result is not equivalent reuse: justify the new implication and name any premises as dependencies [{id, badgeHash}]. Cite a badge only after the judge returns it, and only within its verified conditions. No badge is needed for ordinary connective prose or directly inspectable reasoning from supported premises.",
+    "status asks the supreme judge about named badge IDs, or the badges cited in your current chain. approve is reserved for the committee chair and checks a badge's applicability to criticId's actual report. Neither operation grants direct database access.",
+    "Only justified facts may be cited. An unresolved challenge, missing evidence, or an unverified response is not a certificate of truth. Never infer success from an incomplete conversation. Answers do not identify other requesters.",
+  ),
+  inputSchema: {
+    ...FACT_TABLE_DEFINITION.inputSchema,
+    properties: {
+      ...DIALOGUE_COMMON_PROPERTIES,
+      mode: { type: "string", enum: ["lookup", "reply", "status", "approve"], default: "lookup",
+        description: "lookup opens a claim-only conversation; reply continues it; status checks standing; approve checks a critic's use." },
+      claim: { ...FACT_TABLE_DEFINITION.inputSchema.properties.claim,
+        description: "lookup: the claim to discuss, with no evidence yet. justify/challenge: the precise proposition to verify." },
+      conditions: { ...FACT_TABLE_DEFINITION.inputSchema.properties.conditions,
+        description: "justify/challenge: conditions under which the proposition holds; use 'none' only if unconditional." },
+      evidence: { ...FACT_TABLE_DEFINITION.inputSchema.properties.evidence,
+        description: "justify/challenge: the proof, executed code and output, source quotation, or record supporting the claim." },
+      kind: { ...FACT_TABLE_DEFINITION.inputSchema.properties.kind,
+        description: "justify/challenge: code, record, result, literature, math, or background." },
+      step: { ...FACT_TABLE_DEFINITION.inputSchema.properties.step,
+        description: "reply justify/challenge: the chain step this fact supports, or the step you are reviewing." },
+      purpose: { ...FACT_TABLE_DEFINITION.inputSchema.properties.purpose,
+        description: "reply justify/challenge (optional): what the reviewed reasoning builds on this fact." },
+      factId: { ...FACT_TABLE_DEFINITION.inputSchema.properties.factId,
+        description: "reply badge/challenge: the offered fact to select or contest. approve: the badge cited in the critic's report." },
+      badgeHash: { ...FACT_TABLE_DEFINITION.inputSchema.properties.badgeHash,
+        description: "reply badge/challenge or approve: the exact host-issued hash of the selected, challenged, or cited fact revision." },
+      message: { ...FACT_TABLE_DEFINITION.inputSchema.properties.message,
+        description: "reply clarify: the required follow-up question. reply justify/challenge, status and approve: optional context for Supreme. Not accepted in the initial lookup." },
+      conversationId: { type: "string", minLength: 1, description: "reply: the opaque conversation ID returned by this run's supreme judge." },
+      action: { type: "string", enum: [...FACT_DIALOGUE_ACTIONS], description: "reply: close, badge, justify, challenge, or clarify." },
+      dependencies: { type: "array", items: { type: "object", properties: {
+        id: { type: "string", pattern: "^F:[1-9][0-9]*$" },
+        badgeHash: { type: "string", pattern: "^sha256:[a-f0-9]{64}$" },
+      }, required: ["id", "badgeHash"], additionalProperties: false },
+      description: "justify/challenge: exact verified premises used by the proof. The judge checks dependencies independently." },
+    },
+  },
+} as const;
+
+export function factTableDefinition(accessMode?: FactAccessMode) {
+  return accessMode === "supreme-dialogue/v2" ? FACT_TABLE_DIALOGUE_DEFINITION : FACT_TABLE_DEFINITION;
+}
+
 export const FACT_TABLE_MANIFEST: HostToolManifest = {
   toolId: "fact_table",
   displayName: "Fact Table",
-  operations: ["fact.lookup", "fact.status", "fact.submit", "fact.approve"],
+  operations: ["fact.lookup", "fact.status", "fact.submit", "fact.approve", "fact.reply"],
   risk: "low",
   defaultEnabled: true,
   definition: FACT_TABLE_DEFINITION,
@@ -151,6 +203,9 @@ export class FactQueryError extends Error {
 /** One parsed fact_table call. */
 export interface FactTableQuery {
   readonly mode: FactTableMode;
+  readonly conversationId?: string;
+  readonly action?: FactDialogueAction;
+  readonly dependencies?: readonly FactDependency[];
   readonly message?: string;
   readonly factId?: string;
   readonly badgeHash?: string;
@@ -166,6 +221,7 @@ export interface FactTableQuery {
 }
 
 const INPUT_KEYS = new Set(["mode", "claim", "conditions", "evidence", "kind", "step", "purpose", "ids", "max_results", "message", "factId", "badgeHash", "criticId"]);
+const DIALOGUE_INPUT_KEYS = new Set([...INPUT_KEYS, "conversationId", "action", "dependencies"]);
 
 function optionalText(record: Record<string, unknown>, key: string, ceiling: number): string | undefined {
   const value = record[key];
@@ -179,23 +235,74 @@ function optionalText(record: Record<string, unknown>, key: string, ceiling: num
 }
 
 /** Validates one call's arguments; a FactQueryError carries the message the agent sees. */
-export function parseFactInput(input: JsonValue): FactTableQuery {
+export function parseFactInput(input: JsonValue, accessMode?: FactAccessMode): FactTableQuery {
   const record: Record<string, unknown> =
     typeof input === "object" && input !== null && !Array.isArray(input) ? { ...(input as JsonObject) } : {};
   if (typeof input !== "object" || input === null || Array.isArray(input)) {
     throw new FactQueryError("The fact table takes one JSON object of arguments.");
   }
-  const unknown = Object.keys(record).filter((key) => !INPUT_KEYS.has(key));
+  const dialogue = accessMode === "supreme-dialogue/v2";
+  const keys = dialogue ? DIALOGUE_INPUT_KEYS : INPUT_KEYS;
+  const unknown = Object.keys(record).filter((key) => !keys.has(key));
   if (unknown.length > 0) {
     throw new FactQueryError(
-      `Unknown argument(s): ${unknown.join(", ")}. Allowed: ${[...INPUT_KEYS].join(", ")}.`,
+      `Unknown argument(s): ${unknown.join(", ")}. Allowed: ${[...keys].join(", ")}.`,
     );
   }
   const rawMode = record.mode ?? "lookup";
-  if (typeof rawMode !== "string" || !(FACT_TABLE_MODES as readonly string[]).includes(rawMode)) {
-    throw new FactQueryError(`\`mode\` must be one of ${FACT_TABLE_MODES.join(", ")}.`);
+  const modes = dialogue ? ["lookup", "reply", "status", "approve"] : [...FACT_TABLE_MODES];
+  if (typeof rawMode !== "string" || !modes.includes(rawMode)) {
+    throw new FactQueryError(`\`mode\` must be one of ${modes.join(", ")}.${dialogue ? " Open a lookup conversation before submitting justification." : ""}`);
   }
   const mode = rawMode as FactTableMode;
+  if (dialogue && mode === "lookup" && Object.keys(record).some((key) => key !== "mode" && key !== "claim")) {
+    throw new FactQueryError("Start with only `claim`: provide justification or evidence in a later `reply`.");
+  }
+  let conversationId: string | undefined;
+  let action: FactDialogueAction | undefined;
+  let dependencies: FactDependency[] | undefined;
+  if (mode === "reply") {
+    if (typeof record.conversationId !== "string" || record.conversationId.trim() === "") {
+      throw new FactQueryError("`reply` needs the `conversationId` returned by the supreme judge.");
+    }
+    conversationId = record.conversationId.trim();
+    if (typeof record.action !== "string" || !(FACT_DIALOGUE_ACTIONS as readonly string[]).includes(record.action)) {
+      throw new FactQueryError(`\`reply\` needs an \`action\`: ${FACT_DIALOGUE_ACTIONS.join(", ")}.`);
+    }
+    action = record.action as FactDialogueAction;
+    const common = ["mode", "conversationId", "action"];
+    const allowed = new Set([...common, ...(action === "close" ? [] : action === "clarify" ? ["message"]
+      : action === "badge" ? ["factId", "badgeHash"]
+      : ["claim", "conditions", "evidence", "kind", "step", "purpose", "message", "dependencies",
+        ...(action === "challenge" ? ["factId", "badgeHash"] : [])])]);
+    const irrelevant = Object.keys(record).filter((key) => !allowed.has(key));
+    if (irrelevant.length > 0) throw new FactQueryError(`\`${action}\` does not accept ${irrelevant.join(", ")}.`);
+  } else if (dialogue && ["conversationId", "action", "dependencies"].some((key) => key in record)) {
+    throw new FactQueryError("Conversation arguments belong to `reply`.");
+  }
+  if (dialogue && (mode === "status" || mode === "approve")) {
+    const allowed = new Set(mode === "status" ? ["mode", "ids", "message"]
+      : ["mode", "factId", "badgeHash", "criticId", "claim", "conditions", "message"]);
+    const irrelevant = Object.keys(record).filter((key) => !allowed.has(key));
+    if (irrelevant.length > 0) throw new FactQueryError(`\`${mode}\` does not accept ${irrelevant.join(", ")}.`);
+  }
+  if (record.dependencies !== undefined) {
+    if (!Array.isArray(record.dependencies)) throw new FactQueryError("`dependencies` must be a list of {id, badgeHash} references.");
+    dependencies = record.dependencies.map((candidate): FactDependency => {
+      if (candidate === null || typeof candidate !== "object" || Array.isArray(candidate)) {
+        throw new FactQueryError("Every dependency needs its fact `id` and exact `badgeHash`.");
+      }
+      const dependency = candidate as Record<string, unknown>;
+      if (Object.keys(dependency).some((key) => key !== "id" && key !== "badgeHash") || !isFactId(dependency.id)
+        || typeof dependency.badgeHash !== "string" || !/^sha256:[a-f0-9]{64}$/.test(dependency.badgeHash)) {
+        throw new FactQueryError("Every dependency needs only a valid fact `id` and exact `badgeHash`.");
+      }
+      return { id: dependency.id as string, badgeHash: dependency.badgeHash };
+    });
+    if (new Set(dependencies.map((dependency) => dependency.id)).size !== dependencies.length) {
+      throw new FactQueryError("Name each dependency once.");
+    }
+  }
   const claim = optionalText(record, "claim", MAX_CLAIM_CHARS);
   const conditions = optionalText(record, "conditions", MAX_CONDITIONS_CHARS);
   const evidence = optionalText(record, "evidence", MAX_EVIDENCE_CHARS);
@@ -204,6 +311,10 @@ export function parseFactInput(input: JsonValue): FactTableQuery {
   const factId = optionalText(record, "factId", MAX_PURPOSE_CHARS);
   const badgeHash = optionalText(record, "badgeHash", 71);
   const criticId = optionalText(record, "criticId", MAX_PURPOSE_CHARS);
+  if ((action === "badge" || action === "challenge") && (factId === undefined || badgeHash === undefined)) {
+    throw new FactQueryError(`\`${action}\` needs \`factId\` and its exact \`badgeHash\`.`);
+  }
+  if (action === "clarify" && message === undefined) throw new FactQueryError("`clarify` needs `message`.");
   if (factId !== undefined && !isFactId(factId)) throw new FactQueryError("`factId` must be a badge id such as F:12.");
   if (badgeHash !== undefined && !/^sha256:[a-f0-9]{64}$/.test(badgeHash)) {
     throw new FactQueryError("`badgeHash` must be the exact sha256 hash returned by the supreme judge.");
@@ -243,10 +354,10 @@ export function parseFactInput(input: JsonValue): FactTableQuery {
     }
     maxResults = value;
   }
-  if ((mode === "lookup" || mode === "submit") && claim === undefined) {
+  if ((mode === "lookup" || mode === "submit" || action === "justify" || action === "challenge") && claim === undefined) {
     throw new FactQueryError(`\`${mode}\` needs \`claim\`: the fact as one self-contained sentence.`);
   }
-  if (mode === "submit") {
+  if (mode === "submit" || action === "justify" || action === "challenge") {
     const missing = [
       ...(conditions === undefined ? ["conditions (or \"none\")"] : []),
       ...(evidence === undefined ? ["evidence"] : []),
@@ -258,6 +369,9 @@ export function parseFactInput(input: JsonValue): FactTableQuery {
   }
   return {
     mode,
+    ...(conversationId !== undefined ? { conversationId } : {}),
+    ...(action !== undefined ? { action } : {}),
+    ...(dependencies !== undefined ? { dependencies } : {}),
     ...(message !== undefined ? { message } : {}),
     ...(factId !== undefined ? { factId } : {}),
     ...(badgeHash !== undefined ? { badgeHash } : {}),
@@ -473,20 +587,21 @@ export async function runFactTable(
 ): Promise<ToolResult> {
   let query: FactTableQuery;
   try {
-    query = parseFactInput(input);
+    query = parseFactInput(input, access.accessMode);
   } catch (error) {
     if (error instanceof FactQueryError) return refusal(error.message);
     throw error;
   }
-  const mediated = access.accessMode === "supreme-mediated/v1";
-  if (scope.blindReview !== undefined) {
+  const dialogue = access.accessMode === "supreme-dialogue/v2";
+  const mediated = access.accessMode === "supreme-mediated/v1" || dialogue;
+  if (!dialogue && scope.blindReview !== undefined) {
     if (access.forTask === undefined) {
       throw new Error("Blind review requires an isolated fact-table view; live peer facts cannot be exposed.");
     }
     access = await access.forTask(taskId, scope);
   }
   if (mediated || access.accessMode === "supreme-mediated/v1") {
-    if (access.accessMode !== "supreme-mediated/v1" || access.consult === undefined) {
+    if ((access.accessMode !== "supreme-mediated/v1" && access.accessMode !== "supreme-dialogue/v2") || access.consult === undefined) {
       throw new Error("Supreme-mediated access requires a scoped supreme judge consultation; direct table access is forbidden.");
     }
     if (query.mode === "approve" && scope.role !== "committee-chair") {
@@ -501,6 +616,8 @@ export async function runFactTable(
     }, context) };
   }
   switch (query.mode) {
+    case "reply":
+      return refusal("Fact conversations require a bundle with supreme-dialogue/v2 access.");
     case "approve":
       return refusal("Badge-use approvals require a bundle with supreme-mediated fact access.");
     case "lookup":
@@ -531,6 +648,12 @@ export function describeFactTableCall(args: JsonValue | undefined): string {
     typeof args === "object" && args !== null && !Array.isArray(args) ? (args as JsonObject) : ({} as JsonObject);
   const claim = typeof record.claim === "string" ? clip(record.claim.trim(), 90) : "";
   switch (record.mode) {
+    case "reply":
+      return record.action === "close" ? "Closing the fact conversation"
+        : record.action === "challenge" ? "Challenging a fact with the supreme judge"
+          : record.action === "justify" ? "Providing justification to the supreme judge"
+            : record.action === "badge" ? "Selecting a verified fact"
+              : "Continuing the fact conversation";
     case "approve":
       return typeof record.factId === "string" ? `Asking the supreme judge to approve ${clip(record.factId, 30)}` : "Asking the supreme judge for badge approval";
     case "submit":
@@ -550,7 +673,7 @@ export type FactBindingResolver = (context: ToolExecutionContext) => FactTaskBin
 /** The fact_table tool over a FactAccess, for registries that serve every task of a run. */
 export function factTools(access: FactAccess, resolve: FactBindingResolver): readonly Tool[] {
   const tool: Tool = {
-    definition: FACT_TABLE_DEFINITION,
+    definition: factTableDefinition(access.accessMode),
     async execute(input, context) {
       const binding = resolve(context);
       if (binding === undefined || context.taskId === undefined) {

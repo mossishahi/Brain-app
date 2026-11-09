@@ -32,3 +32,15 @@ test("Supreme approval context is derived from the actual committee task and exa
   assert.equal(factSubmitContextOf({ ...task, outputSchema: { name: "gameCritique", schema: {} } }).review, undefined);
   assert.equal(factSubmitContextOf({ ...task, input: { bindings: { chain, currentStep: 2, comments: { critic: report } } } }).review, undefined);
 });
+
+test("dependency revisions are bound into badges without changing hashes of legacy records", () => {
+  const legacyHash = factBadgeHash(entry);
+  const dependency = { id: "F:2", badgeHash: `sha256:${"a".repeat(64)}` };
+  const other = { id: "F:3", badgeHash: `sha256:${"b".repeat(64)}` };
+  const implication = { ...entry, dependencies: [dependency, other] };
+  assert.notEqual(factBadgeHash(implication), legacyHash);
+  assert.equal(factBadgeHash(implication), factBadgeHash({ ...entry, dependencies: [other, dependency] }));
+  assert.notEqual(factBadgeHash(implication), factBadgeHash({ ...entry, dependencies: [{ ...dependency, badgeHash: other.badgeHash }, other] }));
+  assert.equal(factBadgeHash({ ...entry, dependencies: undefined }), legacyHash);
+  assert.notEqual(factBadgeHash({ ...implication, conditions: "x is strictly positive" }), factBadgeHash(implication));
+});

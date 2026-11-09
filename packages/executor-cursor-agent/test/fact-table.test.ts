@@ -19,7 +19,7 @@ import type {
   FactSubmitContext,
   JsonObject,
 } from "@brainstorm-agentic/core";
-import { FACT_TABLE_DEFINITION } from "@brainstorm-agentic/host-tools";
+import { FACT_TABLE_DEFINITION, FACT_TABLE_DIALOGUE_DEFINITION } from "@brainstorm-agentic/host-tools";
 
 import {
   CursorAgentExecutor,
@@ -466,4 +466,40 @@ test("other custom tools are not held: a slow taxonomy call still trips the stal
   );
   assert.equal(result.status, "ok");
   assert.equal(created.length, 2, "the silent taxonomy call was taken for a stall, as before");
+});
+
+test("Cursor offers v2 reply actions and routes even blind scopes to the single shared judge", async () => {
+  const created: CursorSdkAgentOptions[] = [];
+  const queries: unknown[] = [];
+  const evidence = "Full checked evidence. ".repeat(1000);
+  const facts: FactAccess = {
+    accessMode: "supreme-dialogue/v2",
+    forTask: async () => { throw new Error("private fact view must not be created in v2"); },
+    entries: async () => { throw new Error("a caller cannot directly read the database"); },
+    submit: async () => { throw new Error("a caller cannot bypass the dialogue"); },
+    consult: async (requester, query): Promise<JsonObject> => {
+      assert.equal(requester.taskId, factTask.taskId); queries.push(query);
+      return query.mode === "lookup" ? { conversationId: "C:1", facts: [{ id: "F:1", evidence }] } : { closed: true };
+    },
+  };
+  const result = await new CursorAgentExecutor({ apiKey: "synthetic-key", listModels: async () => [], facts,
+    agentFactory: fakeFactory([{ callTools: async (tools) => {
+      const call = (input: JsonObject) => tools.fact_table!.execute(input, {});
+      assert.deepEqual(await call({ mode: "lookup", claim: CLAIM }), { conversationId: "C:1", facts: [{ id: "F:1", evidence }] });
+      assert.deepEqual(await call({ mode: "reply", conversationId: "C:1", action: "close" }), { closed: true });
+      const refusal = await call(SUBMIT) as { error?: string };
+      assert.match(JSON.stringify(refusal), /lookup conversation/);
+      await submitResult(tools);
+    } }], created),
+  }).execute({ ...factTask, metadata: { factScope: { ...SCOPE, blindReview: "old-scope" } } }, {
+    runId: "run-dialogue", nodePath: "root/review",
+  });
+  assert.equal(result.status, "ok");
+  assert.deepEqual(queries, [{ mode: "lookup", claim: CLAIM }, { mode: "reply", conversationId: "C:1", action: "close" }]);
+  const offered = created[0]!.local.customTools!.fact_table!;
+  assert.equal(offered.description, FACT_TABLE_DIALOGUE_DEFINITION.description);
+  assert.deepEqual(offered.inputSchema, FACT_TABLE_DIALOGUE_DEFINITION.inputSchema);
+  const modes = (offered.inputSchema as { properties: { mode: { enum: readonly string[] } } }).properties.mode.enum;
+  assert.ok(modes.includes("reply"));
+  assert.ok(!modes.includes("submit"));
 });

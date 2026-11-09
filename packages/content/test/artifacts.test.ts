@@ -1354,6 +1354,24 @@ test("factUpdateMerge: merged and discarded entries in notice order, reassess on
   assert.equal(factUpdateMergeSchema.safeParse({ merged: [], discarded: [], extra: true }).success, false);
 });
 
+test("factUpdateMerge validates regenerated final outputs and retains recovery receipts", () => {
+  const proposal = {
+    title: "Rechecked proposal", framing: "Uses the repaired premises.", consensus: ["Checked result."],
+    tensions: [], novelDirections: [], applications: [],
+    actionItems: [{ priority: 1, action: "Verify the repaired construction.", rationale: "Tests the surviving claim." }],
+  };
+  const merge = {
+    merged: [{ key: "chain:member-1", taskId: "repair-1", notices: ["N:1"], output: { decision: "revised" },
+      recovery: { generation: 1, reviewCertificates: [] } }],
+    discarded: [], finalOutputs: { proposal, bridge: { noveltyAudit: [], contradictions: [], seams: [] } },
+  };
+  assert.deepEqual(factUpdateMergeSchema.parse(merge), merge);
+  assert.ok(factUpdateMergeSchema.safeParse({ ...merge, finalOutputs: { proposal } }).success);
+  assert.equal(factUpdateMergeSchema.safeParse({ ...merge, finalOutputs: { bridge: merge.finalOutputs.bridge } }).success, false);
+  assert.equal(factUpdateMergeSchema.safeParse({ ...merge, finalOutputs: { proposal: { ...proposal, actionItems: [] } } }).success, false);
+  assert.equal(factUpdateMergeSchema.safeParse({ ...merge, finalOutputs: { proposal, bridge: {} } }).success, false);
+});
+
 /**
  * A committee-mean v3 settlement (the arithmetic of game-review.test.ts):
  * a and b admitted, y = 0; c rejected and fined for citing F:7, deleted from

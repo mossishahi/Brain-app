@@ -1860,6 +1860,7 @@ test("stage model options serve cached data during startup discovery and refresh
       "game-comment-step-bridge", "game-comment-step", "chair-step", "game-chair-reassess", "game-redevelop-idea",
       "comment-step-bridge", "comment-step", "judge-step", "judge-reassess", "redevelop-idea",
       "bridge-audit", "synthesize-proposal", "fact-verification", "fact-consultation", "fact-update",
+      "fact-revoker", "fact-recovery-review", "fact-recovery-chair",
     ]) assert.ok(stageIds.includes(id), `the stage picker must expose ${id}`);
     const registryReads = server.registryReads.length;
     await requestJson(server, "/api/model-options");

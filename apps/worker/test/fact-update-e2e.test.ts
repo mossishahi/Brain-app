@@ -36,10 +36,10 @@ import { buildRuntime } from "../src/wiring.js";
 
 const brainRepoRoot = fileURLToPath(new URL("../../../../../brain/", import.meta.url));
 /** The pinned published bundle, resolved as in cli.test.ts. */
-function pinnedMaterializedDir(): string {
+function pinnedMaterializedDir(fixtureVersion?: string): string {
   execFileSync(process.execPath, [join(brainRepoRoot, "scripts", "materialize-store.mjs"), "--quiet"], { stdio: "inherit" });
   const storeRoot = join(brainRepoRoot, ".registry-store");
-  const override = process.env.BRAIN_TEST_BUNDLE_VERSION;
+  const override = fixtureVersion ?? process.env.BRAIN_TEST_BUNDLE_VERSION;
   let version: string;
   if (override === "latest") {
     const index = JSON.parse(readFileSync(join(storeRoot, "index.json"), "utf8")) as { bundles: readonly { id: string; latest: string }[] };
@@ -53,8 +53,16 @@ function pinnedMaterializedDir(): string {
   }
   return `${join(storeRoot, "bundles", "brainstorm", version)}/`;
 }
-const sourceContentDir = process.env.BRAIN_TEST_CONTENT_DIR ?? pinnedMaterializedDir();
+const configuredContentDir = process.env.BRAIN_TEST_CONTENT_DIR ?? pinnedMaterializedDir();
+// These scenarios assert the legacy parallel-reconsideration policy, including
+// exact task IDs, one reassessment and deleted-badge fines. V2 intentionally
+// replaces that policy with Revoker planning and fresh review; fact-recovery.test
+// exercises it through the real compiler and worker. Keep these regression
+// assertions on their published legacy bundle when testing a v2 candidate.
+const sourceContentDir = loadContent(configuredContentDir).factTable?.accessMode === "supreme-dialogue/v2"
+  ? pinnedMaterializedDir("0.30.1") : configuredContentDir;
 const sourceBundle = loadContent(sourceContentDir);
+assert.notEqual(sourceBundle.factTable?.accessMode, "supreme-dialogue/v2", "legacy fact-update scenarios require a legacy policy");
 const supported = sourceBundle.factTable?.updates !== undefined && sourceBundle.workflows.brainstorm?.params.gameDecisionRule !== undefined;
 const SKIP = supported ? false : "the Brain content's fact table declares no updates";
 

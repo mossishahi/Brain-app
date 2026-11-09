@@ -218,6 +218,8 @@ export type { NotesMode, NotesQuery } from "./notes/search.js";
 export {
   FACT_MANIFESTS,
   FACT_TABLE_DEFINITION,
+  FACT_TABLE_DIALOGUE_DEFINITION,
+  factTableDefinition,
   FACT_TABLE_MANIFEST,
   FACT_TABLE_MODES,
   FACT_TOOL_NAMES,

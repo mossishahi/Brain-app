@@ -16,6 +16,13 @@ import { dirname } from "node:path";
 
 import {
   emptyFactUpdateMerge,
+  applyRecoveryChoice,
+  recoveryTarget,
+  recoveryReviewSteps,
+  validateRecoveryChoice,
+  factUpdateDigest,
+  applyChainReconsideration,
+  type RecoveryChoice,
   parseSubscriberKey,
   reportBase,
   staleChainParts,
@@ -32,6 +39,7 @@ import {
 } from "@brainstorm-agentic/brainstorm-runtime";
 import {
   factIssuanceReason,
+  factIdsIn,
   WindDownSignal,
   WorkflowCancelledError,
   type AgentExecutor,
@@ -41,6 +49,8 @@ import {
   type JsonObject,
   type JsonValue,
 } from "@brainstorm-agentic/core";
+
+import { finalizeFactOutputs, factFinalizationHash } from "./fact-finalization.js";
 
 import { DEFAULT_FS_DEADLINE_MS, readFileIfExists, withFsDeadline } from "./fs-stores.js";
 
@@ -61,7 +71,7 @@ export interface FactUpdateSpawnerOptions {
   readonly journalPath: string;
   readonly table: FactUpdateTable;
   /** The compiled workflow's subscriber index and task builder. */
-  readonly compiled: Pick<CompiledContentWorkflow, "factUpdateIndex" | "factReconsiderationTask">;
+  readonly compiled: Pick<CompiledContentWorkflow, "factUpdateIndex" | "factReconsiderationTask" | "factRevokerTask" | "factRecoveryReviewTask" | "factRecoveryAssess" | "factRecoveryCritics" | "factFinalizationTask">;
   /** The run's outermost executor: launches are spaced, captured and scoped as for any task. */
   readonly executor: AgentExecutor;
   /** The host's deadline: no task starts after it (design 6.8). */
@@ -89,6 +99,9 @@ interface TaskState {
   readonly notices: readonly string[];
   readonly epoch: number;
   readonly base: JsonObject;
+  readonly target?: JsonObject;
+  recovery?: JsonObject;
+  batch?: { targets: readonly JsonObject[]; notices: readonly string[] };
   superseded: boolean;
   /** Returned by a merge point of this process (merged or discarded). */
   handed: boolean;
@@ -121,6 +134,9 @@ export class FactUpdateSpawner implements FactUpdateCoordinator {
   private readonly index: FactUpdateIndex;
   private readonly build: NonNullable<CompiledContentWorkflow["factReconsiderationTask"]>;
   private readonly executor: AgentExecutor;
+  private readonly compiled: FactUpdateSpawnerOptions["compiled"];
+  private readonly recoveryResults = new Map<string, JsonObject>();
+  private readonly recoveryCalls = new Map<string, Promise<JsonObject>>();
   private readonly windDown: { readonly at: number; readonly reason: string } | undefined;
   private readonly now: () => number;
   private readonly controller = new AbortController();
@@ -165,6 +181,7 @@ export class FactUpdateSpawner implements FactUpdateCoordinator {
     this.index = index;
     this.build = build;
     this.executor = options.executor;
+    this.compiled = options.compiled;
     this.windDown = options.windDown;
     this.now = options.now ?? Date.now;
     if (options.signal !== undefined) {
@@ -185,7 +202,7 @@ export class FactUpdateSpawner implements FactUpdateCoordinator {
       if (this.noticeByDeleted.has(event.deletion.id)) return;
       this.pending.delete(event.deletion.id);
       const submitter = this.submitterOf(event);
-      const found = this.closed
+      const found = this.closed || this.index.isClosed(this.runId)
         ? { subscribers: [] }
         : this.index.subscribersOf(this.runId, event.deletion.id, submitter, event.deletion.seq);
       const subscribers = found.subscribers.filter((subscriber) => !this.isRoundClosed(subscriber.key));
@@ -214,6 +231,7 @@ export class FactUpdateSpawner implements FactUpdateCoordinator {
     await this.drain();
     this.assertHealthy();
     const point = request.point;
+    if (point === "close" && this.index.sharedRecovery) return this.finalize(request);
     let keys: string[];
     if (point === "chain") {
       keys = request.seat !== undefined ? [chainSubscriberKey(request.seat)] : [];
@@ -250,7 +268,20 @@ export class FactUpdateSpawner implements FactUpdateCoordinator {
       if (parsed === undefined) continue;
       let task = this.liveTask(key);
       if (task !== undefined) await this.settled(task, request.signal);
-      if (task !== undefined && parsed.kind === "chain" && task.outcome?.status === "ok") {
+      if (this.index.sharedRecovery) {
+        // A concurrent withdrawal or author revision invalidates the whole recovery certificate.
+        for (;;) {
+          await this.drain(); this.assertHealthy();
+          const current = this.liveTask(key);
+          if (current !== task) { task = current; if (task) await this.settled(task, request.signal); continue; }
+          if (!task) break;
+          const target = recoveryTarget(this.index, this.runId, key);
+          if (task.base.artifactHash === (target.base as JsonObject).artifactHash && task.epoch === await this.table.deletionEpoch()) break;
+          await this.enqueue(() => this.startAll([{ key, notices: task!.notices, rerun: true }]));
+          task = this.liveTask(key); if (task) await this.settled(task, request.signal);
+        }
+      }
+      if (!this.index.sharedRecovery && task !== undefined && parsed.kind === "chain" && task.outcome?.status === "ok") {
         // The base check (design 6.4, P7): a step or section the revision
         // rewrites that changed since the task began gets one re-run.
         const idea = this.index.idea(this.runId, parsed.seat);
@@ -286,7 +317,7 @@ export class FactUpdateSpawner implements FactUpdateCoordinator {
       }
       if (parsed.kind !== "chain") {
         const report = this.index.report(this.runId, key);
-        if (report === undefined || reportBase(report.report).report !== task.base.report) {
+        if (report === undefined || (!this.index.sharedRecovery && reportBase(report.report).report !== task.base.report)) {
           discarded.push({ first: this.firstSeq(task), entry: { key, taskId: task.taskId, notices: [...task.notices], reason: "report-changed" } });
           continue;
         }
@@ -299,6 +330,7 @@ export class FactUpdateSpawner implements FactUpdateCoordinator {
           notices: [...task.notices],
           output: outcome.output,
           ...(parsed.kind === "game-report" ? { epoch: task.epoch } : {}),
+          ...(task.recovery ? { recovery: task.recovery } : {}),
         },
       });
     }
@@ -400,7 +432,7 @@ export class FactUpdateSpawner implements FactUpdateCoordinator {
    */
   private async ensure(keys: readonly string[]): Promise<void> {
     await this.flushPending();
-    if (this.closed) return;
+    if (this.closed || this.index.isClosed(this.runId)) return;
     const known = [...this.notices.values()].sort((a, b) => a.seq - b.seq);
     const deletions = known.map((notice) => ({ id: notice.deleted, seq: notice.seq }));
     const starts: { key: string; notices: readonly string[]; rerun?: boolean }[] = [];
@@ -413,7 +445,7 @@ export class FactUpdateSpawner implements FactUpdateCoordinator {
         if (task.superseded || this.index.isTaskConsumed(this.runId, task.taskId)) continue;
         for (const id of task.notices) covered.add(id);
       }
-      if (parsed.kind !== "chain") {
+      if (!this.index.sharedRecovery && parsed.kind !== "chain") {
         for (const id of this.index.consumedNotices(this.runId, key)) covered.add(id);
       }
       const missing = cited
@@ -446,7 +478,7 @@ export class FactUpdateSpawner implements FactUpdateCoordinator {
    * too (6.5).
    */
   private async startAll(starts: readonly { readonly key: string; readonly notices: readonly string[]; readonly rerun?: boolean }[]): Promise<void> {
-    const ready: { readonly state: TaskState; readonly task: AgentTask }[] = [];
+    const ready: { readonly state: TaskState; readonly task?: AgentTask }[] = [];
     for (const start of starts) {
       const previous = this.liveTask(start.key);
       if (start.notices.length === 0 && previous === undefined) continue;
@@ -459,22 +491,38 @@ export class FactUpdateSpawner implements FactUpdateCoordinator {
       if (previous !== undefined) {
         await this.append({ type: "supersede", keys: [start.key], taskIds: [previous.taskId], at: this.now() });
         previous.superseded = true;
+        if (this.index.sharedRecovery) previous.stop?.abort(new Error("Recovery superseded by a newer fact withdrawal"));
       }
       const attempt = (this.attempts.get(start.key) ?? 0) + 1;
       this.attempts.set(start.key, attempt);
       const taskId = `fact-update:${start.key}:${attempt}`;
-      const built = await this.build({ runId: this.runId, taskId, key: start.key, notices: notices.map((id) => this.noticeFor(id, start.key)) });
+      const target = this.index.sharedRecovery ? recoveryTarget(this.index, this.runId, start.key) : undefined;
+      const built = target ? { base: target.base as JsonObject } : await this.build({ runId: this.runId, taskId, key: start.key, notices: notices.map((id) => this.noticeFor(id, start.key)) });
       const epoch = await this.table.deletionEpoch();
-      await this.append({ type: "task", key: start.key, taskId, notices, epoch, base: built.base, at: this.now() });
+      await this.append({ type: "task", key: start.key, taskId, notices, epoch, base: built.base, ...(target ? { target } : {}), at: this.now() });
       this.blocked.delete(start.key);
-      const state: TaskState = { key: start.key, taskId, notices, epoch, base: built.base, superseded: false, handed: false, listed: false };
+      const state: TaskState = { key: start.key, taskId, notices, epoch, base: built.base, ...(target ? { target } : {}), superseded: false, handed: false, listed: false };
+      if (previous?.batch && previous.epoch === epoch && previous.batch.targets.every((old) => {
+        try { return (recoveryTarget(this.index, this.runId, String(old.targetKey)).base as JsonObject).artifactHash === (old.base as JsonObject).artifactHash; }
+        catch { return false; }
+      })) state.batch = previous.batch;
       this.remember(state);
-      ready.push({ state, task: built.task });
+      ready.push({ state, ...("task" in built ? { task: built.task } : {}) });
     }
     // After the run invocation stopped (D16), a task is journaled but not
     // launched: it has no result, so its next merge point runs it (D10).
     if (this.runSignal?.aborted === true) return;
-    for (const { state, task } of ready) state.run = this.execute(state, task);
+    const targets = ready.flatMap(({ state }) => state.target ? [state.target] : []);
+    const notices = [...new Set(ready.flatMap(({ state }) => [...state.notices]))];
+    if (this.index.sharedRecovery) {
+      for (const { state } of ready) {
+        state.batch ??= { targets, notices };
+        await this.append({ type: "recovery-batch", taskId: state.taskId, targets: state.batch.targets, notices: state.batch.notices, at: this.now() });
+      }
+    }
+    for (const { state, task } of ready) state.run = this.index.sharedRecovery
+      ? this.executeRecovery(state, state.batch!.targets, state.batch!.notices)
+      : this.execute(state, task!);
   }
 
   /** One notice as a subscriber receives it: with the steps of its output that cite the deleted id (4.1). */
@@ -546,6 +594,239 @@ export class FactUpdateSpawner implements FactUpdateCoordinator {
       ...(usage !== undefined ? { usage } : {}),
       at: this.now(),
     }).catch(() => undefined);
+  }
+
+  /** Cache only schema- and authority-valid output. Recheck old caches against current recovery constraints. */
+  private recoveryCall(task: AgentTask, signal: AbortSignal,
+    validate?: (output: JsonObject) => void | Promise<void>): Promise<JsonObject> {
+    const pending = this.recoveryCalls.get(task.taskId);
+    if (pending) return pending;
+    const checked = async (raw: JsonValue): Promise<JsonObject> => {
+      const output = validateArtifact(task.outputSchema?.name ?? "", "fact-recovery", raw) as JsonObject;
+      await validate?.(output);
+      return output;
+    };
+    const call = (async () => {
+      signal.throwIfAborted();
+      const cached = this.recoveryResults.get(task.taskId);
+      if (cached) {
+        try { return await checked(cached); }
+        catch (error) {
+          this.recoveryResults.delete(task.taskId);
+          await this.append({ type: "recovery-invalidated", taskId: task.taskId, error: messageOf(error), at: this.now() });
+        }
+      }
+      signal.throwIfAborted();
+      if (this.windDown !== undefined && this.now() >= this.windDown.at) throw new WindDownSignal(this.windDown.at, this.windDown.reason);
+      await this.append({ type: "recovery-call", taskId: task.taskId, schema: task.outputSchema?.name, at: this.now() });
+      let abort: (() => void) | undefined;
+      const cancelled = new Promise<never>((_, reject) => { abort = () => reject(signal.reason); signal.addEventListener("abort", abort, { once: true }); });
+      let result;
+      try { result = await Promise.race([this.executor.execute(task, { runId: this.runId, nodePath: `fact-recovery/${task.taskId}`, signal }), cancelled]); }
+      finally { if (abort) signal.removeEventListener("abort", abort); }
+      signal.throwIfAborted();
+      if (result.status !== "ok") throw new Error(result.error.message);
+      let output: JsonObject;
+      try { output = await checked(result.output as JsonValue); }
+      catch (error) {
+        await this.append({ type: "recovery-result", taskId: task.taskId, status: "error", error: messageOf(error),
+          ...(result.usage ? { usage: result.usage } : {}), at: this.now() });
+        throw error;
+      }
+      await this.append({ type: "recovery-result", taskId: task.taskId, output, ...(result.usage ? { usage: result.usage } : {}), at: this.now() });
+      this.recoveryResults.set(task.taskId, output);
+      return output;
+    })();
+    this.recoveryCalls.set(task.taskId, call);
+    void call.finally(() => this.recoveryCalls.delete(task.taskId)).catch(() => undefined);
+    return call;
+  }
+
+  private validateRecoveryPlan(plan: JsonObject, targets: readonly JsonObject[], notices: readonly FactNotice[]): void {
+    const choices = Array.isArray(plan.changes) ? plan.changes.filter(isObject) as RecoveryChoice[] : [];
+    const unaffected = Array.isArray(plan.unaffected) ? plan.unaffected.filter(isObject) : [];
+    const decisions = [...choices, ...unaffected];
+    if (decisions.length !== targets.length || new Set(decisions.map((choice) => choice.targetKey)).size !== targets.length ||
+        decisions.some((choice) => !targets.some((target) => target.targetKey === choice.targetKey))) throw new Error("Revoker must assess every offered target exactly once, including explicit unaffected findings");
+    for (const choice of choices) {
+      validateRecoveryChoice(choice, targets.find((target) => target.targetKey === choice.targetKey)!);
+      if (choice.action === "substitute" && !notices.some((notice) => notice.replacement !== undefined && notice.replacement.id === choice.replacementFactId && notice.replacement.status === "justified")) {
+        throw new Error("Revoker substitution does not name a justified replacement in this withdrawal");
+      }
+    }
+    for (const item of unaffected) {
+      const target = targets.find((candidate) => candidate.targetKey === item.targetKey)!;
+      if (!isObject(item.base) || item.base.artifactHash !== (target.base as JsonObject).artifactHash || typeof item.rationale !== "string" || !item.rationale.trim()) {
+        throw new Error("Revoker unaffected finding must name the exact artifact and explain why it does not depend on the withdrawn fact");
+      }
+    }
+  }
+
+  private async executeRecovery(state: TaskState, targets: readonly JsonObject[], noticeIds: readonly string[]): Promise<void> {
+    const stop = new AbortController(); state.stop = stop;
+    const onClose = () => stop.abort(this.controller.signal.reason);
+    this.controller.signal.addEventListener("abort", onClose, { once: true });
+    if (this.controller.signal.aborted) onClose();
+    if (this.runSignal?.aborted) stop.abort(this.runSignal.reason);
+    try {
+      const buildRevoker = this.compiled.factRevokerTask;
+      const buildReview = this.compiled.factRecoveryReviewTask;
+      const assess = this.compiled.factRecoveryAssess;
+      if (!buildRevoker || !buildReview || !assess || !state.target) throw new Error("Shared-fact recovery roles are not wired");
+      const notices = noticeIds.map((id) => this.notices.get(id)!.notice);
+      let feedback: JsonObject | undefined;
+      recoveryLoop: for (let attempt = 0; ; attempt++) {
+      stop.signal.throwIfAborted();
+      if (await this.table.deletionEpoch() !== state.epoch) throw new Error("Facts changed during recovery; a new generation is required");
+      // A retry repairs only the rejected target. Other argument snapshots remain
+      // context; authorizing changes to them here would silently lose those choices.
+      const offered: readonly JsonObject[] = feedback ? [{ ...state.target, recoveryFeedback: feedback,
+        relatedTargets: targets.filter((target) => target.targetKey !== state.key) }] : targets;
+      const version = factUpdateDigest({ targets: offered, notices, epoch: state.epoch });
+      const planTask = await buildRevoker({ runId: this.runId, taskId: `revoker:${version}`, targets: offered, notices });
+      const plan = await this.recoveryCall(planTask, stop.signal, (output) => this.validateRecoveryPlan(output, offered, notices));
+      const choices = Array.isArray(plan.changes) ? plan.changes.filter(isObject) as RecoveryChoice[] : [];
+      const unaffected = Array.isArray(plan.unaffected) ? plan.unaffected.filter(isObject) : [];
+      const untouched = unaffected.find((entry) => entry.targetKey === state.key);
+      if (untouched) {
+        state.recovery = { generation: `recovery:${version}`, unaffected: untouched, artifactHash: state.base.artifactHash!, unscored: true, certificates: [] };
+        state.outcome = { status: "ok", output: { decision: "unchanged", reason: String(untouched.rationale),
+          ...(parseSubscriberKey(state.key)?.kind === "chain" ? { steps: [] } : {}) } };
+      } else {
+      const choice = choices.find((entry) => entry.targetKey === state.key)!;
+      const generation = `recovery:${factUpdateDigest({ version, choice })}`;
+      const built = await this.build({ runId: this.runId, taskId: `${generation}:repair`, key: state.key,
+        notices: state.notices.map((id) => this.noticeFor(id, state.key)), recoveryPlan: feedback ? { ...choice, reviewFeedback: feedback } : choice });
+      const parsed = parseSubscriberKey(state.key)!;
+      const revision = await this.recoveryCall(built.task, stop.signal, async (output) => {
+        applyRecoveryChoice(state.target!, choice, output, notices.map((notice) => notice.deleted));
+        // A rejected historical premise may remain outside the chosen edit. New
+        // repair text must use current support and follow the Revoker's footprint.
+        this.assertCurrentBadges(parsed.kind === "chain"
+          ? { steps: output.steps ?? [], outputPatch: output.outputPatch ?? {}, novelty: output.novelty ?? "" }
+          : output.report ?? output.comment ?? {}, await this.table.deletions());
+      });
+      const next = applyRecoveryChoice(state.target, choice, revision, notices.map((notice) => notice.deleted));
+      const certificates: JsonObject[] = [];
+      if (parsed.kind === "chain") {
+        const data = this.index.runData(this.runId);
+        const members = isObject(data.panel) && Array.isArray(data.panel.members) ? data.panel.members.filter(isObject) : [];
+        const critics = (this.compiled.factRecoveryCritics?.(this.runId) ?? members.map((member) => String(member.id)).filter((id) => !this.index.isDismissed(id)))
+          .filter((id) => id !== parsed.seat);
+        if (!critics.length) throw new Error("Fact recovery cannot validate reasoning without a confirmed panel");
+        for (const step of recoveryReviewSteps(state.target, choice, next)) {
+          stop.signal.throwIfAborted();
+          const epochs: Record<string, JsonValue> = {};
+          const reports = Object.fromEntries(await Promise.all(critics.map(async (criticId) => {
+            epochs[criticId] = await this.table.deletionEpoch();
+            const task = await buildReview({ runId: this.runId, taskId: `${generation}:step:${step}:critic:${criticId}`, kind: "critic",
+              seat: parsed.seat, idea: next, step, criticId });
+            return [criticId, await this.recoveryCall(task, stop.signal)];
+          })));
+          const chair = await buildReview({ runId: this.runId, taskId: `${generation}:step:${step}:chair`, kind: "chair", seat: parsed.seat,
+            idea: next, step, reports });
+          const ruling = await this.recoveryCall(chair, stop.signal);
+          const certificate = await assess({ runId: this.runId, generation, chairTaskId: chair.taskId, idea: next, step, reports, chair: ruling, epochs });
+          await this.append({ type: "recovery-review", generation, targetKey: state.key, artifactHash: factUpdateDigest(next), certificate, at: this.now() });
+          certificates.push(certificate);
+          if (certificate.status === "blocked") {
+            feedback = { attempt: attempt + 1, candidate: next, review: certificate };
+            await this.append({ type: "recovery-rejection", taskId: state.taskId, generation, feedback, at: this.now() });
+            continue recoveryLoop;
+          }
+          if (certificate.status !== "validated") throw new Error(`Recovery review unresolved at ${state.key} step ${step}; no admissible scientific validation is available. ${JSON.stringify(certificate.decision)}`);
+        }
+      }
+      if (await this.table.deletionEpoch() !== state.epoch) throw new Error("Facts changed during recovery; a new recovery generation is required");
+      state.recovery = { generation, plan: choice, reason: plan.reason ?? "", artifactHash: factUpdateDigest(next), unscored: true, certificates };
+      state.outcome = { status: "ok", output: revision };
+      }
+      break;
+      }
+    } catch (error) { state.outcome = { status: "error", error: messageOf(error), thrown: error }; }
+    finally { this.controller.signal.removeEventListener("abort", onClose); }
+    await this.append({ type: "result", taskId: state.taskId, status: state.outcome!.status,
+      ...(state.outcome!.status === "ok" ? { output: state.outcome!.output, recovery: state.recovery } : { error: state.outcome!.error }), at: this.now() }).catch(() => undefined);
+  }
+
+  private assertCurrentBadges(value: JsonValue, deletions: readonly FactDeletion[]): void {
+    const removed = new Set(deletions.map((deletion) => deletion.id));
+    const visit = (entry: JsonValue): void => {
+      if (typeof entry === "string") for (const id of factIdsIn(entry)) {
+        if (removed.has(id)) throw new Error(`Recovered output still cites withdrawn fact ${id}`);
+      }
+      else if (Array.isArray(entry)) entry.forEach(visit);
+      else if (isObject(entry)) Object.values(entry).forEach(visit);
+    };
+    visit(value);
+  }
+
+  /** Close is exclusive: provisional repairs feed rebuilt outputs, then one journaled fold commits all of them. */
+  private async finalize(request: FactMergeRequest): Promise<JsonObject> {
+    const build = this.compiled.factFinalizationTask;
+    if (!build) throw new Error("Shared-fact finalization is not wired");
+    const before = new Map(this.index.seats(this.runId).map((seat) => [seat, this.index.idea(this.runId, seat)!]));
+    const merged: JsonObject[] = [], discarded: JsonObject[] = [];
+    let lastSnapshotEpoch = -1;
+    const snapshot = async () => {
+      const epoch = await this.table.deletionEpoch(); lastSnapshotEpoch = epoch;
+      return { epoch, ideas: Object.fromEntries(this.index.seats(this.runId).map((seat) => [seat, this.index.idea(this.runId, seat)!])) };
+    };
+    const initialSnapshot = await snapshot();
+    const data = this.index.runData(this.runId);
+    let success = false;
+    try {
+      for (;;) {
+      const final = await finalizeFactOutputs({
+        ...(initialSnapshot.epoch === 0 && isObject(data.bridge) && isObject(data.proposal) ? { initial: { bridge: data.bridge, proposal: data.proposal,
+          epoch: 0, ideasHash: factFinalizationHash(initialSnapshot.ideas) } } : {}),
+        snapshot,
+        drain: async () => {
+          await this.quiesceWriters(request.signal);
+          const batch = await this.merge({ ...request, point: "ideas" });
+          for (const raw of Array.isArray(batch.merged) ? batch.merged : []) {
+            if (!isObject(raw)) continue;
+            const key = parseSubscriberKey(String(raw.key));
+            if (!key || key.kind !== "chain") throw new Error("Final recovery received a non-chain patch");
+            const state = applyChainReconsideration({ ideas: (await snapshot()).ideas }, key.seat, raw.output!, "fact-finalization").state;
+            this.index.setIdea(this.runId, key.seat, (state.ideas as JsonObject)[key.seat] as JsonObject);
+            merged.push(raw);
+          }
+          discarded.push(...(Array.isArray(batch.discarded) ? batch.discarded.filter(isObject) : []));
+        },
+        buildTask: ({ stage, generation, revision, ideas, bridge }) => build({ runId: this.runId,
+          taskId: `fact-finalization:${stage}:${revision}:${generation}`, stage, ideas, ...(bridge ? { bridge } : {}) }),
+        execute: async (task) => {
+          const output = await this.recoveryCall(task, request.signal);
+          return output;
+        }, signal: request.signal,
+      });
+      const finalEpoch = lastSnapshotEpoch;
+      const finalDeletions = await this.table.deletions();
+      await this.quiesceWriters(request.signal);
+      if (finalEpoch !== await this.table.deletionEpoch()) continue;
+      this.assertCurrentBadges({ ...final }, finalDeletions);
+      // The workflow close fold, not this provisional operation, commits closure.
+      success = true;
+      return { merged, discarded, finalOutputs: { ...final } };
+      }
+    } finally {
+      // The workflow's durable fold owns committed state; this overlay exists only inside close.
+      for (const [seat, idea] of before) this.index.setIdea(this.runId, seat, idea);
+      if (!success) for (const raw of merged) { const task = this.tasks.get(String(raw.taskId)); if (task) task.handed = false; }
+    }
+  }
+
+  /** Every recovery actor that could still ask Supreme to write facts must finish before close. */
+  private async quiesceWriters(signal: AbortSignal): Promise<void> {
+    for (;;) {
+      await this.drain(); this.assertHealthy();
+      const active = [...this.tasks.values()].filter((task) => task.run !== undefined);
+      await Promise.all(active.map((task) => this.settled(task, signal)));
+      await this.drain(); this.assertHealthy();
+      const again = [...this.tasks.values()].filter((task) => task.run !== undefined);
+      if (active.length === again.length && active.every((task, index) => task === again[index])) return;
+    }
   }
 
   private remember(state: TaskState): void {
@@ -651,6 +932,7 @@ export class FactUpdateSpawner implements FactUpdateCoordinator {
         notices: record.notices.filter((id): id is string => typeof id === "string"),
         epoch: record.epoch,
         base: record.base,
+        ...(isObject(record.target) ? { target: record.target } : {}),
         superseded: false,
         handed: false,
         listed: false,
@@ -664,7 +946,15 @@ export class FactUpdateSpawner implements FactUpdateCoordinator {
       const task = this.tasks.get(record.taskId);
       if (task !== undefined && record.status === "ok" && isObject(record.output)) {
         task.outcome = { status: "ok", output: record.output };
+        if (isObject(record.recovery)) task.recovery = record.recovery;
       }
+    } else if (record.type === "recovery-batch" && typeof record.taskId === "string" && Array.isArray(record.targets) && Array.isArray(record.notices)) {
+      const task = this.tasks.get(record.taskId);
+      if (task) task.batch = { targets: record.targets.filter(isObject), notices: record.notices.filter((id): id is string => typeof id === "string") };
+    } else if (record.type === "recovery-invalidated" && typeof record.taskId === "string") {
+      this.recoveryResults.delete(record.taskId);
+    } else if (record.type === "recovery-result" && typeof record.taskId === "string" && isObject(record.output)) {
+      this.recoveryResults.set(record.taskId, record.output);
     } else if (record.type === "closed") {
       this.closed = true;
     }

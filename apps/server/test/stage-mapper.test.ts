@@ -2836,6 +2836,42 @@ function factUpdateRun(options: {
 
 const partsStep = (label: string) => ({ part1: `${label} premise.`, part2: `${label} assumption.`, part3: `${label} calculation.`, part4: `${label} conclusion.` });
 
+test("v2 finalization displays repaired output and attributes recovery calls to their stages", () => {
+  const proposal = (title: string) => ({ title, framing: paragraph, consensus: [], tensions: [], novelDirections: [], actionItems: [], applications: [] });
+  const bridge = { noveltyAudit: [], contradictions: [], seams: [{ between: ["Physics", "Biology"], gap: "Corrected gap", opportunity: "New check" }] };
+  const usage = (inputTokens: number) => ({ inputTokens, outputTokens: 1 });
+  const detail = factUpdateRun({
+    cot: [partsStep("Original")],
+    journal: [
+      { kind: "agent", key: "brainstorm-root/synthesize-proposal/synthesize-proposal-execute::result", value: { status: "ok", output: proposal("Original") } },
+      { kind: "activity", key: "brainstorm-root/finalize-fact-updates/finalize-fact-updates-run::result", value: {
+        merged: [{ key: "chain:member-1", taskId: "fact-update:chain:member-1:1", notices: ["N:1"],
+          output: { decision: "revised", reason: "Repair the withdrawn premise.", steps: [{ index: 1, ...partsStep("Repaired") }] } }],
+        discarded: [], finalOutputs: { bridge, proposal: proposal("Corrected final proposal") },
+      } },
+    ],
+    facts: [{ type: "transaction", records: [{ type: "consultation-usage", requesterTaskId: "recovery:version:repair",
+      taskIds: ["fact-consultation:one"], usage: usage(2), at: 1 }] }],
+    factUpdates: [
+      { type: "recovery-result", taskId: "revoker:version", usage: usage(3) },
+      { type: "recovery-result", taskId: "recovery:version:repair", usage: usage(5) },
+      { type: "recovery-result", taskId: "fact-finalization:bridge:version:0", usage: usage(7) },
+      { type: "recovery-result", taskId: "fact-finalization:proposal:version:0", usage: usage(11) },
+    ],
+  });
+  const proposalStage = detail.stages.find(stage => stage.id === "synthesize-proposal");
+  assert.ok(proposalStage?.id === "synthesize-proposal");
+  assert.equal(proposalStage.proposal?.title, "Corrected final proposal");
+  assert.deepEqual(proposalStage.usage, usage(11));
+  const bridgeStage = detail.stages.find(stage => stage.id === "bridge-audit");
+  assert.ok(bridgeStage?.id === "bridge-audit");
+  assert.equal(bridgeStage.bridge?.seams[0]?.gap, "Corrected gap");
+  assert.deepEqual(bridgeStage.usage, usage(7));
+  const reviewStage = detail.stages.find(stage => stage.id === "review-members");
+  assert.deepEqual(reviewStage?.usage, { inputTokens: 10, outputTokens: 3 });
+  assert.ok(JSON.stringify(reviewStage).includes("Repaired premise."));
+});
+
 test("fact-update chain merges replay into the reviewed chain and mark exactly the steps revised after the walk passed them", () => {
   const seat = "brainstorm-root/review-members/review-members-fanout/member[0]/review-steps";
   const round = (step: number) => `${seat}/cotStep[${step}]/review-round/review-round-loop/iter[0]/review-round-iteration/review-round-body`;
@@ -2927,6 +2963,7 @@ test("the root fact-update merges belong to the stage that reads the merged chai
   assert.equal(stageForPath("brainstorm-root/apply-fact-updates-after-review"), "bridge-audit");
   assert.equal(stageForPath("brainstorm-root/apply-fact-updates-after-review/apply-fact-updates-after-review-run"), "bridge-audit");
   assert.equal(stageForPath("brainstorm-root/apply-fact-updates-before-synthesis"), "synthesize-proposal");
+  assert.equal(stageForPath("brainstorm-root/finalize-fact-updates/finalize-fact-updates-run"), "synthesize-proposal");
   assert.equal(stageForPath("brainstorm-root/review-members/review-members-fanout/member[0]/review-steps/cotStep[0]/review-round/review-round-loop/iter[0]/review-round-iteration/review-round-body/apply-fact-updates"), "review-members");
   // A merge that fails names its call where it happened; its completion does not end the stage it opens.
   const merge = "brainstorm-root/review-members/review-members-fanout/member[0]/review-steps/cotStep[0]/review-round/review-round-loop/iter[0]/review-round-iteration/review-round-body/apply-comment-updates/apply-comment-updates-run";

@@ -19,7 +19,7 @@ const roleLabels: Record<string, string> = {
   "game-interdisciplinary-commentor": "Interdisciplinary critic", "interdisciplinary-commentor": "Interdisciplinary critic",
   judge: "Committee chair", chair: "Final chair", committee_chair: "Committee chair", "committee-chair": "Committee chair",
   redeveloper: "Redeveloper", "game-redeveloper": "Redeveloper", integrator: "Integrator", supreme_judge: "Supreme judge",
-  supreme_judge_consult: "Supreme judge",
+  supreme_judge_consult: "Supreme judge", revoker: "Revoker",
 };
 const roleLabel = (role: string) => roleLabels[role] ?? role.replace(/[_-]/g, " ");
 const usageLabel = (use: FactUsageView) => ({

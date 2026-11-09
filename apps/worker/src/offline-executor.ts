@@ -134,7 +134,7 @@ function requestedSections(input: JsonValue | undefined, label: string): JsonVal
 }
 
 export interface OfflineExecutorOptions {
-  readonly factAccessMode?: "supreme-mediated/v1";
+  readonly factAccessMode?: "supreme-mediated/v1" | "supreme-dialogue/v2";
   /** Chain-of-thought steps the offline processor requests. Default 3. */
   readonly cotSteps?: number;
   /** The loaded input-type catalog; the executor classifies runs as its paper-shaped type. */
@@ -149,7 +149,7 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
   private readonly mediatedFacts: boolean;
 
   constructor(options: OfflineExecutorOptions = {}) {
-    this.mediatedFacts = options.factAccessMode === "supreme-mediated/v1";
+    this.mediatedFacts = options.factAccessMode !== undefined;
     this.cotSteps = options.cotSteps ?? 3;
     this.paperType = paperTypeOf(options.inputTypes);
     // The classifier's second option must be a different catalog type; any

@@ -105,6 +105,17 @@ export const FACT_INTEGRITY: readonly FactIntegrity[] = ["honest", "unsupported"
 export type FactStatus = "justified" | "disputed" | "revoked" | "refuted";
 export const FACT_STATUSES: readonly FactStatus[] = ["justified", "disputed", "revoked", "refuted"];
 
+/** The access protocol is pinned with a run's content, never inferred from its stored facts. */
+export type FactAccessMode = "supreme-mediated/v1" | "supreme-dialogue/v2";
+export const FACT_DIALOGUE_ACTIONS = ["close", "badge", "justify", "challenge", "clarify"] as const;
+export type FactDialogueAction = (typeof FACT_DIALOGUE_ACTIONS)[number];
+
+/** An implication relies on the exact verified content of these facts, not just their IDs. */
+export interface FactDependency {
+  readonly id: string;
+  readonly badgeHash: string;
+}
+
 /** The id of a table entry: "F:" and a positive integer. Submissions are numbered "S:n". */
 export const FACT_ID_PATTERN = /^F:[1-9][0-9]*$/;
 
@@ -169,6 +180,8 @@ export interface FactEntry {
   readonly method: FactMethod;
   /** What the supreme judge did and found: the script and its output, the quote and its source, the file and line. */
   readonly evidence: string;
+  /** Optional for old records. New implications preserve the premises the judge actually checked. */
+  readonly dependencies?: readonly FactDependency[];
   readonly createdAt: number;
   readonly updatedAt: number;
   /** The entry that superseded this one when it was revoked. */
@@ -184,6 +197,7 @@ export interface FactSubmission {
   readonly conditions: string;
   readonly evidence: string;
   readonly kind: FactKind;
+  readonly dependencies?: readonly FactDependency[];
   /** The chain step the fact supports (thinker) or the step under review (reviewer). */
   readonly step?: number;
   /** What the requester's reasoning builds on the fact. */
@@ -196,6 +210,14 @@ export interface FactConflictRuling {
   readonly resolution: FactResolution;
   /** For "both-narrowed": the conditions the existing entry holds under from now on. */
   readonly conditions?: string;
+  /** V2 both-narrowed issues a new immutable fact instead of editing the incumbent. */
+  readonly replacement?: {
+    readonly claim: string;
+    readonly conditions: string;
+    readonly method: FactMethod;
+    readonly evidence: string;
+    readonly dependencies?: readonly FactDependency[];
+  };
   readonly explanation: string;
 }
 
@@ -207,6 +229,7 @@ export interface FactVerdict {
   readonly conditions: string;
   readonly method: FactMethod;
   readonly evidence: string;
+  readonly dependencies?: readonly FactDependency[];
   /** Addressed to the requester: what was found and why the case follows. */
   readonly explanation: string;
   /** For "justified": the entry that already covers the claim. */
@@ -243,7 +266,10 @@ export interface FactReviewBinding {
 }
 
 export interface FactConsultQuery {
-  readonly mode: "lookup" | "status" | "submit" | "approve";
+  readonly mode: "lookup" | "status" | "submit" | "approve" | "reply";
+  /** V2 conversations are owned and authorized by the host; they are not provider session IDs. */
+  readonly conversationId?: string;
+  readonly action?: FactDialogueAction;
   readonly claim?: string;
   readonly conditions?: string;
   readonly evidence?: string;
@@ -256,6 +282,7 @@ export interface FactConsultQuery {
   readonly factId?: string;
   readonly badgeHash?: string;
   readonly criticId?: string;
+  readonly dependencies?: readonly FactDependency[];
 }
 
 export interface FactConsultation {
@@ -263,6 +290,8 @@ export interface FactConsultation {
   readonly matches: readonly {
     readonly factId: string;
     readonly relation: "equivalent" | "supports" | "conflicts" | "related";
+    /** V2 reuse requires the judge to certify the same conditions; similarity is insufficient. */
+    readonly conditionsRelation?: "same" | "different" | "unspecified";
     readonly reason: string;
   }[];
   readonly approval?: { readonly approved: boolean; readonly targetFactId?: string; readonly reason: string };
@@ -328,7 +357,10 @@ export function factIssuanceReason(entry: FactEntry): string {
 
 export function factBadgeHash(entry: FactEntry): string {
   return `sha256:${factDigest({ id: entry.id, kind: entry.kind, claim: entry.claim, conditions: entry.conditions,
-    method: entry.method, evidence: entry.evidence, reason: factIssuanceReason(entry) })}`;
+    method: entry.method, evidence: entry.evidence, reason: factIssuanceReason(entry),
+    // Preserve hashes issued by legacy bundles. Dependency ordering is not a scientific revision.
+    ...(entry.dependencies !== undefined ? { dependencies: [...entry.dependencies]
+      .sort((a, b) => a.id.localeCompare(b.id) || a.badgeHash.localeCompare(b.badgeHash)) } : {}) })}`;
 }
 
 export function factStandingRevision(entry: FactEntry): string {
@@ -402,7 +434,7 @@ export const DEFAULT_FACT_TABLE_LIMITS: FactTableLimits = {
 
 /** The run's fact table, implemented by the worker. */
 export interface FactAccess {
-  readonly accessMode?: "supreme-mediated/v1";
+  readonly accessMode?: FactAccessMode;
   consult?(requester: FactRequester, query: FactConsultQuery, context: FactSubmitContext): Promise<JsonObject>;
   evidence?(): Promise<FactEvidenceSnapshot>;
   /** Select a task's isolated view when its runtime scope requests blind review. */

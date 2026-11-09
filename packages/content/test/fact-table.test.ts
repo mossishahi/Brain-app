@@ -437,7 +437,7 @@ test("a bundle's fact table names the supreme judge, and exactly the roles in it
       }
     }
   }
-  if (bundle.factTable.accessMode === "supreme-mediated/v1") {
+  if (bundle.factTable.accessMode === "supreme-mediated/v1" || bundle.factTable.accessMode === "supreme-dialogue/v2") {
     assert.deepEqual(bundle.factTable.consultation, { skill: "supreme_judge_consult", route: "reasoning", output: "factConsultation" });
     const consult = bundle.skills["supreme_judge_consult"]!;
     assert.equal(consult.meta.output, "factConsultation");
@@ -461,6 +461,7 @@ test("a bundle's fact table names the supreme judge, and exactly the roles in it
       ...(hasGameReview ? ["game-commentor", "game-interdisciplinary-commentor", ...(hasCommittee ? ["committee-chair", "game-redeveloper"] : ["review-chair"])] : []),
       // Fact updates: the reconsideration roles revise work that cites the table.
       ...(bundle.factTable.updates !== undefined ? ["reconsider-chain", "reconsider-comment", "reconsider-game-report"] : []),
+      ...(bundle.factTable.accessMode === "supreme-dialogue/v2" ? ["revoker"] : []),
     ].sort(),
     "every role that reasons on the brainstorm consults the table; preprocessing roles and the verifier do not",
   );
@@ -599,4 +600,80 @@ test("factVerdict: a strict shape with bounded fields and closed vocabularies", 
   assert.ok(rejects(ruling({ conflicts: [{ ...revoked(0), explanation: "x".repeat(1201) }] })));
   assert.ok(rejects(ruling({ conflicts: [{ ...revoked(0), resolution: "both-narrowed", conditions: "" }] })));
   assert.ok(rejects(ruling({ conflicts: [{ ...revoked(0), resolution: "both-narrowed", conditions: "c".repeat(1201) }] })));
+});
+
+function dialogueBundle(): ContentBundle {
+  const bundle = updatesBundle();
+  for (const key of ["chain", "gameReport", "comment"] as const) {
+    bundle.skills[RECONSIDERATION_SKILLS[key]] = reconsiderationSkill(RECONSIDERATION_SKILLS[key],
+      [...RECONSIDERATION_VARS[key], "recoveryPlan"], RECONSIDERATION_OUTPUTS[key]);
+  }
+  const consultant = reconsiderationSkill("dialogue_consultant", ["input", "files", "request", "entries"], "factConsultation");
+  const revoker = reconsiderationSkill("revoker", ["input", "files", "factUpdates", "targets"], "revokerPlan");
+  consultant.meta.capabilities = [];
+  revoker.meta.capabilities = [];
+  bundle.skills.dialogue_consultant = consultant;
+  bundle.skills.revoker = revoker;
+  return { ...bundle, factTable: { ...bundle.factTable!, accessMode: "supreme-dialogue/v2",
+    consultation: { skill: "dialogue_consultant", route: "reasoning", output: "factConsultation" },
+    reconsideration: { ...bundle.factTable!.reconsideration!, revoker: { skill: "revoker", route: "reasoning", output: "revokerPlan" } } } };
+}
+
+test("v2 shared dialogue requires a versioned Revoker declaration without changing legacy controls", () => {
+  const bundle = dialogueBundle();
+  assert.equal(factTableCatalogSchema.safeParse(bundle.factTable).success, true);
+  const { revoker: _revoker, ...withoutRevoker } = bundle.factTable!.reconsideration!;
+  assert.equal(factTableCatalogSchema.safeParse({ ...bundle.factTable, reconsideration: withoutRevoker }).success, false);
+  assert.equal(factTableCatalogSchema.safeParse({ ...bundle.factTable, accessMode: "supreme-mediated/v1" }).success, false);
+  assert.equal(factTableCatalogSchema.safeParse(updatesBundle().factTable).success, true);
+  assert.equal(factTableCatalogSchema.safeParse(control()).success, true);
+});
+
+test("v2 validates Revoker bindings, capabilities and all recovery role plans", () => {
+  const bundle = dialogueBundle();
+  assert.deepEqual(validateBundle(bundle), []);
+  bundle.skills.revoker!.meta.capabilities = ["fact-table"];
+  assert.deepEqual(validateBundle(bundle), [], "Revoker may ask Supreme to validate replacement premises");
+  bundle.skills.revoker!.meta.capabilities = [];
+  bundle.skills.revoker!.meta.vars = ["input", "files", "factUpdates"];
+  bundle.skills.revoker!.meta.payload = [...bundle.skills.revoker!.meta.vars];
+  assert.ok(expectIssue(bundle, "UNKNOWN_BINDING").some((issue) => issue.message.includes('"targets"')));
+  const absentPlan = dialogueBundle();
+  absentPlan.skills[RECONSIDERATION_SKILLS.chain] = reconsiderationSkill(RECONSIDERATION_SKILLS.chain, RECONSIDERATION_VARS.chain, RECONSIDERATION_OUTPUTS.chain);
+  assert.ok(expectIssue(absentPlan, "UNKNOWN_BINDING").some((issue) => issue.message.includes('"recoveryPlan"')));
+});
+
+test("Revoker plans bind unique versioned targets and require an explicit substitution", () => {
+  const change = { targetKey: "chain:member-1", base: { artifactHash: "sha256:base" }, action: "substitute", steps: [2], sections: ["part1"], rationale: "A checked equivalent replaces the deleted premise.", replacementFactId: "F:2" };
+  const plan = { changes: [change], reason: "Only the cited premise changed." };
+  assert.deepEqual(artifactSchemas.revokerPlan.parse(plan), plan);
+  const { replacementFactId: _replacement, ...missingReplacement } = change;
+  assert.equal(artifactSchemas.revokerPlan.safeParse({ ...plan, changes: [missingReplacement] }).success, false);
+  assert.equal(artifactSchemas.revokerPlan.safeParse({ ...plan, changes: [change, change] }).success, false);
+  assert.equal(artifactSchemas.revokerPlan.safeParse({ ...plan, changes: [{ ...change, steps: [0] }] }).success, false);
+  assert.equal(artifactSchemas.revokerPlan.safeParse({ ...plan, changes: [{ ...change, base: { invented: "hash" } }] }).success, false);
+  assert.equal(artifactSchemas.revokerPlan.safeParse({ ...plan, changes: [{ ...change, action: "restart", steps: [], sections: [] }] }).success, true);
+  const unaffected = { targetKey: "chain:member-2", base: { artifactHash: "sha256:other" }, rationale: "The chain does not depend on the withdrawn premise." };
+  assert.equal(artifactSchemas.revokerPlan.safeParse({ ...plan, unaffected: [unaffected] }).success, true);
+  assert.equal(artifactSchemas.revokerPlan.safeParse({ ...plan, changes: [], unaffected: [unaffected] }).success, true);
+  assert.equal(artifactSchemas.revokerPlan.safeParse({ ...plan, unaffected: [unaffected, unaffected] }).success, false);
+  assert.equal(artifactSchemas.revokerPlan.safeParse({ ...plan, unaffected: [{ ...unaffected, targetKey: change.targetKey }] }).success, false);
+  assert.equal(artifactSchemas.revokerPlan.safeParse({ ...plan, unaffected: [{ ...unaffected, rationale: "" }] }).success, false);
+});
+
+test("facts retain exact dependency revisions and narrowing issues an explicit replacement proposition", () => {
+  const dependency = { id: "F:1", badgeHash: `sha256:${"a".repeat(64)}` };
+  assert.ok(accepts(ruling({ dependencies: [dependency] })));
+  assert.ok(!accepts(ruling({ dependencies: [dependency, dependency] })));
+  assert.ok(!accepts(ruling({ dependencies: [{ ...dependency, badgeHash: "old" }] })));
+  const replacement = { claim: "The original claim holds for x > 0.", conditions: "x > 0", method: "judgement-only", evidence: "Proof for the restricted domain.", dependencies: [dependency] };
+  const conflict = conflictOn("F:2", "both-narrowed", { conditions: "x > 0", replacement });
+  assert.ok(accepts(ruling({ conflicts: [conflict] })));
+  assert.ok(!accepts(ruling({ conflicts: [{ ...conflict, conditions: "x >= 0" }] })));
+  assert.ok(!accepts(ruling({ conflicts: [{ ...conflict, replacement: { ...replacement, method: "none" } }] })));
+  assert.ok(!accepts(ruling({ conflicts: [{ ...conflict, resolution: "incumbent-revoked" }] })));
+  assert.ok(accepts(ruling({ conflicts: [conflictOn("F:2", "both-narrowed", { conditions: "x > 0" })] })), "legacy narrowing is still loadable");
+  const consultation = { answer: "Same proposition and conditions.", matches: [{ factId: "F:1", relation: "equivalent", conditionsRelation: "same", reason: "The domain is identical." }] };
+  assert.deepEqual(artifactSchemas.factConsultation.parse(consultation), consultation);
+  assert.equal(artifactSchemas.factConsultation.safeParse({ ...consultation, matches: [{ ...consultation.matches[0], conditionsRelation: "close-enough" }] }).success, false);
 });
