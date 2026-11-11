@@ -29,7 +29,7 @@ function specification(id: QuickEditorId, s: ServerSettings): { title: string; d
   }
 }
 
-export function QuickSettingsEditor({ id, settings, onClose }: { id: QuickEditorId; settings: ServerSettings; onClose: () => void }) {
+export function QuickSettingsEditor({ id, settings, onClose, side = 'right' }: { id: QuickEditorId; settings: ServerSettings; onClose: () => void; side?: 'top' | 'right' }) {
   const spec = specification(id, settings);
   const prefix = useId();
   const [draft, setDraft] = useState<Record<string, string>>(() => Object.fromEntries(spec.fields.map(field => [field.name, field.value])));
@@ -72,7 +72,7 @@ export function QuickSettingsEditor({ id, settings, onClose }: { id: QuickEditor
   }
   const error = saveError ?? (id === 'appInfo' || id === 'modelsByTask' ? undefined : state.status[id]?.error);
   return <Popover.Root open onOpenChange={next => { if (!next && !saving) onClose(); }}>
-    <Popover.Portal><Popover.Positioner anchor={() => document.getElementById('canvas-settings-trigger')} side="right" align="end" sideOffset={12} collisionPadding={12} className="quick-editor-positioner">
+    <Popover.Portal><Popover.Positioner anchor={() => document.getElementById('canvas-settings-trigger')} side={side} align="end" sideOffset={12} collisionPadding={12} className="quick-editor-positioner">
       <Popover.Popup className="quick-editor" aria-label={spec.title} finalFocus={() => document.getElementById('canvas-settings-trigger')}>
         <header><Popover.Title>{spec.title}</Popover.Title><button type="button" aria-label="Close editor" disabled={saving} onClick={onClose}><LuX /></button></header>
         <Popover.Description>{spec.description}</Popover.Description>

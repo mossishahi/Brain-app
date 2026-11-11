@@ -10,6 +10,7 @@ import { QuickEditorBoundary } from './QuickEditorBoundary';
 import type { QuickControlItem } from './types';
 import { agentDefaults, hostTools, providerConfigured, type QuickSetting } from './settings-commands';
 import { changeQuickSetting, loadQuickSettings, useQuickSettings } from './settings-store';
+import { isLauncher } from '../../desktop/context';
 import type { QuickEditorId } from './QuickSettingsEditor';
 
 const QuickSettingsEditor = lazy(() => loadOptionalModule(() => import('./QuickSettingsEditor')).then(module => ({ default: module.QuickSettingsEditor })));
@@ -25,7 +26,7 @@ const providers = [
   { value: 'cursor-agent', label: 'Cursor SDK' }, { value: 'gemini', label: 'Gemini API' }, { value: 'offline', label: 'Offline' },
 ] as const;
 
-export function WorkspaceControls({ open, onOpenChange, onOpenSettings }: { open: boolean; onOpenChange: (open: boolean) => void; onOpenSettings: (category: SettingsCategory) => void }) {
+export function WorkspaceControls({ open, onOpenChange, onOpenSettings, placement = 'rail' }: { open: boolean; onOpenChange: (open: boolean) => void; onOpenSettings: (category: SettingsCategory) => void; placement?: 'composer' | 'rail' }) {
   const state = useQuickSettings();
   const modelOptions = useModelOptions().value;
   const appearance = useAppearance();
@@ -33,6 +34,13 @@ export function WorkspaceControls({ open, onOpenChange, onOpenSettings }: { open
   const [checking, setChecking] = useState(false);
   const [checkStatus, setCheckStatus] = useState<string>();
   const [checkError, setCheckError] = useState<string>();
+  const [host, setHost] = useState(() => window.__CO_INFERENCE_HOST__?.getSnapshot());
+  useEffect(() => {
+    const update = () => setHost(window.__CO_INFERENCE_HOST__?.getSnapshot());
+    window.addEventListener('co-inference:host-change', update);
+    update();
+    return () => window.removeEventListener('co-inference:host-change', update);
+  }, []);
   useEffect(() => { if (open) void loadQuickSettings(); }, [open]);
   useEffect(() => {
     if (!editor) return;
@@ -56,6 +64,14 @@ export function WorkspaceControls({ open, onOpenChange, onOpenSettings }: { open
   }, [editor]);
   function configure(category: SettingsCategory) { setEditor(null); onOpenChange(false); onOpenSettings(category); }
   function edit(id: QuickEditorId) { onOpenChange(false); setEditor(id); }
+  function showHost() {
+    onOpenChange(false);
+    // Let the menu restore its trigger focus before the bridge opens details.
+    window.requestAnimationFrame(() => {
+      if (window.__CO_INFERENCE_HOST__) window.__CO_INFERENCE_HOST__.showDetails();
+      else window.location.assign('/');
+    });
+  }
   async function checkUpdates() {
     if (checking) return;
     setChecking(true); setCheckStatus(undefined); setCheckError(undefined);
@@ -179,8 +195,8 @@ export function WorkspaceControls({ open, onOpenChange, onOpenSettings }: { open
   }, [state, modelOptions, appearance, checking, checkStatus, checkError, onOpenSettings, onOpenChange]);
 
   return <>
-    <QuickControls open={open} onOpenChange={next => { if (next) setEditor(null); onOpenChange(next); }} items={items} loading={state.loading && !state.data} error={state.error}
-      footer={[{ kind: 'action', id: 'all-settings', label: 'All settings…', onSelect: () => configure('connections') }]} />
-    {editor && state.data && <QuickEditorBoundary key={editor} onClose={() => setEditor(null)} onConfigure={() => configure(editorCategory[editor])}><Suspense fallback={<span className="canvas-rail-label" role="status">Opening editor…</span>}><QuickSettingsEditor id={editor} settings={state.data} onClose={() => setEditor(null)} /></Suspense></QuickEditorBoundary>}
+    <QuickControls placement={placement} open={open} onOpenChange={next => { if (next) setEditor(null); onOpenChange(next); }} items={items} loading={state.loading && !state.data} error={state.error}
+      footer={[...(isLauncher ? [{ kind: 'action' as const, id: 'host-connection', label: host ? 'Host connection…' : 'Switch host…', description: host?.label || undefined, onSelect: showHost }] : []), { kind: 'action', id: 'all-settings', label: 'All settings…', onSelect: () => configure('connections') }]} />
+    {editor && state.data && <QuickEditorBoundary key={editor} side={placement === 'composer' ? 'top' : 'right'} onClose={() => setEditor(null)} onConfigure={() => configure(editorCategory[editor])}><Suspense fallback={<span role="status">Opening editor…</span>}><QuickSettingsEditor id={editor} settings={state.data} side={placement === 'composer' ? 'top' : 'right'} onClose={() => setEditor(null)} /></Suspense></QuickEditorBoundary>}
   </>;
 }

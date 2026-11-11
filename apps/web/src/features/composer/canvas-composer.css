@@ -40,13 +40,10 @@
 .canvas-composer .attach-input-row { display: flex; flex-wrap: wrap; gap: var(--ui-space-2); padding-top: var(--ui-space-2); }
 .canvas-composer .attach-input { flex: 1 1 240px; min-width: 0; min-height: var(--ui-control-height); padding: var(--ui-space-1) var(--ui-space-2); background: var(--ui-field-bg); border: 0; border-radius: var(--ui-radius-md); font-size: var(--ui-font-input); line-height: 22px; }
 .canvas-composer .attach-input-row .btn { border: 0; background: var(--ui-control-fill); min-height: var(--ui-control-height); padding: var(--ui-space-1) var(--ui-space-2); border-radius: var(--ui-radius-md); font-size: var(--ui-font-control); }
-.canvas-composer-health { display: flex; align-items: center; gap: var(--ui-space-1); flex-shrink: 0; }
-.canvas-composer-health .env-status { gap: var(--ui-space-1); }
-.canvas-composer-health .env-icon, .canvas-composer-health .registry-indicator { width: var(--ui-control-height); height: var(--ui-control-height); margin: 0; }
-.canvas-composer-health .env-icon svg, .canvas-composer-health .registry-indicator svg { display: block; width: var(--ui-icon-md); height: var(--ui-icon-md); }
-.canvas-composer-health .registry-indicator::after, .canvas-composer-health .env-icon::after { display: none; }
-.canvas-registry-tooltip { max-width: min(340px, calc(100vw - 24px)); padding: var(--ui-space-2) var(--ui-space-3); background: var(--surface-raised); color: var(--text); border: 0; border-radius: var(--ui-radius-lg); box-shadow: var(--ui-float-shadow); font-size: var(--ui-font-caption); line-height: 1.6; overflow-wrap: anywhere; }
-.canvas-composer-health .env-popover { width: min(350px, calc(100vw - 90px)); max-height: min(400px, 65svh); overflow: auto; }
+/* A single toolbar button keeps setup and connection details out of the draft. */
+.canvas-composer .composer-settings-trigger { display: grid; place-items: center; flex: none; width: var(--ui-control-height); height: var(--ui-control-height); padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--text-dim); }
+.canvas-composer .composer-settings-trigger > svg { display: block; width: var(--ui-icon-md); height: var(--ui-icon-md); }
+.canvas-composer .composer-settings-trigger:hover, .canvas-composer .composer-settings-trigger[data-popup-open] { background: var(--ui-focus-fill); color: var(--ui-focus-text); }
 .canvas-composer-stack .waiting-card { border: 0; border-radius: var(--ui-radius-xl); background: var(--surface-raised); padding: var(--ui-space-4); }
 .canvas-composer-stack .waiting-head { flex-wrap: wrap; }
 .canvas-composer-stack .waiting-check { grid-template-columns: 8px minmax(0, 1fr); }
@@ -71,7 +68,7 @@
 .canvas-attachments-popover .attach-remove svg { width: var(--ui-icon-md); height: var(--ui-icon-md); }
 .canvas-attachments-popover .attach-kind { font-size: var(--ui-font-xs); color: var(--muted); }
 .canvas-attachments-popover .attach-tray-invalid { grid-column: 2; }
-.canvas-composer :is(button, input):focus-visible, .canvas-composer-health :is(button, a):focus-visible, .canvas-attachments-popover button:focus-visible { outline: none; background: var(--ui-focus-fill); color: var(--ui-focus-text); box-shadow: none; }
+.canvas-composer :is(button, input):focus-visible, .canvas-attachments-popover button:focus-visible { outline: none; background: var(--ui-focus-fill); color: var(--ui-focus-text); box-shadow: none; }
 
 /* Reflow follows the available composer width as the viewport changes. */
 @container composer (max-width: 620px) {

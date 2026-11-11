@@ -39,7 +39,7 @@ async function checkFilePicker(page: Page): Promise<void> {
 }
 
 for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }]) {
-  test(`environment details fit ${viewport.width}×${viewport.height} and restore keyboard focus`, async ({ page }) => {
+  test(`settings diagnostics fit ${viewport.width}×${viewport.height} and restore keyboard focus`, async ({ page }) => {
     await page.setViewportSize(viewport);
     const brain = await mockBrain(page);
     brain.readiness = { ready: false, updatedAt: Date.now(), checks: [{
@@ -48,20 +48,27 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }
       advice: "Verify the provider settings and connection before retrying. ".repeat(8),
     }] };
     await page.goto("/");
-    const trigger = page.getByRole("button", { name: /^Model connection: failed/ });
+    const prompt = page.getByRole("textbox", { name: "What do you want to think through?", exact: true });
+    await prompt.fill("Keep the question while checking the connection.");
+    const trigger = page.getByRole("button", { name: "Open settings menu", exact: true });
     await trigger.focus();
     await page.keyboard.press("Enter");
-    const popup = page.getByRole("dialog", { name: "Model connection check", exact: true });
-    await expect(popup).toBeVisible();
-    await withinViewport(page, popup);
-    await expect.poll(() => popup.evaluate((element) => element.contains(document.activeElement))).toBe(true);
+    await page.getByRole("menuitem", { name: "All settings…", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "Settings", exact: true });
+    const diagnostic = dialog.getByRole("article", { name: "Model connection check", exact: true });
+    await expect(diagnostic).toContainText("Connection requires attention");
+    await diagnostic.getByText("Technical details", { exact: true }).click();
+    await expect(diagnostic.locator("pre")).toContainText("Long provider diagnostic detail");
+    await withinViewport(page, dialog);
+    await diagnostic.getByRole("button", { name: "Re-run check", exact: true }).scrollIntoViewIfNeeded();
+    await expect(diagnostic.getByRole("button", { name: "Re-run check", exact: true })).toBeInViewport();
+    await withinViewport(page, dialog.getByRole("button", { name: "Done", exact: true }));
     await page.keyboard.press("Escape");
-    await expect(popup).toHaveCount(0);
+    await expect(dialog).not.toBeVisible();
     await expect(trigger).toBeFocused();
-    await trigger.click();
-    await popup.getByRole("button", { name: "Open settings", exact: true }).click();
-    await expect(page.getByRole("dialog", { name: "Settings", exact: true })).toBeVisible();
-    await expect(popup).toHaveCount(0);
+    await expect(prompt).toHaveValue("Keep the question while checking the connection.");
+    expect(brain.writes.filter(write => write.path !== '/update-check')).toEqual([]);
+    expect(brain.unhandled).toEqual([]);
   });
 
   test(`server file picker fits ${viewport.width}×${viewport.height} with reachable actions`, async ({ page }) => {
@@ -83,13 +90,13 @@ test.describe('coarse-pointer phone', () => {
   });
 });
 
-test('history navigation dismisses portaled connection details while preserving the home draft', async ({ page }) => {
+test('history navigation dismisses the portaled settings menu while preserving the home draft', async ({ page }) => {
   await mockBrain(page);
   await page.goto('/');
   const prompt = page.getByRole('textbox', { name: 'What do you want to think through?', exact: true });
   await prompt.fill('Continue this question after checking history.');
-  await page.getByRole('button', { name: /^Model connection:/ }).click();
-  const popup = page.getByRole('dialog', { name: 'Model connection check', exact: true });
+  await page.getByRole('button', { name: 'Open settings menu', exact: true }).click();
+  const popup = page.getByRole('menu').filter({ has: page.getByRole('menuitem', { name: 'All settings…', exact: true }) });
   await expect(popup).toBeVisible();
   // Browser navigation does not click outside the popup: the owning view must close it.
   await page.evaluate(() => { location.hash = '#/history'; });

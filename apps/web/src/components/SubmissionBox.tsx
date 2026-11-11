@@ -22,24 +22,19 @@ import {
 } from "@ant-design/icons";
 import { LuPlus, LuX } from "react-icons/lu";
 import { useCapabilityDraft } from "../features/composer/capability-draft";
-import { RegistryIndicator } from "../features/composer/RegistryIndicator";
 import { useNavigationDismiss } from "../shell/useNavigationDismiss";
 import {
   ATTACHMENT_LIMITS,
   type AttachmentSelectionKind,
   type ReadinessCheckId,
   type ReadinessReport,
-  type ServerSettings,
   type ValidatedAttachment,
 } from "@brainstorm-agentic/protocol";
 import {
   blockedReadiness,
   errorMessage,
-  getHealth,
-  getSettings,
   validateAttachments,
 } from "../api";
-import { EnvironmentStatus } from "./EnvironmentStatus";
 import { PaperclipIcon, SendIcon } from "./Icons";
 
 // Ant Design's directory tree is substantial; load it only when the user
@@ -123,28 +118,6 @@ function attachmentMeta(attachment: ValidatedAttachment): string {
     .join(" · ");
 }
 
-function registryHost(url: string | undefined): string {
-  if (!url) return "Brain Registry";
-  try {
-    return new URL(url).hostname;
-  } catch {
-    return url;
-  }
-}
-
-function registryPageUrl(url: string | undefined): string | undefined {
-  if (!url) return undefined;
-  try {
-    const parsed = new URL(url);
-    parsed.pathname = parsed.pathname.replace(/\/mcp\/?$/, "/");
-    parsed.search = "";
-    parsed.hash = "";
-    return parsed.toString();
-  } catch {
-    return undefined;
-  }
-}
-
 /** Shared menu primitives own focus, keyboard navigation and viewport collision. */
 function AttachmentPicker({ disabled, onSelect, triggerRef }: {
   readonly disabled: boolean;
@@ -226,10 +199,9 @@ function guessAttachmentKind(path: string): AttachmentSelectionKind {
 export function SubmissionBox({
   active = true,
   onSubmit,
-  onOpenSettings,
+  settingsControl,
   readiness,
   onRecheckReadiness,
-  onDiagnoseReadiness,
   prefill,
 }: {
   readonly active?: boolean;
@@ -238,10 +210,9 @@ export function SubmissionBox({
     attachmentPaths: readonly string[],
     capabilityOverrides: Readonly<Record<string, boolean>>,
   ) => Promise<void>;
-  readonly onOpenSettings: () => void;
+  readonly settingsControl?: ReactNode;
   readonly readiness: ReadinessReport | null;
   readonly onRecheckReadiness: (checks?: readonly ReadinessCheckId[]) => void;
-  readonly onDiagnoseReadiness: (check: ReadinessCheckId) => void;
   /**
    * A redo request: put this topic in the box and replay these attachment
    * paths (revalidated). The nonce distinguishes two redos of the same job.
@@ -281,15 +252,7 @@ export function SubmissionBox({
     useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [submitPhase, setSubmitPhase] = useState("");
-  const [settings, setSettings] = useState<ServerSettings | null>(
-    null,
-  );
   const capabilityDraft = useCapabilityDraft();
-  const [registryConnected, setRegistryConnected] = useState(false);
-  const [registryTarget, setRegistryTarget] = useState("Brain Registry");
-  const [registryPage, setRegistryPage] = useState<string | undefined>();
-  /** "brainstorm v0.11.0 (latest) · registry v0.1.0 · app v0.1.0" */
-  const [registryVersionLine, setRegistryVersionLine] = useState<string | undefined>();
   const ref = useRef<HTMLTextAreaElement>(null);
   const attachmentTriggerRef = useRef<HTMLButtonElement>(null);
   const pastedRef = useRef(false);
@@ -433,80 +396,6 @@ export function SubmissionBox({
       window.removeEventListener("resize", resize);
     };
   }, [active]);
-
-  useEffect(() => {
-    let live = true;
-    const onSettingsUpdated = (event: Event): void => {
-      const detail = (event as CustomEvent<ServerSettings>).detail;
-      if (detail) setSettings(detail);
-    };
-    window.addEventListener(
-      "brain-settings-updated",
-      onSettingsUpdated,
-    );
-    void getSettings()
-      .then((current) => {
-        if (live) setSettings(current);
-      })
-      .catch(() => undefined);
-    return () => {
-      live = false;
-      window.removeEventListener(
-        "brain-settings-updated",
-        onSettingsUpdated,
-      );
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!active) return;
-    let live = true;
-    const refresh = async (): Promise<void> => {
-      try {
-        const health = await getHealth();
-        if (!live) return;
-        const endpoint =
-          health.contentRegistry.url ?? settings?.contentRegistry.url;
-        const registry = health.contentRegistry;
-        // Connected is strict: the server verified the registry live AND
-        // resolved the bundle version new runs would use right now. A
-        // reachable-but-unresolvable registry shows as disconnected — never
-        // as a connection to an unknown or old version.
-        const verified =
-          registry.running && registry.effectiveVersion !== undefined;
-        setRegistryConnected(verified);
-        setRegistryTarget(registryHost(endpoint));
-        setRegistryPage(registryPageUrl(endpoint));
-        // Exactly what runs where, unambiguously labeled: the SKILLS bundle
-        // version new runs use, the registry server's own software version,
-        // and this app's own software version (the latter two are program
-        // versions, not content versions).
-        const parts = verified
-          ? [
-              `skills ${registry.bundle ?? "brainstorm"} v${registry.effectiveVersion}` +
-                (registry.pinnedVersion ? " (pinned)" : " (latest)"),
-              registry.serverVersion
-                ? `registry server v${registry.serverVersion}`
-                : undefined,
-              `brain app v${health.version}`,
-            ].filter((part): part is string => Boolean(part))
-          : [];
-        setRegistryVersionLine(parts.length > 0 ? parts.join(" · ") : undefined);
-      } catch {
-        if (!live) return;
-        setRegistryConnected(false);
-        setRegistryTarget(registryHost(settings?.contentRegistry.url));
-        setRegistryPage(registryPageUrl(settings?.contentRegistry.url));
-        setRegistryVersionLine(undefined);
-      }
-    };
-    void refresh();
-    const timer = window.setInterval(() => void refresh(), 15_000);
-    return () => {
-      live = false;
-      window.clearInterval(timer);
-    };
-  }, [settings?.contentRegistry.url, active]);
 
   const addValidated = (
     items: readonly ValidatedAttachment[],
@@ -835,18 +724,7 @@ export function SubmissionBox({
               )}
             </div>
             <div className="composer-footer-right">
-              <div className="canvas-composer-health">
-                {active && <>
-                  <RegistryIndicator connected={registryConnected} page={registryPage} target={registryTarget} versionLine={registryVersionLine} />
-                  <EnvironmentStatus
-                    showToolChecks={false}
-                    readiness={readiness}
-                    onRecheck={onRecheckReadiness}
-                    onDiagnose={onDiagnoseReadiness}
-                    onOpenSettings={onOpenSettings}
-                  />
-                </>}
-              </div>
+              {settingsControl}
               <button
                 type="button"
                 className="send-btn"

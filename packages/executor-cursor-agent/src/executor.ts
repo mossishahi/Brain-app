@@ -1884,11 +1884,10 @@ function reportPromptHandoff(
     ]),
   });
   if (task.outputSchema !== undefined && customTools[RESULT_TOOL] === undefined) {
-    // The transport tool is absent on the raw-JSON fallback attempt, so the
-    // schema above does not carry it; the task's schema still governs what the
-    // answer must satisfy, and a reader needs to see it.
+    // The transport tool is absent on the raw-JSON fallback attempt. The
+    // schema is delivered verbatim in the prompt instead.
     sections.push({
-      title: `Output JSON schema (not delivered: this attempt asks for raw JSON)`,
+      title: "Delivered output JSON schema (included in the raw JSON prompt)",
       body: sectionJson(task.outputSchema.schema),
     });
   }
@@ -2034,6 +2033,9 @@ async function executeAttempt(
           "",
           "Structured-output tool transport is unavailable for this attempt.",
           "End with ONLY the complete raw JSON object as your final message. Do not use Markdown fences or commentary.",
+          "JSON-escape all string values, including LaTeX backslashes, quotation marks, and newlines. Preserve the schema's exact object, array, and scalar types.",
+          "The complete output JSON schema follows. Its field descriptions and constraints remain authoritative:",
+          JSON.stringify(task.outputSchema.schema, null, 2),
         ]
       : []),
   ];

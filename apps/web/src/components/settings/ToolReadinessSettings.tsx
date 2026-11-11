@@ -3,13 +3,19 @@ import type { ReadinessCheck, ReadinessCheckId } from "@brainstorm-agentic/proto
 import { diagnoseOverviewReadiness, recheckOverviewReadiness, refreshOverviewReadiness, useOverviewReadiness } from "../../features/library/WorkspaceOverview";
 import "./research-controls.css";
 
-const checks: readonly ReadinessCheckId[] = ["capabilities", "code", "internet"];
+const toolChecks: readonly ReadinessCheckId[] = ["capabilities", "code", "internet"];
 const stateLabel: Record<ReadinessCheck["state"], string> = {
   ok: "Ready", failed: "Failed", checking: "Checking…", skipped: "Not required", unknown: "Not checked yet",
 };
 
 /** Shares the shell's event feed; this section never starts another poller. */
-export function ToolReadinessSettings() {
+export function ToolReadinessSettings({
+  checks = toolChecks,
+  description = "Check capability access, code execution, and internet connectivity. Results update as checks complete.",
+}: {
+  readonly checks?: readonly ReadinessCheckId[];
+  readonly description?: string;
+}) {
   const readiness = useOverviewReadiness();
   useEffect(() => {
     if (!readiness.data) void refreshOverviewReadiness();
@@ -22,10 +28,10 @@ export function ToolReadinessSettings() {
   });
 
   return <div className="settings-research-controls">
-    <p className="field-note">Check capability access, code execution, and internet connectivity. Results update as checks complete.</p>
+    <p className="field-note">{description}</p>
     {readiness.error && <div className="inline-actions"><p className="error-text" role="alert">{readiness.error}</p><button type="button" className="btn btn-small" disabled={readiness.loading} onClick={() => void refreshOverviewReadiness()}>Retry environment checks</button></div>}
     {!readiness.data && !readiness.error && <p className="field-note" role="status">Loading environment checks…</p>}
-    {readiness.data && ordered.length === 0 && <p className="field-note">No tool checks have been reported yet.</p>}
+    {readiness.data && ordered.length === 0 && <p className="field-note">No checks have been reported yet.</p>}
     {ordered.map((check) => <article className="settings-tool-check" aria-label={`${check.label} check`} key={check.id}>
       <header className="settings-tool-check-heading"><h4>{check.label}</h4><span className={`settings-tool-check-state state-${check.state}`} role="status">{stateLabel[check.state]}</span></header>
       {check.message && <p className="field-note">{check.message}</p>}
@@ -36,7 +42,7 @@ export function ToolReadinessSettings() {
       </div>}
       <div className="inline-actions">
         <button type="button" className="btn btn-small" disabled={check.state === "checking"} onClick={() => recheckOverviewReadiness([check.id])}>Re-run check</button>
-        {check.state === "failed" && <button type="button" className="btn btn-small" disabled={check.advising === true} onClick={() => diagnoseOverviewReadiness(check.id)}>Ask AI for help</button>}
+        {check.state === "failed" && check.id !== "llm" && <button type="button" className="btn btn-small" disabled={check.advising === true} onClick={() => diagnoseOverviewReadiness(check.id)}>Ask AI for help</button>}
       </div>
     </article>)}
   </div>;

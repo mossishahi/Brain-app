@@ -165,30 +165,32 @@ test('attachment hover preserves the draft and tolerates crossing the popup gap'
   noUserWrites(brain);
 });
 
-test('status hover previews preserve typing focus and remain open across the popup gap', async ({ page }) => {
+test('the single settings control retains model, scheduler, GPU and registry diagnostics without incidental writes', async ({ page }) => {
   const brain = await openHome(page);
-  for (const name of ['Model connection', 'SLURM scheduler']) {
-    const trigger = page.getByRole('button', { name: new RegExp(`^${name}:`) });
-    const popup = page.getByRole('dialog', { name: `${name} check`, exact: true });
-    await trigger.hover();
-    await expect(popup).toBeVisible();
-    await expect(question(page)).toBeFocused();
-    await crossGap(page, trigger, popup);
-    await expect(question(page)).toBeFocused();
-    await outside(page);
-    await expect(popup).not.toBeVisible();
-  }
-  const registry = page.getByRole('link', { name: /^Connected to Brain Registry/ });
-  await registry.hover();
-  const tooltip = page.locator('.canvas-registry-tooltip');
-  await expect(tooltip).toContainText('Connected to Brain Registry');
-  await expect(question(page)).toBeFocused();
-  await outside(page);
-  await expect(tooltip).not.toBeVisible();
+  await expect(page.locator('.canvas-composer .env-icon, .canvas-composer .registry-indicator')).toHaveCount(0);
+  const trigger = page.getByRole('button', { name: 'Open settings menu', exact: true });
+  await expect(trigger).toHaveCount(1);
+  await trigger.click();
+  await page.getByRole('menuitem', { name: 'All settings…', exact: true }).click();
+  const settings = page.getByRole('dialog', { name: 'Settings', exact: true });
+  await expect(settings.getByRole('article', { name: 'Model connection check', exact: true })).toContainText('Ready');
+  await settings.getByRole('button', { name: 'Execution', exact: true }).click();
+  await expect(settings.getByRole('article', { name: 'SLURM scheduler check', exact: true })).toContainText('Scheduler ready');
+  await settings.getByRole('button', { name: 'Configure GPU execution…', exact: true }).click();
+  const gpu = page.getByRole('dialog', { name: 'GPU execution', exact: true });
+  await expect(gpu).toBeVisible();
+  await gpu.getByRole('button', { name: 'Done', exact: true }).click();
+  await settings.getByRole('button', { name: 'App updates', exact: true }).click();
+  await expect(settings.getByText('https://registry.example.test/mcp', { exact: true })).toBeVisible();
+  await settings.getByRole('button', { name: 'Done', exact: true }).click();
+  await expect(trigger).toBeFocused();
+  await expect(question(page)).toHaveValue('Keep typing while browsing nearby controls.');
   noUserWrites(brain);
+  expect(brain.writes.filter(write => write.path.startsWith('/gpu/'))).toEqual([]);
+  expect(brain.unhandled).toEqual([]);
 });
 
-test('keyboard still opens and closes attachment, settings and connection controls', async ({ page }) => {
+test('keyboard opens and closes attachments and consolidated settings with focus restoration', async ({ page }) => {
   await openHome(page);
   const attach = page.getByRole('button', { name: 'Attach from server', exact: true });
   await attach.focus();
@@ -204,18 +206,17 @@ test('keyboard still opens and closes attachment, settings and connection contro
   await page.keyboard.press('Escape');
   await expect(settingsMenu(page)).not.toBeVisible();
   await expect(settings).toBeFocused();
-  const connection = page.getByRole('button', { name: /^Model connection:/ });
-  await connection.focus();
   await page.keyboard.press('Enter');
-  const popup = page.getByRole('dialog', { name: 'Model connection check', exact: true });
-  await expect(popup).toBeVisible();
+  await page.getByRole('menuitem', { name: 'All settings…', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Settings', exact: true });
+  await expect(dialog.getByRole('article', { name: 'Model connection check', exact: true })).toBeVisible();
   await page.keyboard.press('Escape');
-  await expect(popup).not.toBeVisible();
-  await expect(connection).toBeFocused();
+  await expect(dialog).not.toBeVisible();
+  await expect(settings).toBeFocused();
 });
 
-test('registry, model, GPU and scheduler stay inside the composer beside Send in compact and multiline layouts', async ({ page }) => {
-  await openHome(page);
+test('one settings control stays immediately beside Send in compact and multiline layouts', async ({ page }) => {
+  const brain = await openHome(page);
   await expect(page.getByText('Research, in one place.', { exact: true })).toHaveCount(0);
   for (const viewport of [{ width: 320, height: 740 }, { width: 390, height: 844 }, { width: 844, height: 390 }, { width: 1440, height: 1000 }]) {
     await page.setViewportSize(viewport);
@@ -228,10 +229,12 @@ test('registry, model, GPU and scheduler stay inside the composer beside Send in
           return { x: bounds.x, y: bounds.y, right: bounds.right, bottom: bounds.bottom, centerY: bounds.y + bounds.height / 2 };
         };
         const surface = box(element);
-        const controls = [...element.querySelectorAll('.registry-indicator, .env-icon, .send-btn')].map(box);
+        const controls = [...element.querySelectorAll('#canvas-settings-trigger, .send-btn')].map(box);
         return { surface, controls, input: box(element.querySelector('textarea')!), viewport: innerWidth, documentWidth: document.documentElement.scrollWidth };
       });
-      expect(geometry.controls).toHaveLength(5);
+      expect(geometry.controls).toHaveLength(2);
+      await expect(page.locator('#canvas-settings-trigger')).toHaveCount(1);
+      await expect(page.locator('.canvas-composer .env-icon, .canvas-composer .registry-indicator')).toHaveCount(0);
       const send = geometry.controls.at(-1)!;
       for (const [index, control] of geometry.controls.entries()) {
         expect(control.x).toBeGreaterThanOrEqual(geometry.surface.x);
@@ -244,8 +247,11 @@ test('registry, model, GPU and scheduler stay inside the composer beside Send in
       }
       expect(geometry.surface.right).toBeLessThanOrEqual(geometry.viewport + 1);
       expect(geometry.documentWidth).toBeLessThanOrEqual(geometry.viewport + 1);
+      expect(geometry.controls[1]!.x - geometry.controls[0]!.right).toBeLessThanOrEqual(16);
+      await expect(question(page)).toBeFocused();
     }
   }
+  noUserWrites(brain);
 });
 
 test.describe('touch fallback', () => {
@@ -268,8 +274,14 @@ test.describe('touch fallback', () => {
     await page.getByRole('button', { name: 'Attach from server', exact: true }).tap();
     await expect(attachmentMenu(page)).toBeVisible();
     await page.keyboard.press('Escape');
-    await page.getByRole('button', { name: /^Model connection:/ }).tap();
-    await expect(page.getByRole('dialog', { name: 'Model connection check', exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Open settings menu', exact: true }).tap();
+    await page.getByRole('menuitem', { name: 'All settings…', exact: true }).tap();
+    const settings = page.getByRole('dialog', { name: 'Settings', exact: true });
+    await expect(settings.getByRole('article', { name: 'Model connection check', exact: true })).toBeVisible();
+    await settings.getByRole('button', { name: 'Execution', exact: true }).tap();
+    await expect(settings.getByRole('article', { name: 'SLURM scheduler check', exact: true })).toBeVisible();
+    await settings.getByRole('button', { name: 'Done', exact: true }).tap();
+    await expect(question(page)).toHaveValue('Keep typing while browsing nearby controls.');
     noUserWrites(brain);
   });
 });

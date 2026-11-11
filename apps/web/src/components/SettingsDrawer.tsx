@@ -629,12 +629,17 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
               </div>
             </Section>
 
+            <Section category="execution" title="Scheduler readiness">
+              <ToolReadinessSettings checks={["slurm"]} description="Check whether the selected runner can submit and complete jobs on this host." />
+            </Section>
+
             <Section category="execution" title="GPU runs">
               <p className="field-note">Discover the host, choose GPU resources, and approve the exact probe script. GPU setup is optional; saving a new draft requires another approved probe before GPU execution is enabled.</p>
               <GpuSetupControl />
             </Section>
 
             <Section category="updates" title="Brain Registry">
+              <ToolReadinessSettings checks={["registry"]} description="Check access to the workflow instructions used by new research runs." />
               <div className="registry-info">
                 <div className="registry-info-row">
                   <span className="registry-info-label">Endpoint</span>
@@ -1027,6 +1032,11 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
                   </div>
                 </>
               )}
+            </Section>
+
+
+            <Section category="connections" title="Connection readiness">
+              <ToolReadinessSettings checks={["llm"]} description="Check access to the active model provider. Update the connection above if it needs attention." />
             </Section>
 
 

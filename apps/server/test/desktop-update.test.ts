@@ -12,7 +12,7 @@ import { JobManager } from "../src/job-manager.js";
 import { startBrainServer } from "../src/server.js";
 import { SettingsStore } from "../src/settings.js";
 
-async function fixture(seedCompletedWorker?: "worker" | "reused-pid") {
+async function fixture(seedCompletedWorker?: "worker" | "reused-pid", updateOptions: { desktopUpdateLeaseMs?: number; exitForUpdate?: () => void; unauthenticated?: boolean } = {}) {
   const workspace = mkdtempSync(join(tmpdir(), "brain-desktop-update-"));
   const workerPath = join(workspace, "worker.cjs");
   let worker: ChildProcess | undefined;
@@ -36,7 +36,10 @@ async function fixture(seedCompletedWorker?: "worker" | "reused-pid") {
   await new Promise<void>(resolve => registry.listen(0, "127.0.0.1", resolve));
   const address = registry.address(); assert.ok(address && typeof address !== "string");
   const token = "a".repeat(64);
-  const server = await startBrainServer({ workspace, port: 0, apiToken: token, selfUpdateCheck: false,
+  const server = await startBrainServer({ workspace, port: 0, ...(!updateOptions.unauthenticated ? { apiToken: token } : {}), selfUpdateCheck: false,
+    managedRuntimeUpdates: true,
+    ...(updateOptions.desktopUpdateLeaseMs !== undefined ? { desktopUpdateLeaseMs: updateOptions.desktopUpdateLeaseMs } : {}),
+    ...(updateOptions.exitForUpdate ? { exitForUpdate: updateOptions.exitForUpdate } : {}),
     workerPath,
     contentRegistryUrl: `http://127.0.0.1:${address.port}`, readinessAdvisor: null,
     readinessProbes: { llm: async () => ({}), capabilities: async () => ({}), internet: async () => ({}), code: async () => ({}), slurm: async () => ({}) },
@@ -146,4 +149,114 @@ test("startup credit recovery in progress prevents an apparently idle desktop up
     assert.equal(await f.server.prepareForDesktopUpdate(), true);
     f.server.cancelDesktopUpdate();
   } finally { release(); await f.close(); }
+});
+
+const updateId = "d1f8b04a-e5ac-4f89-855e-688c004520f7";
+const otherUpdateId = "f8196f38-631c-4aa5-874c-2bed2c3ad243";
+const maintenance = (f: Awaited<ReturnType<typeof fixture>>, action: string, requestId = updateId, authorized = true) =>
+  fetch(`${f.server.url}/api/desktop/update/${action}`, { method: "POST", headers: authorized ? f.headers : { "content-type": "application/json" }, body: JSON.stringify({ requestId }) });
+
+test("remote update needs authentication and owns an expiring reservation across requests", async () => {
+  let exits = 0;
+  const f = await fixture(undefined, { exitForUpdate: () => { exits++; } });
+  try {
+    assert.equal((await maintenance(f, "prepare", updateId, false)).status, 401);
+    assert.equal((await maintenance(f, "prepare", "invalid")).status, 400);
+    const prepared = await maintenance(f, "prepare");
+    assert.equal(prepared.status, 200);
+    assert.equal((await prepared.json() as { ready: boolean }).ready, true);
+    assert.equal((await fetch(`${f.server.url}/api/desktop/handshake`, { headers: f.headers })).status, 200);
+    assert.equal((await fetch(`${f.server.url}/api/jobs`, { method: "POST", headers: f.headers, body: '{"topic":"new work"}' })).status, 503);
+    assert.equal((await maintenance(f, "commit", otherUpdateId)).status, 409);
+    assert.equal((await maintenance(f, "cancel", otherUpdateId)).status, 409);
+    f.server.cancelDesktopUpdate();
+    assert.equal((await fetch(`${f.server.url}/api/jobs`, { headers: f.headers })).status, 503, "local cancellation cannot release a remote reservation");
+    assert.equal((await maintenance(f, "cancel")).status, 200);
+    assert.equal((await maintenance(f, "commit")).status, 409);
+    assert.equal((await fetch(`${f.server.url}/api/jobs`, { headers: f.headers })).status, 200);
+    assert.equal((await (await maintenance(f, "prepare")).json() as { ready: boolean }).ready, true);
+    const committed = await maintenance(f, "commit");
+    assert.equal(committed.status, 202);
+    assert.deepEqual(await committed.json(), { accepted: true });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(exits, 1);
+    assert.equal((await maintenance(f, "commit")).status, 409, "commit cannot be repeated");
+  } finally { await f.close(); }
+});
+
+test("remote update refuses active research and automatically releases an abandoned reservation", async t => {
+  const f = await fixture(undefined, { desktopUpdateLeaseMs: 30 });
+  let jobs: JobSummary[] = [{ jobId: "live", topic: "research", runner: "slurm", status: "running", createdAt: 1, updatedAt: 1 }];
+  t.mock.method(f.server.manager, "list", async () => jobs);
+  try {
+    assert.equal((await (await maintenance(f, "prepare")).json() as { ready: boolean }).ready, false);
+    assert.equal((await maintenance(f, "commit")).status, 409);
+    jobs = [];
+    assert.equal((await (await maintenance(f, "prepare")).json() as { ready: boolean }).ready, true);
+    await new Promise(resolve => setTimeout(resolve, 60));
+    assert.equal((await maintenance(f, "commit")).status, 409, "expired reservation cannot stop the backend");
+    assert.equal((await fetch(`${f.server.url}/api/jobs`, { headers: f.headers })).status, 200);
+  } finally { await f.close(); }
+});
+
+test("cancelling during idle inspection cannot revive a stale update reservation", async t => {
+  const f = await fixture();
+  let release!: () => void;
+  let inspecting!: () => void;
+  const started = new Promise<void>(resolve => { inspecting = resolve; });
+  const wait = new Promise<void>(resolve => { release = resolve; });
+  t.mock.method(f.server.manager, "list", async () => { inspecting(); await wait; return []; });
+  try {
+    const pending = maintenance(f, "prepare");
+    await started;
+    assert.equal((await maintenance(f, "commit")).status, 409);
+    assert.equal((await maintenance(f, "cancel")).status, 200);
+    release();
+    assert.equal((await (await pending).json() as { ready: boolean }).ready, false);
+    assert.equal((await maintenance(f, "commit")).status, 409);
+  } finally { release(); await f.close(); }
+});
+
+test("ordinary unauthenticated deployments do not expose remote shutdown", async () => {
+  const f = await fixture(undefined, { unauthenticated: true });
+  try {
+    const handshake = await (await fetch(`${f.server.url}/api/desktop/handshake`)).json() as { capabilities: string[] };
+    assert.ok(!handshake.capabilities.includes("managed-runtime-update"));
+    assert.equal((await maintenance(f, "prepare")).status, 404);
+  } finally { await f.close(); }
+});
+
+test("a cancelled local scan cannot release a newer remote update reservation", async t => {
+  const f = await fixture();
+  let rejectScan!: (error: Error) => void;
+  const wait = new Promise<JobSummary[]>((_, reject) => { rejectScan = reject; });
+  let calls = 0;
+  t.mock.method(f.server.manager, "list", () => ++calls === 1 ? wait : Promise.resolve([]));
+  try {
+    const local = f.server.prepareForDesktopUpdate();
+    f.server.cancelDesktopUpdate();
+    assert.equal((await (await maintenance(f, "prepare")).json() as { ready: boolean }).ready, true);
+    const rejected = assert.rejects(local, /cancelled scan/);
+    rejectScan(new Error("cancelled scan"));
+    await rejected;
+    assert.equal((await fetch(`${f.server.url}/api/jobs`, { headers: f.headers })).status, 503);
+    assert.equal((await maintenance(f, "cancel")).status, 200);
+  } finally { rejectScan(new Error("cancelled scan")); await f.close(); }
+});
+
+test("an interrupted commit releases admission instead of stranding a live backend", async () => {
+  let exits = 0;
+  const f = await fixture(undefined, { desktopUpdateLeaseMs: 100, exitForUpdate: () => { exits++; } });
+  try {
+    assert.equal((await (await maintenance(f, "prepare")).json() as { ready: boolean }).ready, true);
+    f.server.httpServer.on("request", (req, res) => {
+      if (req.url === "/api/desktop/update/commit") req.once("end", () => res.destroy());
+    });
+    await assert.rejects(maintenance(f, "commit"));
+    await new Promise(resolve => setTimeout(resolve, 150));
+    assert.equal(exits, 0);
+    assert.equal((await fetch(`${f.server.url}/api/jobs`, { headers: f.headers })).status, 200);
+    assert.equal((await maintenance(f, "cancel")).status, 409);
+    assert.equal((await (await maintenance(f, "prepare", otherUpdateId)).json() as { ready: boolean }).ready, true);
+  } finally { await f.close(); }
 });

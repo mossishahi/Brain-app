@@ -116,8 +116,8 @@ export function App() {
   }, [settingsSection, setPanel]);
   const mainRouteId = route.view === 'job' ? `job:${route.jobId}` : 'home';
   useEffect(() => { window.scrollTo(0, 0); }, [mainRouteId]);
-  const openSettings = useCallback(() => setSettingsSection('connections'), []);
   const closeSettings = useCallback(() => setSettingsSection(null), []);
+  const workspaceControls = useMemo(() => <WorkspaceControls placement={isHome ? 'composer' : 'rail'} open={menuOpen} onOpenChange={setMenuOpen} onOpenSettings={setSettingsSection} />, [isHome, menuOpen]);
   const newResearch = useCallback(() => {
     navigate({ view: 'home' });
     window.requestAnimationFrame(() => {
@@ -156,14 +156,14 @@ export function App() {
             <button key={item.id} id={`sidebar-${item.id}-trigger`} type="button" className={`canvas-rail-button ${route.panel === item.id ? 'is-active' : ''}`} data-library-navigation aria-label={item.label} title={item.label} aria-expanded={route.panel === item.id} aria-controls="research-sidebar" onPointerEnter={(event) => libraryHover.pointerEnter(item.id, event)} onPointerLeave={libraryHover.pointerLeave} onClick={(event) => togglePanel(item.id, event.detail === 0 || !window.matchMedia('(pointer: coarse)').matches)}><item.icon /><span className="canvas-rail-label">{item.label}</span></button>)}
         </div>
         <div className="canvas-rail-bottom">
-          <WorkspaceControls open={menuOpen} onOpenChange={setMenuOpen} onOpenSettings={setSettingsSection} />
+          {!isHome && workspaceControls}
           <span className="canvas-rail-monogram" title="co-inference research workspace" aria-hidden="true">co</span>
         </div>
       </nav>
       <LibraryPanel open={!!route.panel} section={route.panel ?? lastPanel.current} selectedJobId={route.view === 'job' ? route.jobId : undefined} focusSearch={librarySearchFocus} autoFocus={libraryAutoFocus} onClose={closePanel} onSelect={selectResearch} onRedo={redo} />
       <div className="canvas-content" id="canvas-main" tabIndex={-1}>
         <header className="canvas-topbar"><a className="canvas-home-link" href={homeLink} data-library-navigation onClick={followHome} aria-label="co-inference home"><BrandWordmark introReady={headlineIntroComplete} /></a>{route.view === 'job' && <button type="button" className="canvas-back" data-library-navigation onClick={() => setPanel('history')}>Research history</button>}</header>
-        {(landingVisited || isHome) && <div hidden={!isHome}><ViewBoundary><PersistentLanding active={isHome} onIntroComplete={finishHeadlineIntro} onOpenSettings={openSettings} onSubmitted={selectResearch} prefillRequest={prefill} /></ViewBoundary></div>}
+        {(landingVisited || isHome) && <div hidden={!isHome}><ViewBoundary><PersistentLanding active={isHome} settingsControl={isHome ? workspaceControls : undefined} onIntroComplete={finishHeadlineIntro} onSubmitted={selectResearch} prefillRequest={prefill} /></ViewBoundary></div>}
         {route.view === 'job' && <ViewBoundary key={route.jobId}><Suspense fallback={<ViewLoading />}><Dashboard key={route.jobId} jobId={route.jobId} initialStage={route.stage} onNavigateStage={selectResearchStage} onGoHome={newResearch} /></Suspense></ViewBoundary>}
       </div>
       {settingsSection !== null && <Suspense fallback={<ViewLoading />}><ViewBoundary><SettingsDrawer initialSection={settingsSection} onClose={closeSettings} /></ViewBoundary></Suspense>}

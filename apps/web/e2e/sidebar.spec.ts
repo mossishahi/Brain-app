@@ -168,12 +168,12 @@ test('outside controls receive the first click while the library closes', async 
   await page.keyboard.type(' without another click.');
   await expect(prompt(page)).toHaveValue('Continue this question without another click.');
   await openLibrary(page);
-  const connection = page.getByRole('button', { name: /^Model connection:/ });
-  await connection.click();
+  const settings = page.getByRole('button', { name: 'Open settings menu', exact: true });
+  await settings.click();
   await expect(panel(page)).not.toBeVisible();
-  await expect(page.getByRole('dialog', { name: 'Model connection check', exact: true })).toBeVisible();
+  await expect(page.getByRole('menuitem', { name: 'All settings…', exact: true })).toBeVisible();
   await page.keyboard.press('Escape');
-  await expect(connection).toBeFocused();
+  await expect(settings).toBeFocused();
   expect(brain.writes.filter((write) => write.path.startsWith('/jobs'))).toEqual([]);
   expect(brain.unhandled).toEqual([]);
 });

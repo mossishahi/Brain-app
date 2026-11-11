@@ -11,7 +11,7 @@ async function mockComposer(page: Page, options?: Parameters<typeof mockBrain>[1
   return brain;
 }
 
-async function openSettings(page: Page, category: 'Tools & sources' | 'Models & connections') {
+async function openSettings(page: Page, category: 'Tools & sources' | 'Models & connections' | 'Pipeline models') {
   await page.getByRole('button', { name: 'Open settings menu', exact: true }).click();
   await page.getByRole('menuitem', { name: 'All settings…', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: 'Settings', exact: true });
@@ -180,15 +180,14 @@ test('the composer stays minimal while Settings retains tool diagnostics and the
   await question(page).fill('Keep this draft while inspecting tool checks.');
   await expect(page.getByRole('button', { name: /^Capabilities:/ })).toHaveCount(0);
   await expect(page.getByRole('button', { name: /^Models by task type:/ })).toHaveCount(0);
-  const status = page.locator('.canvas-composer-health');
-  await expect(status.getByRole('button', { name: /^(Agent capabilities|Code execution|Internet access|Tools and providers)/ })).toHaveCount(0);
-  await status.getByRole('button', { name: /^Model connection:/ }).click();
-  const modelCheck = page.getByRole('dialog', { name: 'Model connection check', exact: true });
+  const composer = page.locator('.canvas-composer');
+  await expect(composer.locator('.env-icon, .registry-indicator')).toHaveCount(0);
+  await expect(composer.getByRole('button', { name: 'Open settings menu', exact: true })).toHaveCount(1);
+  const settings = await openSettings(page, 'Models & connections');
+  const modelCheck = settings.getByRole('article', { name: 'Model connection check', exact: true });
   await expect(modelCheck).toContainText('Connected');
-  await page.keyboard.press('Escape');
-  await expect(modelCheck).not.toBeVisible();
-
-  const settings = await openSettings(page, 'Tools & sources');
+  expect(brain.writes.filter(write => write.path !== '/update-check')).toEqual([]);
+  await settings.getByRole('button', { name: 'Tools & sources', exact: true }).click();
   const capabilities = settings.getByRole('article', { name: 'Agent capabilities check', exact: true });
   const code = settings.getByRole('article', { name: 'Code execution check', exact: true });
   const internet = settings.getByRole('article', { name: 'Internet access check', exact: true });

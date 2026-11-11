@@ -9,6 +9,7 @@ import './quick-controls.css';
 export type { QuickControlItem, QuickControlSubmenu } from './types';
 
 export interface QuickControlsProps {
+  placement?: 'composer' | 'rail';
   open: boolean;
   onOpenChange: (open: boolean) => void;
   items: readonly QuickControlItem[];
@@ -85,8 +86,8 @@ function DesktopRows({ items, hoverFocus }: { items: readonly QuickControlItem[]
     : <ControlRow key={item.id} item={item} />)}</>;
 }
 
-/** One rail entry point; desktop submenus become in-place tiers on touch screens. */
-export function QuickControls({ open, onOpenChange, items, footer, loading, error }: QuickControlsProps) {
+/** One settings entry point; desktop submenus become in-place tiers on touch screens. */
+export function QuickControls({ open, onOpenChange, items, footer, loading, error, placement = 'rail' }: QuickControlsProps) {
   const drillIn = useDrillInMenu();
   const hoverFocus = useHoverMenuFocus();
   const [path, setPath] = useState<string[]>([]);
@@ -170,8 +171,8 @@ export function QuickControls({ open, onOpenChange, items, footer, loading, erro
     hoverFocus.onOpenChange(next, details);
     onOpenChange(next);
   }}>
-    <Menu.Trigger {...hoverFocus.triggerProps} openOnHover delay={160} closeDelay={240} id="canvas-settings-trigger" className="canvas-rail-button" aria-label="Open settings menu"><LuSettings2 /><span className="canvas-rail-label">Settings</span></Menu.Trigger>
-    <Menu.Portal><Menu.Positioner side={drillIn ? 'top' : 'right'} align="end" sideOffset={12} collisionPadding={12} className="quick-controls-positioner">
+    <Menu.Trigger {...hoverFocus.triggerProps} openOnHover delay={160} closeDelay={240} id="canvas-settings-trigger" data-co-inference-host-control className={placement === 'composer' ? 'composer-settings-trigger' : 'canvas-rail-button'} aria-label="Open settings menu"><LuSettings2 aria-hidden="true" />{placement === 'rail' && <span className="canvas-rail-label">Settings</span>}</Menu.Trigger>
+    <Menu.Portal><Menu.Positioner side={drillIn || placement === 'composer' ? 'top' : 'right'} align="end" sideOffset={12} collisionPadding={12} className="quick-controls-positioner">
       <Menu.Popup {...hoverFocus.popupProps} ref={popup} className="quick-controls-popup" aria-label="Workspace settings" data-drill-in={drillIn || undefined} onKeyDown={event => {
         hoverFocus.popupProps.onKeyDown();
         if (drillIn && validDepth > 0 && event.key === 'ArrowLeft') {

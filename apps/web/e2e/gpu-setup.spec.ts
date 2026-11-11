@@ -2,7 +2,14 @@ import { expect, test, type Page } from '@playwright/test';
 import { gpuDraftFixture, mockBrain } from './fixtures';
 
 const gpuDialog = (page: Page) => page.getByRole('dialog', { name: 'GPU execution', exact: true });
-async function openGpu(page: Page) { await page.getByRole('button', { name: /^GPU setup:/ }).click(); return gpuDialog(page); }
+async function openGpu(page: Page) {
+  await page.getByRole('button', { name: 'Open settings menu', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'All settings…', exact: true }).click();
+  const settings = page.getByRole('dialog', { name: 'Settings', exact: true });
+  await settings.getByRole('button', { name: 'Execution', exact: true }).click();
+  await settings.getByRole('button', { name: 'Configure GPU execution…', exact: true }).click();
+  return gpuDialog(page);
+}
 
 test('discovery progress is server-owned; showing its draft submits no job', async ({ page }) => {
   const brain = await mockBrain(page);
@@ -14,7 +21,7 @@ test('discovery progress is server-owned; showing its draft submits no job', asy
   await expect(dialog.getByRole('button', { name: 'Approve and run probe' })).toBeVisible();
   expect(brain.writes.filter(write => write.path.startsWith('/gpu/'))).toEqual([]);
   await dialog.getByRole('button', { name: 'Done', exact: true }).click();
-  await expect(page.getByRole('button', { name: /^GPU setup: Pending approval/ })).toBeFocused();
+  await expect(page.getByRole('button', { name: 'Configure GPU execution…', exact: true })).toBeFocused();
   expect(brain.unhandled).toEqual([]);
 });
 
@@ -70,6 +77,7 @@ test('structured choices produce an exact preview and only explicit approval que
   await dialog.getByRole('button', { name: 'Cancel probe' }).click();
   await expect(dialog.getByRole('region', { name: 'GPU probe status' })).toContainText('CANCELLED');
   await dialog.getByRole('button', { name: 'Done', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Settings', exact: true }).getByRole('button', { name: 'Done', exact: true }).click();
   await expect(page.getByRole('textbox', { name: 'What do you want to think through?', exact: true })).toHaveValue('Preserve my research draft');
   expect(brain.unhandled).toEqual([]);
 });

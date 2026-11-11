@@ -8,13 +8,14 @@ export class QuickEditorBoundary extends Component<{
   children: ReactNode;
   onClose: () => void;
   onConfigure: () => void;
+  side?: 'top' | 'right';
 }, { failed: boolean }> {
   state = { failed: false };
   static getDerivedStateFromError() { return { failed: true }; }
   render() {
     if (!this.state.failed) return this.props.children;
     return <Popover.Root open onOpenChange={next => { if (!next) this.props.onClose(); }}>
-      <Popover.Portal><Popover.Positioner anchor={() => document.getElementById('canvas-settings-trigger')} side="right" align="end" sideOffset={12} collisionPadding={12} className="quick-editor-positioner">
+      <Popover.Portal><Popover.Positioner anchor={() => document.getElementById('canvas-settings-trigger')} side={this.props.side ?? 'right'} align="end" sideOffset={12} collisionPadding={12} className="quick-editor-positioner">
         <Popover.Popup className="quick-editor" aria-label="Editor unavailable" finalFocus={() => document.getElementById('canvas-settings-trigger')}>
           <header><Popover.Title>Editor unavailable</Popover.Title><button type="button" aria-label="Close editor" onClick={this.props.onClose}><LuX /></button></header>
           <Popover.Description>This editor could not load. Your research remains in place. You can change this option in Settings.</Popover.Description>

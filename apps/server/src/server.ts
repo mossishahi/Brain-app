@@ -305,6 +305,10 @@ export interface StartBrainServerOptions {
    * to die before touching the tree.
    */
   readonly exitForUpdate?: () => void;
+  /** Test seam; abandoned remote update reservations expire after 60 seconds. */
+  readonly desktopUpdateLeaseMs?: number;
+  /** Only standalone desktop services can hand over their owning process. */
+  readonly managedRuntimeUpdates?: boolean;
   /** Per-check probe overrides (test seam / special deployments). */
   readonly readinessProbes?: Partial<ReadinessProbes>;
   /** Test seam: the fetch every tool-availability probe goes through. */
@@ -984,18 +988,29 @@ export async function startBrainServer(
     defaultWebappDir();
 
   let desktopUpdatePending = false;
+  let localUpdateReservation: object | undefined;
   let activeRequests = 0;
+  let remoteUpdateLease: { requestId: string; ready: boolean; committing: boolean; timer: NodeJS.Timeout } | undefined;
   const backgroundJobs = new Set<Promise<unknown>>();
   const trackBackgroundJob = (task: Promise<unknown>): void => {
     backgroundJobs.add(task);
     void task.finally(() => backgroundJobs.delete(task)).catch(() => undefined);
   };
+  const desktopIdle = async (): Promise<boolean> => {
+    if (activeRequests || backgroundJobs.size) return false;
+    const jobs = await manager.list();
+    const settled = new Set(["completed", "failed", "cancelled", "paused"]);
+    return !manager.hasLiveLocalWorkers() && jobs.every(job => settled.has(job.status));
+  };
+  const releaseRemoteUpdate = (): void => {
+    if (!remoteUpdateLease) return;
+    clearTimeout(remoteUpdateLease.timer);
+    remoteUpdateLease = undefined;
+    desktopUpdatePending = false;
+  };
   const httpServer = createServer(async (req, res) => {
     let counted = false;
     try {
-      if (desktopUpdatePending) throw new HttpError(503, "The desktop app is preparing to update. Please wait for it to restart.");
-      activeRequests++;
-      counted = true;
       if (options.apiToken !== undefined && !authorizedDesktopRequest(req.headers.authorization, options.apiToken)) {
         res.setHeader("www-authenticate", "Bearer");
         res.setHeader("cache-control", "no-store");
@@ -1008,10 +1023,72 @@ export async function startBrainServer(
       if (req.method === "GET" && path === "/api/desktop/handshake") {
         sendJson(res, 200, {
           protocolVersion: 1, version: VERSION, workspace: options.workspace, instanceId,
-          capabilities: ["http-api", "sse", ...(options.apiToken ? ["bearer-auth"] : [])],
+          capabilities: ["http-api", "sse", ...(options.apiToken ? ["bearer-auth"] : []), ...(options.apiToken && options.managedRuntimeUpdates ? ["managed-runtime-update"] : [])],
         });
         return;
       }
+      if (req.method === "POST" && /^\/api\/desktop\/update\/(prepare|cancel|commit)$/.test(path)) {
+        // These controls are never exposed by an unauthenticated web server.
+        if (!options.apiToken || !options.managedRuntimeUpdates) throw new HttpError(404, "API route not found");
+        const body = requestObject(await readJson(req));
+        const requestId = body.requestId;
+        if (typeof requestId !== "string" || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(requestId)) {
+          throw new HttpError(400, "A valid update request ID is required");
+        }
+        if (path.endsWith("/prepare")) {
+          if (desktopUpdatePending) {
+            sendJson(res, 200, { requestId, ready: remoteUpdateLease?.requestId === requestId && remoteUpdateLease.ready && !remoteUpdateLease.committing,
+              reason: "Another update or activity check is already in progress" });
+            return;
+          }
+          // Close admission before awaiting the job scan. Ordinary requests and
+          // automatic recovery cannot start new work while this lease is held.
+          desktopUpdatePending = true;
+          const lease = { requestId, ready: false, committing: false,
+            timer: setTimeout(() => { if (remoteUpdateLease === lease) releaseRemoteUpdate(); }, options.desktopUpdateLeaseMs ?? 60_000) };
+          lease.timer.unref();
+          remoteUpdateLease = lease;
+          try {
+            const idle = await desktopIdle();
+            lease.ready = idle && remoteUpdateLease === lease;
+            if (!lease.ready && remoteUpdateLease === lease) releaseRemoteUpdate();
+            sendJson(res, 200, { requestId, ready: lease.ready, ...(!lease.ready ? { reason: "Research or another request is still active; the backend was kept running" } : {}) });
+          } catch (error) {
+            if (remoteUpdateLease === lease) releaseRemoteUpdate();
+            throw error;
+          }
+          return;
+        }
+        const lease = remoteUpdateLease;
+        if (!lease || lease.requestId !== requestId || lease.committing) throw new HttpError(409, "No matching update reservation");
+        if (path.endsWith("/cancel")) {
+          releaseRemoteUpdate();
+          sendJson(res, 200, { cancelled: true });
+          return;
+        }
+        if (!lease.ready) throw new HttpError(409, "The backend has not confirmed it is idle");
+        if (res.destroyed) { releaseRemoteUpdate(); return; }
+        lease.committing = true;
+        // A lost response must neither strand admission nor stop an app whose
+        // updater could not receive acceptance. Keep expiry until it flushes.
+        res.once("close", () => {
+          if (!res.writableFinished && remoteUpdateLease === lease) releaseRemoteUpdate();
+        });
+        res.once("finish", () => {
+          if (remoteUpdateLease !== lease) return;
+          clearTimeout(lease.timer);
+          const exit = options.exitForUpdate ?? (() => {
+            process.kill(process.pid, "SIGTERM");
+            setTimeout(() => process.exit(0), FORCED_EXIT_AFTER_UPDATE_MS).unref();
+          });
+          setImmediate(exit);
+        });
+        sendJson(res, 202, { accepted: true });
+        return;
+      }
+      if (desktopUpdatePending) throw new HttpError(503, "The desktop app is preparing to update. Please wait for it to restart.");
+      activeRequests++;
+      counted = true;
       if (req.method === "GET" && path === "/api/health") {
         const settings = manager.settings.get();
         const { latest, latestNotes } = await registryLatest(
@@ -2238,17 +2315,23 @@ export async function startBrainServer(
     gpuSetup,
     httpServer,
     prepareForDesktopUpdate: async () => {
+      if (desktopUpdatePending) return false;
+      const reservation = {};
+      localUpdateReservation = reservation;
       desktopUpdatePending = true;
-      if (activeRequests || backgroundJobs.size) { desktopUpdatePending = false; return false; }
       try {
-        const jobs = await manager.list();
-        const settled = new Set(["completed", "failed", "cancelled", "paused"]);
-        if (manager.hasLiveLocalWorkers() || jobs.some(job => !settled.has(job.status))) { desktopUpdatePending = false; return false; }
-        return desktopUpdatePending;
-      } catch (error) { desktopUpdatePending = false; throw error; }
+        const idle = await desktopIdle();
+        if (localUpdateReservation !== reservation) return false;
+        if (!idle) { localUpdateReservation = undefined; desktopUpdatePending = false; return false; }
+        return true;
+      } catch (error) {
+        if (localUpdateReservation === reservation) { localUpdateReservation = undefined; desktopUpdatePending = false; }
+        throw error;
+      }
     },
-    cancelDesktopUpdate: () => { desktopUpdatePending = false; },
+    cancelDesktopUpdate: () => { localUpdateReservation = undefined; if (!remoteUpdateLease) desktopUpdatePending = false; },
     close: async () => {
+      if (remoteUpdateLease) clearTimeout(remoteUpdateLease.timer);
       clearInterval(poll);
       clearInterval(interruptedPoll);
       clearInterval(registryPoll);

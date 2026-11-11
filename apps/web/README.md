@@ -7,10 +7,17 @@ Click outside, press Escape, or choose New research or a run to dismiss it. It u
 contract; research, attachments, model configuration, recovery, and execution controls remain real.
 Credentials pass to the server for explicit verification and are never saved in browser storage.
 
-The Settings rail menu opens nested controls: on/off settings use pill toggles, and choices stay in
+The single Settings button sits beside Send in the composer, and in the rail when viewing a run.
+It opens nested controls: on/off settings use pill toggles, and choices stay in
 the menu. Touch screens use one menu with Back navigation. Small numeric/text edits open compact
 editors; connection setup, execution templates, and All settings open the centered settings window.
 Scope labels distinguish browser preferences, defaults for new research, and changes to existing runs.
+Model readiness lives in Models & connections; scheduler checks and GPU setup in Execution;
+tool checks in Tools & sources; registry checks and versions in App updates. These checks reuse
+the shared readiness feed rather than adding composer status icons or another poller.
+In the desktop app, Host connection opens the launcher's connection details on demand. Healthy
+connections stay out of view, while reconnect and sign-in warnings remain visible. Older launchers
+without the on-demand bridge retain their banner and expose Switch host from the settings menu.
 
 - [Interaction and architecture](docs/webapp-design.md)
 - [Adding a custom animated background](../../docs/backgrounds.md)

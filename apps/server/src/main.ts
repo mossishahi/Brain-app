@@ -279,6 +279,7 @@ async function main(): Promise<void> {
       host,
       port,
       apiToken,
+      managedRuntimeUpdates: Boolean(apiToken),
       onStartupPhase: reportStartup,
       ...(attachmentRoots && attachmentRoots.length > 0
         ? { attachmentRoots }

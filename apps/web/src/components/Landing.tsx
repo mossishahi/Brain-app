@@ -1,16 +1,16 @@
 /** Persistent home composer. The shell owns history, trash, and their live feed. */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import type { ServerSettings } from "@brainstorm-agentic/protocol";
 import { blockedReadiness, errorMessage, getSettings, submitJob } from "../api";
-import { diagnoseOverviewReadiness, publishOverviewReadiness, recheckOverviewReadiness, refreshOverviewJobs, refreshOverviewReadiness, useOverviewReadiness } from "../features/library/WorkspaceOverview";
+import { publishOverviewReadiness, recheckOverviewReadiness, refreshOverviewJobs, refreshOverviewReadiness, useOverviewReadiness } from "../features/library/WorkspaceOverview";
 import type { PrefillRequest } from "../features/library/types";
 import { ResearchHeadline } from "../features/composer/ResearchHeadline";
 import "../features/composer/canvas-composer.css";
 import { ProviderOnboarding, onboardingDismissed, onboardingNeeded } from "./ProviderOnboarding";
 import { SubmissionBox } from "./SubmissionBox";
 
-export function Landing({ onOpenSettings, onSubmitted, active = true, onIntroComplete, prefillRequest }: {
-  readonly onOpenSettings: () => void;
+export function Landing({ onSubmitted, active = true, onIntroComplete, prefillRequest, settingsControl }: {
+  readonly settingsControl?: ReactNode;
   readonly onSubmitted: (jobId: string) => void;
   readonly active?: boolean;
   readonly onIntroComplete?: () => void;
@@ -51,7 +51,7 @@ export function Landing({ onOpenSettings, onSubmitted, active = true, onIntroCom
   return <section className="landing canvas-landing canvas-landing-home" aria-label="New research">
     <div className="landing-column canvas-home">
       <div className="canvas-home-intro"><ResearchHeadline active={active} onIntroComplete={onIntroComplete} /></div>
-      <SubmissionBox active={active} onSubmit={submit} onOpenSettings={onOpenSettings} readiness={readiness.data} onRecheckReadiness={recheckOverviewReadiness} onDiagnoseReadiness={diagnoseOverviewReadiness} {...(prefillRequest ? { prefill: prefillRequest } : {})} />
+      <SubmissionBox active={active} settingsControl={settingsControl} onSubmit={submit} readiness={readiness.data} onRecheckReadiness={recheckOverviewReadiness} {...(prefillRequest ? { prefill: prefillRequest } : {})} />
       {submitError && <p className="error-text submit-error" role="alert">{submitError}</p>}
       {readiness.error && <div className="canvas-readiness-error" role="status"><span>Environment checks could not be refreshed. {readiness.error}</span><button type="button" className="btn btn-small" onClick={() => void refreshOverviewReadiness()}>Retry checks</button></div>}
     </div>
