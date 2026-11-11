@@ -6,14 +6,14 @@
     <description>Co-inference desktop application updates</description>
     <language>en</language>
     <item>
-      <title>Co-inference 0.1.0-preview.12</title>
-      <pubDate>Wed, 11 Nov 2026 18:16:00 GMT</pubDate>
-      <sparkle:version>12</sparkle:version>
-      <sparkle:shortVersionString>0.1.0-preview.12</sparkle:shortVersionString>
+      <title>Co-inference 0.1.0-preview.13</title>
+      <pubDate>Wed, 11 Nov 2026 18:39:00 GMT</pubDate>
+      <sparkle:version>13</sparkle:version>
+      <sparkle:shortVersionString>0.1.0-preview.13</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-      <description>This update brings settings together beside Send, hides the host status when the connection is healthy, and improves recovery from malformed model output. Future updates safely upgrade idle remote backends and reconnect to your selected host after restart. Research already in progress is preserved. This preview remains unnotarized. The first upgrade from preview 11 may ask you to select your host once.
+      <description>Settings now distinguishes desktop updates from research service updates. Use Co-inference → Check for Updates… in the macOS menu bar to check, install and restart. The browser no longer reports desktop updates as disabled or offers a backend-only notification switch. Source installations retain their existing updater.
 </description>
-      <enclosure url="https://github.com/mossishahi/Brain-app/releases/download/desktop-v0.1.0-preview.12/Co-inference-0.1.0-macOS-Intel-unnotarized.dmg" length="46854702" type="application/octet-stream" sparkle:os="macos" sparkle:edSignature="h3VnlrC0lxOsrK16Y+xL/z1Y6XH2sUiJn4nmgyAEUid5VLMyYQMcO/fYKv6I3Frfc/hUP/Q8gTTdP4KYiILgDg=="/>
+      <enclosure url="https://github.com/mossishahi/Brain-app/releases/download/desktop-v0.1.0-preview.13/Co-inference-0.1.0-macOS-Intel-unnotarized.dmg" length="46854487" type="application/octet-stream" sparkle:os="macos" sparkle:edSignature="vsqCylS2AABafR56/wX7QeEwQJFk8D5MsVpJHLSvi6uZ44Sxu64hgN7qKrQpHJptk82Sf3qBHDg7IFcZ3J3yBA=="/>
     </item>
   </channel>
 </rss>
