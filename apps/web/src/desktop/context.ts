@@ -11,7 +11,7 @@ export interface HostConnectionSnapshot {
 
 declare global {
   interface Window {
-    __CO_INFERENCE_LAUNCHER__?: { version: number };
+    __CO_INFERENCE_LAUNCHER__?: { version: number; nativeUpdates?: 'macos-menu' | 'unavailable' };
     __CO_INFERENCE_HOST__?: {
       version: 1;
       getSnapshot: () => HostConnectionSnapshot;
@@ -21,6 +21,7 @@ declare global {
 }
 
 export const isLauncher = typeof window !== 'undefined' && window.__CO_INFERENCE_LAUNCHER__?.version === 1;
+export const nativeUpdates = typeof window !== 'undefined' ? window.__CO_INFERENCE_LAUNCHER__?.nativeUpdates : undefined;
 const pathname = typeof window === 'undefined' ? '/' : window.location.pathname;
 export const activeConnectionId = connectionIdFromPath(pathname, isLauncher);
 export const API_BASE = researchApiBase(pathname, isLauncher);

@@ -11,6 +11,7 @@ import type { QuickControlItem } from './types';
 import { agentDefaults, hostTools, providerConfigured, type QuickSetting } from './settings-commands';
 import { changeQuickSetting, loadQuickSettings, useQuickSettings } from './settings-store';
 import { isLauncher } from '../../desktop/context';
+import { updateCheckMessage } from '../settings/update-status';
 import type { QuickEditorId } from './QuickSettingsEditor';
 
 const QuickSettingsEditor = lazy(() => loadOptionalModule(() => import('./QuickSettingsEditor')).then(module => ({ default: module.QuickSettingsEditor })));
@@ -73,13 +74,12 @@ export function WorkspaceControls({ open, onOpenChange, onOpenSettings, placemen
     });
   }
   async function checkUpdates() {
-    if (checking) return;
+    if (isLauncher || checking) return;
     setChecking(true); setCheckStatus(undefined); setCheckError(undefined);
     try {
       const result = await postUpdateCheck();
       window.dispatchEvent(new Event('brain-check-updates'));
-      setCheckStatus(result.appUpdate ? `Version ${result.appUpdate.version} is available. Use the update notification to install.`
-        : !result.selfUpdateEnabled ? `Running ${result.version}. Update checks are disabled by this deployment.` : `Version ${result.version} is up to date.`);
+      setCheckStatus(updateCheckMessage(result));
     } catch (error) { setCheckError(errorMessage(error)); }
     finally { setChecking(false); }
   }
@@ -115,8 +115,10 @@ export function WorkspaceControls({ open, onOpenChange, onOpenSettings, placemen
         ...(!appearance.persisted ? [action('appearance-persistence', 'Preferences are not saved', () => {}, { disabled: true, description: 'Browser storage is unavailable. Changes apply in this tab.' })] : []),
       ],
       updates: [
-        action('check-updates', 'Check for updates', () => { void checkUpdates(); }, { keepOpen: true, pending: checking, description: checkStatus, error: checkError }),
-        ...(s ? [toggle('updateCheck', 'Notify about app updates', s.updateCheck !== 'off', 'Switch off for manual checks only.', 'This deployment'), editorAction('appInfo', 'App & registry information…')] : []),
+        isLauncher ? setup('updates', 'Desktop updates…')
+          : action('check-updates', 'Check for updates', () => { void checkUpdates(); }, { keepOpen: true, pending: checking, description: checkStatus, error: checkError }),
+        ...(s ? [...(!isLauncher ? [toggle('updateCheck', 'Notify about app updates', s.updateCheck !== 'off', 'Switch off for manual checks only.', 'This deployment')] : []),
+          editorAction('appInfo', isLauncher ? 'Research service & registry information…' : 'App & registry information…')] : []),
       ],
     };
     if (s) {

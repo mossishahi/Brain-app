@@ -5,6 +5,7 @@ import type { HealthResponse, ModelOptionsResponse, ServerSettings } from '@brai
 import { errorMessage, getHealth, getModelOptions, putModelsByRoute, refreshModelOptions } from '../../api';
 import { agentDefaults, type QuickValue } from './settings-commands';
 import { changeQuickSetting, useQuickSettings } from './settings-store';
+import { isLauncher } from '../../desktop/context';
 import './quick-editor.css';
 
 export type QuickEditorId = 'model' | 'modelsByTask' | 'agentLimits' | 'searchLimits' | 'contactEmail' | 'recoveryBuffer' | 'appInfo';
@@ -25,7 +26,7 @@ function specification(id: QuickEditorId, s: ServerSettings): { title: string; d
     ] };
     case 'contactEmail': return { title: 'Scholarly contact', description: 'Shared with scholarly indexes for their polite pools. Applies to new research.', fields: [{ name: 'contactEmail', label: 'Contact email', type: 'email', value: s.webSearch?.contactEmail ?? '', hint: 'Optional; leave empty to remove it.' }] };
     case 'recoveryBuffer': return { title: 'Recovery safety buffer', description: 'Extra time after a provider credit reset before automatic resume. Applies to existing blocked runs.', fields: [{ name: 'recoveryBuffer', label: 'Seconds', type: 'number', min: 0, max: 3600, step: '1', value: String(s.creditRecovery.safetyBufferSeconds) }] };
-    case 'appInfo': return { title: 'App & registry information', description: 'Versions and connection details for this deployment.', fields: [] };
+    case 'appInfo': return { title: isLauncher ? 'Research service & registry information' : 'App & registry information', description: isLauncher ? 'Versions of the connected research service and skills. The launcher is updated separately from the research service.' : 'Versions and connection details for this deployment.', fields: [] };
   }
 }
 
@@ -93,8 +94,8 @@ export function QuickSettingsEditor({ id, settings, onClose, side = 'right' }: {
               </select><small>{task.description}</small>
             </div>))}
             {id === 'appInfo' && (!health ? !loadError && <p role="status">Loading versions…</p> : <>
-              <dl className="quick-editor-details"><dt>App</dt><dd>{health.version}</dd><dt>Registry</dt><dd>{health.contentRegistry.url ?? settings.contentRegistry.url}</dd><dt>Bundle</dt><dd>{settings.contentRegistry.bundle}</dd><dt>Bundle version</dt><dd>{health.contentRegistry.effectiveVersion ?? settings.contentRegistry.version ?? 'Latest for new research'}</dd><dt>Registry server</dt><dd>{health.contentRegistry.serverVersion ?? 'Not reported'}</dd><dt>Version pin</dt><dd>{settings.contentRegistry.version ?? 'None'}</dd></dl>
-              {(health.contentRegistry.latestNotes || health.appUpdate?.notes) && <details><summary>Release notes</summary><pre>{health.appUpdate?.notes ?? health.contentRegistry.latestNotes}</pre></details>}
+              <dl className="quick-editor-details"><dt>{isLauncher ? 'Research service' : 'App'}</dt><dd>{health.version}</dd><dt>Registry</dt><dd>{health.contentRegistry.url ?? settings.contentRegistry.url}</dd><dt>Bundle</dt><dd>{settings.contentRegistry.bundle}</dd><dt>Bundle version</dt><dd>{health.contentRegistry.effectiveVersion ?? settings.contentRegistry.version ?? 'Latest for new research'}</dd><dt>Registry server</dt><dd>{health.contentRegistry.serverVersion ?? 'Not reported'}</dd><dt>Version pin</dt><dd>{settings.contentRegistry.version ?? 'None'}</dd></dl>
+              {(health.contentRegistry.latestNotes || (!isLauncher && health.appUpdate?.notes)) && <details><summary>{isLauncher ? 'Skills release notes' : 'Release notes'}</summary><pre>{(!isLauncher && health.appUpdate?.notes) || health.contentRegistry.latestNotes}</pre></details>}
             </>)}
             {error && <p className="quick-editor-error" role="alert">{error}</p>}
           </div>

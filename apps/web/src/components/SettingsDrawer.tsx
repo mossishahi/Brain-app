@@ -39,6 +39,8 @@ import { findModel } from "./settings/stage-models-model";
 import { GpuSetupControl } from "../features/gpu/GpuSetup";
 import { ToolReadinessSettings } from "./settings/ToolReadinessSettings";
 import { approvalPreferenceDescription, askBeforeApprovalLabel } from "./settings/approval-preference";
+import { isLauncher, nativeUpdates } from "../desktop/context";
+import { updateCheckMessage } from "./settings/update-status";
 import "./settings/settings.css";
 export type { SettingsCategory } from "./settings/catalog";
 
@@ -214,18 +216,13 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
   };
 
   const checkForUpdates = async (): Promise<void> => {
+    if (isLauncher) return;
     setCheckingUpdates(true);
     setUpdateStatus(null);
     try {
       const result = await postUpdateCheck();
       window.dispatchEvent(new Event("brain-check-updates"));
-      setUpdateStatus(
-        result.appUpdate
-          ? "Update available — use the notification at the lower left to install it."
-          : result.selfUpdateEnabled === false
-            ? `Update checks are switched off on this deployment (launched with --no-self-update), so nothing was checked — v${result.version} is running, but a newer release may exist. Update it the way it was installed.`
-            : `You are on the latest version (v${result.version}).`,
-      );
+      setUpdateStatus(updateCheckMessage(result));
     } catch (error) {
       setUpdateStatus(errorMessage(error));
     } finally {
@@ -546,9 +543,14 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
                 {activeCategory === "appearance" ? <AppearanceSettings /> : <>
                 {loadError && <div><p className="error-text" role="alert">{loaded ? `Could not refresh settings. Your last saved settings and drafts are still available. ${loadError}` : loadError}</p><button type="button" className="btn btn-small" onClick={() => setLoadAttempt(attempt => attempt + 1)}>Retry loading settings</button></div>}
                 {!loaded ? !loadError && <p className="dim" role="status">Loading settings…</p> : <>
-            <Section category="updates" title="Application updates" state={saveState.updates} error={saveError.updates} onRetry={canRetry("updates") ? () => void retry("updates") : undefined}>
-
-              <div className="inline-actions">
+            <Section category="updates" title={isLauncher ? "Desktop updates" : "Application updates"} state={saveState.updates} error={saveError.updates} onRetry={canRetry("updates") ? () => void retry("updates") : undefined}>
+              {isLauncher ? nativeUpdates === 'macos-menu' ? <>
+                <p>Desktop updates are managed by the Co-inference app. To check now, bring the Co-inference app to the front and choose <strong>Co-inference → Check for Updates…</strong> from the macOS menu bar.</p>
+                <p>The desktop update dialog downloads the update and offers to install and restart. You do not need to download a DMG yourself.</p>
+              </> : nativeUpdates === 'unavailable' ? <p>This launcher installation is updated by its deployment owner. Browser controls cannot update the launcher.</p> : <>
+                <p>If you use Co-inference for Mac, bring the app to the front and choose <strong>Co-inference → Check for Updates…</strong> from the macOS menu bar.</p>
+                <p>Supported Mac releases offer installation and restart in the desktop update dialog. Other launcher installations are updated by their deployment owner.</p>
+              </> : <><div className="inline-actions">
                 <button
                   type="button"
                   className="btn"
@@ -573,7 +575,7 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
                   </select>
                 </div>
               </div>
-              {updateStatus && <span className="field-note" role="status">{updateStatus}</span>}
+              {updateStatus && <span className="field-note" role="status">{updateStatus}</span>}</>}
             </Section>
 
             <Section

@@ -20,7 +20,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { HealthResponse } from "@brainstorm-agentic/protocol";
 import { errorMessage, getHealth, postUpdateApp, postUpdateCheck } from "../api";
-import { hostStorageKey } from "../desktop/context";
+import { hostStorageKey, isLauncher } from "../desktop/context";
 
 /** Last bundle version this browser has acknowledged as "seen". */
 const BUNDLE_ACK_KEY = hostStorageKey("brain-acked-bundle-version");
@@ -105,7 +105,7 @@ export function UpdateToast() {
   /** Just landed from a self-update reload: confirm it until any click. */
   const [updateSuccess, setUpdateSuccess] = useState<{
     readonly to?: string;
-  } | null>(takeUpdateSuccess);
+  } | null>(() => isLauncher ? null : takeUpdateSuccess());
   /**
    * The server version this PAGE LOAD first saw. A later health answer with
    * a different version means the server was updated (or rolled back) under
@@ -153,7 +153,10 @@ export function UpdateToast() {
     // Opening the dashboard is the beginning of a pipeline session: ask the
     // server for a FRESH release check first (throttled server-side), then
     // fall into the regular health polling that renders the result.
-    postUpdateCheck()
+    // Desktop releases have their own signed updater. The connected backend
+    // version does not identify the interface bundled inside the desktop app.
+    if (isLauncher) poll();
+    else postUpdateCheck()
       .catch(() => undefined)
       .finally(poll);
     const timer = window.setInterval(poll, 60_000);
@@ -178,7 +181,7 @@ export function UpdateToast() {
   // version answering after a observed downtime means the updater rolled
   // back; surface that with the log location instead of reloading.
   useEffect(() => {
-    if (phase.kind !== "updating") return;
+    if (isLauncher || phase.kind !== "updating") return;
     const startedAt = Date.now();
     let sawDown = false;
     const timer = window.setInterval(() => {
@@ -224,7 +227,7 @@ export function UpdateToast() {
   }, [phase]);
 
   const startUpdate = async (): Promise<void> => {
-    if (!health?.appUpdate) return;
+    if (isLauncher || !health?.appUpdate) return;
     const from = health.version;
     try {
       // The server re-probes the release tags at click time and answers
@@ -288,6 +291,7 @@ export function UpdateToast() {
     ackedVersion !== null &&
     registry.latest !== ackedVersion;
   const appUpdate =
+    !isLauncher &&
     health?.appUpdate !== undefined &&
     health.appUpdate.version !== snoozedAppVersion
       ? health.appUpdate
@@ -308,12 +312,12 @@ export function UpdateToast() {
     <div className="update-toast-stack" role="status">
       {serverChangedTo !== null && (
         <div className="update-toast update-toast-actionable">
-          <strong>The server now runs v{serverChangedTo}</strong>
-          <p>
+          <strong>{isLauncher ? 'The research service' : 'The server'} now runs v{serverChangedTo}</strong>
+          {isLauncher ? <p>Reload to refresh this research connection. Your app’s interface is updated separately.</p> : <p>
             This tab still shows the interface it loaded from v
             {firstSeenVersion.current ?? "an older version"} — reload to get
             the matching one. Runs live on the server; nothing is lost.
-          </p>
+          </p>}
           <div className="update-toast-actions">
             <button
               type="button"

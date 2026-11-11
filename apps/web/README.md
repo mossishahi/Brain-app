@@ -89,6 +89,14 @@ requests, event streams, and downloads. Composer drafts, attachment references, 
 and update notices use a connection-specific storage key; visual preferences stay shared.
 Direct server deployments continue to use `/api` without the marker.
 
+Launcher pages never invoke the backend's source updater. The marker may include
+`nativeUpdates: "macos-menu"` to show the Mac app's Check for Updates instructions,
+or `"unavailable"` for installations managed by their deployment owner. Older markers
+receive conditional guidance. Health polling and skills notices remain active; the
+reported backend version is labelled Research service, not the desktop app version.
+A backend version change offers to refresh the connection without claiming to replace
+the interface bundled in the desktop app. Direct server pages retain their update controls.
+
 The gateway serves an independently built, pinned release of this UI and adds its own
 connection-status bridge. Switching hosts performs a full navigation, clearing this page's
 in-memory research caches.
