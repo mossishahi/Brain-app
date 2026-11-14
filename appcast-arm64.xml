@@ -6,14 +6,14 @@
     <description>Co-inference desktop application updates</description>
     <language>en</language>
     <item>
-      <title>Co-inference 0.1.0-preview.13</title>
-      <pubDate>Wed, 11 Nov 2026 18:38:56 GMT</pubDate>
-      <sparkle:version>13</sparkle:version>
-      <sparkle:shortVersionString>0.1.0-preview.13</sparkle:shortVersionString>
+      <title>Co-inference 0.1.0-preview.14</title>
+      <pubDate>Sat, 14 Nov 2026 12:23:25 GMT</pubDate>
+      <sparkle:version>14</sparkle:version>
+      <sparkle:shortVersionString>0.1.0-preview.14</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-      <description>Settings now distinguishes desktop updates from research service updates. Use Co-inference → Check for Updates… in the macOS menu bar to check, install and restart. The browser no longer reports desktop updates as disabled or offers a backend-only notification switch. Source installations retain their existing updater.
+      <description>The installer now shows the standard app-to-Applications drag-and-drop window, with clear installation instructions. The finished disk image is checked for its saved Finder layout, background, Applications shortcut, and intact app contents. Research service: 0.2.92.
 </description>
-      <enclosure url="https://github.com/mossishahi/Brain-app/releases/download/desktop-v0.1.0-preview.13/Co-inference-0.1.0-macOS-AppleSilicon-unnotarized.dmg" length="45880453" type="application/octet-stream" sparkle:os="macos" sparkle:edSignature="1jyUBx2N3xkNd8Zo6Q8glmQR8/kt/uZbDfLQqBd+SiSbMQ6SYyUXDLPsPAESeHgA8QInR9NBeq2QS9jBoOkxDQ=="/>
+      <enclosure url="https://github.com/mossishahi/Brain-app/releases/download/desktop-v0.1.0-preview.14/Co-inference-0.1.0-macOS-AppleSilicon-unnotarized.dmg" length="45903637" type="application/octet-stream" sparkle:os="macos" sparkle:edSignature="5O8upKccQLMm9al55mIpnQ4wFwmIYb1R31cZOiVrGtGTN7deDkFr2EcOXuMD2ZqPln7thNuuihVtWsJWnoZLCQ=="/>
     </item>
   </channel>
 </rss>

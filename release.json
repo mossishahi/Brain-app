@@ -1,40 +1,40 @@
 {
   "schemaVersion": 1,
-  "updateBuild": 13,
-  "releaseTag": "desktop-v0.1.0-preview.13",
+  "updateBuild": 14,
+  "releaseTag": "desktop-v0.1.0-preview.14",
   "backendRevision": "aeeed9c8cd71d4e71c5c436738aa98e5ddaa75fd",
-  "desktopRevision": "7e7056c145d3b2d1adeb6d92915cb598d087cdcc",
+  "desktopRevision": "30212f172e3676c004f43a941b642b2bd1b830b8",
   "publicKey": "1aVVaxjEYa03BWhTGSxNU0anSMuazRpat5JMx0DFjYA=",
   "assets": [
     {
       "name": "Co-inference-0.1.0-macOS-AppleSilicon-unnotarized.dmg",
-      "size": 45880453,
-      "digest": "sha256:a8e3c0c4a24d78877a2d83ef6bc213991976f4fd0d8e268b29a88b95c1374e77"
+      "size": 45903637,
+      "digest": "sha256:0deb64ca24d08687d3d9512aea1cc2e1c878489c46546b3ba39f2ac46f8ed984"
     },
     {
       "name": "Co-inference-0.1.0-macOS-AppleSilicon-unnotarized.dmg.sha256",
       "size": 120,
-      "digest": "sha256:a0ffa232423b2c260b0b2bae0d678a73ce611e9ffd508d44b8d9f75e692da9d8"
+      "digest": "sha256:3be5a8d93fe856f44480701695ab33da48a807c683f7ee8f0c3b5e04c56a53e0"
     },
     {
       "name": "Co-inference-0.1.0-macOS-Intel-unnotarized.dmg",
-      "size": 46854487,
-      "digest": "sha256:956a66210f3e358f4e5a17fc7c8f084d1b90db7bce17cda7eb6a76cbb3779a52"
+      "size": 46849566,
+      "digest": "sha256:14a8751db0c5c9d5032c979993a004dc0df7ef8717d9874ae442e323c3044871"
     },
     {
       "name": "Co-inference-0.1.0-macOS-Intel-unnotarized.dmg.sha256",
       "size": 113,
-      "digest": "sha256:b48c6a795acb2d8afef1980e1adfcded2c6ae58fcc9e555bf1ac2efae4173ae2"
+      "digest": "sha256:83d0f08fe5ebb9d466d4c5604ba531e8a83fc08f422b25a4a59cd0bbed9b8f11"
     },
     {
       "name": "appcast-arm64.xml",
-      "size": 1445,
-      "digest": "sha256:d2a20bf34a2158eb74030b0316e7a19c63b0dbafe605561b2d6947267cd85237"
+      "size": 1387,
+      "digest": "sha256:24b5ef235181ffea490dfa886b7c639dc11b981362241c88a8a280b6dffc4be5"
     },
     {
       "name": "appcast-x64.xml",
-      "size": 1429,
-      "digest": "sha256:8dc83f21288d5d62cc617ec56af1814d8ba6e4c4199d204254e9c4fc11d2e0e1"
+      "size": 1371,
+      "digest": "sha256:f038f709153194e64b467116076e638b5a3b586d1bf0101ef50214f6e9177acf"
     },
     {
       "name": "application-2e63d729df90d6509f06160937b554c6fc64a35fba1b08044a92e2eab35507db.tar.gz",
@@ -129,37 +129,37 @@
     {
       "name": "index.json",
       "size": 17688,
-      "digest": "sha256:b0de9461ff93a967bc50fbe77d16d91f7dd6c86c141f23487c581dd71bbcd070"
+      "digest": "sha256:71e7132e950d4ef6d6b82570a1c1b98b8eb99fe326d246ba284499726adae73f"
     },
     {
       "name": "install-runtime.mjs",
       "size": 52793,
-      "digest": "sha256:7f858342ca5c1e6d182c20efc8a8a7e814f8042ddadcc793578bfb49427ec6dd"
+      "digest": "sha256:301dadb84fb97f40ec1d51bc4f395589172ac2727d2e9ee3c4894f8e9b69574e"
     },
     {
       "name": "install-runtime.sh",
       "size": 2303,
-      "digest": "sha256:571efe2f62da2644045330c978bc6401e159a2b001a3945ae981243f6a2ef78e"
+      "digest": "sha256:eeae59b9564a9cb531e4e1f69936bd2ddd6e3ad85a6bec02ef88c25abdecb48d"
     },
     {
       "name": "runtime-darwin-arm64-node24.json",
       "size": 3893,
-      "digest": "sha256:54b451830ea43f209047f1cf9a8c985b00a32fd4fa57186e7b676e638634735f"
+      "digest": "sha256:6f4f2947db0f5535648a1e2fbf1f0d3d4890197e3b03953192b19918416d45a7"
     },
     {
       "name": "runtime-darwin-x64-node24.json",
       "size": 3973,
-      "digest": "sha256:6f4d4cfda88ad59f9e226bede63082f5b5596d8cb1d6be3cd138ae8fc76c081a"
+      "digest": "sha256:d4ebd36b6d1ff1d465d1d78ad782e7fefe3785ae7ce770a44e546396418b7136"
     },
     {
       "name": "runtime-linux-arm64-node24.json",
       "size": 4006,
-      "digest": "sha256:90828dedba9929caa911026d82fa1c32a7d1796313ba0116fdacb4abca78b2b0"
+      "digest": "sha256:a1a3d33c7d597b80ffdc0b1f0a32efe30b9ebe744f3bc3eb7f724672bb8e78e0"
     },
     {
       "name": "runtime-linux-x64-node24.json",
       "size": 4004,
-      "digest": "sha256:4d05b225250832fe59e07a55242da33829e2c522249ec606fff683b4d6ff1ce5"
+      "digest": "sha256:91a156b174afae47c2d2a70e7bd9e224f89cd93ebb2ba7af556e2877370f72c4"
     }
   ]
 }
