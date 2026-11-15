@@ -7,7 +7,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { loadContent, type ContentBundle } from "@brainstorm-agentic/content";
-import type { AgentResult, AgentTask, JsonObject, JsonValue } from "@brainstorm-agentic/core";
+import type { AgentExecutionContext, AgentResult, AgentTask, JsonObject, JsonValue } from "@brainstorm-agentic/core";
 
 import { FsArtifactStore, FsCheckpointStore } from "../src/fs-stores.js";
 import { OfflineBrainstormExecutor } from "../src/offline-executor.js";
@@ -82,8 +82,8 @@ const pathOf = (task: AgentTask): string => task.taskId.slice(task.taskId.indexO
 const offlineExecute = OfflineBrainstormExecutor.prototype.execute;
 /** The offline executor, except that one chosen critique cites one more badge,
  * and a critic's first task after its committed penalty can fail once. */
-async function wrappedExecute(this: OfflineBrainstormExecutor, task: AgentTask): Promise<AgentResult> {
-  const result = await offlineExecute.call(this, task);
+async function wrappedExecute(this: OfflineBrainstormExecutor, task: AgentTask, context?: AgentExecutionContext): Promise<AgentResult> {
+  const result = await offlineExecute.call(this, task, context);
   if (task.outputSchema?.name !== "gameCritique" || result.status !== "ok") return result;
   const bindings = objectOf(objectOf(task.input).bindings);
   const history = objectOf(bindings.criticState).history;

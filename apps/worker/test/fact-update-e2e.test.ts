@@ -233,7 +233,7 @@ async function wrappedExecute(this: OfflineBrainstormExecutor, task: AgentTask, 
       scenario.deleted = true;
     }
   }
-  const result = await offlineExecute.call(this, task);
+  const result = await offlineExecute.call(this, task, context);
   if (result.status !== "ok") return result;
   const output = objectOf(result.output);
   if (name === "brainIdeaParts" && task.agentId === CHAIN_SEAT) {

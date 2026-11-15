@@ -1,5 +1,6 @@
 /** No source URL is fetched in this worker. Only host-downloaded bytes enter it. */
 import { parentPort, workerData } from "node:worker_threads";
+import { fileURLToPath } from "node:url";
 import type { DocumentDescriptor, DocumentLocator } from "@brainstorm-agentic/core";
 import { extractDocumentHtml } from "./documents.js";
 import type { ParserRequest } from "./document-parser.js";
@@ -12,7 +13,17 @@ async function parse(request: ParserRequest): Promise<unknown> {
     return parsed;
   }
   const { getDocument } = await import("pdfjs-dist/legacy/build/pdf.mjs");
-  const task = getDocument({ data: Uint8Array.from(request.bytes), useSystemFonts: true, maxImageSize: 16_000_000 });
+  // Resolve the support assets from the installed package, independently of
+  // the service cwd. Without wasmUrl, PDF.js can silently render JPEG2000
+  // figures as blank pages while returning an otherwise successful image.
+  const pdfjsPackage = import.meta.resolve("pdfjs-dist/package.json");
+  const supportDirectory = (name: string): string => fileURLToPath(new URL(`./${name}/`, pdfjsPackage));
+  const task = getDocument({
+    data: Uint8Array.from(request.bytes), useSystemFonts: true, maxImageSize: 16_000_000,
+    cMapUrl: supportDirectory("cmaps"), cMapPacked: true,
+    standardFontDataUrl: supportDirectory("standard_fonts"),
+    wasmUrl: supportDirectory("wasm"),
+  });
   try {
     const pdf = await task.promise;
     if (request.operation === "image") {

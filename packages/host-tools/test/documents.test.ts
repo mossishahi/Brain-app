@@ -4,10 +4,32 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { createCanvas, loadImage } from "@napi-rs/canvas";
 import { DocumentReader, extractDocumentHtml } from "../src/web/documents.js";
 import { WebAccessManager } from "../src/web/manager.js";
 import { buildWebAccessManager } from "../src/web/config.js";
 import { webAnswerResult, webToolNames } from "../src/web/tools.js";
+
+/** Generated 8x8 red JPEG2000 image: rendering needs PDF.js's shipped WASM. */
+function jpeg2000PdfFixture(): Buffer {
+  const image = Buffer.from("AAAADGpQICANCocKAAAAFGZ0eXBqcDIgAAAAAGpwMiAAAAAtanAyaAAAABZpaGRyAAAACAAAAAgAAwcHAAAAAAAPY29scgEAAAAAABAAAACkanAyY/9P/1EALwAAAAAACAAAAAgAAAAAAAAAAAAAAAgAAAAIAAAAAAAAAAAAAwcBAQcBAQcBAf9SAAwAAAABAAMEBAAB/1wADUBASEhQSEhQSEhQ/2QAJQABQ3JlYXRlZCBieSBPcGVuSlBFRyB2ZXJzaW9uIDIuNS40/5AACgAAAAAAIwAB/5PPtAQA34AIB9+ACAeAgICAgICAgID/2Q==", "base64");
+  const stream = "q 32 0 0 32 0 0 cm /Im1 Do Q";
+  const objects = [
+    Buffer.from("<< /Type /Catalog /Pages 2 0 R >>"),
+    Buffer.from("<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+    Buffer.from("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 32 32] /Resources << /XObject << /Im1 4 0 R >> >> /Contents 5 0 R >>"),
+    Buffer.concat([Buffer.from(`<< /Type /XObject /Subtype /Image /Width 8 /Height 8 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /JPXDecode /Length ${image.length} >>\nstream\n`), image, Buffer.from("\nendstream")]),
+    Buffer.from(`<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`),
+  ];
+  let result = Buffer.from("%PDF-1.5\n");
+  const offsets: number[] = [];
+  objects.forEach((object, index) => {
+    offsets.push(result.length);
+    result = Buffer.concat([result, Buffer.from(`${index + 1} 0 obj\n`), object, Buffer.from("\nendobj\n")]);
+  });
+  const xref = result.length;
+  return Buffer.concat([result, Buffer.from(`xref\n0 6\n0000000000 65535 f \n${offsets.map(offset => `${offset.toString().padStart(10, "0")} 00000 n \n`).join("")}trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`)]);
+}
 
 function pdfFixture(): Buffer {
   const stream = "BT /F1 18 Tf 40 700 Td (Methods: anisotropy and spectral directions) Tj ET";
@@ -32,6 +54,7 @@ function pdfFixture(): Buffer {
 async function fixture(t: { after(fn: () => Promise<void>): void }) {
   const dir = await mkdtemp(join(tmpdir(), "reader-test-"));
   const server = createServer((req, res) => {
+    if (req.url === "/jpeg2000") { res.setHeader("content-type", "application/pdf"); res.end(jpeg2000PdfFixture()); return; }
     if (req.url === "/pdf") { res.setHeader("content-type", "application/pdf"); res.end(pdfFixture()); return; }
     if (req.url === "/large") { res.setHeader("content-type", "text/html"); res.end(`<html><head><title>Long paper</title></head><body><article><h1>Introduction</h1><p>${"Long introduction. ".repeat(4000)}</p><h2>Methods</h2><p>Late method: anisotropy correction.</p><p>Repeated query ${"x".repeat(1000)} repeated query.</p></article></body></html>`); return; }
     if (req.url === "/landing") { res.setHeader("content-type", "text/html"); res.end('<html><head><meta name="citation_pdf_url" content="/pdf"></head><body><p>Abstract only</p></body></html>'); return; }
@@ -113,6 +136,18 @@ test("publisher metadata resolves PDF and failures never invent receipts", async
   await assert.rejects(reader.execute({ operation: "open", source: `${url}/forbidden` }, owner), /HTTP 403/);
   assert.equal((await reader.receipts(owner)).length, 0);
   await assert.rejects(reader.execute({ operation: "read", documentId: "../../secret" }, owner), /Invalid document_id/);
+});
+
+test("PDF page images retain JPEG2000 figures instead of silently producing blank evidence", async t => {
+  const { reader, url } = await fixture(t);
+  const opened = await reader.execute({ operation: "open", source: `${url}/jpeg2000` }, owner);
+  const rendered = await reader.execute({ operation: "page_image", documentId: opened.document.documentId, page: 1 }, owner);
+  const image = await loadImage(Buffer.from(rendered.image!.data, "base64"));
+  const canvas = createCanvas(image.width, image.height);
+  const context = canvas.getContext("2d");
+  context.drawImage(image, 0, 0);
+  const pixel = [...context.getImageData(Math.floor(image.width / 2), Math.floor(image.height / 2), 1, 1).data];
+  assert.deepEqual(pixel, [255, 0, 0, 255], "a delivered page image must contain the red source figure");
 });
 
 test("reader uses public address policy and rejects oversized source instead of persisting truncated evidence", async t => {
