@@ -44,6 +44,8 @@ export interface CompiledSkillPrompt {
   readonly payload: readonly PayloadEntry[];
   readonly skills: readonly string[];
   readonly capabilities: readonly string[];
+  readonly deliverables: readonly string[];
+  readonly requiredDeliverables: readonly string[];
 }
 
 export interface PayloadEntry {
@@ -131,6 +133,8 @@ export function compileSkillPrompt(
       role.meta.name,
       ...orderedTechniques.map((technique) => technique.meta.name),
     ],
+    deliverables: unique([...(role.meta.deliverables ?? []), ...orderedTechniques.flatMap((technique) => technique.meta.deliverables ?? [])]),
+    requiredDeliverables: role.meta.requiredDeliverables ?? [],
     capabilities: unique([
       ...role.meta.capabilities,
       ...orderedTechniques.flatMap((technique) => technique.meta.capabilities),

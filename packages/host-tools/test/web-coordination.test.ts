@@ -51,7 +51,7 @@ function fakeClock(start = Date.UTC(2026, 8, 30, 12)): SchedulerClock & {
 test("every web tool describes itself and every parameter", () => {
   assert.deepEqual(
     WEB_SEARCH_MANIFESTS.map((manifest) => manifest.toolId),
-    ["web_search", "web_fetch", "news_search", "paper_search", "paper_details"],
+    ["web_search", "web_fetch", "news_search", "paper_search", "paper_details", "paper_read"],
   );
   for (const manifest of WEB_SEARCH_MANIFESTS) {
     assert.ok((manifest.definition.description ?? "").length > 80, manifest.toolId);

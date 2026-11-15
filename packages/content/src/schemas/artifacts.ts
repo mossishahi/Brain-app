@@ -657,6 +657,120 @@ export const paperSchema = z
 
 export type Paper = z.infer<typeof paperSchema>;
 
+/**
+ * A review is an authored, agent-owned deliverable, not a shared verified fact.
+ * Host ownership, the original input revision, and delivery receipts are checked
+ * separately by the runtime. Keep the legacy bibliography shapes above intact:
+ * older pinned bundles do not acquire new requirements when an app is updated.
+ */
+const reviewText = z.string().trim().min(1);
+
+export const literatureReviewEvidenceV1Schema = z.object({
+  documentId: reviewText,
+  receiptId: reviewText,
+  segmentId: reviewText,
+  /** Human-readable page/section locator matching the delivered segment. */
+  locator: reviewText,
+}).strict();
+
+export const literatureReviewWorkV1Schema = z.object({
+  id: reviewText,
+  source: z.object({
+    title: reviewText,
+    authors: z.array(reviewText),
+    year: z.number().int().nullable(),
+    venue: reviewText.nullable(),
+    url: z.string().url(),
+    doi: reviewText.nullable(),
+    /** Inspected source revision/hash, or null when metadata cannot establish it. */
+    version: reviewText.nullable(),
+  }).strict(),
+  inspected: z.object({
+    level: z.enum(["metadata", "abstract", "sections", "full-text"]),
+    evidence: z.array(literatureReviewEvidenceV1Schema),
+    accessLimitations: z.array(reviewText),
+  }).strict(),
+  /** Describe what was inspected; state explicitly when the source cannot establish it. */
+  method: reviewText,
+  results: reviewText,
+  conditions: z.array(reviewText),
+  limitations: z.array(reviewText),
+  relevance: z.array(z.object({
+    requirementId: reviewText,
+    relationship: z.enum(["solves", "partially-addresses", "supports", "contradicts", "background", "not-applicable"]),
+    /** Explain the concrete connection to this requirement, including scope differences. */
+    justification: reviewText,
+  }).strict()).min(1),
+  intendedUse: z.array(reviewText).min(1),
+  uncertainties: z.array(reviewText),
+}).strict();
+
+export const literatureReviewV1Schema = z.object({
+  schemaVersion: z.literal("literature-review/v1"),
+  scope: z.object({
+    question: reviewText,
+    /** Copied from the host's original-input requirement list, never invented by an agent. */
+    inputRequirements: z.array(z.object({ id: reviewText, text: reviewText }).strict()).min(1),
+    vantage: reviewText,
+  }).strict(),
+  search: z.object({
+    queries: z.array(z.object({
+      query: reviewText,
+      source: reviewText,
+      evidenceRefIds: z.array(reviewText),
+    }).strict()),
+    coverage: reviewText,
+    limitations: z.array(reviewText),
+  }).strict(),
+  works: z.array(literatureReviewWorkV1Schema),
+  synthesis: z.object({
+    closestWorkIds: z.array(reviewText),
+    assessment: z.enum(["solved", "partially-solved", "open", "undetermined"]),
+    findings: reviewText,
+    gaps: z.array(reviewText),
+    comparisons: z.array(reviewText),
+  }).strict(),
+  status: z.enum(["complete", "incomplete", "no-relevant-works"]),
+  statusReason: reviewText,
+}).strict().superRefine((review, ctx) => {
+  const requirements = new Set<string>();
+  review.scope.inputRequirements.forEach((entry, index) => {
+    if (requirements.has(entry.id)) ctx.addIssue({ code: "custom", path: ["scope", "inputRequirements", index, "id"], message: "requirement IDs must be unique" });
+    requirements.add(entry.id);
+  });
+  const works = new Set<string>();
+  review.works.forEach((work, index) => {
+    if (works.has(work.id)) ctx.addIssue({ code: "custom", path: ["works", index, "id"], message: "work IDs must be unique" });
+    works.add(work.id);
+    const related = new Set<string>();
+    work.relevance.forEach((relation, relationIndex) => {
+      if (!requirements.has(relation.requirementId)) ctx.addIssue({ code: "custom", path: ["works", index, "relevance", relationIndex, "requirementId"], message: "relevance must reference an original-input requirement in the review scope" });
+      if (related.has(relation.requirementId)) ctx.addIssue({ code: "custom", path: ["works", index, "relevance", relationIndex, "requirementId"], message: "combine each work's assessment of a requirement into one justification" });
+      related.add(relation.requirementId);
+    });
+    const inspectedText = work.inspected.level === "sections" || work.inspected.level === "full-text";
+    if (inspectedText && work.inspected.evidence.length === 0) ctx.addIssue({ code: "custom", path: ["works", index, "inspected", "evidence"], message: "inspected source text requires host-issued delivery references" });
+    if (inspectedText && work.source.version === null) ctx.addIssue({ code: "custom", path: ["works", index, "source", "version"], message: "inspected source text must identify the exact retrieved source version" });
+    if (!inspectedText && work.inspected.accessLimitations.length === 0) ctx.addIssue({ code: "custom", path: ["works", index, "inspected", "accessLimitations"], message: "metadata/abstract-only inspection must disclose that limitation" });
+  });
+  for (const [index, id] of review.synthesis.closestWorkIds.entries()) {
+    if (!works.has(id)) ctx.addIssue({ code: "custom", path: ["synthesis", "closestWorkIds", index], message: "closest work must be present in this review" });
+  }
+  if (new Set(review.synthesis.closestWorkIds).size !== review.synthesis.closestWorkIds.length) ctx.addIssue({ code: "custom", path: ["synthesis", "closestWorkIds"], message: "closest work IDs must be unique" });
+  if (review.status === "complete" && review.works.length === 0) ctx.addIssue({ code: "custom", path: ["status"], message: "an empty review must report incomplete or no-relevant-works" });
+  if (review.status === "no-relevant-works" && review.works.some((work) => work.relevance.some((relation) => relation.relationship !== "not-applicable"))) ctx.addIssue({ code: "custom", path: ["status"], message: "no-relevant-works cannot contain a work assessed as relevant" });
+  if (review.works.length === 0 && review.synthesis.assessment !== "undetermined") ctx.addIssue({ code: "custom", path: ["synthesis", "assessment"], message: "no collected works cannot establish that the research question is solved or open" });
+});
+
+/** Machine-readable contract shared by incremental deliverable tools. */
+export const literatureReviewV1JsonSchema = z.toJSONSchema(literatureReviewV1Schema, {
+  target: "draft-2020-12", io: "output", unrepresentable: "any",
+});
+
+export type LiteratureReviewEvidenceV1 = z.infer<typeof literatureReviewEvidenceV1Schema>;
+export type LiteratureReviewWorkV1 = z.infer<typeof literatureReviewWorkV1Schema>;
+export type LiteratureReviewV1 = z.infer<typeof literatureReviewV1Schema>;
+
 // ---------------------------------------------------------------------------
 // expertise pool -> taxonomy matching -> placement (the decomposer split)
 // ---------------------------------------------------------------------------
@@ -3619,6 +3733,7 @@ export type FactVerdictArtifact = z.infer<typeof factVerdictSchema>;
 
 /** Every schema an agent or activity node's `output.schema` may reference, by name. */
 export const artifactSchemas = {
+  literatureReviewV1: literatureReviewV1Schema,
   processorOutput: processorOutputSchema,
   taskClassification: taskClassificationSchema,
   usefulFiles: usefulFilesSchema,

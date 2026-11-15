@@ -10,6 +10,7 @@ import type { TokenUsage } from "../model/response.js";
 import type { ToolChoice } from "../model/tools.js";
 import type { JsonObject, JsonValue } from "../types/json.js";
 import type { ResolvedCapabilityPlan } from "../capability/types.js";
+import type { Tool } from "./tool.js";
 
 /** Per-task controls resolved against the selected model's launch-time catalog. */
 export interface AgentModelExecutionControls {
@@ -221,6 +222,16 @@ export interface AgentExecutionContext {
   /** Workflow node path that spawned the task (e.g. "root/round/member[2]"). */
   readonly nodePath: string;
   readonly signal?: AbortSignal;
+  /** Host-scoped, durable deliverable tools. Never resolved from model-supplied ownership. */
+  readonly deliverableTools?: readonly Tool[];
+  /** Observe source use so conditional deliverables become required when research starts. */
+  readonly beforeToolUse?: (name: string) => Promise<void>;
+  /** Fresh recovery instructions from durable deliverables, including after an SDK retry. */
+  readonly restoreDeliverables?: () => Promise<string>;
+  /** An empty list permits completion; failures are fed back through ordinary validation. */
+  readonly validateDeliverables?: () => Promise<readonly string[]>;
+  /** Enforce prerequisite deliverables before publishing an argument step. */
+  readonly beforeArgumentStep?: () => Promise<readonly string[]>;
   /** Streams sanitized operational progress into the workflow event log. */
   readonly reportProgress?: (progress: AgentProgress) => void;
   /**

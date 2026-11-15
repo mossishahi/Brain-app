@@ -161,3 +161,16 @@ test("a run with no log yields an empty table, and the CSV escapes what needs es
   assert.match(header!, /^time,tool,outcome,kind,provider,subject/);
   assert.match(row!, /"a query with ""quotes"", commas"/);
 });
+
+test("paper_read calls retain document operations and delivered passage counts", () => {
+  const dir = mkdtempSync(join(tmpdir(), "paper-read-log-"));
+  try {
+    writeFileSync(join(dir, "searches.jsonl"), JSON.stringify({ id: "read-1", at: 1, tool: "paper_read", outcome: "ok", request: { operation: "read", documentId: "doc-123", page: 2 }, response: { passages: [{ text: "Method" }, { text: "Equation" }] }, taskId: "critic", elapsedMs: 12 }) + "\n");
+    const table = readSearchTable(dir);
+    assert.equal(table.total, 1);
+    assert.equal(table.entries[0]?.tool, "paper_read");
+    assert.equal(table.entries[0]?.subject, "read · doc-123 · page 2");
+    assert.equal(table.entries[0]?.resultCount, 2);
+    assert.equal(table.entries[0]?.taskId, "critic");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

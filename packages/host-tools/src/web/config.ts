@@ -179,6 +179,7 @@ export interface BuildWebAccessManagerOptions {
   /** Directory for the disk cache layer, when the cache is enabled. */
   readonly cacheDir?: string;
   readonly fetchOptions?: WebFetchOptions;
+  readonly documents?: WebAccessManagerOptions["documents"];
   /** Test seam: injected into every provider. */
   readonly fetchImpl?: ProviderFetch;
   /** Requests metered providers already made in this run (a resume). */
@@ -245,7 +246,12 @@ export function buildWebAccessManager(
 ): WebAccessManager | undefined {
   const { config } = options;
   // Search handed to the agents' own tools: no host layer at all.
-  if (config.mode === "agent") return undefined;
+  if (config.mode === "agent") {
+    if (!options.documents) return undefined;
+    return new WebAccessManager({ providers: [], chains: {}, documentOnly: true, documents: options.documents,
+      paperBackends: [crossrefBackend({ ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}) }), arxivBackend({ ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}) })],
+      ...(options.fetchOptions ? { fetchOptions: options.fetchOptions } : {}), ...(options.log ? { log: options.log } : {}) });
+  }
   const secrets = options.secrets ?? {};
   const providers: WebSearchProvider[] = [];
   const chains: Partial<Record<WebSearchKind, string[]>> = {};
@@ -343,7 +349,7 @@ export function buildWebAccessManager(
     );
   }
 
-  if (providers.length === 0) return undefined;
+  if (providers.length === 0 && !options.documents) return undefined;
 
   const primary = general !== undefined && "provider" in general ? general.provider.id : undefined;
   const preset = presetRoutes(config.routePreset ?? "searxng-first", primary);
@@ -418,6 +424,7 @@ export function buildWebAccessManager(
     ...(detailsCache !== undefined ? { detailsCache } : {}),
     ...(config.maxSearchesPerTask !== undefined ? { maxSearchesPerTask: config.maxSearchesPerTask } : {}),
     ...(options.fetchOptions !== undefined ? { fetchOptions: options.fetchOptions } : {}),
+    ...(options.documents !== undefined ? { documents: options.documents } : {}),
     ...(options.seededStatuses !== undefined ? { seededStatuses: options.seededStatuses } : {}),
     ...(options.onStatusChange !== undefined ? { onStatusChange: options.onStatusChange } : {}),
     ...(options.routeOrders !== undefined ? { routeOrders: options.routeOrders } : {}),

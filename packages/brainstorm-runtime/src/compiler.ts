@@ -297,6 +297,7 @@ export interface FactFinalizationRequest {
  * resolution definitions are bound from the control itself.
  */
 export interface FactVerificationTaskRequest {
+  readonly runId?: string;
   /** Unique per submission, e.g. "fact-verification:S:12". */
   readonly taskId: string;
   readonly bindings: {
@@ -308,6 +309,7 @@ export interface FactVerificationTaskRequest {
 }
 
 export interface FactConsultationTaskRequest {
+  readonly runId?: string;
   readonly taskId: string;
   readonly bindings: { readonly input: JsonValue; readonly files: JsonValue; readonly request: JsonObject; readonly entries: JsonValue };
 }
@@ -1769,7 +1771,7 @@ class ContentCompiler {
                 this.factReconsiderationTask(factTable, request),
               ...(factTable.accessMode === "supreme-dialogue/v2" ? {
                 factRevokerTask: (request: { runId: string; taskId: string; notices: readonly FactNotice[]; targets: readonly JsonObject[] }) =>
-                  this.controlRoleTask({ declaration: factTable.reconsideration!.revoker!, label: "the fact Revoker", taskId: request.taskId,
+                  this.controlRoleTask({ runId: request.runId, declaration: factTable.reconsideration!.revoker!, label: "the fact Revoker", taskId: request.taskId,
                     nodeId: "fact-revoker", bindings: { input: this.factUpdateIndex.runData(request.runId).input ?? null,
                       files: this.factUpdateIndex.runData(request.runId).files ?? null,
                       factUpdates: structuredClone(request.notices) as unknown as JsonValue, targets: [...request.targets] },
@@ -2666,6 +2668,11 @@ class ContentCompiler {
           ? revisionBaseFor(scope)
           : {}),
         metadata: {
+          ...(prompt.deliverables.includes("literatureReviewV1") ? { literatureReview: {
+            mode: prompt.requiredDeliverables.includes("literatureReviewV1") ? "required" : "conditional",
+            input: { submission: (isJsonRecord(stateFrom(scope).session) ? (stateFrom(scope).session as JsonObject).submission : undefined) ?? bindings.input ?? null,
+              requestedOutputs: requestedOutputsOf(bindings.input) },
+          } } : {}),
           workflow: this.content.name,
           nodeId: node.id,
           schema: node.output.schema,
@@ -2775,6 +2782,7 @@ class ContentCompiler {
       declaration,
       label: "the fact table's verifier",
       taskId: request.taskId,
+      ...(request.runId !== undefined ? { runId: request.runId } : {}),
       bindings: {
         ...request.bindings,
         ...(!consultation ? { caseCatalog: factTable.cases, methodCatalog: factTable.methods, resolutionCatalog: factTable.resolutions } : {}),
@@ -2794,6 +2802,7 @@ class ContentCompiler {
    * scope that capability needs.
    */
   private async controlRoleTask(spec: {
+    readonly runId?: string;
     readonly declaration: { readonly skill: string; readonly route: string; readonly output: string };
     /** How errors name the role, e.g. "the fact table's verifier". */
     readonly label: string;
@@ -2993,6 +3002,11 @@ class ContentCompiler {
       capabilityPlan,
       ...(spec.reconsideration?.revisionBase !== undefined ? { revisionBase: spec.reconsideration.revisionBase } : {}),
       metadata: {
+        ...(prompt.deliverables.includes("literatureReviewV1") ? { literatureReview: {
+          mode: prompt.requiredDeliverables.includes("literatureReviewV1") ? "required" : "conditional",
+          input: { submission: (spec.runId !== undefined ? this.factUpdateIndex.runData(spec.runId).submission : undefined) ?? bindings.input ?? null,
+            requestedOutputs: requestedOutputsOf(bindings.input) },
+        } } : {}),
         workflow: this.content.name,
         nodeId: spec.nodeId,
         schema: output,
@@ -3347,6 +3361,7 @@ class ContentCompiler {
         ...recovery,
       };
       const task = await this.controlRoleTask({
+        runId: request.runId,
         declaration: roles.chain,
         label: "the fact table's chain reconsideration role",
         taskId: request.taskId,
@@ -3396,6 +3411,7 @@ class ContentCompiler {
     const prefixScope = { seat: report.seat, step: report.step, ...citedScope([...report.prefix]) };
     if (subscriber.kind === "game-report") {
       const task = await this.controlRoleTask({
+        runId: request.runId,
         declaration: roles.gameReport,
         label: "the fact table's game-report reconsideration role",
         taskId: request.taskId,
@@ -3418,6 +3434,7 @@ class ContentCompiler {
     }
     const allowed = [...(report.allowedVerdicts ?? [])];
     const task = await this.controlRoleTask({
+        runId: request.runId,
       declaration: roles.comment,
       label: "the fact table's comment reconsideration role",
       taskId: request.taskId,
@@ -3479,7 +3496,7 @@ class ContentCompiler {
       ? { ...common, comments: request.reports ?? {}, typeGuidance: this.bundle.catalogs.inputTypes.guidance[type] ?? null }
       : { ...common, department: critic!.department ?? null, umbrella: critic!.umbrella ?? null, subfields: critic!.subfields ?? null,
           ...(interdisciplinary ? { roster: members } : {}), criticState: { ...privateState, recovery: true, unscored: true } };
-    return this.controlRoleTask({ declaration: { skill, route: "reasoning", output: request.kind === "chair" ? "gameCommitteeDecision" : "gameCritique" },
+    return this.controlRoleTask({ runId: request.runId, declaration: { skill, route: "reasoning", output: request.kind === "chair" ? "gameCommitteeDecision" : "gameCritique" },
       label: "the recovery revalidation role", taskId: request.taskId, nodeId: request.kind === "chair" ? "fact-recovery-chair" : "fact-recovery-review",
       bindings, instructions: "This is an UNSCORED recovery revalidation after a fact withdrawal. Independently validate the revised argument under the current shared facts. Historical settlements and balances are immutable; this task awards no points. Return the normal scientific report/assessment. The following developed output is supplied only to check consequences of this repair; future argument steps remain withheld.\n" + JSON.stringify(recoveryText(request.idea.output ?? {})),
       reconsideration: { agentId: request.criticId ?? "committee-chair", factScope: { role: skill, agent: request.criticId ?? "committee-chair",
@@ -3513,7 +3530,7 @@ class ContentCompiler {
     const skill = request.stage === "bridge" ? "integrator" : "chair";
     const ideas = Object.fromEntries(Object.entries(request.ideas).filter(([id]) => !this.factUpdateIndex.isDismissed(id)).map(([id, idea]) => [id,
       isJsonRecord(idea) ? Object.fromEntries(Object.entries(idea).filter(([key]) => (request.stage === "bridge" ? ["output", "novelty", "literature"] : ["output", "novelty"]).includes(key))) : idea]));
-    return this.controlRoleTask({ declaration: { skill, route: request.stage === "bridge" ? "reasoning" : "writing", output: request.stage === "bridge" ? "bridgeReport" : "finalProposal" },
+    return this.controlRoleTask({ runId: request.runId, declaration: { skill, route: request.stage === "bridge" ? "reasoning" : "writing", output: request.stage === "bridge" ? "bridgeReport" : "finalProposal" },
       label: "the recovered final synthesis", taskId: request.taskId, nodeId: request.stage === "bridge" ? "bridge-audit" : "synthesize-proposal",
       instructions: "Use bracket badge citation syntax only for currently valid supporting facts. A withdrawn badge mentioned as historical or rejected evidence must be written as a plain identifier without citation brackets. Resolve support through Supreme before claiming it.",
       bindings: { input: Object.fromEntries(Object.entries(input).filter(([key]) => key !== "files")), files: data.files ?? null,

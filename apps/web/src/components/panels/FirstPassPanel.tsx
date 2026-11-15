@@ -9,6 +9,7 @@ import type { ReactNode } from "react";
 import { diffInline, outputSections } from "@brainstorm-agentic/protocol";
 import type { InlineDiffSegment } from "@brainstorm-agentic/protocol";
 import { EditIcon } from "../Icons";
+import { LiteratureReviews } from "../LiteratureReview";
 import { CommitteeTable } from "../committee/CommitteeTable";
 import { prefersReducedMotion } from "../../format";
 import type {
@@ -647,7 +648,7 @@ export function IdeaTabs({
   const [tab, setTab] = useState<TabId>("primary");
   const literature = idea.literature ?? [];
   const requested = idea.requested ?? [];
-  const hasPapers = literature.length > 0;
+  const hasPapers = literature.length > 0 || (idea.literatureReviews?.length ?? 0) > 0;
   const hasNovelty = idea.novelty !== undefined;
   const hasRequested = requested.length > 0;
   // Diffing the whole body is real work; do it once per version pair, and
@@ -706,7 +707,7 @@ export function IdeaTabs({
         )}
       </div>
       <div className="idea-tab-content">
-        {active === "primary" && <PrimaryBody idea={idea} />}
+        {active === "primary" && <><PrimaryBody idea={idea} /><LiteratureReviews reviews={idea.literatureReviews} /></>}
         {active === "requested" && (
           <div>
             {requested.map((section) => (
@@ -731,7 +732,7 @@ export function IdeaTabs({
           </ol>
         )}
         {active === "novelty" && <div className="callout">{idea.novelty}</div>}
-        {active === "papers" && <PaperTable papers={literature} />}
+        {active === "papers" && <><PaperTable papers={literature} /><LiteratureReviews reviews={idea.literatureReviews} /></>}
         {active === "changes" && changes && (
           <div>
             <p className="dim small odiff-legend">

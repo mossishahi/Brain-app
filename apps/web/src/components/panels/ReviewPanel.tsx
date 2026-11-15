@@ -1,3 +1,4 @@
+import { LiteratureReviews } from "../LiteratureReview";
 /**
  * Stage 6 — Review: the committee table above the
  * seat-paged walk inspector.
@@ -444,6 +445,7 @@ function JudgeContent({
         </div>
       )}
       {decision.evidence && <EvidenceBlock evidence={decision.evidence} />}
+      <LiteratureReviews reviews={decision.literatureReviews} />
     </div>
   );
 }
@@ -488,6 +490,7 @@ function CommentContent({
         </div>
       )}
       {comment.evidence && <EvidenceBlock evidence={comment.evidence} />}
+      <LiteratureReviews reviews={comment.literatureReviews} />
     </div>
   );
 }

@@ -1,3 +1,4 @@
+import { LiteratureReviews } from "../LiteratureReview";
 import type { GameCritiqueView, ReviewRoundView, ReviewStage } from "@brainstorm-agentic/protocol";
 import { downloadTextFile } from "../../latex";
 import { TokenChip } from "../common";
@@ -17,6 +18,7 @@ export function GameReport({ report, round }: { report: GameCritiqueView; round:
     <p className="game-review-prose">{report.justification}</p>
     <p><span className="badge">{WITHDRAWN_BADGE}</span>{withdrawn.length > 0 && <> {withdrawnText(withdrawn)}</>}</p>
     {report.usage && <TokenChip usage={report.usage} />}
+    <LiteratureReviews reviews={report.literatureReviews} />
   </div>;
   return <div>
     <p><strong>q = {report.q}</strong> · Probability of a major flaw that could prevent a correct final solution</p>
@@ -30,6 +32,7 @@ export function GameReport({ report, round }: { report: GameCritiqueView; round:
       {row.balanceAfter !== undefined && <p>Balance: {scoreText(row.balanceBefore)} → <strong>{scoreText(row.balanceAfter)}</strong> · {row.excluded ? "Excluded from future critic work; own solution continues" : "Eligible for future critic work"}</p>}
     </> : <p className="dim">Scores pending</p>}
     {report.usage && <TokenChip usage={report.usage} />}
+    <LiteratureReviews reviews={report.literatureReviews} />
   </div>;
 }
 
@@ -57,6 +60,7 @@ export function GameChair({ round, labelOf }: { round: ReviewRoundView; labelOf:
       <p className="game-review-prose"><strong>Committee chair:</strong> {round.firstAssessment.gameChair.reason}</p>
       <ul>{Object.entries(round.firstAssessment.gameChair.reports).map(([id, report]) => <li key={id}><strong>{labelOf(id)} — {report.admissible ? "admissible" : "rejected"}{report.label !== undefined ? ` · ${gameReportLabelText(report.label)}` : ""}:</strong> {report.reason}</li>)}</ul>
     </details>}
+    <LiteratureReviews reviews={chair.literatureReviews} />
   </div>;
 }
 

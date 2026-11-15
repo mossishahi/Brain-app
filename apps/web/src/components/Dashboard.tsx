@@ -12,6 +12,7 @@ import type {
   StageView,
   TokenUsageView,
   LiveTextEntry,
+  LiteratureReviewView,
 } from "@brainstorm-agentic/protocol";
 import {
   answerGate,
@@ -43,6 +44,7 @@ import {
 } from "../format";
 import { runIsLive } from "../liveness";
 import { ActivityFeed, Dot, SkeletonLines, TokenChip } from "./common";
+import { LiteratureReviews } from "./LiteratureReview";
 import {
   BackIcon,
   ChevronIcon,
@@ -173,6 +175,7 @@ function StageFrame({
   activity,
   activityTotal,
   activityFloor,
+  literatureReviews,
   usage,
   selected,
   expanded,
@@ -198,6 +201,7 @@ function StageFrame({
   activityTotal?: number;
   /** The id from which `activity` is gap-free (see StageBase.activityFloor). */
   activityFloor?: string;
+  literatureReviews?: readonly LiteratureReviewView[];
   usage?: TokenUsageView;
   selected: boolean;
   expanded: boolean;
@@ -272,6 +276,7 @@ function StageFrame({
               (status === "active" && live && (activity?.length ?? 0) === 0 ? (
                 <SkeletonLines />
               ) : null)}
+            <LiteratureReviews reviews={literatureReviews} label="Agent literature reviews" />
           </>
         )}
       </div>
@@ -1013,6 +1018,7 @@ export function Dashboard({
             activity={stage?.activity}
             activityTotal={stage?.activityTotal}
             activityFloor={stage?.activityFloor}
+            literatureReviews={stage?.literatureReviews}
             usage={stage?.usage}
             selected={false}
             expanded={!collapsed.has(selected)}

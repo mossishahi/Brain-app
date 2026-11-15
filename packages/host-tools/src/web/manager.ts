@@ -44,6 +44,10 @@
 import { randomUUID } from "node:crypto";
 
 import type {
+  DocumentAnswer,
+  DocumentCoverage,
+  DocumentQuery,
+  DocumentReceipt,
   JsonObject,
   JsonValue,
   PaperDetailPart,
@@ -69,6 +73,7 @@ import type {
 } from "@brainstorm-agentic/core";
 import { PAPER_DETAIL_PARTS, WEB_SEARCH_KINDS } from "@brainstorm-agentic/core";
 
+import { DocumentReader, type DocumentReaderOptions } from "./documents.js";
 import { performWebFetch, type WebFetchOptions } from "../web-search.js";
 import { MemoryCache, MemoryWebSearchCache, type WebSearchCache } from "./cache.js";
 import { DEFAULT_ENGINE_CANARIES, EnginePool, type EngineRoute } from "./engines.js";
@@ -180,6 +185,7 @@ class ProviderGate {
 }
 
 export interface WebAccessManagerOptions {
+  readonly documentOnly?: boolean;
   /** Every provider the deployment configured, by construction. */
   readonly providers: readonly WebSearchProvider[];
   /**
@@ -197,6 +203,7 @@ export interface WebAccessManagerOptions {
   readonly cache?: WebSearchCache;
   /** Options for the wrapped hardened fetch (proxy/test seams). */
   readonly fetchOptions?: WebFetchOptions;
+  readonly documents?: Omit<DocumentReaderOptions, "paperDetails">;
   /** Test seams. */
   readonly now?: () => number;
   readonly sleep?: (ms: number) => Promise<void>;
@@ -372,7 +379,11 @@ export class WebAccessManager implements WebAccess {
   private readonly transientPapers = new MemoryCache<PaperSearchAnswer>(7 * 24 * 60 * 60_000);
   private readonly paperCache: WebSearchCache<PaperSearchAnswer> | undefined;
   private readonly detailsCache: WebSearchCache<PaperDetailsAnswer> | undefined;
+  readonly documentOnly: boolean;
   private readonly fetchOptions: WebFetchOptions;
+  readonly document?: (query: DocumentQuery, context?: WebAccessCallContext) => Promise<DocumentAnswer>;
+  readonly documentReceipts?: (context: WebAccessCallContext) => Promise<readonly DocumentReceipt[]>;
+  readonly documentCoverage?: (documentId: string, context: WebAccessCallContext) => Promise<DocumentCoverage>;
   private readonly now: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly engines: EnginePool | undefined;
@@ -449,7 +460,32 @@ export class WebAccessManager implements WebAccess {
     this.routeCaches = options.routeCaches ?? {};
     this.paperCache = options.paperCache;
     this.detailsCache = options.detailsCache;
+    this.documentOnly = options.documentOnly === true;
     this.fetchOptions = options.fetchOptions ?? {};
+    if (options.documents) {
+      const documentGate = new FairGate(2);
+      const reader = new DocumentReader({ ...options.documents, fetchOptions: options.documents.fetchOptions ?? this.fetchOptions,
+        paperDetails: (source, context) => this.paperDetails({ ids: [source], include: ["abstract"] }, context) });
+      this.documentReceipts = context => reader.receipts(context);
+      this.documentCoverage = (documentId, context) => reader.coverage(documentId, context);
+      this.document = async (query, context = {}) => {
+        const at = this.now();
+        const id = this.nextRecordId();
+        const release = await documentGate.acquire(agentKeyOf(context), context.signal);
+        try {
+          const result = await reader.execute(query, context);
+          const response = result.image ? { ...result, image: { mimeType: result.image.mimeType, page: result.image.page, bytes: Buffer.from(result.image.data, "base64").length } } : result;
+          this.emit({ id, at, tool: "paper_read", outcome: "ok", request: query as unknown as JsonObject,
+            response: response as unknown as JsonValue, elapsedMs: this.now() - at, ...attributionOf(context) });
+          return result;
+        } catch (error) {
+          this.emit({ id, at, tool: "paper_read", outcome: "error", request: query as unknown as JsonObject,
+            error: error instanceof Error ? error.message : String(error), elapsedMs: this.now() - at, ...attributionOf(context) });
+          throw error;
+        } finally { release(); }
+      };
+    }
+
     this.engines = options.engines;
     this.budgets = options.budgets ?? {};
     for (const [id, used] of Object.entries(options.spent ?? {})) this.spent.set(id, used);

@@ -322,3 +322,8 @@ test("htmlToText survives markup without head or title", () => {
   assert.equal(title, undefined);
   assert.equal(text, "bare");
 });
+
+test("public address guard rejects site-local and private-address transition ranges", () => {
+  for (const address of ["fec0::1", "feff::1", "2002:0a00:0001::", "2001:0000::1", "2001:2::1", "3fff::1", "192.88.99.1"]) assert.equal(isPublicAddress(address), false, address);
+  for (const address of ["2606:4700:4700::1111", "2001:4860:4860::8888"]) assert.equal(isPublicAddress(address), true, address);
+});

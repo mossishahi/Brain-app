@@ -733,6 +733,10 @@ export const skillMetaSchema = z
     payload: z.array(identifier).default([]),
     /** Technique skills folded into this role's instructions (roles only). */
     techniques: z.array(identifier).default([]),
+    /** Additional, independently persisted deliverables offered by a role or technique. */
+    deliverables: z.array(identifier).optional(),
+    /** Role-level deliverables that must be submitted before the task can complete. */
+    requiredDeliverables: z.array(identifier).optional(),
     /** Executable capabilities the host must provide (from the capability catalog). */
     capabilities: z.array(identifier).default([]),
     /**
@@ -764,6 +768,14 @@ export const skillMetaSchema = z
     }
     if (meta.kind === "technique" && meta.output !== undefined) {
       ctx.addIssue({ code: "custom", path: ["output"], message: "technique skills must not declare an output schema" });
+    }
+    if (meta.kind === "technique" && (meta.requiredDeliverables?.length ?? 0) > 0) {
+      ctx.addIssue({ code: "custom", path: ["requiredDeliverables"], message: "techniques declare deliverables; only roles decide which are mandatory" });
+    }
+    for (const key of ["deliverables", "requiredDeliverables"] as const) {
+      if (new Set(meta[key] ?? []).size !== (meta[key]?.length ?? 0)) {
+        ctx.addIssue({ code: "custom", path: [key], message: `${key} must be unique` });
+      }
     }
     if (meta.kind === "technique" && meta.techniques.length > 0) {
       ctx.addIssue({ code: "custom", path: ["techniques"], message: "technique skills cannot include other techniques" });

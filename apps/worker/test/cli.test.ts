@@ -14,7 +14,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { loadContent } from "@brainstorm-agentic/content";
+import { loadContent, literatureReviewV1Schema } from "@brainstorm-agentic/content";
 import { Scope, type AgentResult, type JsonValue, type ModelRequest, type TaxonomyAccess, type WebAccess, type WebSearchKind } from "@brainstorm-agentic/core";
 import { prepareCodeWorkspace, webAccessTools } from "@brainstorm-agentic/host-tools";
 import { GeminiModelProvider } from "@brainstorm-agentic/provider-gemini";
@@ -25,6 +25,7 @@ import {
   providerConfigFromEnv,
 } from "../src/wiring.js";
 import { FsArtifactStore, FsCheckpointStore } from "../src/fs-stores.js";
+import type { ReviewEnvelope } from "../src/literature-reviews.js";
 import {
   LocalTaxonomyService,
   localTaxonomySeedPath,
@@ -374,10 +375,52 @@ test("offline run completes end to end with file-backed stores and auto-approved
     const proposal = result.output as { title?: string };
     assert.ok(typeof proposal.title === "string" && proposal.title.length > 0);
 
-    const artifacts = await new FsArtifactStore(root, runId).list();
+    const artifactStore = new FsArtifactStore(root, runId);
+    const artifacts = await artifactStore.list();
     assert.ok(artifacts.length > 0, "artifacts were persisted to disk");
     const checkpoint = await new FsCheckpointStore(root).load(runId);
     assert.equal(checkpoint?.status, "completed");
+    const reviewArtifacts = artifacts.filter((artifact) => artifact.metadata?.kind === "literature-review");
+    if (registryBundle.skills.brain?.meta.requiredDeliverables?.includes("literatureReviewV1")) {
+      const latest = new Map<string, ReviewEnvelope>();
+      for (const ref of reviewArtifacts) {
+        const stored = await artifactStore.get(ref.id);
+        assert.ok(stored);
+        const envelope = JSON.parse(stored.data) as ReviewEnvelope;
+        if (!latest.has(envelope.reviewId) || latest.get(envelope.reviewId)!.revision < envelope.revision) {
+          latest.set(envelope.reviewId, envelope);
+        }
+      }
+      const firstPass = checkpoint!.journal.filter((entry) => entry.kind === "agent" && entry.key.includes("/develop-idea-execute::result"));
+      assert.ok(firstPass.length >= 2, "the pipeline includes independent first-pass authors");
+      const authorReviewIds = new Set<string>();
+      for (const entry of firstPass) {
+        const result = entry.value as unknown as AgentResult;
+        assert.equal(result.status, "ok");
+        if (result.status !== "ok") continue;
+        const ids = result.metadata?.literatureReviewIds;
+        assert.ok(Array.isArray(ids) && ids.length > 0, "every first-pass result links its own persisted review deliverable");
+        for (const id of ids) {
+          assert.equal(typeof id, "string");
+          const review = latest.get(id as string);
+          assert.ok(review, "an output reference resolves to an artifact on disk");
+          assert.equal(review.state, "submitted");
+          assert.equal(review.owner.runId, runId);
+          assert.equal(review.owner.taskId, result.taskId, "bibliography ownership follows its authoring task");
+          assert.ok(review.owner.agentId);
+          assert.ok(review.owner.nodePath.includes("/first-pass/"));
+          assert.equal(authorReviewIds.has(review.reviewId), false, "independent authors do not share a bibliography record");
+          authorReviewIds.add(review.reviewId);
+          const body = literatureReviewV1Schema.parse(review.review);
+          assert.equal(body.status, "incomplete", "offline wiring never claims to have completed a real literature search");
+          assert.deepEqual(body.works, []);
+          assert.deepEqual(body.scope.inputRequirements, review.inputRequirements);
+          assert.match(review.inputRequirements[0]!.text, /Can KNN graph construction be made differentiable/);
+        }
+      }
+    } else {
+      assert.deepEqual(reviewArtifacts, [], "legacy pinned bundles keep their prior artifact contract");
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -5,7 +5,7 @@
  * (panel selection, review rounds, chair) can be exercised end to end.
  */
 import type { ChainPart, LoadedInputTypes } from "@brainstorm-agentic/content";
-import type { AgentExecutor, AgentResult, AgentTask, FactEntry, JsonObject, JsonValue } from "@brainstorm-agentic/core";
+import type { AgentExecutionContext, AgentExecutor, AgentResult, AgentTask, FactEntry, JsonObject, JsonValue } from "@brainstorm-agentic/core";
 
 /** Deliberately synthetic evidence, used only by the explicit offline provider. */
 export const OFFLINE_GAME_FACT: FactEntry = {
@@ -164,7 +164,20 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
     return { type: this.paperType, paper: paperBody(label) };
   }
 
-  async execute(task: AgentTask): Promise<AgentResult> {
+  async execute(task: AgentTask, context?: AgentExecutionContext): Promise<AgentResult> {
+    // Offline runs exercise persistence without pretending to have searched or read papers.
+    const reviews = context?.deliverableTools?.find((tool) => tool.definition.name === "literature_review");
+    if (reviews && asObject(task.metadata?.literatureReview).mode === "required") {
+      const begun = await reviews.execute({ action: "begin" }, { runId: context!.runId, taskId: task.taskId });
+      const envelope = asObject(begun.output);
+      const submitted = await reviews.execute({ action: "submit", reviewId: envelope.reviewId!, patch: {
+        scope: { question: "Offline pipeline contract smoke test", inputRequirements: envelope.inputRequirements!, vantage: "Deterministic offline fixture" },
+        search: { queries: [], coverage: "No research performed in offline mode.", limitations: ["Network access is disabled in this fixture."] },
+        works: [], synthesis: { closestWorkIds: [], assessment: "undetermined", findings: "This fixture validates pipeline wiring only.", gaps: ["Scientific literature was not evaluated."], comparisons: [] },
+        status: "incomplete", statusReason: "Explicit offline test; no scientific assessment or source inspection was performed.",
+      } }, { runId: context!.runId, taskId: task.taskId });
+      if (submitted.isError) throw new Error(JSON.stringify(submitted.output));
+    }
     const input = asObject(task.input);
     const bindings = asObject(input.bindings as JsonValue);
     const role = String(input.role ?? task.kind ?? "");

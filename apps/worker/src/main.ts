@@ -192,7 +192,7 @@ function webLayerForRun(
   const { config, secrets } = webSearchRuntimeFromEnv(process.env);
   // The deployment handed web search to the agents' OWN tools: no host web
   // layer is wired, and the run's search log stays empty by design.
-  if (config.mode === "agent") return { searchLog, nativeWeb: true };
+  // Native search still uses the host document reader for stable citation receipts.
   const workspaceRoot = workspaceRootFromSessionRoot(sessionRoot);
   const spentBrave = paidRequestsOfRun(workspaceRoot, "brave", runId);
   const seed = readAvailabilitySeed(
@@ -213,6 +213,7 @@ function webLayerForRun(
     secrets,
     log: (record) => searchLog.note(record),
     cacheDir: join(workspaceRoot, "web-cache"),
+    documents: { rootDir: join(sessionRoot, runId, "documents") },
     ...(spentBrave > 0 ? { spent: { brave: spentBrave } } : {}),
     onSpend: (provider) => notePaidRequest(workspaceRoot, provider, runId),
     ...(seed !== undefined ? { seededStatuses: seed.seededStatuses, routeOrders: seed.routeOrders } : {}),
@@ -221,7 +222,7 @@ function webLayerForRun(
   web?.startChecks().catch((error: unknown) => {
     console.error(`[web] launch check failed: ${error instanceof Error ? error.message : String(error)}`);
   });
-  return { ...(web !== undefined ? { web } : {}), searchLog, nativeWeb: false };
+  return { ...(web !== undefined ? { web } : {}), searchLog, nativeWeb: config.mode === "agent" };
 }
 
 /**

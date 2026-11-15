@@ -28,10 +28,12 @@ export {
   NEWS_SEARCH_MANIFEST,
   PAPER_SEARCH_MANIFEST,
   PAPER_DETAILS_MANIFEST,
+  PAPER_READ_MANIFEST,
   WEB_SEARCH_MANIFESTS,
   WEB_FETCH_TOOL_NAMES,
   FIELDS_OF_STUDY,
   performWebFetch,
+  performPublicDownload,
   webFetchTools,
   htmlToText,
   isPublicAddress,
@@ -142,6 +144,8 @@ export {
   parsePaperDetailsInput,
   parsePaperSearchInput,
   parseWebFetchInput,
+  parseDocumentInput,
+  webAnswerResult,
   parseWebSearchInput,
   webAccessTools,
   webToolNames,
@@ -243,3 +247,6 @@ export {
   availableHostToolManifests,
 } from "./registry.js";
 export type { HostToolRegistryConfig } from "./registry.js";
+
+export { DocumentReader, extractDocumentHtml } from "./web/documents.js";
+export type { DocumentReaderOptions } from "./web/documents.js";

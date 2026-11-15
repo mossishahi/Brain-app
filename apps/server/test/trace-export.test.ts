@@ -162,7 +162,7 @@ test("buildRunTrace deals the record into named, attachable files", async () => 
     const { sessionDir, jobDir } = writeFixture(root, runId);
     const files = await buildRunTrace({ runId, sessionDir, jobDir });
     assert.ok(files !== undefined);
-    const byPath = new Map(files.map((file) => [file.path, file.data]));
+    const byPath = new Map(files.map((file) => [file.path, file.data.toString()]));
     assert.deepEqual(
       [...byPath.keys()].sort(),
       [
@@ -217,7 +217,7 @@ test("files split into parts before they reach the per-file cap", async () => {
     }
     // The parts reassemble to the same entries, in order.
     const reassembled = setupParts.flatMap(
-      (file) => JSON.parse(file.data) as { key?: string }[],
+      (file) => JSON.parse(file.data.toString()) as { key?: string }[],
     );
     assert.deepEqual(
       reassembled.map((entry) => entry.key),
@@ -244,4 +244,31 @@ test("a run with no checkpoint has nothing to export", async () => {
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("trace preserves exact document bytes, page images and task-owned receipts", async () => {
+  const root = mkdtempSync(join(tmpdir(), "trace-documents-"));
+  try {
+    const runId = "bsa_document_fixture";
+    const { sessionDir, jobDir } = writeFixture(root, runId);
+    const snapshot = join(sessionDir, "documents", "snapshots", "doc-123");
+    const receiptDir = join(sessionDir, "documents", "receipts", "task-owner");
+    mkdirSync(snapshot, { recursive: true }); mkdirSync(receiptDir, { recursive: true });
+    const source = Buffer.from([0, 255, 254, 13, 10, 128, 37, 80, 68, 70]);
+    const image = Buffer.from([137, 80, 78, 71, 255, 0]);
+    writeFileSync(join(snapshot, "source.bin"), source);
+    writeFileSync(join(snapshot, "document.json"), JSON.stringify({ document: { documentId: "doc-123" }, segments: [] }));
+    writeFileSync(join(snapshot, "receipt-1.png"), image);
+    writeFileSync(join(snapshot, "source.pending.tmp"), "incomplete");
+    writeFileSync(join(receiptDir, "receipt-1.json"), JSON.stringify({ receiptId: "receipt-1", taskId: "thinker", documentId: "doc-123" }));
+    const files = (await buildRunTrace({ runId, sessionDir, jobDir }))!;
+    const byPath = new Map(files.map(file => [file.path, file.data]));
+    assert.deepEqual(byPath.get("documents/snapshots/doc-123/source.bin"), source);
+    assert.deepEqual(byPath.get("documents/snapshots/doc-123/receipt-1.png"), image);
+    assert.equal(JSON.parse(byPath.get("documents/receipts/task-owner/receipt-1.json")!.toString()).taskId, "thinker");
+    assert.equal(byPath.has("documents/snapshots/doc-123/source.pending.tmp"), false);
+    const archived = await readZip(await zipArchive(files));
+    assert.deepEqual(archived.get("documents/snapshots/doc-123/source.bin"), source);
+    assert.deepEqual(archived.get("documents/snapshots/doc-123/receipt-1.png"), image);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

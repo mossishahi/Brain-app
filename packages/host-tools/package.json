@@ -21,6 +21,9 @@
   },
   "dependencies": {
     "@brainstorm-agentic/core": "0.1.0",
+    "@napi-rs/canvas": "^1.0.13",
+    "linkedom": "^0.18.12",
+    "pdfjs-dist": "^6.5.438",
     "undici": "^6.28.0"
   },
   "devDependencies": {

@@ -11,6 +11,8 @@
 export * from "./diff-inline.js";
 export * from "./output-sections.js";
 export * from "./gpu.js";
+export * from "./literature-review.js";
+import type { LiteratureReviewView } from "./literature-review.js";
 
 /* ------------------------------------------------------------------ stages */
 
@@ -172,6 +174,8 @@ export interface StageErrorView {
 }
 
 export interface StageBase {
+  /** Each task's own submitted review; never a merged stage bibliography. */
+  readonly literatureReviews?: readonly LiteratureReviewView[];
   readonly id: StageId;
   readonly status: StageStatus;
   readonly startedAt?: number;
@@ -581,6 +585,7 @@ export interface RequestedSectionView {
  * explicitly asked for deliverables — one response section per ask.
  */
 export interface BrainIdeaView {
+  readonly literatureReviews?: readonly LiteratureReviewView[];
   readonly type: string;
   readonly shape: OutputShape;
   readonly paper?: IdeaOutputView;
@@ -629,6 +634,7 @@ export interface FlawEntryView {
 }
 
 export interface CommentView {
+  readonly literatureReviews?: readonly LiteratureReviewView[];
   readonly commentorId: string;
   readonly commentorLabel: string;
   readonly verdict: Verdict;
@@ -670,6 +676,7 @@ export interface JudgeIssueView {
 }
 
 export interface JudgeDecisionView {
+  readonly literatureReviews?: readonly LiteratureReviewView[];
   readonly verdict: Verdict;
   readonly reason: string;
   readonly suggestion?: string;
@@ -743,6 +750,7 @@ export interface ReviewRoundView {
 }
 
 export interface GameCritiqueView {
+  readonly literatureReviews?: readonly LiteratureReviewView[];
   readonly criticId: string;
   readonly criticLabel: string;
   readonly q: number;
@@ -773,6 +781,7 @@ export interface GameReviewSettings {
 }
 
 export interface GameChairDecisionView {
+  readonly literatureReviews?: readonly LiteratureReviewView[];
   readonly reports: Readonly<Record<string, {
     readonly admissible: boolean;
     readonly reason: string;

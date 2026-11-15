@@ -234,6 +234,7 @@ export interface FactSubscribers {
 
 /** The run data a reconsideration task is built from. */
 export interface FactUpdateRunData {
+  readonly submission?: JsonValue;
   readonly input?: JsonValue;
   readonly files?: JsonValue;
   readonly panel?: JsonValue;
@@ -283,6 +284,7 @@ export class FactUpdateIndex {
   noteRunData(runId: string, state: JsonObject): void {
     const files = isRecord(state.usefulFiles) ? state.usefulFiles.files : undefined;
     this.run(runId).data = {
+      ...(isRecord(state.session) && state.session.submission !== undefined ? { submission: state.session.submission } : {}),
       ...(state.input !== undefined ? { input: state.input } : {}),
       ...(files !== undefined ? { files } : {}),
       ...(state.panel !== undefined ? { panel: state.panel } : {}),

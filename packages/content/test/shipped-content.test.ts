@@ -874,12 +874,13 @@ test("skills split into the expected roles and its techniques, with clean prompt
   for (const technique of techniques) {
     assert.equal(technique.meta.output, undefined);
   }
-  // The literature review is parameterized by the seat's expertise, and the two
-  // taxonomy NA-resolution prompts by their per-call task data; the other
-  // techniques stay var-free and universal.
+  // Legacy reviews rendered seat variables. Deliverable-aware reviews read the
+  // role's own vantage, so unseated verifiers can use the same contract without
+  // introducing unavailable seat bindings. Pinned bundles retain their schema.
   assert.deepEqual(
     bundle.skills["literature-review"]!.meta.vars.sort(),
-    ["department", "subfields", "umbrella"],
+    bundle.skills["literature-review"]!.meta.deliverables?.includes("literatureReviewV1")
+      ? [] : ["department", "subfields", "umbrella"],
   );
   assert.deepEqual(bundle.skills["field-match"]!.meta.vars.slice().sort(), ["options", "query"]);
   assert.deepEqual(bundle.skills["field-placement"]!.meta.vars.slice().sort(), ["query", "taxonomy"]);

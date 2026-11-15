@@ -19,12 +19,62 @@
  * a trace of any size stays attachable whole.
  */
 import { readdir, readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 
 export interface TraceFile {
   /** Forward-slash relative path inside the trace. */
   readonly path: string;
-  readonly data: string;
+  readonly data: string | Buffer;
+}
+
+/** Reviews are exported per author task; no pooled bibliography erases ownership. */
+async function literatureFiles(sessionDir: string): Promise<TraceFile[]> {
+  const indexText = await readIfExists(join(sessionDir, "artifacts", "index.json"));
+  if (indexText === undefined) return [];
+  let refs: readonly { id?: unknown; metadata?: { kind?: unknown } }[];
+  try {
+    const index = JSON.parse(indexText) as { refs?: unknown };
+    refs = Array.isArray(index.refs) ? index.refs : [];
+  } catch { return []; }
+  const files: TraceFile[] = [];
+  for (const ref of refs) {
+    if (ref.metadata?.kind !== "literature-review" || typeof ref.id !== "string" || /[\\/]/.test(ref.id)) continue;
+    const text = await readIfExists(join(sessionDir, "artifacts", ref.id));
+    if (text === undefined) continue;
+    try {
+      const value = JSON.parse(text) as { owner?: { taskId?: unknown; role?: unknown }; reviewId?: unknown; revision?: unknown; state?: unknown };
+      if (typeof value.owner?.taskId !== "string") continue;
+      const task = createHash("sha256").update(value.owner.taskId).digest("hex").slice(0, 16);
+      const role = String(value.owner.role ?? "agent").replace(/[^a-zA-Z0-9_.-]/g, "_").slice(0, 60);
+      const artifact = createHash("sha256").update(ref.id).digest("hex").slice(0, 16);
+      files.push({ path: `literature/${role}-${task}/review-${artifact}.json`, data: text });
+    } catch { /* A malformed artifact must not prevent exporting the rest. */ }
+  }
+  return files;
+}
+
+/** Exact source bytes and delivered renditions stay paired with host receipts. */
+async function documentFiles(sessionDir: string): Promise<TraceFile[]> {
+  const root = join(sessionDir, "documents");
+  const files: TraceFile[] = [];
+  async function walk(relative: string): Promise<void> {
+    let entries;
+    try { entries = await readdir(join(root, relative), { withFileTypes: true }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
+    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      // Ignore in-progress writes and never follow symlinks outside this run.
+      if (entry.name.endsWith(".tmp") || entry.isSymbolicLink()) continue;
+      const path = relative ? `${relative}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) await walk(path);
+      else if (entry.isFile()) {
+        try { files.push({ path: `documents/${path}`, data: await readFile(join(root, path)) }); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      }
+    }
+  }
+  await walk("");
+  return files;
 }
 
 /** Stay well under the 25 MB per-file attachment cap. */
@@ -231,6 +281,8 @@ re-submission as an attachment. Nothing here was rewritten or summarized.
   calls, retries), one JSON record per line.
 - \`searches.jsonl\` — every web search and fetch of the run, verbatim (when
   the run recorded one).
+- \`literature/\` — each agent task's literature deliverables and saved drafts, kept separate with ownership, source locations, and input relevance.
+- \`documents/\` — immutable source bytes, extracted page/section text, delivered page images, and task-owned reading receipts. Binary evidence is preserved byte-for-byte; large source files may exceed the attachment picker cap.
 - \`final/\` — the readable end results: one JSON per seat plus the proposal
   (when the run reached them).
 - \`raw_expertise.json\` / \`mul_expertise.json\` — the expertise tree and its
@@ -298,6 +350,8 @@ export async function buildRunTrace(options: {
   for (const [name, sections] of await thinkingSections(options.sessionDir)) {
     files.push(...markdownParts(name, sections, splitBytes));
   }
+  files.push(...await literatureFiles(options.sessionDir));
+  files.push(...await documentFiles(options.sessionDir));
 
   const events = await readIfExists(join(options.jobDir, "events.jsonl"));
   if (events !== undefined) files.push(...lineParts("events.jsonl", events, splitBytes));

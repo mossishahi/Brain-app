@@ -43,6 +43,7 @@ import {
   StaticBrainstormRouteResolver,
   artifactSchemaToJsonSchema,
   compileContentWorkflow,
+  compileSkillPrompt,
   type CompiledContentWorkflow,
   type FactVerificationTaskRequest,
 } from "../src/index.js";
@@ -423,6 +424,67 @@ test("the supreme judge's task: its role, the factVerdict schema, the three cata
   });
   assert.equal(factScopeOf(task.metadata), undefined, "the verifier never reaches the table");
   assert.ok(!("requirements" in task), "no requirements were resolved");
+});
+
+test("literature deliverables propagate through included techniques without altering legacy task metadata", async () => {
+  const legacy = await nodeTask(compile(bundle()), "verify", scopeWith({}));
+  assert.equal(legacy.metadata?.literatureReview, undefined);
+
+  const source = bundle();
+  const technique: Skill = {
+    meta: skillMetaSchema.parse({ name: "literature-review", kind: "technique", description: "Source-grounded review.", deliverables: ["literatureReviewV1"] }),
+    body: "Record each inspected source and justify its relation to the original input.",
+    sourcePath: "test/literature-review.md",
+  };
+  source.skills["literature-review"] = technique;
+  const reviewingRole = source.skills.supreme_judge!;
+  reviewingRole.meta.techniques = ["literature-review"];
+  reviewingRole.meta.requiredDeliverables = ["literatureReviewV1"];
+  // Direct and technique declarations deduplicate into one lifecycle requirement.
+  reviewingRole.meta.deliverables = ["literatureReviewV1"];
+  const compiled = compile(source);
+  const required = await nodeTask(compiled, "verify", scopeWith({}));
+  assert.deepEqual(required.metadata?.literatureReview, { mode: "required", input: { submission: REQUEST.bindings.input, requestedOutputs: [] } });
+  assert.deepEqual(required.outputSchema, legacy.outputSchema, "the primary fact-verdict schema remains untouched");
+  assert.deepEqual(required.allowedCapabilities, legacy.allowedCapabilities);
+  const prompt = compileSkillPrompt(reviewingRole, [technique], {
+    ...REQUEST.bindings,
+    caseCatalog: CONTROL.cases,
+    methodCatalog: CONTROL.methods,
+    resolutionCatalog: CONTROL.resolutions,
+  });
+  assert.deepEqual(prompt.deliverables, ["literatureReviewV1"]);
+  assert.deepEqual(prompt.requiredDeliverables, ["literatureReviewV1"]);
+  assert.ok(prompt.skills.includes("literature-review"));
+});
+
+test("nested Supreme verification receives the same conditional review contract and original input", async () => {
+  const source = bundle();
+  source.skills["literature-review"] = {
+    meta: skillMetaSchema.parse({ name: "literature-review", kind: "technique", description: "Scoped source assessment.", deliverables: ["literatureReviewV1"] }),
+    body: "Submit your source assessment separately from the verdict.", sourcePath: "test/literature-review.md",
+  };
+  source.skills.supreme_judge!.meta.techniques = ["literature-review"];
+  const compiled = compile(source);
+  const direct = await nodeTask(compiled, "verify", scopeWith({}));
+  const nested = await compiled.factVerificationTask!(REQUEST);
+  assert.deepEqual(nested.metadata?.literatureReview, direct.metadata?.literatureReview);
+  assert.deepEqual(nested.metadata?.literatureReview, { mode: "conditional", input: { submission: REQUEST.bindings.input, requestedOutputs: [] } });
+  assert.notDeepEqual(((nested.metadata?.literatureReview as JsonObject).input as JsonObject).submission, REQUEST.bindings.request,
+    "a later fact query cannot replace the original research input");
+  assert.equal(factScopeOf(nested.metadata), undefined, "adding a review contract never gives Supreme recursive fact-table access");
+});
+
+test("literature requirements retain the raw user submission as well as classified requested outputs", async () => {
+  const source = bundle();
+  source.skills.supreme_judge!.meta.deliverables = ["literatureReviewV1"];
+  const raw = { prompt: "The user's exact words, including geometry and variance requirements.", attachments: [{ name: "requirements.pdf" }] };
+  const requestedOutputs = [{ title: "Required comparison", ask: "Compare against existing methods under the same conditions." }];
+  const scope = Scope.root({ [BRAINSTORM_STATE]: {
+    ...STATE, session: { submission: raw }, input: { title: "A shorter model paraphrase", requestedOutputs },
+  } });
+  const actual = await nodeTask(compile(source), "verify", scope);
+  assert.deepEqual(actual.metadata?.literatureReview, { mode: "conditional", input: { submission: raw, requestedOutputs } });
 });
 
 test("workflow and fact-control tasks resolve by stable node identity and retain execution controls", async () => {

@@ -47,6 +47,7 @@ import {
   type SystemPrompt,
   type TaxonomyAccess,
   type ToolExecutionContext,
+  type ToolResult,
   type TokenUsage,
   type ToolCallDetail,
   type WebAccess,
@@ -69,6 +70,7 @@ import {
   runFactTable,
   runNotesSearch,
   webToolNames,
+  webAnswerResult,
   webToolSpecs,
   type GpuRunConfig,
 } from "@brainstorm-agentic/host-tools";
@@ -601,6 +603,7 @@ function stepwiseServer(
   spec: StepwiseSpec,
   capture: TraceCapture,
   watchdog: SessionWatchdog,
+  context: AgentExecutionContext,
 ): ReturnType<typeof createSdkMcpServer> {
   const description = stepwiseToolDescription(spec);
   const index = z.number().int().min(1).max(spec.count);
@@ -631,6 +634,8 @@ function stepwiseServer(
                   "the four parts must carry the step; all four are empty.",
                 );
               }
+              const issues = await context.beforeArgumentStep?.() ?? [];
+              if (issues.length > 0) return stepwiseRefusal(issues.join("; "));
               return recordStepwiseStep(spec, capture, args.index, body);
             }),
           )
@@ -644,6 +649,8 @@ function stepwiseServer(
                   "text must carry the step as one non-empty paragraph.",
                 );
               }
+              const issues = await context.beforeArgumentStep?.() ?? [];
+              if (issues.length > 0) return stepwiseRefusal(issues.join("; "));
               return recordStepwiseStep(spec, capture, args.index, args.text);
             }),
           ),
@@ -1067,6 +1074,34 @@ function gpuServer(
 
 /** In-process MCP server name carrying the unified host web tools. */
 const WEB_SERVER = "web";
+const DELIVERABLE_SERVER = "deliverables";
+
+function sdkHostResult(result: ToolResult) {
+  return {
+    content: [
+      { type: "text" as const, text: typeof result.output === "string" ? result.output : JSON.stringify(result.output) },
+      ...(result.blocks ?? []).flatMap((block) => block.type === "image" && block.source.kind === "base64"
+        ? [{ type: "image" as const, data: block.source.data, mimeType: block.source.mediaType }] : []),
+    ],
+    ...(result.isError === true ? { isError: true as const } : {}),
+  };
+}
+
+function deliverableSdkToolNames(context: AgentExecutionContext): string[] {
+  return (context.deliverableTools ?? []).map((tool) => `mcp__${DELIVERABLE_SERVER}__${tool.definition.name}`);
+}
+
+function deliverableServer(task: AgentTask, context: AgentExecutionContext, watchdog: SessionWatchdog): ReturnType<typeof createSdkMcpServer> {
+  return createSdkMcpServer({ name: DELIVERABLE_SERVER, version: "1.0.0", tools: (context.deliverableTools ?? []).map((tool) =>
+    sdkTool(tool.definition.name, tool.definition.description ?? "", zodShape(tool.definition.inputSchema), watchdog.held(async (args) => {
+      try {
+        return sdkHostResult(await tool.execute(args as JsonValue, { runId: context.runId, taskId: task.taskId, ...(context.signal ? { signal: context.signal } : {}) }));
+      } catch (error) {
+        return sdkHostResult({ output: error instanceof Error ? error.message : String(error), isError: true });
+      }
+    })),
+  ) });
+}
 
 /** Full Claude Code tool names for the in-process web MCP server. */
 function webSdkToolNames(web: WebAccess): readonly string[] {
@@ -1128,7 +1163,10 @@ function zodType(schema: unknown): z.ZodType {
     if (typeof node.maxItems === "number") list = list.max(node.maxItems);
     type = list;
   } else if (node.type === "object") {
-    type = z.object(zodShape(node));
+    const object = z.object(zodShape(node));
+    // Durable draft patches intentionally accept arbitrary nested JSON. A
+    // plain z.object({}) silently strips it before the host can validate it.
+    type = node.additionalProperties === true ? object.passthrough() : object;
   } else {
     type = z.unknown();
   }
@@ -1149,18 +1187,11 @@ function zodType(schema: unknown): z.ZodType {
  */
 function webServer(
   web: WebAccess,
-  attribution: { taskId?: string; agentId?: string; nodePath?: string },
+  attribution: { taskId?: string; agentId?: string; nodePath?: string; signal?: AbortSignal },
   watchdog: SessionWatchdog,
+  beforeToolUse?: AgentExecutionContext["beforeToolUse"],
 ): ReturnType<typeof createSdkMcpServer> {
-  const textResult = (value: unknown, isError = false) => ({
-    content: [
-      {
-        type: "text" as const,
-        text: typeof value === "string" ? value : JSON.stringify(value),
-      },
-    ],
-    ...(isError ? { isError: true as const } : {}),
-  });
+  const textResult = (value: unknown, isError = false) => sdkHostResult({ ...webAnswerResult(value), ...(isError ? { isError: true } : {}) });
   const run = async (work: () => Promise<unknown>) => {
     try {
       return textResult(await work());
@@ -1178,7 +1209,10 @@ function webServer(
         spec.definition.description ?? "",
         zodShape(spec.definition.inputSchema),
         watchdog.held(async (args) =>
-          run(async () => spec.run(args as unknown as JsonValue, attribution)),
+          run(async () => {
+            await beforeToolUse?.(spec.name);
+            return spec.run(args as unknown as JsonValue, attribution);
+          }),
         ),
       ),
     ),
@@ -2159,6 +2193,7 @@ function shellPathCandidates(
 function fileAccessHooks(
   config: ClaudeAgentExecutorConfig,
   observeToolUse: (name: string, input: unknown) => void,
+  beforeToolUse?: AgentExecutionContext["beforeToolUse"],
 ): UnknownRecord {
   const taskRoot = resolve(config.cwd ?? process.cwd());
   const roots = [
@@ -2247,6 +2282,7 @@ function fileAccessHooks(
         hooks: [async (input: unknown) => {
           const event = record(input);
           if (event.hook_event_name === "PreToolUse" && typeof event.tool_name === "string") {
+            await beforeToolUse?.(event.tool_name);
             observeToolUse(event.tool_name, event.tool_input);
           }
           return { continue: true };
@@ -2287,6 +2323,7 @@ function queryOptions(
     ...(wantsAttachments ? attachmentsSdkToolNames() : []),
     ...(wantsGpu ? gpuSdkToolNames() : []),
     ...(wantsWeb ? webSdkToolNames(config.web!) : []),
+    ...deliverableSdkToolNames(context),
   ];
   const disallowedTools = KNOWN_BUILTIN_TOOLS.filter(
     (name) => !tools.includes(name),
@@ -2320,11 +2357,12 @@ function queryOptions(
     } : {}),
     cwd: config.cwd ?? process.cwd(),
     env: sdkEnvironment(config.token, config.env),
-    hooks: fileAccessHooks(config, observeToolUse),
+    hooks: fileAccessHooks(config, observeToolUse, context.beforeToolUse),
   };
   const mcpServers: UnknownRecord = {
+    ...((context.deliverableTools?.length ?? 0) > 0 ? { [DELIVERABLE_SERVER]: deliverableServer(task, context, watchdog) } : {}),
     ...(capture.stepwise !== undefined
-      ? { [STEPWISE_SERVER]: stepwiseServer(capture.stepwise.spec, capture, watchdog) }
+      ? { [STEPWISE_SERVER]: stepwiseServer(capture.stepwise.spec, capture, watchdog, context) }
       : {}),
     ...(wantsTaxonomy
       ? { [TAXONOMY_SERVER]: taxonomyServer(config.taxonomy!, watchdog) }
@@ -2347,10 +2385,12 @@ function queryOptions(
             config.web!,
             {
               taskId: task.taskId,
-              ...(task.agentId !== undefined ? { agentId: task.agentId } : {}),
+              agentId: task.agentId ?? task.taskId,
               nodePath: context.nodePath,
+              signal: controller.signal,
             },
             watchdog,
+            context.beforeToolUse,
           ),
         }
       : {}),
@@ -2417,6 +2457,7 @@ function offeredTools(
   task: AgentTask,
   capture: TraceCapture,
   options: UnknownRecord,
+  context: AgentExecutionContext,
 ): JsonValue {
   const described = new Map<string, { description: string; input: readonly string[] }>();
   if (capture.stepwise !== undefined) {
@@ -2483,6 +2524,12 @@ function offeredTools(
       });
     }
   }
+  for (const tool of context.deliverableTools ?? []) {
+    described.set(`mcp__${DELIVERABLE_SERVER}__${tool.definition.name}`, {
+      description: tool.definition.description ?? "",
+      input: Object.keys(record(record(tool.definition.inputSchema).properties)),
+    });
+  }
   const names = Array.isArray(options.tools) ? options.tools.map(String) : [];
   return names.map((name): JsonObject => {
     const definition = described.get(name);
@@ -2536,7 +2583,7 @@ function reportPromptHandoff(
   sections.push({ title: "Prompt", body: promptText });
   sections.push({
     title: "Tools offered (Claude Code owns its built-in definitions)",
-    body: sectionJson(offeredTools(config, task, capture, options)),
+    body: sectionJson(offeredTools(config, task, capture, options, context)),
   });
   const outputFormat = options.outputFormat;
   if (isJsonValue(outputFormat)) {
@@ -2645,6 +2692,7 @@ async function executeQuery(
     const replaySafeTools = new Set([
       "Read", "Glob", "Grep", "WebSearch", "WebFetch", STRUCTURED_OUTPUT_TOOL,
       ...taxonomySdkToolNames(), ...notesSdkToolNames(), ...attachmentsSdkToolNames(),
+      ...deliverableSdkToolNames(context),
       ...(config.web ? webSdkToolNames(config.web) : []),
       ...(capture.stepwise ? [stepwiseSdkToolName(capture.stepwise.spec)] : []),
     ]);
@@ -2670,8 +2718,10 @@ async function executeQuery(
     const watchdog = new SessionWatchdog(
       config.stallTimeoutMs ?? DEFAULT_SESSION_STALL_MS,
     );
+    const restoredDeliverables = await context.restoreDeliverables?.();
     const promptText = [
       messagePrompt(task.modelRequest.messages),
+      ...(restoredDeliverables ? ["", restoredDeliverables] : []),
       ...(task.outputSchema
         ? [
             "",
@@ -3070,16 +3120,14 @@ export class ClaudeAgentExecutor implements AgentExecutor {
           usage,
           metadata: { ...(result.metadata ?? {}), ...traceMetadata },
         };
-        if (!task.outputSchema || !this.config.outputValidator) {
+        if ((!task.outputSchema || !this.config.outputValidator) && !context.validateDeliverables) {
           return succeeded;
         }
-        const checked = await this.config.outputValidator.validate(
-          succeeded.output,
-          task.outputSchema.schema,
-          task,
-        );
-        const normalized = normalizeValidation(checked, succeeded.output);
-        if (normalized.success) {
+        const normalized = task.outputSchema && this.config.outputValidator
+          ? normalizeValidation(await this.config.outputValidator.validate(succeeded.output, task.outputSchema.schema, task), succeeded.output)
+          : { success: true as const, value: succeeded.output };
+        const deliverableIssues = await context.validateDeliverables?.() ?? [];
+        if (normalized.success && deliverableIssues.length === 0) {
           return {
             ...succeeded,
             output: normalized.value,
@@ -3089,7 +3137,7 @@ export class ClaudeAgentExecutor implements AgentExecutor {
             },
           };
         }
-        validationIssues = normalized.issues;
+        validationIssues = [...(normalized.success ? [] : normalized.issues), ...deliverableIssues];
         rejectedOutput = succeeded.output;
         rejectedJsonText = undefined;
         if (attempt < attempts) {

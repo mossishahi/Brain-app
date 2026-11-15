@@ -598,6 +598,115 @@ test("stepwise tasks record ordered submit_step calls, inject the chain, and cap
   ]);
 });
 
+test("durable deliverables restore context, expose task-local tools, and gate argument publication", async () => {
+  let submitted = false;
+  let restores = 0;
+  let prerequisiteChecks = 0;
+  let completionChecks = 0;
+  const executions: string[] = [];
+  const reviewTool = defineTool("literature_review", async (input, execution) => {
+    assert.deepEqual(input, { action: "submit" });
+    assert.equal(execution.runId, context.runId);
+    assert.equal(execution.taskId, "deliverable-step");
+    executions.push("submit-review");
+    submitted = true;
+    return { output: { state: "submitted", reviewId: "own-review" } };
+  });
+  const provider = new FakeProvider((request, call) => {
+    assert.ok(request.tools?.some((tool) => tool.name === "literature_review"));
+    if (call === 1) {
+      assert.ok(JSON.stringify(request.messages).includes("Continue saved review own-review"));
+      return response([{ type: "tool_use", id: "early-step", name: "submit_step", input: { index: 1, text: "Premature argument" } }]);
+    }
+    if (call === 2) {
+      const rejected = request.messages.at(-1)?.content.find((block) => block.type === "tool_result" && block.toolUseId === "early-step");
+      assert.ok(rejected?.type === "tool_result" && rejected.isError);
+      assert.ok(JSON.stringify(rejected).includes("Submit the scoped literature review first"));
+      return response([
+        { type: "tool_use", id: "review-submit", name: "literature_review", input: { action: "submit" } },
+        { type: "tool_use", id: "supported-step", name: "submit_step", input: { index: 1, text: "Argument after inspecting and recording the source" } },
+      ]);
+    }
+    return response([{ type: "text", text: '{"title":"completed"}' }]);
+  });
+  const executor = new ToolLoopAgentExecutor({ provider, tools: new ToolRegistry(),
+    modelRouteResolver: new FixedModelRouteResolver({ modelId: "fake-model", responseFormat: { type: "json" } }) });
+  const result = await executor.execute(task({ taskId: "deliverable-step", input: "Develop the result.",
+    metadata: { stepwise: { tool: "submit_step", field: "cot", parts: false, count: 1 } },
+  }), {
+    ...context, deliverableTools: [reviewTool],
+    restoreDeliverables: async () => { restores += 1; return "Continue saved review own-review with its inspected evidence."; },
+    beforeArgumentStep: async () => { prerequisiteChecks += 1; return submitted ? [] : ["Submit the scoped literature review first."]; },
+    validateDeliverables: async () => { completionChecks += 1; return submitted ? [] : ["Review missing."]; },
+  });
+  assert.equal(result.status, "ok");
+  if (result.status !== "ok") return;
+  assert.deepEqual(result.output, { title: "completed", cot: ["Argument after inspecting and recording the source"] });
+  assert.equal(restores, 1);
+  assert.equal(prerequisiteChecks, 2, "the rejected step was never recorded");
+  assert.equal(completionChecks, 1);
+  assert.deepEqual(executions, ["submit-review"]);
+});
+
+test("a premature final answer receives actionable deliverable feedback and can recover", async () => {
+  let submitted = false;
+  let checks = 0;
+  const provider = new FakeProvider((request, call) => {
+    if (call === 2) {
+      assert.ok(JSON.stringify(request.messages.at(-1)).includes("Review R1 is still a draft"));
+      return response([{ type: "tool_use", id: "submit-review", name: "literature_review", input: { action: "submit" } }]);
+    }
+    return response([{ type: "text", text: '{"answer":"research result"}' }]);
+  });
+  const executor = new ToolLoopAgentExecutor({ provider, tools: new ToolRegistry(),
+    modelRouteResolver: new FixedModelRouteResolver({ modelId: "fake-model", responseFormat: { type: "json" } }),
+    retry: { maxValidationRetries: 1 },
+  });
+  const result = await executor.execute(task({ taskId: "deliverable-final", input: "Finish the result." }), {
+    ...context,
+    deliverableTools: [defineTool("literature_review", async () => { submitted = true; return { output: { state: "submitted" } }; })],
+    validateDeliverables: async () => { checks += 1; return submitted ? [] : ["Review R1 is still a draft; inspect its missing sources and submit it."]; },
+  });
+  assert.equal(result.status, "ok");
+  assert.equal(checks, 2);
+  assert.equal(provider.requests.length, 3);
+});
+
+test("missing required deliverables cannot be bypassed by repeating the final answer", async () => {
+  const provider = new FakeProvider(() => response([{ type: "text", text: "Finished." }]));
+  const executor = new ToolLoopAgentExecutor({ provider, tools: new ToolRegistry(),
+    modelRouteResolver: new FixedModelRouteResolver({ modelId: "fake-model" }), retry: { maxValidationRetries: 1 } });
+  const result = await executor.execute(task({ taskId: "missing-review", input: "Finish." }), {
+    ...context, validateDeliverables: async () => ["Required review has not been submitted."],
+  });
+  assert.equal(result.status, "error");
+  if (result.status === "error") assert.equal(result.error.name, "OutputValidationError");
+  assert.equal(provider.requests.length, 2);
+});
+
+test("deliverable tools stay scoped to their execution context and do not leak into legacy tasks", async () => {
+  let executions = 0;
+  const provider = new FakeProvider((_request, call) => {
+    if (call === 1 || call === 3) return response([{ type: "tool_use", id: `attempt-${call}`, name: "literature_review", input: { action: "list" } }]);
+    return response([{ type: "text", text: "Done." }]);
+  });
+  const registry = new ToolRegistry();
+  const executor = new ToolLoopAgentExecutor({ provider, tools: registry,
+    modelRouteResolver: new FixedModelRouteResolver({ modelId: "fake-model" }) });
+  const first = await executor.execute(task({ taskId: "new-task", input: "Review." }), {
+    ...context, deliverableTools: [defineTool("literature_review", async () => { executions += 1; return { output: [] }; })],
+  });
+  const legacy = await executor.execute(task({ taskId: "legacy-task", input: "Answer." }), context);
+  assert.equal(first.status, "ok");
+  assert.equal(legacy.status, "ok");
+  assert.equal(executions, 1);
+  assert.equal(registry.get("literature_review"), undefined);
+  assert.ok(provider.requests[0]!.tools?.some((tool) => tool.name === "literature_review"));
+  assert.equal(provider.requests[2]!.tools?.some((tool) => tool.name === "literature_review"), false);
+  const refused = provider.requests[3]!.messages.at(-1)?.content.find((block) => block.type === "tool_result");
+  assert.ok(refused?.type === "tool_result" && refused.isError);
+});
+
 test("optional transcripts accept a model without thinking while preserving required argument steps", async () => {
   const provider = new FakeProvider((_request, call) => call === 1
     ? response([{ type: "tool_use", id: "step", name: "submit_step", input: { index: 1, text: "Reviewable argument" } }])

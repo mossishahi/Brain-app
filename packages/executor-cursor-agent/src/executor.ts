@@ -56,6 +56,7 @@ import {
   type SystemPrompt,
   type TaxonomyAccess,
   type TokenUsage,
+  type ToolResult,
   type WebAccess,
 } from "@brainstorm-agentic/core";
 import {
@@ -76,6 +77,7 @@ import {
   runFactTable,
   runNotesSearch,
   webToolSpecs,
+  webAnswerResult,
   type GpuRunConfig,
 } from "@brainstorm-agentic/host-tools";
 
@@ -1157,6 +1159,7 @@ function reported(
     });
     let failed = false;
     try {
+      await context.beforeToolUse?.(name);
       const result = await execute(args);
       failed =
         typeof result === "object" &&
@@ -1232,7 +1235,7 @@ function stepwiseTool(
       required: spec.parts ? ["index", ...STEP_PARTS] : ["index", "text"],
       additionalProperties: false,
     },
-    execute: reported(spec.tool, context, (args) => {
+    execute: reported(spec.tool, context, async (args) => {
       const index = args.index;
       if (
         typeof index !== "number" ||
@@ -1263,6 +1266,8 @@ function stepwiseTool(
         }
         body = args.text;
       }
+      const issues = await context.beforeArgumentStep?.() ?? [];
+      if (issues.length > 0) return toolError(issues.join("; "));
       const steps = capture.stepwise!.steps;
       if (spec.sparse === true) {
         const last = steps[steps.length - 1];
@@ -1542,8 +1547,9 @@ function webCustomTools(
 ): CustomToolMap {
   const attribution = {
     taskId: task.taskId,
-    ...(task.agentId !== undefined ? { agentId: task.agentId } : {}),
+    agentId: task.agentId ?? task.taskId,
     nodePath: context.nodePath,
+    ...(context.signal ? { signal: context.signal } : {}),
   };
   const tools: CustomToolMap = {};
   for (const spec of webToolSpecs(web)) {
@@ -1552,7 +1558,8 @@ function webCustomTools(
       inputSchema: spec.definition.inputSchema,
       execute: reported(spec.name, context, async (args) => {
         try {
-          return (await spec.run(args, attribution)) as JsonValue;
+          const result = webAnswerResult(await spec.run(args, attribution));
+          return result.blocks?.length ? customHostResult(result) : result.output;
         } catch (error) {
           if (error instanceof WebAccessError) return toolError(error.message);
           throw error;
@@ -1561,6 +1568,29 @@ function webCustomTools(
     };
   }
   return tools;
+}
+
+function customHostResult(result: ToolResult) {
+  return {
+    content: [
+      { type: "text" as const, text: typeof result.output === "string" ? result.output : JSON.stringify(result.output) },
+      ...(result.blocks ?? []).flatMap((block) => block.type === "image" && block.source.kind === "base64"
+        ? [{ type: "image" as const, data: block.source.data, mimeType: block.source.mediaType }] : []),
+    ],
+    ...(result.isError === true ? { isError: true } : {}),
+  };
+}
+
+function deliverableCustomTools(task: AgentTask, context: AgentExecutionContext): CustomToolMap {
+  return Object.fromEntries((context.deliverableTools ?? []).map((tool) => [tool.definition.name, {
+    description: tool.definition.description ?? "",
+    inputSchema: tool.definition.inputSchema,
+    execute: reported(tool.definition.name, context, async (args) => {
+      const result = await tool.execute(args, { runId: context.runId, taskId: task.taskId, ...(context.signal ? { signal: context.signal } : {}) });
+      return result.isError ? toolError(typeof result.output === "string" ? result.output : JSON.stringify(result.output))
+        : result.blocks?.length ? customHostResult(result) : result.output;
+    }),
+  }]));
 }
 
 /** The gpu_run host tool bridged in-process (bug-report-to-submitter contract). */
@@ -1967,6 +1997,7 @@ async function executeAttempt(
   const stallHold = new StallHold();
 
   const customTools: CustomToolMap = {
+    ...deliverableCustomTools(task, context),
     ...(capture.stepwise !== undefined
       ? { [capture.stepwise.spec.tool]: stepwiseTool(capture.stepwise.spec, capture, context) }
       : {}),
@@ -1994,8 +2025,10 @@ async function executeAttempt(
   // prompt record can name them separately; concatenated in this order they
   // are the exact bytes the agent is sent.
   const instructions = instructionBlock(task.modelRequest.system);
+  const restoredDeliverables = await context.restoreDeliverables?.();
   const promptParts: string[] = [
     messagePrompt(task.modelRequest.messages),
+    ...(restoredDeliverables ? ["", restoredDeliverables] : []),
     ...(task.outputSchema && nativeStructuredOutput
       ? [
           "",
@@ -2215,6 +2248,12 @@ async function executeAttempt(
         lastStreamActivityAt = Date.now();
         armStallTimer();
         const message = record(rawMessage);
+        // Native web calls execute inside Cursor, so their stream is the
+        // earliest host observation. Register source use before accepting any
+        // later argument step or final result; the worker callback is idempotent.
+        if (message.type === "tool_call" && (message.name === "webSearch" || message.name === "webFetch")) {
+          await context.beforeToolUse?.(message.name);
+        }
         if (message.type === "tool_call" && message.status === "running") {
           const callId =
             typeof message.call_id === "string"
@@ -2633,23 +2672,21 @@ export class CursorAgentExecutor implements AgentExecutor {
           usage,
           metadata: { ...(result.metadata ?? {}), ...traceMetadata },
         };
-        if (!task.outputSchema || !this.config.outputValidator) {
+        if ((!task.outputSchema || !this.config.outputValidator) && !context.validateDeliverables) {
           return succeeded;
         }
-        const checked = await this.config.outputValidator.validate(
-          succeeded.output,
-          task.outputSchema.schema,
-          task,
-        );
-        const normalized = normalizeValidation(checked, succeeded.output);
-        if (normalized.success) {
+        const normalized = task.outputSchema && this.config.outputValidator
+          ? normalizeValidation(await this.config.outputValidator.validate(succeeded.output, task.outputSchema.schema, task), succeeded.output)
+          : { success: true as const, value: succeeded.output };
+        const deliverableIssues = await context.validateDeliverables?.() ?? [];
+        if (normalized.success && deliverableIssues.length === 0) {
           return {
             ...succeeded,
             output: normalized.value,
             metadata: { ...succeeded.metadata, validationAttempts: attempt },
           };
         }
-        validationIssues = normalized.issues;
+        validationIssues = [...(normalized.success ? [] : normalized.issues), ...deliverableIssues];
         rejectedOutput = succeeded.output;
         if (attempt < attempts) {
           progress(context, {

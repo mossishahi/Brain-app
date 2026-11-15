@@ -17,6 +17,8 @@ import {
   PAPER_DETAIL_PARTS,
   PAPER_SORTS,
   PAPER_TYPES,
+  type DocumentQuery,
+  type DocumentAnswer,
   type HostToolManifest,
   type JsonValue,
   type PaperDetailPart,
@@ -38,6 +40,7 @@ import {
   FIELDS_OF_STUDY,
   NEWS_SEARCH_MANIFEST,
   PAPER_DETAILS_MANIFEST,
+  PAPER_READ_MANIFEST,
   PAPER_SEARCH_MANIFEST,
   WEB_FETCH_MANIFEST,
   WEB_SEARCH_MANIFEST,
@@ -50,6 +53,7 @@ export const WEB_ACCESS_TOOL_NAMES = [
   "news_search",
   "paper_search",
   "paper_details",
+  "paper_read",
 ] as const;
 
 export type WebAccessToolName = (typeof WEB_ACCESS_TOOL_NAMES)[number];
@@ -304,6 +308,40 @@ export function parseWebFetchInput(input: JsonValue): WebFetchQuery {
   return { url, ...(maxChars !== undefined ? { maxChars } : {}) };
 }
 
+export function parseDocumentInput(input: JsonValue): DocumentQuery {
+  const args = inputRecord(input);
+  const operation = args.operation;
+  if (operation !== "open" && operation !== "read" && operation !== "search" && operation !== "page_image") return invalid("operation must be open, read, search, or page_image.");
+  const query: DocumentQuery = { operation,
+    ...(textOf(args.source) ? { source: textOf(args.source) } : {}),
+    ...(textOf(args.document_id) ? { documentId: textOf(args.document_id) } : {}),
+    ...(textOf(args.cursor) ? { cursor: textOf(args.cursor) } : {}),
+    ...(textOf(args.section_id) ? { sectionId: textOf(args.section_id) } : {}),
+    ...(textOf(args.query) ? { query: textOf(args.query) } : {}),
+    ...(intOf(args.page) !== undefined ? { page: intOf(args.page) } : {}),
+    ...(intOf(args.max_chars) !== undefined ? { maxChars: intOf(args.max_chars) } : {}),
+    ...(intOf(args.max_results) !== undefined ? { maxResults: intOf(args.max_results) } : {}),
+  };
+  if (operation === "open" && !query.source) return invalid("source is required for open.");
+  if (operation !== "open" && !query.documentId) return invalid("document_id is required; first open the source.");
+  if (operation === "search" && !query.query) return invalid("query is required for search.");
+  if (operation === "page_image" && !query.page) return invalid("page is required for page_image.");
+  return query;
+}
+
+/** Actual image content, not base64 embedded in JSON text. Shared by all provider bridges. */
+export function webAnswerResult(answer: unknown): ToolResult {
+  const document = answer as Partial<DocumentAnswer> | null;
+  if (document?.image && typeof document.image.data === "string") {
+    const { image, ...metadata } = document;
+    return { output: metadata as unknown as JsonValue, blocks: [
+      { type: "text", text: JSON.stringify(metadata) },
+      { type: "image", source: { kind: "base64", mediaType: image.mimeType, data: image.data } },
+    ] };
+  }
+  return { output: answer as JsonValue };
+}
+
 /** One model-facing web tool: its definition and how to run a call. */
 export interface WebToolSpec {
   readonly name: WebAccessToolName;
@@ -322,6 +360,7 @@ export interface WebToolSpec {
  * scholarly index; web_fetch needs nothing.
  */
 export function webToolSpecs(web: WebAccess): readonly WebToolSpec[] {
+  if (web.documentOnly) return web.document ? [{ name: "paper_read", definition: PAPER_READ_MANIFEST.definition, run: (input, context) => web.document!(parseDocumentInput(input), context) }] : [];
   const kinds = web.backedKinds();
   const indexes = web.backsPapers?.() ?? kinds.includes("scholarly");
   const specs: WebToolSpec[] = [];
@@ -370,6 +409,10 @@ export function webToolSpecs(web: WebAccess): readonly WebToolSpec[] {
       },
     });
   }
+  if (web.document) {
+    specs.push({ name: "paper_read", definition: PAPER_READ_MANIFEST.definition,
+      run: (input, context) => web.document!(parseDocumentInput(input), context) });
+  }
   return specs;
 }
 
@@ -391,8 +434,8 @@ export function webAccessTools(
       definition: spec.definition,
       async execute(input, context): Promise<ToolResult> {
         try {
-          const answer = await spec.run(input, { ...attribution, signal: context.signal });
-          return { output: answer as JsonValue };
+          const answer = await spec.run(input, { ...attribution, taskId: attribution.taskId ?? context.taskId, agentId: attribution.agentId ?? context.taskId, signal: context.signal });
+          return webAnswerResult(answer);
         } catch (error) {
           if (context.signal?.aborted) throw error;
           if (error instanceof WebAccessError) return refusal(error.message);

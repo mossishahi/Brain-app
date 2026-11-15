@@ -11,7 +11,7 @@
  * copy lives in latex-style.ts), so it can also run outside the browser for
  * validation. Only types and the pure step helpers are imported here.
  */
-import { stepTextBlocks } from "./steps";
+import { stepTextBlocks } from "./steps.js";
 import type {
   AssessFeasibilityOutputView,
   BrainIdeaView,
@@ -26,6 +26,7 @@ import type {
   SolutionOutputView,
   SurveyOutputView,
   VerifyOutputView,
+  LiteratureReviewView,
 } from "@brainstorm-agentic/protocol";
 
 /* --------------------------------------------------------------- escaping */
@@ -231,6 +232,34 @@ function literatureItems(papers: readonly PaperView[]): string[] {
     ]
       .filter((part) => part !== "")
       .join(" ");
+  });
+}
+
+/** Agent-owned evidence and interpretations remain separate in downloaded papers. */
+function reviewBlocks(reviews: readonly LiteratureReviewView[]): Block[] {
+  return reviews.flatMap((record) => {
+    const { review, owner } = record;
+    const requirements = new Map(record.inputRequirements.map((item) => [item.id, item.text]));
+    return section(`Literature review — ${owner.role}${owner.agentId ? ` (${owner.agentId})` : ""}`, [
+      facts([["Task", owner.taskId], ["Status", words(review.status)], ["Review", `${record.reviewId}, revision ${record.revision}`]]),
+      escapeLatex(review.scope.question),
+      escapeLatex(review.statusReason),
+      escapeLatex(`Assessment: ${review.synthesis.assessment}. ${review.synthesis.findings}`),
+      ...plainListSection("Remaining gaps", review.synthesis.gaps),
+      ...plainListSection("Comparisons", review.synthesis.comparisons),
+      escapeLatex(`Search coverage: ${review.search.coverage}`),
+      ...plainListSection("Search limitations", review.search.limitations),
+      list(review.works.map((work) => joinBlocks([
+        `\\textbf{${escapeLatex(work.source.title)}}. ${escapeLatex([work.source.authors.join(", "), work.source.year, work.source.venue, work.source.version].filter(Boolean).join("; "))}`,
+        url(work.source.url),
+        escapeLatex(`Inspected: ${work.inspected.level === "full-text" ? "Entire retrieved document" : work.inspected.level}. Method: ${work.method}`),
+        escapeLatex(`Results: ${work.results}`),
+        ...work.relevance.map((relation) => escapeLatex(`Relation to input (${requirements.get(relation.requirementId) ?? relation.requirementId}): ${relation.relationship}. ${relation.justification}`)),
+        ...[["Conditions", work.conditions], ["Limitations", work.limitations], ["Use in this output", work.intendedUse], ["Uncertainties", work.uncertainties], ["Access limitations", work.inspected.accessLimitations]].map(([label, values]) =>
+          (values as readonly string[]).length ? escapeLatex(`${label}: ${(values as readonly string[]).join("; ")}`) : ""),
+        ...work.inspected.evidence.map((evidence) => escapeLatex(`Source: ${evidence.locator} (document ${evidence.documentId}, segment ${evidence.segmentId}, receipt ${evidence.receiptId})`)),
+      ]))),
+    ], true);
   });
 }
 
@@ -563,6 +592,7 @@ export function seatOutputToLatex(input: SeatTexInput, styleText: string): strin
     ...(literature.length > 0
       ? section("Collected literature", [list(literatureItems(literature))], true)
       : []),
+    ...reviewBlocks(idea.literatureReviews ?? []),
   ];
 
   return [

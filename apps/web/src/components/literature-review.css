@@ -1,0 +1,6 @@
+.literature-reviews { margin-top: 1.5rem; border-top: 1px solid var(--border, #454b60); padding-top: 1rem; }
+.literature-review { margin: .6rem 0; }
+.literature-review > summary { cursor: pointer; padding: .5rem 0; }
+.literature-review-body { padding: .5rem 1rem; overflow-wrap: anywhere; }
+.literature-work { margin: 1.25rem 0; padding-bottom: 1rem; border-bottom: 1px solid var(--border, #454b60); }
+.literature-review-body p, .literature-review-body ul { margin: .6rem 0; }

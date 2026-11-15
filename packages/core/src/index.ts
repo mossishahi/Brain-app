@@ -30,6 +30,7 @@ export * from "./agent/tool-detail.js";
 export * from "./capability/index.js";
 export * from "./taxonomy.js";
 export * from "./web.js";
+export * from "./documents.js";
 export * from "./notes.js";
 export * from "./facts.js";
 export * from "./embedder.js";

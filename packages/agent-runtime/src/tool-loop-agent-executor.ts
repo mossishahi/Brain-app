@@ -780,15 +780,16 @@ export class ToolLoopAgentExecutor<
     const steps: StepwiseStep[] = [];
     const thinkingSegments: { turn: number; text: string }[] = [];
     const allowedToolNames = task.tools ?? [];
-    const registryDefinitions = this.#tools.definitions(allowedToolNames);
+    const deliverableTools = context.deliverableTools ?? [];
+    const registryDefinitions = [...this.#tools.definitions(allowedToolNames), ...deliverableTools.map((tool) => tool.definition)];
     const toolDefinitions =
       stepwise !== undefined
         ? [...registryDefinitions, stepwiseToolDefinition(stepwise)]
         : registryDefinitions;
     const allowedTools = new Set(
       stepwise !== undefined
-        ? [...allowedToolNames, stepwise.tool]
-        : allowedToolNames,
+        ? [...allowedToolNames, ...deliverableTools.map((tool) => tool.definition.name), stepwise.tool]
+        : [...allowedToolNames, ...deliverableTools.map((tool) => tool.definition.name)],
     );
     // A stepwise task needs at least one turn per step plus room for the
     // final answer and validation retries.
@@ -797,6 +798,8 @@ export class ToolLoopAgentExecutor<
         ? Math.max(this.#maxTurns, stepwise.count * 2 + 4)
         : this.#maxTurns;
     const messages: ModelMessage[] = [...baseRequest.messages];
+    const restored = await context.restoreDeliverables?.();
+    if (restored) messages.push({ role: "user", content: [{ type: "text", text: restored }] });
     const schema =
       baseRequest.responseFormat?.type === "jsonSchema"
         ? baseRequest.responseFormat.schema
@@ -1005,6 +1008,14 @@ export class ToolLoopAgentExecutor<
             }
           : {}),
       };
+      const deliverableIssues = await context.validateDeliverables?.() ?? [];
+      if (deliverableIssues.length > 0) {
+        if (validationRetries >= this.#maxValidationRetries) throw new OutputValidationError(deliverableIssues);
+        validationRetries += 1;
+        context.reportProgress?.({ kind: "validation", turn, message: "Required deliverable needs completion" });
+        messages.push({ role: "user", content: [textBlock(["Complete or repair the required deliverables using their tools before returning the final response. Reuse saved work; do not restart the research.", ...deliverableIssues].join("\n"))] });
+        continue;
+      }
       if (schema === undefined) {
         return this.#successResult(
           task,
@@ -1422,6 +1433,8 @@ export class ToolLoopAgentExecutor<
     // The stepwise chain tool is virtual: recorded by the executor itself,
     // never dispatched to the host tool registry.
     if (stepwise !== undefined && call.name === stepwise.spec.tool) {
+      const prerequisites = await context.beforeArgumentStep?.() ?? [];
+      if (prerequisites.length > 0) return failureToolResult(call, prerequisites.join("\n"));
       const result = recordStepwiseCall(call, stepwise);
       context.reportProgress?.({
         kind: "tool_end",
@@ -1435,7 +1448,7 @@ export class ToolLoopAgentExecutor<
       return result;
     }
 
-    const tool = this.#tools.get(call.name);
+    const tool = context.deliverableTools?.find((candidate) => candidate.definition.name === call.name) ?? this.#tools.get(call.name);
     if (tool === undefined) {
       return failureToolResult(
         call,
@@ -1444,7 +1457,7 @@ export class ToolLoopAgentExecutor<
     }
 
     const startedAt = Date.now();
-    const hint = toolCallHint(call.input);
+    const hint = call.name === "literature_review" ? undefined : toolCallHint(call.input);
     // The structured counterpart of the message hint: the one input that
     // tells a reader what this call targeted, attached so the dashboard can
     // render per-activity capability detail. Content-bearing tools
@@ -1458,6 +1471,7 @@ export class ToolLoopAgentExecutor<
       ...detailData,
     });
     try {
+      await context.beforeToolUse?.(call.name);
       const result = await tool.execute(call.input, {
         runId: context.runId,
         taskId: task.taskId,

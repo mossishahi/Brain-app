@@ -65,6 +65,7 @@ import { GeminiModelProvider } from "@brainstorm-agentic/provider-gemini";
 import type { ModelCatalogSnapshot, StageModelSettings } from "@brainstorm-agentic/protocol";
 import { contentRouteResolver, modelCatalogFromEnv, stageSettingsFromEnv } from "./stage-models.js";
 
+import { LiteratureReviewAgentExecutor, LiteratureReviewStore } from "./literature-reviews.js";
 import { attachmentTools, ATTACHMENT_TOOL_NAMES } from "./attachment-tools.js";
 import { lazyEncoderProvider, nodeTextsFromBundle } from "./literature-wiring.js";
 import {
@@ -926,7 +927,7 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
   const executorStack = new NotesScopeAgentExecutor(
     new ThinkingArtifactAgentExecutor(
       new CreditBlockDetectingAgentExecutor(
-        buildAgentExecutor(
+        new LiteratureReviewAgentExecutor(buildAgentExecutor(
           options.providerConfig,
           executorAttachmentRoots,
           options.bundle.catalogs.inputTypes,
@@ -942,7 +943,7 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
           notes,
           facts,
           factControl?.accessMode,
-        ),
+        ), new LiteratureReviewStore(options.artifacts, options.web)),
         options.providerConfig.creditRecovery,
       ),
       options.artifacts,
@@ -1066,7 +1067,7 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
     factTable.attachVerifier(async ({ submission, bindings, execution, signal }) => {
       const build = runtime.compiled.factVerificationTask;
       if (build === undefined) throw new Error("this bundle declares no fact verifier");
-      const task = await build({ taskId: `fact-verification:${submission}`, bindings });
+      const task = await build({ taskId: `fact-verification:${submission}`, bindings, runId: execution?.runId ?? factRunId });
       const result = await agentExecutor.execute(task, {
         runId: execution?.runId ?? factRunId,
         nodePath: `${execution?.nodePath ?? "fact-table"}/fact-verification[${submission}]`,
@@ -1083,7 +1084,7 @@ export function buildRuntime(options: RuntimeWiringOptions): BrainstormRuntime {
       factTable.attachConsultant(async ({ consultation, bindings, execution, signal }) => {
         const build = runtime.compiled.factConsultationTask;
         if (build === undefined) throw new Error("this bundle declares no supreme consultation role");
-        const task = await build({ taskId: `fact-consultation:${consultation}`, bindings });
+        const task = await build({ taskId: `fact-consultation:${consultation}`, bindings, runId: execution?.runId ?? factRunId });
         const result = await agentExecutor.execute(task, {
           runId: execution?.runId ?? factRunId,
           nodePath: `${execution?.nodePath ?? "fact-table"}/fact-consultation[${consultation}]`, signal,

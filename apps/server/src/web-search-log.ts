@@ -49,6 +49,7 @@ const LOGGED_TOOLS = [
   "news_search",
   "paper_search",
   "paper_details",
+  "paper_read",
   "web_fetch",
   "web_check",
 ] as const;
@@ -123,6 +124,7 @@ export function readSearchLogText(sessionDir: string): string | undefined {
 /** The call's subject: what was searched, looked up, or fetched. */
 function subjectOf(tool: SearchLogTool, request: { readonly [key: string]: unknown }): string {
   if (tool === "web_fetch") return str(request.url) ?? "";
+  if (tool === "paper_read") return [str(request.operation), str(request.source) ?? str(request.documentId) ?? str(request.document_id), typeof request.page === "number" ? `page ${request.page}` : undefined, str(request.query)].filter(Boolean).join(" · ");
   if (tool === "web_check") return "launch check";
   if (tool === "paper_details") {
     return Array.isArray(request.ids)
@@ -144,6 +146,7 @@ function countOf(tool: SearchLogTool, response: unknown): number | undefined {
   if (Array.isArray(response)) return tool === "web_check" ? response.length : undefined;
   const record = response as { readonly [key: string]: unknown };
   if (tool === "web_fetch") return typeof record.text === "string" ? record.text.length : undefined;
+  if (tool === "paper_read") return Array.isArray(record.passages) ? record.passages.length : record.image !== undefined ? 1 : undefined;
   if (tool === "paper_search" || tool === "paper_details") {
     return Array.isArray(record.papers) ? record.papers.length : undefined;
   }

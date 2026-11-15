@@ -131,6 +131,7 @@ export type IssueCode =
   | "ACTIVITY_INPUT_TYPE_MISMATCH"
   | "ACTIVITY_OUTPUT_MISMATCH"
   | "MISSING_SCHEMA"
+  | "MISSING_DELIVERABLE"
   | "SKILL_OUTPUT_MISMATCH"
   | "UNBOUND_VAR"
   | "UNKNOWN_BINDING"
@@ -164,6 +165,25 @@ export interface ValidationIssue {
   /** Human-readable location, e.g. `workflow brainstorm > node judge-step`. */
   path: string;
   message: string;
+}
+
+/** Resolve technique deliverables once, consistently for eager and lazy loading. */
+function validateSkillDeliverables(skill: Skill, skills: Readonly<Record<string, Skill>>, issues: ValidationIssue[]): void {
+  const at = `skill ${skill.meta.name}`;
+  const declared = new Set([
+    ...(skill.meta.deliverables ?? []),
+    ...skill.meta.techniques.flatMap((name) => skills[name]?.meta.deliverables ?? []),
+  ]);
+  for (const schema of skill.meta.deliverables ?? []) {
+    if (!Object.prototype.hasOwnProperty.call(artifactSchemas, schema)) {
+      issues.push({ code: "MISSING_SCHEMA", path: at, message: `deliverable schema "${schema}" is not a known artifact schema` });
+    }
+  }
+  for (const schema of skill.meta.requiredDeliverables ?? []) {
+    if (!declared.has(schema)) {
+      issues.push({ code: "MISSING_DELIVERABLE", path: at, message: `required deliverable "${schema}" must be declared by this role or an included technique` });
+    }
+  }
 }
 
 export class ContentValidationError extends Error {
@@ -617,6 +637,7 @@ export function validateBundle(
   // -- skills ---------------------------------------------------------------
   for (const skill of Object.values(bundle.skills)) {
     const at = `skill ${skill.meta.name}`;
+    validateSkillDeliverables(skill, bundle.skills, issues);
 
     for (const tech of skill.meta.techniques) {
       const found = bundle.skills[tech];
@@ -750,6 +771,7 @@ export function validateResolvedRole(
   }
   for (const skill of Object.values(skills)) {
     const at = `skill ${skill.meta.name}`;
+    validateSkillDeliverables(skill, skills, issues);
     for (const capability of skill.meta.capabilities) {
       if (!capabilityNames.has(capability)) {
         issues.push({

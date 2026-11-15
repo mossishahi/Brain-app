@@ -14,6 +14,7 @@
  * (multi-provider, parallel, cached, logged). Offline runs wire none, and the
  * capability broker then reports web-search honestly as vacant.
  */
+import type { DocumentQuery, DocumentAnswer, DocumentReceipt, DocumentCoverage } from "./documents.js";
 import type { JsonObject, JsonValue } from "./types/json.js";
 
 /**
@@ -368,7 +369,8 @@ export interface WebAccessLogRecord {
     | "paper_search"
     | "paper_details"
     | "web_fetch"
-    | "web_check";
+    | "web_check"
+    | "paper_read";
   /**
    * How the call was answered:
    * - "ok"        — a provider answered;
@@ -417,6 +419,12 @@ export type WebAccessLogSink = (record: WebAccessLogRecord) => void;
  * ordinary host tools — so the model-facing surface is identical everywhere.
  */
 export interface WebAccess {
+  /** Native search deployments can expose only the host document reader. */
+  readonly documentOnly?: boolean;
+  /** Versioned full-text snapshots and task-owned delivery receipts. */
+  document?(query: DocumentQuery, context?: WebAccessCallContext): Promise<DocumentAnswer>;
+  documentReceipts?(context: WebAccessCallContext): Promise<readonly DocumentReceipt[]>;
+  documentCoverage?(documentId: string, context: WebAccessCallContext): Promise<DocumentCoverage>;
   search(query: WebSearchQuery, context?: WebAccessCallContext): Promise<WebSearchAnswer>;
   fetch(query: WebFetchQuery, context?: WebAccessCallContext): Promise<WebFetchAnswer>;
   /**

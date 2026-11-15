@@ -80,6 +80,7 @@ import {
   type StageView,
   type TokenUsageView,
   type OutputVersionView,
+  type LiteratureReviewView,
 } from "@brainstorm-agentic/protocol";
 import { jobIsExecuting, outputSections } from "@brainstorm-agentic/protocol";
 
@@ -94,6 +95,7 @@ import { gameChairView, gameCritiqueView, gameLedgerFromJournal, gameReviewConfi
 import { readJsonCached, readJsonlCached } from "./read-cache.js";
 import { factCallUsage, factMergeOf, readFactTableView, readFactUpdateJournal, type FactCallUsage, type FactNotice } from "./fact-table-view.js";
 import type { JobRecord } from "./model.js";
+import { literatureForResult, submittedLiteratureReviews, withLiterature } from "./literature-review-view.js";
 
 interface ArtifactRefFile {
   readonly id: string;
@@ -2591,6 +2593,7 @@ function buildReviews(
   ) => { readonly dismissed: DismissedSeatView } | Record<string, never> = () => ({}),
   /** The fact-update notices by id (fact-updates.jsonl): which badge each deleted and what replaced it. */
   factNotices: ReadonlyMap<string, FactNotice> = new Map(),
+  literatureReviews: readonly LiteratureReviewView[] = [],
 ): {
   members: ReviewMemberView[];
   maxRounds: number;
@@ -2618,6 +2621,7 @@ function buildReviews(
   // Per-member revision replay: how many redevelopments landed, and the last
   // one's raw record — the source of the member's final output envelope.
   const memberRevisions = new Map<number, { count: number; last: Record<string, unknown> }>();
+  const memberLiterature = new Map<number, LiteratureReviewView[]>();
   // Every version the replay assembles of each member's MAIN section, in
   // walk order — the record the output change tracker (Changes tab, change
   // document) diffs. A revision that rewrote only chain steps still
@@ -2756,6 +2760,7 @@ function buildReviews(
         continue;
       }
       chain.splice(0, chain.length, ...merged.steps);
+      memberLiterature.set(memberIndex, [...(memberLiterature.get(memberIndex) ?? []), ...literatureForResult(literatureReviews, item)]);
       workingOutput.set(memberIndex, merged.output);
       workingNovelty.set(memberIndex, merged.novelty);
       const state = memberRevisions.get(memberIndex);
@@ -2804,15 +2809,19 @@ function buildReviews(
       if (output.decision === "revised") {
         if (game) {
           const view = gameCritiqueView(output.report, author.id, seatLabel(panel.indexOf(author)));
-          const usage = round.gameCritiques?.get(commentor)?.usage;
+          const previous = round.gameCritiques?.get(commentor);
+          const usage = previous?.usage;
+          const reviews = [...(previous?.literatureReviews ?? []), ...literatureForResult(literatureReviews, item)];
           if (view) {
             round.gameCritiques ??= new Map();
-            round.gameCritiques.set(commentor, { ...view, ...(usage ? { usage } : {}), revisedAfterFactUpdate: true });
+            round.gameCritiques.set(commentor, { ...view, ...(usage ? { usage } : {}), ...(reviews.length ? { literatureReviews: reviews } : {}), revisedAfterFactUpdate: true });
           }
         } else {
           const view = comment(output.comment, author, seatLabel(panel.indexOf(author)));
-          const usage = round.comments.get(commentor)?.usage;
-          if (view) round.comments.set(commentor, { ...view, ...(usage ? { usage } : {}), revisedAfterFactUpdate: true });
+          const previous = round.comments.get(commentor);
+          const usage = previous?.usage;
+          const reviews = [...(previous?.literatureReviews ?? []), ...literatureForResult(literatureReviews, item)];
+          if (view) round.comments.set(commentor, { ...view, ...(usage ? { usage } : {}), ...(reviews.length ? { literatureReviews: reviews } : {}), revisedAfterFactUpdate: true });
         }
       } else if (output.decision === "withdrawn") {
         round.withdrawn ??= new Map();
@@ -2833,6 +2842,7 @@ function buildReviews(
     const output = isSettlement ? entry.value : agentOutput(entry);
     if (output === undefined || !entry.key.includes("/review-members/")) continue;
     const at = coordinates(entry.key);
+    const ownLiterature = literatureForResult(literatureReviews, entry.value);
     if (at.member === undefined || at.step === undefined || at.round === undefined) continue;
     const round = roundFor(at.member, at.step, at.round);
     if (round.cot === undefined) {
@@ -2846,18 +2856,18 @@ function buildReviews(
       const settledDecision = object(object(settlement)?.decision);
       if (settledDecision) round.decision = decision({ ...settledDecision, assessment: {} });
     } else if (agentResultOf(entry.key, "chair-step")) {
-      round.gameChair = gameChairView(output, issueViews(object(output)?.issues));
+      round.gameChair = withLiterature(gameChairView(output, issueViews(object(output)?.issues)), ownLiterature);
     } else if (agentResultOf(entry.key, "game-chair-reassess")) {
       // The chair's re-assessment after a fact update replaces its first
       // assessment as the round's result; the first one is kept beside it.
-      const view = gameChairView(output, issueViews(object(output)?.issues));
+      const view = withLiterature(gameChairView(output, issueViews(object(output)?.issues)), ownLiterature);
       if (view) {
         if (round.gameChair && round.firstAssessment === undefined) round.firstAssessment = { gameChair: round.gameChair };
         round.gameChair = view;
         round.reassessed = true;
       }
     } else if (agentResultOf(entry.key, "judge-reassess")) {
-      const view = decision(output);
+      const view = withLiterature(decision(output), ownLiterature);
       if (view) {
         if (round.decision && round.firstAssessment === undefined) round.firstAssessment = { decision: round.decision };
         round.decision = view;
@@ -2866,7 +2876,7 @@ function buildReviews(
     } else if ((agentResultOf(entry.key, "game-comment-step") || agentResultOf(entry.key, "game-comment-step-bridge")) && at.commentor !== undefined) {
       const author = panel.filter((member) => member.id !== panel[at.member!]?.id)[at.commentor];
       if (author) {
-        const view = gameCritiqueView(output, author.id, seatLabel(panel.indexOf(author)));
+        const view = withLiterature(gameCritiqueView(output, author.id, seatLabel(panel.indexOf(author))), ownLiterature);
         const result = object(entry.value);
         const usage = (typeof result?.taskId === "string" ? taskUsage.get(result.taskId) : undefined) ?? usageView(result?.usage);
         if (view) {
@@ -2883,7 +2893,7 @@ function buildReviews(
       const commentors = panel.filter((member) => member.id !== thinker?.id);
       const author = commentors[at.commentor];
       if (author) {
-        const view = comment(output, author, seatLabel(panel.indexOf(author)));
+        const view = withLiterature(comment(output, author, seatLabel(panel.indexOf(author))), ownLiterature);
         if (view) {
           // The commentor task's spend rides its comment: the index covers
           // retried attempts; the journaled result is the fallback.
@@ -2896,10 +2906,11 @@ function buildReviews(
         }
       }
     } else if (agentResultOf(entry.key, "judge-step")) {
-      round.decision = decision(output);
+      round.decision = withLiterature(decision(output), ownLiterature);
     } else if (agentResultOf(entry.key, "redevelop-idea") || agentResultOf(entry.key, "game-redevelop-idea")) {
       const revision = object(output);
       if (Array.isArray(revision?.steps)) {
+        memberLiterature.set(at.member, [...(memberLiterature.get(at.member) ?? []), ...ownLiterature]);
         // A revision arrives in one of two forms: the complete re-emitted
         // chain and body, or a patch naming only what changed. The patch is
         // applied through the SAME merge the runtime folded into the run, so
@@ -3053,6 +3064,8 @@ function buildReviews(
       });
       if (composed) finalIdea = composed;
     }
+    const ownReviews = [...(ideas.get(member.id)?.literatureReviews ?? []), ...(memberLiterature.get(memberIndex) ?? [])];
+    finalIdea = withLiterature(finalIdea, [...new Map(ownReviews.map((item) => [item.reviewId, item])).values()]);
     return {
       memberId: member.id,
       label: seatLabel(memberIndex),
@@ -3465,6 +3478,7 @@ export function buildJobDetailWithActivity(input: MapperInput): JobDetailWithAct
   const checkpoint = readCheckpoint(input.sessionDir);
   const events = readEvents(input.jobDir);
   const artifacts = readArtifacts(input.sessionDir);
+  const literatureReviews = submittedLiteratureReviews(artifacts).filter((review) => review.owner.runId === input.record.jobId);
   const entries = checkpoint?.journal ?? [];
   const taskUsage = taskUsageIndex(entries, events);
   const stageTimings = timings(events, taskUsage);
@@ -3638,7 +3652,10 @@ export function buildJobDetailWithActivity(input: MapperInput): JobDetailWithAct
         key.includes(`/member[${finalPanel.indexOf(member)}]/`) &&
         /\/develop-idea(?:\/develop-idea-execute)?::result$/.test(key)
       );
-    const value = brainIdea(raw);
+    const developResult = entries.find((entry) => entry.kind === "agent" &&
+      entry.key.includes("/first-pass/") && entry.key.includes(`/member[${finalPanel.indexOf(member)}]/`) &&
+      /\/develop-idea(?:\/develop-idea-execute)?::result$/.test(entry.key));
+    const value = withLiterature(brainIdea(raw), literatureForResult(literatureReviews, developResult?.value));
     if (value) {
       ideas.set(member.id, value);
       rawIdeas.set(member.id, raw);
@@ -3765,6 +3782,7 @@ export function buildJobDetailWithActivity(input: MapperInput): JobDetailWithAct
     taskUsage,
     dismissedSeat,
     new Map(readFactUpdateJournal(input.sessionDir).notices.map((notice): [string, FactNotice] => [notice.id, notice])),
+    literatureReviews,
   );
 
   // With the executed roster AND the review's own rounds known, every activity
@@ -4214,7 +4232,7 @@ export function buildJobDetailWithActivity(input: MapperInput): JobDetailWithAct
     });
   }
 
-  const stages: StageView[] = [
+  const stageRecords: StageView[] = [
     {
       ...processBase,
       id: "process-input",
@@ -4266,6 +4284,11 @@ export function buildJobDetailWithActivity(input: MapperInput): JobDetailWithAct
     },
     { ...doneBase, id: "done", ...(summary ? { summary } : {}), ...(factTable ? { factTable } : {}) },
   ];
+
+  const stages: StageView[] = stageRecords.map((stage) => {
+    const ownReviews = literatureReviews.filter((review) => (stageForPath(review.owner.nodePath) ?? "done") === stage.id);
+    return ownReviews.length > 0 ? { ...stage, literatureReviews: ownReviews } : stage;
+  });
 
   const activeStage = stages.find(
     (stage) =>
