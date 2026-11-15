@@ -471,7 +471,8 @@ export function needsEditViolation(originalValue: unknown, editedValue: unknown)
         if (!sameJson(source[key], problem[key])) return `equivalent problem "${str(problem.name)}": ${key} cannot be rewritten`;
       }
       const confidence = problem.confidence;
-      if (typeof confidence !== "number" || !Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
+      if (source.confidence !== undefined &&
+          (typeof confidence !== "number" || !Number.isFinite(confidence) || confidence < 0 || confidence > 1)) {
         return `equivalent problem "${str(problem.name)}": confidence must be within [0, 1]`;
       }
     }

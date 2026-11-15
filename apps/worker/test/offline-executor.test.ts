@@ -81,6 +81,37 @@ test("the first pass writes four-part steps under brainIdeaParts and paragraphs 
   }
 });
 
+test("the offline first pass and revision follow the run's configured argument count", async () => {
+  const firstPass = taskFor("brain", "brainIdeaParts", { ...brainBindings, cotSteps: 7 });
+  const result = await new OfflineBrainstormExecutor({ cotSteps: 3 }).execute(firstPass);
+  assert.ok(result.status === "ok");
+  const idea = artifactSchemas.brainIdeaParts.parse(result.output);
+  assert.equal(idea.cot.length, 7);
+  assert.equal((result.metadata?.stepTurns as JsonValue[]).length, 7);
+
+  const revision = await artifactOf(taskFor("redeveloper", "redevelopment", {
+    currentStep: 2,
+    totalSteps: 7,
+    chain: Array.from({ length: 7 }, (_, index) => `Original argument ${index + 1}.`),
+  }));
+  assert.equal((revision.steps as JsonValue[]).length, 7);
+  assert.equal((revision.steps as JsonValue[])[6], "Original argument 7.");
+});
+
+test("offline classification preserves legacy counts and respects conditional keyword routing", async () => {
+  const legacy = await artifactOf(taskFor("classifier", "taskClassification", {}));
+  assert.equal(legacy.cotSteps, 3);
+  for (const routeKeyTerms of [false, true]) {
+    const classified = await artifactOf(taskFor("classifier", "taskClassification", {
+      routeKeyTerms,
+      equivalentProblemWeight: 0,
+    }));
+    artifactSchemas.taskClassification.parse(classified);
+    assert.equal(Object.hasOwn(classified, "cotSteps"), false);
+    assert.equal(Object.hasOwn(classified.embeddingInput as JsonObject, "keyTerms"), routeKeyTerms);
+  }
+});
+
 test("a part-aware comment carries a per-step flaw draft and no top-level step", async () => {
   const bindings: JsonObject = { currentStep: 3 };
   const comment = await artifactOf(taskFor("commentor", "commentParts", bindings));

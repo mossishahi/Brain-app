@@ -14,6 +14,9 @@ async function loadSdk(): Promise<void> {
   await sdkLoading;
 }
 import { z } from "zod";
+import { Ajv2020 } from "ajv/dist/2020.js";
+import { fullFormats } from "ajv-formats/dist/formats.js";
+import { singleClosingDelimiterRepairs, type ClosingDelimiterRepair } from "./json-format-repair.js";
 import { createHash, randomUUID } from "node:crypto";
 import { lstatSync, mkdirSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -2090,6 +2093,49 @@ function parseResultOutput(result: UnknownRecord, task: AgentTask): JsonValue {
   return text;
 }
 
+/**
+ * A complete answer can lose a single closing brace/bracket in transport to
+ * raw JSON. Do not spend another research session on that formatting error.
+ * Only one unambiguous insertion is allowed, selected by the EXACT delivered
+ * schema (not the SDK's flattened transport schema). The normal authoritative
+ * artifact and deliverable checks still run after the captured steps are added.
+ */
+function recoverClosingDelimiter(
+  raw: string,
+  schema: JsonObject,
+  signal: AbortSignal | undefined,
+): ClosingDelimiterRepair | undefined {
+  try {
+    const validate = new Ajv2020({
+      strict: false,
+      strictSchema: true,
+      formats: fullFormats,
+      coerceTypes: false,
+      useDefaults: false,
+      removeAdditional: false,
+    }).compile(schema);
+    // This local search only supports synchronous schemas. An async validator
+    // returns a truthy Promise, not a validation verdict.
+    if ("$async" in validate && validate.$async === true) return undefined;
+    let selected: ClosingDelimiterRepair | undefined;
+    for (const candidate of singleClosingDelimiterRepairs(raw)) {
+      if (signal?.aborted) throw abortError(signal.reason);
+      if (validate(candidate.value) !== true) continue;
+      // The generator deduplicates equal parsed values. More than one valid
+      // structure means the schema cannot establish the intended placement.
+      if (selected !== undefined) return undefined;
+      selected = candidate;
+    }
+    if (signal?.aborted) throw abortError(signal.reason);
+    return selected;
+  } catch {
+    if (signal?.aborted) throw abortError(signal.reason);
+    // Unsupported schemas and an incomplete/time-bounded search must never
+    // weaken validation or allow an arbitrary first matching candidate.
+    return undefined;
+  }
+}
+
 function normalizeValidation(
   result: ClaudeAgentValidationResult,
   original: JsonValue,
@@ -2893,15 +2939,35 @@ async function executeQuery(
       );
     }
     let output: JsonValue;
+    let jsonFormattingRepair: JsonObject | undefined;
     try {
       output = parseResultOutput(finalResult, task);
     } catch (error) {
-      // An unparseable final message spends a validation attempt in a fresh
-      // session; the tokens this one billed must not vanish with it.
-      throw attachTaskUsage(error, queryUsage, finalResult.total_cost_usd);
+      const stepDeliveryComplete = capture.stepwise === undefined ||
+        (capture.stepwise.spec.sparse === true
+          ? capture.stepwise.steps.length >= 1
+          : capture.stepwise.steps.length === capture.stepwise.spec.count);
+      const repaired = error instanceof StructuredOutputParseError && task.outputSchema &&
+        config.outputValidator && stepDeliveryComplete
+        ? recoverClosingDelimiter(error.rawOutput, task.outputSchema.schema, context.signal)
+        : undefined;
+      if (repaired === undefined) {
+        // The tokens billed by an unsuccessful attempt must not vanish.
+        throw attachTaskUsage(error, queryUsage, finalResult.total_cost_usd);
+      }
+      output = repaired.value;
+      jsonFormattingRepair = {
+        kind: "insert-closing-delimiter", offset: repaired.offset, delimiter: repaired.delimiter,
+      };
+      progress(context, {
+        kind: "validation",
+        message: "Recovered a missing JSON closing delimiter; preserving completed work and validating the artifact",
+        data: { jsonFormattingRepair },
+      });
     }
     const metadata: JsonObject = {
       executor: "claude-agent-sdk",
+      ...(jsonFormattingRepair !== undefined ? { jsonFormattingRepair } : {}),
       ...(typeof finalResult.session_id === "string"
         ? { sessionId: finalResult.session_id }
         : {}),
@@ -3126,7 +3192,9 @@ export class ClaudeAgentExecutor implements AgentExecutor {
         const normalized = task.outputSchema && this.config.outputValidator
           ? normalizeValidation(await this.config.outputValidator.validate(succeeded.output, task.outputSchema.schema, task), succeeded.output)
           : { success: true as const, value: succeeded.output };
+        if (context.signal?.aborted) throw abortError(context.signal.reason);
         const deliverableIssues = await context.validateDeliverables?.() ?? [];
+        if (context.signal?.aborted) throw abortError(context.signal.reason);
         if (normalized.success && deliverableIssues.length === 0) {
           return {
             ...succeeded,

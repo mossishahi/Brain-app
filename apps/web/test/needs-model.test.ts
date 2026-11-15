@@ -78,3 +78,13 @@ test("an unchanged reading approves; any edit sends the full edited input", () =
     embeddingInput: edited,
   });
 });
+
+test("retrieval-only equivalents omit dead labels and never acquire confidence through editing", () => {
+  const slim: NeedsInput = { ...input, equivalentProblems: [{ name: "Gaussian belief propagation", statement: "E" }] };
+  const rows = needRows(slim, { ...weights, equivalentProblemWeight: 0 });
+  assert.deepEqual(rows.at(-1), { kind: "equivalent", name: "Gaussian belief propagation", weight: 0, retrievalOnly: true });
+  assert.ok(Number.isFinite(totalWeight(rows)));
+  const unchanged = setConfidence(slim, 0, 0.9);
+  assert.deepEqual(unchanged, slim);
+  assert.deepEqual(needsGateAnswer("confirm-needs", slim, unchanged), { gateKey: "confirm-needs", action: "approve" });
+});

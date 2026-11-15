@@ -135,6 +135,33 @@ settings. New workers must load the updated executor before the recovery is
 available; updating a source checkout alone does not update an installed desktop
 backend.
 
+For a successful SDK response whose final raw JSON is missing exactly one
+closing brace or bracket, the executor first tries a local formatting repair.
+It preserves all keys and values and accepts only a unique placement that
+satisfies the complete delivered JSON schema. Already submitted argument steps
+remain intact, and authoritative artifact and literature-deliverable validation
+still run. This makes no additional model call, including on the final allowed
+attempt. Ambiguous placements, incomplete values, malformed escapes and missing
+steps are not repaired. Progress and result metadata record the inserted
+delimiter and its position; a bounded search that cannot finish accepts nothing.
+
+### Classification and argument steps
+
+With Brain workflow 0.33.0 and app 0.2.94, **Settings → Research → Argument
+steps per committee member** controls the number of reviewable argument steps
+for new runs (3–9, default 6). This setting is saved with each job; changing it
+does not change an existing run or its resumed checkpoint. It does not limit
+the model's thinking or output tokens. Older pinned workflows retain their
+classifier-selected count.
+
+The classifier supplies the submission type, a brief reason for each offered
+reading, requested deliverables, and retrieval text. It no longer generates
+facet-kind labels, equivalent-problem field labels, or the argument count.
+Key terms are requested only when their search route is enabled; equivalent
+confidence is requested only when equivalent-problem weighting is positive.
+Formulation, equivalent names/statements, and aliases remain available for
+retrieval. Existing artifacts with the older fields remain readable.
+
 ### Optional GPU execution (SLURM)
 
 After the LLM connection is configured, the host discovers its architecture,

@@ -1623,6 +1623,9 @@ export interface ServerSettings {
   readonly gamifiedReview?: boolean;
   /** Frozen for each new run; absent defaults to threshold 0.5 and automatic points. */
   readonly gameReview?: GameReviewSettings;
+  /** Reviewable argument steps per committee member for NEW runs (integer 3–9; default 6).
+   * Frozen in the run's execution settings; independent of model thinking. */
+  readonly argumentSteps?: number;
   /**
    * Review-round budget for NEW runs: one chain step may take at most
    * `maxRounds` rounds (the first review plus revisions). Absent = the
@@ -1890,6 +1893,8 @@ export interface ServerSettingsUpdate {
   readonly gamifiedReview?: boolean;
   /** Absent keeps the section; omitting initialPoints in a supplied section restores automatic points. */
   readonly gameReview?: GameReviewSettings;
+  /** Absent keeps the stored argument count; integer 3–9, for new runs only. */
+  readonly argumentSteps?: number;
   /**
    * Absent = keep the stored review policy. `{}` = follow the bundle's
    * default again. `{ maxRounds: n }` = override the budget for new runs.

@@ -194,6 +194,9 @@ export function buildOrchestrationCommand(
           )}`,
         ]
       : [];
+  const argumentStepsEnv = options.settings.argumentSteps !== undefined
+    ? [`BRAINSTORM_AGENTIC_ARGUMENT_STEPS=${shellQuote(String(options.settings.argumentSteps))}`]
+    : [];
   // Panel policy for NEW runs, same channel: the size maps onto the pinned
   // workflow's panelSize param at run start, and the seat switch is a host
   // option the runtime's weave activity honors. Resumes carry both too — a
@@ -222,6 +225,7 @@ export function buildOrchestrationCommand(
     ...credentialsEnv,
     ...modelEnvironment(options.settings),
     ...reviewEnv,
+    ...argumentStepsEnv,
     ...panelEnv,
     ...args,
   ].join(" ");

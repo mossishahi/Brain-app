@@ -14,8 +14,10 @@ const task: AgentTask = {
 };
 
 test("a malformed long draft reaches corrective feedback intact, with its parser error and schema", async () => {
-  const expected = { abstract: ["Anisotropic spectrum. ".repeat(600) + "Final important condition: connected graph."] };
-  const malformed = JSON.stringify(expected).slice(0, -1);
+  const expected = { abstract: ["Anisotropic spectrum. ".repeat(600), "Final important condition: connected graph."] };
+  // Missing commas are outside the deterministic single-closing-delimiter
+  // repair contract, and must still reach model feedback without truncation.
+  const malformed = JSON.stringify(expected).replace('\",\"', '\" \"');
   assert.ok(malformed.length > 11_000);
   assert.equal(salvageJsonText(malformed), undefined, "never accept a complete inner array as the paper");
   const inputs: ClaudeAgentQueryInput[] = [];

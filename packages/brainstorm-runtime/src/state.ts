@@ -47,6 +47,9 @@ function positiveParam(
   if (typeof value !== "number" || !Number.isFinite(value)) {
     throw new BrainstormRuntimeError(`workflow param "${name}" must be numeric`, "INVALID_WORKFLOW_PARAM");
   }
+  if (name === "argumentSteps" && !Number.isInteger(value)) {
+    throw new BrainstormRuntimeError('workflow param "argumentSteps" must be an integer', "INVALID_WORKFLOW_PARAM");
+  }
   if (name === "gameInitialPoints" && value < 0 && value !== -1) {
     throw new BrainstormRuntimeError('workflow param "gameInitialPoints" must be -1 (automatic) or nonnegative', "INVALID_WORKFLOW_PARAM");
   }

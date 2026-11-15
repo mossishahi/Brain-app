@@ -226,21 +226,21 @@ export function NeedsGateCard({
                 </tr>
               )}
               {(current.equivalentProblems ?? []).map((problem, index) => {
-                const weight = view.weights.equivalentProblemWeight * problem.confidence;
+                const weight = view.weights.equivalentProblemWeight * (problem.confidence ?? 0);
                 return (
-                  <tr key={`${problem.field}/${problem.name}`}>
+                  <tr key={`${problem.field ?? ""}/${problem.name}`}>
                     <th scope="row">
                       <span className="chip chip-dim">equivalent</span> {problem.name}{" "}
-                      <span className="dim">({problem.field})</span>
+                      {problem.field && <span className="dim">({problem.field})</span>}
                       <span className="needs-statement dim small">{problem.statement}</span>
                     </th>
                     <td>
-                      <WeightInput
+                      {problem.confidence !== undefined && <WeightInput
                         label={`confidence of ${problem.name}`}
                         value={problem.confidence}
                         disabled={busy}
                         onChange={(next) => setEdited(setConfidence(current, index, next))}
-                      />
+                      />}
                       <span className="dim small">
                         {" "}
                         → weight {weight.toFixed(2)}

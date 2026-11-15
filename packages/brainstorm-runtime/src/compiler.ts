@@ -55,6 +55,7 @@ import {
 } from "@brainstorm-agentic/core";
 
 import { planTaskCaches, type TaskCachePlan } from "./cache-plan.js";
+import { assertClassifierOutput, classificationArgumentSteps, classifierTaskSchema } from "./classifier-contract.js";
 import { createDismissalPolicy, type DismissalPolicy } from "./dismissal.js";
 import {
   jsonEqual,
@@ -1496,8 +1497,8 @@ function builtinActivities(options: {
     },
     "classification.apply": (input) => {
       // Fold the classifier's primary decision into the structured input:
-      // type, cotSteps, and the requested outputs (omitted when empty, the
-      // same contract the processor used to follow). The confirmation gate
+      // type and requested outputs (omitted when empty), plus the configured
+      // argument count. Old workflows retain the classifier's count. The confirmation gate
       // downstream may overwrite type and requestedOutputs with the human's
       // choice; everything else of the input rides through unchanged.
       const processor = asObject(
@@ -1520,7 +1521,7 @@ function builtinActivities(options: {
       return {
         ...rest,
         type: primary.type!,
-        cotSteps: classification.cotSteps!,
+        cotSteps: classificationArgumentSteps(input, classification),
         ...(requested.length > 0 ? { requestedOutputs: requested } : {}),
         // The finite-output bound is declared over the file map; the merge
         // never grows it, but the field must exist for the bound check.
@@ -2121,6 +2122,9 @@ class ContentCompiler {
         }
       }
       let taskJsonSchema = jsonSchema;
+      if (node.output.schema === "taskClassification") {
+        taskJsonSchema = classifierTaskSchema(taskJsonSchema, bindings);
+      }
       if ((node.output.schema === "gameChairDecision" || node.output.schema === "gameCommitteeDecision") && isJsonRecord(bindings.comments)) {
         const ids = Object.keys(bindings.comments);
         // A bundle that declares the decision rule hands its chair the
@@ -2697,6 +2701,9 @@ class ContentCompiler {
       if (raw === undefined && (this.dismissedHere(scope, enclosing) ||
           (committeeCritic && isJsonRecord(scope.get(dispatchKey))))) return stateFrom(scope);
       if (raw === undefined) throw new BrainstormRuntimeError(`agent "${node.id}" produced no output`, "MISSING_OUTPUT");
+      if (node.output.schema === "taskClassification") {
+        assertClassifierOutput(raw, resolveBindings(node.bind, scope, this.roots, this.dismissal));
+      }
       let written = await writeValidatedOutput(
         scope,
         node.output.key,

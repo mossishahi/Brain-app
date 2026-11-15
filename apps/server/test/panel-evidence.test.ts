@@ -196,6 +196,21 @@ test("editRule needs refuses additions, rewrites, out-of-range weights and fewer
   assert.match(needsEditViolation(embeddingInput, [])!, /must be an object/);
 });
 
+test("the needs gate accepts edits when the classifier omitted unused equivalent metadata", () => {
+  const current = {
+    ...embeddingInput,
+    equivalentProblems: embeddingInput.equivalentProblems.map(({ name, statement }) => ({ name, statement })),
+  };
+  const edited = structuredClone(current);
+  edited.facets[0]!.relevance = 0.4;
+  edited.equivalentProblems.splice(0, 1);
+  assert.equal(needsEditViolation(current, edited), undefined);
+  assert.equal(needsEditViolation(current, structuredClone(current)), undefined);
+  assert.match(needsEditViolation(current, { ...current, equivalentProblems: [
+    { ...current.equivalentProblems[0], confidence: 0.7 },
+  ] })!, /confidence cannot be added/);
+});
+
 test("the needs gate view carries the run's weight params, defaulting to spec 0.1", () => {
   const view = buildNeedsGateView("confirm-needs", { embeddingInput }, { coreWeight: 0.9, formulationWeight: 0 });
   assert.ok(view);

@@ -11,11 +11,11 @@ export const settingsCategories = [
 ] as const;
 
 export type SettingsCategory = (typeof settingsCategories)[number]["id"];
-export type SettingsSectionId = "updates" | "execution" | "gpu" | "model" | "credential" | "confirmation" | "review" | "panel" | "panelComposition" | "tools" | "webSearch" | "availability" | "recovery";
+export type SettingsSectionId = "updates" | "execution" | "gpu" | "model" | "credential" | "confirmation" | "argumentSteps" | "review" | "panel" | "panelComposition" | "tools" | "webSearch" | "availability" | "recovery";
 export type SaveState = "idle" | "saving" | "saved" | "error";
 
 export const categorySections: Record<SettingsCategory, readonly SettingsSectionId[]> = {
-  connections: ["model", "credential"], stageModels: [], research: ["confirmation", "review", "panel", "panelComposition"],
+  connections: ["model", "credential"], stageModels: [], research: ["confirmation", "argumentSteps", "review", "panel", "panelComposition"],
   tools: ["tools", "webSearch", "availability"], execution: ["execution", "gpu"],
   recovery: ["recovery"], updates: ["updates"], appearance: [],
 };
@@ -24,7 +24,7 @@ export function settingsCategory(value?: string): SettingsCategory {
   if (settingsCategories.some((category) => category.id === value)) return value as SettingsCategory;
   const aliases: Record<string, SettingsCategory> = {
     model: "connections", credential: "connections", webSearch: "tools", availability: "tools", gpu: "execution",
-    confirmation: "research", review: "research", panel: "research", panelComposition: "research",
+    confirmation: "research", argumentSteps: "research", review: "research", panel: "research", panelComposition: "research",
   };
   return aliases[value ?? ""] ?? "connections";
 }

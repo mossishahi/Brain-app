@@ -160,6 +160,14 @@ function pinnedBundleDir(): string {
 
 const registryContentDir = process.env.BRAIN_TEST_CONTENT_DIR ?? pinnedBundleDir();
 
+/** These review fixtures intentionally use a small, fixed chain; explicit test params still override it. */
+function fixtureBundle(): ReturnType<typeof loadContent> {
+  const bundle = loadContent(registryContentDir);
+  const steps = bundle.workflows.brainstorm?.params.argumentSteps;
+  if (steps) steps.default = CHAIN_STEPS;
+  return bundle;
+}
+
 function object(value: JsonValue | undefined, label: string): JsonObject {
   assert.ok(typeof value === "object" && value !== null && !Array.isArray(value), `${label} is not an object`);
   return value as JsonObject;
@@ -331,9 +339,10 @@ class FakeBrainstormExecutor implements AgentExecutor {
             type: "unverified claim",
             reason: "A reader could take the held-out-graph question as a single checkable claim instead.",
           },
-          cotSteps: CHAIN_STEPS,
+          ...(typeof bindings.routeKeyTerms === "boolean" ? {} : { cotSteps: CHAIN_STEPS }),
           requestedOutputs: [],
           embeddingInput: {
+            ...(bindings.routeKeyTerms === true ? { keyTerms: [] } : {}),
             title: "Distributional message passing over graphs",
             abstract:
               "This work studies message passing over graphs in which node states are full distributions rather than point estimates. " +
@@ -630,7 +639,7 @@ function runtime(
   humanGateMode: "manual" | "autoApproveSkippable" = "autoApproveSkippable",
   stores?: Pick<BrainstormRuntime, "checkpoints" | "artifacts">,
 ) {
-  const bundle = loadContent(registryContentDir);
+  const bundle = fixtureBundle();
   return new BrainstormRuntime({
     bundle,
     workflow: judgedWorkflow(bundle),
@@ -1099,7 +1108,7 @@ test("a run out of host time finishes what is in flight, starts nothing new, and
   let deadlinePassed = false;
   const firstPassSeen = () => executor.tasks("brain").length;
   const app = new BrainstormRuntime({
-    bundle: loadContent(registryContentDir),
+    bundle: fixtureBundle(),
     agentExecutor: executor,
     humanGateMode: "autoApproveSkippable",
     activities: { ...taxonomyActivities(new StubTaxonomy()), ...literatureFixtureActivities() },

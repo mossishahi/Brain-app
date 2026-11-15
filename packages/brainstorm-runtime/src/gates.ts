@@ -217,7 +217,10 @@ export function applyNeedsEdit(current: JsonObject, proposed: JsonValue, nodeId:
           throw needsEditError(nodeId, `equivalent problem "${String(entry.name)}" may not change "${key}"`);
         }
       }
-      if (!unitInterval(entry.confidence)) {
+      if (original.confidence === undefined && entry.confidence !== undefined) {
+        throw needsEditError(nodeId, `equivalent problem "${String(entry.name)}" has no confidence to edit`);
+      }
+      if (original.confidence !== undefined && !unitInterval(entry.confidence)) {
         throw needsEditError(nodeId, `equivalent problem "${String(entry.name)}" needs a confidence within [0, 1]`);
       }
     }

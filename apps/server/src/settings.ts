@@ -407,6 +407,7 @@ export function defaultServerSettings(
     gateAutoApprove: true,
     gamifiedReview: false,
     gameReview: { threshold: 0.5, decisionRule: "chair-decisive", leaveOneOut: true },
+    argumentSteps: 6,
     contentRegistry: {
       url: contentRegistryUrl,
       bundle: "brainstorm",
@@ -506,6 +507,7 @@ function validateCommonSettings(value: unknown): {
   readonly gateAutoApprove: boolean;
   readonly gamifiedReview: boolean;
   readonly gameReview: GameReviewSettings;
+  readonly argumentSteps: number;
   readonly review?: { readonly maxRounds?: number };
   readonly panel?: { readonly size?: number; readonly interdisciplinarySeat?: boolean };
   readonly llm: Record<string, unknown>;
@@ -560,6 +562,10 @@ function validateCommonSettings(value: unknown): {
   }
   const gamifiedReview = input.gamifiedReview === true;
   const gameReview = validateGameReviewSettings(input.gameReview);
+  const argumentSteps = input.argumentSteps === undefined ? 6 : input.argumentSteps;
+  if (typeof argumentSteps !== "number" || !Number.isInteger(argumentSteps) || argumentSteps < 3 || argumentSteps > 9) {
+    throw new Error("argumentSteps must be an integer between 3 and 9");
+  }
   const llm = object(input.llm, "llm");
   const creditRecovery =
     input.creditRecovery === undefined
@@ -620,6 +626,7 @@ function validateCommonSettings(value: unknown): {
     gateAutoApprove,
     gamifiedReview,
     gameReview,
+    argumentSteps,
     ...(review !== undefined ? { review } : {}),
     ...(panel !== undefined ? { panel } : {}),
     llm,
@@ -1100,6 +1107,7 @@ function validateStoredSettings(value: unknown): StoredServerSettings {
     gateAutoApprove: common.gateAutoApprove,
     gamifiedReview: common.gamifiedReview,
     gameReview: common.gameReview,
+    argumentSteps: common.argumentSteps,
     // Stored only when it actually overrides; `{}` normalizes to absent.
     ...(common.review?.maxRounds !== undefined
       ? { review: { maxRounds: common.review.maxRounds } }
@@ -1333,6 +1341,7 @@ function validateSettingsUpdate(value: unknown): ValidatedUpdate {
       gateAutoApprove: common.gateAutoApprove,
       gamifiedReview: common.gamifiedReview,
       gameReview: common.gameReview,
+      argumentSteps: common.argumentSteps,
       ...(common.updateCheck !== undefined ? { updateCheck: common.updateCheck } : {}),
       // Opt-out has to survive the save that made it. This was validated and
       // then dropped from the persisted document, so switching telemetry off
@@ -2090,6 +2099,7 @@ export class SettingsStore {
       gateAutoApprove: patch.gateAutoApprove ?? stored.gateAutoApprove,
       gamifiedReview: patch.gamifiedReview !== undefined ? patch.gamifiedReview : stored.gamifiedReview,
       gameReview: patch.gameReview !== undefined ? patch.gameReview : stored.gameReview,
+      argumentSteps: patch.argumentSteps !== undefined ? patch.argumentSteps : stored.argumentSteps,
       updateCheck: patch.updateCheck ?? stored.updateCheck,
       llm: section("llm"),
       creditRecovery: section("creditRecovery"),

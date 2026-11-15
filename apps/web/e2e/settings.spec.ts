@@ -84,6 +84,45 @@ test('typed settings save the final keystroke and closing flushes the debounce',
   await expect(dialog.getByLabel('Time limit per job (minutes)')).toHaveCount(0);
 });
 
+test('argument count autosaves independently of review rounds and survives reopening settings', async ({ page }) => {
+  const writes = settingsWrites(page);
+  let dialog = await openSettings(page, 'Research');
+  const count = () => dialog.getByLabel('Argument steps per committee member', { exact: true });
+  await expect(count()).toHaveValue('6');
+  await expect(count().locator('option')).toHaveText(['3 steps', '4 steps', '5 steps', '6 steps', '7 steps', '8 steps', '9 steps']);
+  await count().selectOption('4');
+  await expect.poll(() => writes.some(patch => patch.argumentSteps === 4)).toBe(true);
+  await dialog.getByLabel('Rounds one chain step may take', { exact: true }).selectOption('7');
+  await dialog.getByRole('button', { name: 'Done', exact: true }).click();
+  await page.reload();
+  dialog = await openSettings(page, 'Research');
+  await expect(count()).toHaveValue('4');
+  await expect(dialog.getByLabel('Rounds one chain step may take', { exact: true })).toHaveValue('7');
+  expect(writes.find(patch => patch.argumentSteps === 4)).toEqual({ argumentSteps: 4 });
+});
+
+test('a failed argument count save remains retryable after a review budget save', async ({ page }) => {
+  let fail = true;
+  await page.route('**/api/settings', async route => {
+    if (fail && route.request().method() === 'PUT' && route.request().postDataJSON().argumentSteps !== undefined) {
+      await route.fulfill({ status: 503, json: { error: 'Argument count could not be saved' } });
+    } else await route.fallback();
+  });
+  const dialog = await openSettings(page, 'Research');
+  await dialog.getByLabel('Argument steps per committee member', { exact: true }).selectOption('5');
+  await expect(dialog.getByText('Argument count could not be saved', { exact: true })).toBeVisible();
+  await dialog.getByLabel('Rounds one chain step may take', { exact: true }).selectOption('8');
+  await expect(dialog.getByText('Argument count could not be saved', { exact: true })).toBeVisible();
+  fail = false;
+  await dialog.getByRole('button', { name: 'Retry saving', exact: true }).click();
+  await expect(dialog.getByText('Argument count could not be saved', { exact: true })).toHaveCount(0);
+  await dialog.getByRole('button', { name: 'Done', exact: true }).click();
+  await page.reload();
+  await openSettings(page, 'Research');
+  await expect(dialog.getByLabel('Argument steps per committee member', { exact: true })).toHaveValue('5');
+  await expect(dialog.getByLabel('Rounds one chain step may take', { exact: true })).toHaveValue('8');
+});
+
 test('failed saves remain visible through close and can be corrected', async ({ page }) => {
   let fail = true;
   await page.route('**/api/settings', async (route) => {

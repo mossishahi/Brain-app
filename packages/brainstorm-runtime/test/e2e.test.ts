@@ -175,6 +175,14 @@ function pinnedBundleDir(): string {
 const registryContentDir =
   process.env.BRAIN_TEST_CONTENT_DIR ?? pinnedBundleDir();
 
+/** These review fixtures intentionally use a small, fixed chain; explicit test params still override it. */
+function fixtureBundle(): ReturnType<typeof loadContent> {
+  const bundle = loadContent(registryContentDir);
+  const steps = bundle.workflows.brainstorm?.params.argumentSteps;
+  if (steps) steps.default = 3;
+  return bundle;
+}
+
 function object(value: JsonValue | undefined, label: string): JsonObject {
   assert.ok(typeof value === "object" && value !== null && !Array.isArray(value), `${label} is not an object`);
   return value as JsonObject;
@@ -430,9 +438,10 @@ class FakeBrainstormExecutor implements AgentExecutor {
             type: "unverified claim",
             reason: "A reader could take the held-out-graph question as a single checkable claim instead.",
           },
-          cotSteps: 3,
+          ...(typeof bindings.routeKeyTerms === "boolean" ? {} : { cotSteps: 3 }),
           requestedOutputs: [],
           embeddingInput: {
+            ...(bindings.routeKeyTerms === true ? { keyTerms: [] } : {}),
             title: "Distributional message passing over graphs",
             abstract:
               "This work studies message passing over graphs in which node states are full distributions rather than point estimates. " +
@@ -536,7 +545,7 @@ class FakeBrainstormExecutor implements AgentExecutor {
       case "brain":
         output = {
           output: developedOutput(agentId),
-          cot: [1, 2, 3].map((step) => `COT:${agentId}:${step}`),
+          cot: Array.from({ length: typeof bindings.cotSteps === "number" ? bindings.cotSteps : 3 }, (_, index) => `COT:${agentId}:${index + 1}`),
           novelty: `Novelty for ${agentId}`,
         };
         break;
@@ -715,13 +724,13 @@ class FakeBrainstormExecutor implements AgentExecutor {
 let publishedBundle: ContentBundle | undefined;
 
 function payloadVars(role: string): readonly string[] {
-  publishedBundle ??= loadContent(registryContentDir);
+  publishedBundle ??= fixtureBundle();
   return publishedBundle.skills[role]?.meta.payload ?? [];
 }
 
 /** A role's effective capabilities: its own plus its techniques', in declared order. */
 function roleCapabilities(role: string): readonly string[] {
-  publishedBundle ??= loadContent(registryContentDir);
+  publishedBundle ??= fixtureBundle();
   const skill = publishedBundle.skills[role];
   if (!skill) return [];
   const capabilities = [...skill.meta.capabilities];
@@ -829,7 +838,7 @@ function runtime(
   workflow?: ContentWorkflowDefinition,
 ) {
   return new BrainstormRuntime({
-    bundle: loadContent(registryContentDir),
+    bundle: fixtureBundle(),
     agentExecutor: executor,
     humanGateMode,
     ...(workflow !== undefined ? { workflow } : {}),
@@ -1039,7 +1048,7 @@ test("Pass path walks every seat in step order (seats in parallel) and keeps C-O
   // stopped rendering it as a prose block (bundle 0.26.0). Read from the
   // loaded bundle so the expectation is the same single source the compiler
   // merges from, whichever bundle version the suite is pinned to.
-  publishedBundle ??= loadContent(registryContentDir);
+  publishedBundle ??= fixtureBundle();
   const ideaOutline = publishedBundle.catalogs.inputTypes.outlines["research idea"]!;
   assert.ok(Object.keys(ideaOutline).length > 0, "the catalog carries an outline to merge");
   const paperFields = object(
@@ -1244,7 +1253,7 @@ test("instructions stay in a cacheable system prefix; submitted data rides the t
   // bullet per OTHER seat ("- <umbrella>, <subfields>"), the seat's own row
   // removed by the compiler. Version-aware like every content-shape check:
   // bundles that do not bind `board` must render no board bullet at all.
-  publishedBundle ??= loadContent(registryContentDir);
+  publishedBundle ??= fixtureBundle();
   const bindsBoard = JSON.stringify(publishedBundle.workflows.brainstorm).includes(
     '"board"',
   );
@@ -1282,7 +1291,7 @@ test("instructions stay in a cacheable system prefix; submitted data rides the t
  * tests keep proving the same thing against older pins.
  */
 function judgedWorkflow(): ContentWorkflowDefinition {
-  publishedBundle ??= loadContent(registryContentDir);
+  publishedBundle ??= fixtureBundle();
   const cloned = JSON.parse(
     JSON.stringify(publishedBundle.workflows.brainstorm!),
   ) as unknown;
@@ -1406,7 +1415,7 @@ test("verdict definitions ride the instructions, and only the round's names ride
     params: { panelSize: 2 },
   });
   assert.equal(result.status, "completed");
-  publishedBundle ??= loadContent(registryContentDir);
+  publishedBundle ??= fixtureBundle();
   // Both placements render the catalog as JSON, and the definitions quote the
   // verdict names, so the text to look for is the escaped form.
   const passDefinition = JSON.stringify(
@@ -1455,7 +1464,7 @@ test("verdict definitions ride the instructions, and only the round's names ride
 });
 
 test("the cache plan proves stability from the workflow's structure, never from variable names", () => {
-  publishedBundle ??= loadContent(registryContentDir);
+  publishedBundle ??= fixtureBundle();
   const plan = planTaskCaches(publishedBundle.workflows.brainstorm!);
 
   // A review task's run-level material is identical in every call of the run;
@@ -1622,7 +1631,7 @@ test("a unanimous round is a fast pass: recorded, walked past, and no judge conv
   // judge — a passing comment may carry no evidence, so the round holds
   // nothing to weigh. Version-aware: bundles without the flag convene the
   // judge exactly as before.
-  publishedBundle ??= loadContent(registryContentDir);
+  publishedBundle ??= fixtureBundle();
   const flagged = JSON.stringify(publishedBundle.workflows.brainstorm).includes(
     '"fastPassUnanimous"',
   );
@@ -1678,7 +1687,7 @@ test("the interdisciplinary seat switches off as a host option, and the panel ri
   // that run — replay never re-asks.
   const executor = new FakeBrainstormExecutor();
   const app = new BrainstormRuntime({
-    bundle: loadContent(registryContentDir),
+    bundle: fixtureBundle(),
     agentExecutor: executor,
     humanGateMode: "autoApproveSkippable",
     interdisciplinarySeat: false,
@@ -1761,7 +1770,7 @@ test("Build redevelops minimally: change-set computed, ledger carried, no immedi
   // The reviser's patch body carries the same catalog outline descriptions
   // the first pass wrote to: a rewritten section answers the same contract,
   // and the schema is where that contract now travels.
-  publishedBundle ??= loadContent(registryContentDir);
+  publishedBundle ??= fixtureBundle();
   const patchOutline = publishedBundle.catalogs.inputTypes.outlines["research idea"]!;
   const patchFields = object(
     object(
@@ -2459,7 +2468,7 @@ test("a classification outside the input-type catalog fails the run with a named
  * from metadata instead of reading the files they were given.
  */
 function requiringAttachments(): ContentBundle {
-  const bundle = loadContent(registryContentDir);
+  const bundle = fixtureBundle();
   const processor = bundle.skills["processor"]!;
   assert.ok(
     processor.meta.capabilities.includes("attachment-access"),
@@ -2568,7 +2577,7 @@ function partsBundle(): ContentBundle {
     }
     return rewritten;
   };
-  const bundle = loadContent(registryContentDir);
+  const bundle = fixtureBundle();
   const published = bundle.workflows.brainstorm;
   if (!published) throw new Error("the published bundle has no brainstorm workflow");
   const skills = Object.fromEntries(
@@ -2921,7 +2930,7 @@ class GameBrainstormExecutor extends FakeBrainstormExecutor {
 }
 
 function supportsGame(): boolean {
-  return loadContent(registryContentDir).workflows.brainstorm?.params.gamifiedReview !== undefined;
+  return fixtureBundle().workflows.brainstorm?.params.gamifiedReview !== undefined;
 }
 
 const GAME_TEST_FACT: FactEntry = {
@@ -2937,7 +2946,7 @@ const gameFixtureApprovals = new WeakMap<AgentExecutor, Map<string, FactUseAppro
 function gameRuntime(
   executor: AgentExecutor,
   stores?: Partial<Pick<BrainstormRuntime, "checkpoints" | "artifacts">>,
-  bundle = loadContent(registryContentDir),
+  bundle = fixtureBundle(),
   dismissedMembers?: readonly string[],
   facts: readonly FactEntry[] = [GAME_TEST_FACT],
 ) {
@@ -3065,7 +3074,7 @@ test("game reviews keep reports private across seats, score before repair, and r
   assert.ok(critics.length > 0);
   assert.equal(scoreEntries.length, chairs.length);
   const groupCritics = new Map<string, Set<string>>();
-  const sharedFacts = loadContent(registryContentDir).factTable?.accessMode === "supreme-dialogue/v2";
+  const sharedFacts = fixtureBundle().factTable?.accessMode === "supreme-dialogue/v2";
   for (const critic of critics) {
     for (const key of ["comments", "history", "record", "feedback", "scores", "decision"]) assert.equal(critic.bindings[key], undefined);
     assert.equal(critic.task.metadata?.notesScope, undefined);
@@ -3135,7 +3144,7 @@ test("game critic transport failures remain resumable failures rather than rejec
 
 for (const leak of ["thinkerNotes", "roleCapability", "techniqueCapability"] as const) {
   test(`game critics reject ${leak} before any reviewer model call`, { skip: !supportsGame() }, async () => {
-    const source = loadContent(registryContentDir);
+    const source = fixtureBundle();
     const clone = structuredClone(source);
     if (leak === "thinkerNotes") {
       const visit = (value: unknown): void => {
@@ -3181,7 +3190,7 @@ test("game mode off uses standard reviewers with the current literature-composed
 });
 
 test("game settlements carry the decision rule the bundle declares, or the legacy rule when it declares none", { skip: !supportsGame() }, async () => {
-  const params = loadContent(registryContentDir).workflows.brainstorm!.params;
+  const params = fixtureBundle().workflows.brainstorm!.params;
   const declaredRule = params.gameDecisionRule?.default; const declaredLeaveOneOut = params.gameLeaveOneOut?.default;
   const executor = new GameBrainstormExecutor("cap");
   const app = gameRuntime(executor);
@@ -3312,7 +3321,7 @@ function objectOrUndefined(value: JsonValue | undefined): JsonObject | undefined
 }
 
 for (const mode of ["pass", "repair"] as const) {
-  test(`game direct reasoning without badges follows the ${mode} workflow with an empty fact table`, { skip: !supportsGame() || loadContent(registryContentDir).skills["claim-evidence"] === undefined }, async () => {
+  test(`game direct reasoning without badges follows the ${mode} workflow with an empty fact table`, { skip: !supportsGame() || fixtureBundle().skills["claim-evidence"] === undefined }, async () => {
     const step = (valid: boolean): JsonObject => ({
       part1: valid ? "For a real x with x>=0, |x|=x." : "For every real x, |x|=x.",
       part2: valid ? "Assume x>=0 and apply the nonnegative branch of the absolute-value definition." : "Use the nonnegative branch without imposing a sign condition on x.",
@@ -3369,7 +3378,7 @@ for (const mode of ["pass", "repair"] as const) {
       assert.ok(reviewer.task.skills?.includes("claim-evidence"), "review tasks receive the shared claim-level evidence technique");
     }
     for (const chair of executor.tasks("committee-chair")) {
-      assert.deepEqual(chair.bindings.verifiedFacts, loadContent(registryContentDir).factTable?.accessMode !== undefined ? undefined : [], "the test injects no badge or fact evidence, and mediated chairs never receive raw table contents");
+      assert.deepEqual(chair.bindings.verifiedFacts, fixtureBundle().factTable?.accessMode !== undefined ? undefined : [], "the test injects no badge or fact evidence, and mediated chairs never receive raw table contents");
       for (const critique of Object.values(object(chair.bindings.comments, "comments"))) {
         assert.doesNotMatch(String(object(critique, "critique").justification), /\[F:/);
       }
@@ -3434,4 +3443,76 @@ test("game resume skips an uncompleted call despite its old eligible snapshot an
   const after = (await checkpoints.load("game-excluded-resume"))!;
   for (const old of oldSettlements) assert.deepEqual(after.journal.find((entry) => entry.key === old.key), old);
   assert.ok(executor.tasks("committee-chair").some((entry) => entry.agentId === "member-1" && Number(entry.bindings.currentStep) > 1), "the excluded critic's thinker walk still completes");
+});
+
+/** Exercise the new classifier contract against either a legacy pin or the candidate bundle. */
+function configuredClassifierBundle(): ContentBundle {
+  const bundle = fixtureBundle();
+  const workflow = judgedWorkflow();
+  workflow.params.argumentSteps = { description: "User configured argument steps", default: 6, min: 3, max: 9 };
+  assert.equal(workflow.root.kind, "sequence");
+  if (workflow.root.kind !== "sequence") throw new Error("fixture requires a sequence");
+  const classifier = workflow.root.steps.find((node) => node.id === "classify-input");
+  const apply = workflow.root.steps.find((node) => node.id === "apply-classification");
+  assert.ok(classifier?.kind === "agent" && apply?.kind === "activity");
+  classifier.bind = { ...classifier.bind, routeKeyTerms: "params.routeKeyTerms", equivalentProblemWeight: "params.equivalentProblemWeight" };
+  apply.bind = { ...apply.bind, argumentSteps: "params.argumentSteps" };
+  const role = bundle.skills.classifier!;
+  if (!role.meta.vars.includes("routeKeyTerms")) {
+    role.body += "\nFixture routing: key terms {{routeKeyTerms}}; equivalent weight {{equivalentProblemWeight}}.\n";
+  }
+  role.meta.vars = [...new Set([...role.meta.vars, "routeKeyTerms", "equivalentProblemWeight"])];
+  bundle.workflows.brainstorm = workflow;
+  return bundle;
+}
+
+function configuredClassifierRuntime(executor: AgentExecutor, bundle = configuredClassifierBundle()): BrainstormRuntime {
+  return new BrainstormRuntime({
+    bundle, agentExecutor: executor, humanGateMode: "autoApproveSkippable",
+    activities: { ...taxonomyActivities(new StubTaxonomy()), ...literatureFixtureActivities() },
+    routeResolver: new StaticBrainstormRouteResolver({
+      reasoning: { modelId: "configured-reasoner", providerId: "fake" },
+      writing: { modelId: "configured-writer", providerId: "fake" },
+      balanced: { modelId: "configured-balanced", providerId: "fake" },
+    }),
+    hostTools: TEST_HOST_TOOLS,
+    enabledHostToolIds: new Set(TEST_HOST_TOOLS.map((manifest) => manifest.toolId)),
+  });
+}
+
+test("user-configured argument steps reach every first pass and every reviewed position", async () => {
+  const executor = new FakeBrainstormExecutor();
+  const result = await configuredClassifierRuntime(executor).run({
+    submission: "Develop the graph inference mechanism", params: { argumentSteps: 5, panelSize: 2, panelSizeMode: "fixed" },
+  });
+  assert.equal(result.status, "completed", result.status === "failed" ? result.error.message : undefined);
+  const classifier = executor.tasks("classifier")[0]!;
+  assert.equal(object(classifier.task.outputSchema!.schema.properties, "classification properties").cotSteps, undefined);
+  const members = executor.tasks("brain");
+  assert.ok(members.length >= 2);
+  for (const member of members) {
+    assert.equal(member.bindings.cotSteps, 5);
+    assert.deepEqual(executor.judgeOrder.filter((entry) => entry.startsWith(`${member.agentId}:`)),
+      [1, 2, 3, 4, 5].map((step) => `${member.agentId}:${step}:1`));
+  }
+});
+
+test("classifier write guard rejects a model-selected count before any panel or first-pass work", async () => {
+  const executor = new (class extends FakeBrainstormExecutor {
+    override async execute(task: AgentTask): Promise<AgentResult> {
+      const result = await super.execute(task);
+      if (object(task.input, "input").role !== "classifier" || result.status !== "ok") return result;
+      return { ...result, output: { ...object(result.output as JsonValue, "classification"), cotSteps: 3 } };
+    }
+  })();
+  const result = await configuredClassifierRuntime(executor).run({ submission: "Develop the graph inference mechanism", params: { argumentSteps: 7 } });
+  assert.equal(result.status, "failed");
+  assert.match(result.status === "failed" ? result.error.message : "", /must not choose cotSteps/);
+  assert.equal(executor.tasks("brain").length, 0);
+});
+
+test("invalid argument step counts fail before buying classification", async () => {
+  const executor = new FakeBrainstormExecutor();
+  await assert.rejects(configuredClassifierRuntime(executor).run({ submission: "Develop graph inference", params: { argumentSteps: 4.5 } }), /argumentSteps.*integer/);
+  assert.equal(executor.seen.length, 0);
 });

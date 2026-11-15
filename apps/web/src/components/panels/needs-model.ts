@@ -18,10 +18,10 @@ export interface NeedsFacet {
 }
 
 export interface NeedsEquivalentProblem {
-  readonly field: string;
+  readonly field?: string;
   readonly name: string;
   readonly statement: string;
-  readonly confidence: number;
+  readonly confidence?: number;
   readonly [key: string]: unknown;
 }
 
@@ -91,8 +91,8 @@ export function needRows(input: NeedsInput, weights: NeedsWeights): NeedRow[] {
     });
   }
   for (const problem of input.equivalentProblems ?? []) {
-    const weight = weights.equivalentProblemWeight * problem.confidence;
-    rows.push({ kind: "equivalent", name: `${problem.name} (${problem.field})`, weight, retrievalOnly: weight <= 0 });
+    const weight = weights.equivalentProblemWeight * (problem.confidence ?? 0);
+    rows.push({ kind: "equivalent", name: problem.field ? `${problem.name} (${problem.field})` : problem.name, weight, retrievalOnly: weight <= 0 });
   }
   return rows;
 }
@@ -138,7 +138,7 @@ export function setConfidence(input: NeedsInput, index: number, value: number): 
   return {
     ...input,
     equivalentProblems: input.equivalentProblems.map((problem, i) =>
-      i === index ? { ...problem, confidence: clamp01(value) } : problem,
+      i === index && problem.confidence !== undefined ? { ...problem, confidence: clamp01(value) } : problem,
     ),
   };
 }

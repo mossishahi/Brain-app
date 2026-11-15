@@ -79,6 +79,24 @@ test("nothing set means no overrides", () => {
   assert.deepEqual(read({ BRAINSTORM_AGENTIC_WORKFLOW_PARAMS: "  " }), { params: undefined, lines: [] });
 });
 
+test("argument count is user-owned for supporting bundles while old bundles keep classifier behavior", () => {
+  const supported = { ...declared, argumentSteps: { default: 6, min: 3, max: 9 } };
+  assert.deepEqual(workflowParamsFromEnv({
+    BRAINSTORM_AGENTIC_ARGUMENT_STEPS: " 4 ",
+    BRAINSTORM_AGENTIC_WORKFLOW_PARAMS: '{"argumentSteps":7}',
+  }, supported), { argumentSteps: 4 });
+  assert.deepEqual(workflowParamsFromEnv({ BRAINSTORM_AGENTIC_ARGUMENT_STEPS: "9" }, supported), { argumentSteps: 9 });
+  const legacy = read({ BRAINSTORM_AGENTIC_ARGUMENT_STEPS: "4", BRAINSTORM_AGENTIC_PANEL_SIZE: "5" });
+  assert.deepEqual(legacy.params, { panelSize: 5 });
+  assert.match(legacy.lines[0]!, /pinned workflow does not declare argumentSteps/);
+  for (const value of ["2", "10", "4.5", "NaN", "Infinity", "count"]) {
+    assert.throws(() => workflowParamsFromEnv({ BRAINSTORM_AGENTIC_ARGUMENT_STEPS: value }, supported), /ARGUMENT_STEPS must be an integer/);
+  }
+  assert.throws(() => workflowParamsFromEnv({ BRAINSTORM_AGENTIC_ARGUMENT_STEPS: "4" }, {
+    argumentSteps: { default: 6, min: 5, max: 9 },
+  }), /pinned workflow's declared bounds/);
+});
+
 test("gamified review cannot silently fall back to standard review on an older bundle", () => {
   assert.throws(
     () => read({ BRAINSTORM_AGENTIC_WORKFLOW_PARAMS: '{"gamifiedReview":true}' }),

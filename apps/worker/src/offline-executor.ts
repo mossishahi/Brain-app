@@ -135,7 +135,7 @@ function requestedSections(input: JsonValue | undefined, label: string): JsonVal
 
 export interface OfflineExecutorOptions {
   readonly factAccessMode?: "supreme-mediated/v1" | "supreme-dialogue/v2";
-  /** Chain-of-thought steps the offline processor requests. Default 3. */
+  /** Legacy fallback for tasks without a bound argument count. Default 3. */
   readonly cotSteps?: number;
   /** The loaded input-type catalog; the executor classifies runs as its paper-shaped type. */
   readonly inputTypes?: LoadedInputTypes;
@@ -180,6 +180,15 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
     }
     const input = asObject(task.input);
     const bindings = asObject(input.bindings as JsonValue);
+    // New workflows pin the user's argument count in the task; older ones
+    // carry it on the classified input or the current revision chain.
+    const boundSteps = bindings.cotSteps ?? asObject(bindings.input).cotSteps ?? bindings.totalSteps;
+    const argumentSteps = typeof boundSteps === "number" && Number.isSafeInteger(boundSteps) &&
+      boundSteps >= 3 && boundSteps <= 9
+      ? boundSteps
+      : Array.isArray(bindings.chain) && bindings.chain.length >= 3 && bindings.chain.length <= 9
+        ? bindings.chain.length
+        : this.cotSteps;
     const role = String(input.role ?? task.kind ?? "");
     const agentId = task.agentId ?? role;
     this.executed.push({ role, agentId });
@@ -314,7 +323,9 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
             reason:
               "Offline deterministic runner-up: the strongest other reading a careful reader could take.",
           },
-          cotSteps: this.cotSteps,
+          ...(typeof bindings.routeKeyTerms === "boolean" && typeof bindings.equivalentProblemWeight === "number"
+            ? {}
+            : { cotSteps: this.cotSteps }),
           requestedOutputs: [
             {
               title: "Submitter takeaway",
@@ -322,6 +333,7 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
             },
           ],
           embeddingInput: {
+            ...(bindings.routeKeyTerms === true ? { keyTerms: [] } : {}),
             title: "Offline deterministic study of graph-based representation learning",
             abstract:
               "This work studies how graph-based machine learning methods recover useful low-dimensional structure from high-dimensional observations. " +
@@ -603,14 +615,14 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
         const requested = requestedSections(bindings.input as JsonValue, agentId);
         metadata = syntheticTrace(
           agentId,
-          Array.from({ length: this.cotSteps }, (_, i) => i + 1),
+          Array.from({ length: argumentSteps }, (_, i) => i + 1),
         );
         output = {
           output: {
             ...this.developedOutput(agentId),
             ...(requested ? { requested } : {}),
           },
-          cot: Array.from({ length: this.cotSteps }, (_, i) =>
+          cot: Array.from({ length: argumentSteps }, (_, i) =>
             schemaName === "brainIdeaParts"
               ? cotParts(agentId, i + 1)
               : `${agentId} chain step ${i + 1} reasoning paragraph.`,
@@ -722,7 +734,7 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
           `${agentId} revised`,
           schemaName === "redevelopmentPatch" || schemaName === "redevelopmentPatchParts"
             ? [currentStep]
-            : Array.from({ length: this.cotSteps }, (_, i) => i + 1),
+            : Array.from({ length: argumentSteps }, (_, i) => i + 1),
         );
         if (schemaName === "redevelopmentPatch" || schemaName === "redevelopmentPatchParts") {
           // A patch names ONLY what changed and carries no `output` envelope
@@ -751,7 +763,7 @@ export class OfflineBrainstormExecutor implements AgentExecutor {
             ...this.developedOutput(`${agentId} revised`),
             ...(requested ? { requested } : {}),
           },
-          steps: Array.from({ length: this.cotSteps }, (_, i) => {
+          steps: Array.from({ length: argumentSteps }, (_, i) => {
             const carried = previous[i];
             return i + 1 === currentStep || typeof carried !== "string"
               ? `${agentId} revised step ${i + 1} paragraph.`

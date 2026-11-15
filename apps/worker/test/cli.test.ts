@@ -447,7 +447,9 @@ for (const gamifiedReview of [false, true]) {
         const result = await runtime.run({
           runId,
           submission: { prompt: "Can KNN graph construction be made differentiable?", attachments: [] },
-          params: { panelSize: 2, maxReviewRounds: 1, gamifiedReview, encoder: "hash-ngram-v1" },
+          params: { panelSize: 2, maxReviewRounds: 1, gamifiedReview, encoder: "hash-ngram-v1",
+            ...(registryBundle.workflows.brainstorm?.params?.argumentSteps ? { argumentSteps: 3 } : {}),
+          },
         });
         assert.equal(result.status, "completed");
         assert.ok(result.output !== undefined, "the final deliverable is produced");
@@ -739,7 +741,7 @@ test("run and resume accept content-dir and append JSONL events", () => {
     const started = spawnSync(
       process.execPath,
       [cli.pathname, "run", "--topic", "Exercise CLI flags", ...common],
-      spawnOptions,
+      { ...spawnOptions, env: { ...spawnOptions.env, BRAINSTORM_AGENTIC_ARGUMENT_STEPS: "7" } },
     );
     assert.equal(started.status, 0, started.stderr);
     let checkpoint = JSON.parse(
@@ -753,7 +755,7 @@ test("run and resume accept content-dir and append JSONL events", () => {
     let resumed = spawnSync(
       process.execPath,
       [cli.pathname, "resume", ...common, "--gate", `${checkpoint.pendingGates[0]!.gateKey}=approve`],
-      spawnOptions,
+      { ...spawnOptions, env: { ...spawnOptions.env, BRAINSTORM_AGENTIC_ARGUMENT_STEPS: "3" } },
     );
     assert.equal(resumed.status, 0, resumed.stderr);
     for (let round = 0; round < 2; round += 1) {
@@ -764,7 +766,7 @@ test("run and resume accept content-dir and append JSONL events", () => {
       resumed = spawnSync(
         process.execPath,
         [cli.pathname, "resume", ...common, "--gate", `${checkpoint.pendingGates[0]!.gateKey}=approve`],
-        spawnOptions,
+        { ...spawnOptions, env: { ...spawnOptions.env, BRAINSTORM_AGENTIC_ARGUMENT_STEPS: "3" } },
       );
       assert.equal(resumed.status, 0, resumed.stderr);
     }
@@ -799,6 +801,17 @@ test("run and resume accept content-dir and append JSONL events", () => {
       readFileSync(join(finalDir, memberFiles[0]!), "utf8"),
     ) as { output?: unknown; cot?: unknown };
     assert.ok(memberFinal.output !== undefined && Array.isArray(memberFinal.cot));
+    if (registryBundle.workflows.brainstorm?.params?.argumentSteps) {
+      assert.equal(memberFinal.cot.length, 7,
+        "resume keeps the argument count selected at launch despite changed settings");
+      const saved = JSON.parse(readFileSync(join(sessionRoot, runId, "checkpoint.json"), "utf8")) as {
+        journal: Array<{ key: string; value: { output?: Record<string, unknown> } }>;
+      };
+      const classification = saved.journal.find(entry => entry.key.endsWith("/classify-input-execute::result"));
+      assert.ok(classification?.value.output);
+      assert.equal(Object.hasOwn(classification.value.output, "cotSteps"), false,
+        "the classifier no longer produces the argument count");
+    }
     assert.ok(resumed.stdout.includes("Final output:"), "the CLI reports the final copies");
   } finally {
     rmSync(root, { recursive: true, force: true });

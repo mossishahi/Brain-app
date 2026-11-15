@@ -207,9 +207,9 @@ export const processorOutputSchema = z
     /** Implied-but-unstated assumptions; empty when there are none. */
     assumptions: z.array(nonEmpty),
     /**
-     * How many reasoning steps a panel member should produce when developing
-     * this input. OPTIONAL since workflow 0.14.0 — decided by the classifier
-     * and merged in by classification.apply (see `type`).
+     * How many explicit argument steps a panel member should produce. Absent
+     * during preprocessing; classification.apply writes the configured user
+     * count (or the classifier's count for a pinned legacy workflow).
      */
     cotSteps: z.number().int().min(3).max(9).optional(),
     /**
@@ -317,7 +317,7 @@ export const embeddingFacetSchema = z
       )
       .max(5)
       .optional(),
-    /** Optional (classifier v2): what kind of concept the facet names. */
+    /** Legacy display metadata; new classifier tasks do not generate this label. */
     kind: z.enum(["method", "theory", "problem", "object", "application"]).optional(),
   })
   .strict()
@@ -354,13 +354,13 @@ export type EmbeddingFacet = z.infer<typeof embeddingFacetSchema>;
  */
 export const equivalentProblemSchema = z
   .object({
-    /** The field that studies it (2-80 characters, one line). */
+    /** Legacy display metadata; new classifier tasks do not generate this label. */
     field: singleLine(
       z
         .string()
         .min(2, "equivalent-problem field must be at least 2 characters")
         .max(80, "equivalent-problem field must stay at most 80 characters"),
-    ),
+    ).optional(),
     /** The problem's name in that field (3-120 characters, one line). */
     name: singleLine(
       z
@@ -376,8 +376,8 @@ export const equivalentProblemSchema = z
       .refine((value) => paragraphs(1).safeParse(value).success, {
         message: "equivalent-problem statement must be a single paragraph",
       }),
-    /** Confidence that the problem is equivalent or closely analogous, 0-1. */
-    confidence: z.number().min(0).max(1),
+    /** Required by tasks only when equivalents contribute to scoring; optional in saved artifacts. */
+    confidence: z.number().min(0).max(1).optional(),
   })
   .strict();
 
@@ -469,8 +469,8 @@ export type EmbeddingInput = z.infer<typeof embeddingInputSchema>;
  * The classifier's decision, produced by a dedicated reasoning stage AFTER
  * preprocessing (workflow 0.14.0): the primary reading of the submission,
  * the strongest alternative reading (always a different type — the two
- * options a human confirms between at the classification gate), the panel's
- * chain-of-thought step count, the requested outputs — the submitter's
+ * options a human confirms between at the classification gate), the requested
+ * outputs — the submitter's
  * explicit asks plus any ask the submission unmistakably implies — and the
  * embedding input: the submission projected into clean retrieval text for
  * the semantic panel-assembly stage. The deterministic classification.apply
@@ -482,8 +482,8 @@ export const taskClassificationSchema = z
   .object({
     primary: classificationOptionSchema,
     alternative: classificationOptionSchema,
-    /** How many reasoning steps a panel member should produce for this input. */
-    cotSteps: z.number().int().min(3).max(9),
+    /** Legacy classifier choice; new runs take the argument count from user settings. */
+    cotSteps: z.number().int().min(3).max(9).optional(),
     /**
      * The deliverables the panel must answer beyond the type's standard
      * output: every explicit ask, plus asks the submission unmistakably

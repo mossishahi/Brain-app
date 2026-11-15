@@ -119,6 +119,7 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
   const [gateAutoApprove, setGateAutoApprove] = useState(true);
   /** "" = follow the bundle's default; otherwise the override as a string. */
   const [reviewMaxRounds, setReviewMaxRounds] = useState<string>("");
+  const [argumentSteps, setArgumentSteps] = useState("6");
   const [gamifiedReview, setGamifiedReview] = useState(false);
   const [gameThreshold, setGameThreshold] = useState("0.5");
   const [gamePointsMode, setGamePointsMode] = useState<"auto" | "custom">("auto");
@@ -256,6 +257,7 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
     setGameDecisionRule(current => !previous || current === (previous.gameReview?.decisionRule ?? "chair-decisive") ? (s.gameReview?.decisionRule ?? "chair-decisive") : current);
     setGameLeaveOneOut(current => !previous || current === (previous.gameReview?.leaveOneOut !== false) ? (s.gameReview?.leaveOneOut !== false) : current);
     setReviewMaxRounds(current => !previous || current === (previous.review?.maxRounds !== undefined ? String(previous.review.maxRounds) : "") ? (s.review?.maxRounds !== undefined ? String(s.review.maxRounds) : "") : current);
+    setArgumentSteps(current => !previous || current === String(previous.argumentSteps ?? 6) ? String(s.argumentSteps ?? 6) : current);
     setPanelSize(current => !previous || current === (previous.panel?.size !== undefined ? String(previous.panel.size) : "") ? (s.panel?.size !== undefined ? String(s.panel.size) : "") : current);
     setInterdisciplinarySeat(current => !previous || current === (previous.panel?.interdisciplinarySeat !== false) ? (s.panel?.interdisciplinarySeat !== false) : current);
     setAutoResume(current => !previous || current === (previous.creditRecovery.autoResume) ? (s.creditRecovery.autoResume) : current);
@@ -1076,6 +1078,25 @@ export function SettingsDrawer({ onClose, initialSection }: { onClose: () => voi
                 including a run that has passed the first gate and not yet reached the
                 second; any countdown already on screen stops at once.
               </span>
+            </Section>
+
+            <Section
+              category="research"
+              title="Argument steps"
+              state={saveState.argumentSteps}
+              error={saveError.argumentSteps} onRetry={canRetry("argumentSteps") ? () => void retry("argumentSteps") : undefined}
+            >
+              <div className="field">
+                <label className="field-label" htmlFor="settings-argument-steps">Argument steps per committee member</label>
+                <select id="settings-argument-steps" value={argumentSteps} onChange={(event) => {
+                  const next = event.target.value;
+                  setArgumentSteps(next);
+                  void save("argumentSteps", { argumentSteps: Number(next) });
+                }}>
+                  {Array.from({ length: 7 }, (_, i) => i + 3).map((count) => <option key={count} value={String(count)}>{count} steps</option>)}
+                </select>
+                <span className="field-note">The number of reviewable argument steps each committee member develops. This does not control the model’s thinking. Applies to new runs; existing runs keep their original count.</span>
+              </div>
             </Section>
 
             <Section

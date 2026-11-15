@@ -17,6 +17,9 @@
  *   ("committee-mean", false) and rejects any other value explicitly.
  * - BRAINSTORM_AGENTIC_MAX_REVIEW_ROUNDS and BRAINSTORM_AGENTIC_PANEL_SIZE
  *   keep working and win over the JSON for their two params.
+ * - BRAINSTORM_AGENTIC_ARGUMENT_STEPS selects the reviewable argument count
+ *   only when the pinned workflow declares argumentSteps. Older bundles keep
+ *   their classifier-owned count.
  *
  * Read only by `run`: a resume replays the params its checkpoint recorded at
  * start, so the variables are ignored there. The pinned bundle's declared
@@ -154,5 +157,19 @@ export function workflowParamsFromEnv(
   };
   read("BRAINSTORM_AGENTIC_MAX_REVIEW_ROUNDS", "maxReviewRounds");
   read("BRAINSTORM_AGENTIC_PANEL_SIZE", "panelSize");
+  const argumentSteps = env.BRAINSTORM_AGENTIC_ARGUMENT_STEPS?.trim();
+  if (argumentSteps !== undefined && argumentSteps !== "") {
+    const definition = Object.prototype.hasOwnProperty.call(declared, "argumentSteps") ? declared.argumentSteps : undefined;
+    if (definition === undefined) {
+      log("[config] ignoring BRAINSTORM_AGENTIC_ARGUMENT_STEPS: the pinned workflow does not declare argumentSteps");
+    } else {
+      const value = Number(argumentSteps);
+      if (typeof definition.default !== "number" || !Number.isSafeInteger(value) || value < 3 || value > 9 ||
+          (definition.min !== undefined && value < definition.min) || (definition.max !== undefined && value > definition.max)) {
+        throw new Error("BRAINSTORM_AGENTIC_ARGUMENT_STEPS must be an integer between 3 and 9 within the pinned workflow's declared bounds");
+      }
+      params.argumentSteps = value;
+    }
+  }
   return Object.keys(params).length > 0 ? params : undefined;
 }

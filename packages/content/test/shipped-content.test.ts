@@ -133,7 +133,12 @@ test("the classification stage decides the type and gates before any panel cost"
     input: "input",
     classification: "classification",
     maxFiles: "params.maxAttachmentFiles",
+    ...(bundle.workflows.brainstorm!.params.argumentSteps ? { argumentSteps: "params.argumentSteps" } : {}),
   });
+  if (bundle.workflows.brainstorm!.params.argumentSteps) {
+    assert.equal(classifier.bind?.routeKeyTerms, "params.routeKeyTerms");
+    assert.equal(classifier.bind?.equivalentProblemWeight, "params.equivalentProblemWeight");
+  }
   assert.deepEqual(merge.output, { key: "input", schema: "processorOutput" });
 
   // The confirmation gate is skippable (countdown auto-approval) and its

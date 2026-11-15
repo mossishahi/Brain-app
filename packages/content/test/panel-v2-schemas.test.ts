@@ -44,6 +44,27 @@ const base = {
   facets,
 };
 
+test("persisted classifications accept slim outputs and still parse legacy metadata", () => {
+  const common = {
+    primary: { type: "research idea", reason: "The submission proposes a new inference method." },
+    alternative: { type: "research question", reason: "The submission also asks whether convergence holds." },
+    requestedOutputs: [],
+    embeddingInput: { ...base, equivalentProblems: [{ name: "Gaussian belief propagation", statement: statement("Belief propagation") }] },
+  };
+  const slim = taskClassificationSchema.parse(common);
+  assert.equal(slim.cotSteps, undefined);
+  assert.equal(slim.embeddingInput.equivalentProblems![0]!.field, undefined);
+  assert.equal(slim.embeddingInput.equivalentProblems![0]!.confidence, undefined);
+  const legacy = taskClassificationSchema.parse({ ...common, cotSteps: 5, embeddingInput: {
+    ...common.embeddingInput,
+    facets: facets.map((facet) => ({ ...facet, kind: "method" })),
+    equivalentProblems: [{ ...common.embeddingInput.equivalentProblems[0], field: "Statistics", confidence: 0.7 }],
+  } });
+  assert.equal(legacy.cotSteps, 5);
+  assert.equal(legacy.embeddingInput.facets[0]!.kind, "method");
+  assert.equal(legacy.embeddingInput.equivalentProblems![0]!.confidence, 0.7);
+});
+
 test("classifier JSON schema delivers the existing embedding length ceilings to providers", () => {
   type NativeSchema = { properties?: Record<string, NativeSchema>; items?: NativeSchema; maxLength?: number };
   // Use the runtime converter's settings: arbitrary refinements are omitted,
