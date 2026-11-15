@@ -6,14 +6,14 @@
     <description>Co-inference desktop application updates</description>
     <language>en</language>
     <item>
-      <title>Co-inference 0.1.0-preview.15</title>
-      <pubDate>Sun, 15 Nov 2026 14:17:50 GMT</pubDate>
-      <sparkle:version>15</sparkle:version>
-      <sparkle:shortVersionString>0.1.0-preview.15</sparkle:shortVersionString>
+      <title>Co-inference 0.1.0-preview.16</title>
+      <pubDate>Sun, 15 Nov 2026 17:16:07 GMT</pubDate>
+      <sparkle:version>16</sparkle:version>
+      <sparkle:shortVersionString>0.1.0-preview.16</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-      <description>Literature reviews now produce a separate bibliography-style deliverable for each agent, with an explicit explanation of how each source relates to the original input. Full-text PDF and HTML reading includes verifiable passages and PDF page images. Saved review progress survives retries. Existing research checkpoints remain supported. Requires the published Brain workflow 0.32.0 for the new review requirements.
+      <description>Adds a pipeline setting for 3–9 reviewable argument steps and removes unused classifier output requirements while preserving active retrieval inputs. Repairs an unambiguous missing JSON closing delimiter locally without repeating completed research or changing its content. Existing jobs retain their launch settings on resume. Unnotarized preview; Linux packaging verification does not establish macOS launch or restart behavior.
 </description>
-      <enclosure url="https://github.com/mossishahi/Brain-app/releases/download/desktop-v0.1.0-preview.15/Co-inference-0.1.0-macOS-Intel-unnotarized.dmg" length="66051964" type="application/octet-stream" sparkle:os="macos" sparkle:edSignature="fhUmZ1Tb/0ueDKbF3GNsupVl8lkkBlXmk06SGn10nJCb2zpFfplrqzR5tV+4uhJ0AiSKwRq5oRgx1rXzn1lFBg=="/>
+      <enclosure url="https://github.com/mossishahi/Brain-app/releases/download/desktop-v0.1.0-preview.16/Co-inference-0.1.0-macOS-Intel-unnotarized.dmg" length="66076079" type="application/octet-stream" sparkle:os="macos" sparkle:edSignature="x3rBZjeEk9fJZOe1+bhJv1tzI3JnHZTeJ15D543x8ao7FR8j90OFbBkcHHyPAcSloQUwW7KHjD7ffDldBD+7Dg=="/>
     </item>
   </channel>
 </rss>
