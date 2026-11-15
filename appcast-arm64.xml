@@ -6,14 +6,14 @@
     <description>Co-inference desktop application updates</description>
     <language>en</language>
     <item>
-      <title>Co-inference 0.1.0-preview.14</title>
-      <pubDate>Sat, 14 Nov 2026 12:23:25 GMT</pubDate>
-      <sparkle:version>14</sparkle:version>
-      <sparkle:shortVersionString>0.1.0-preview.14</sparkle:shortVersionString>
+      <title>Co-inference 0.1.0-preview.15</title>
+      <pubDate>Sun, 15 Nov 2026 14:17:45 GMT</pubDate>
+      <sparkle:version>15</sparkle:version>
+      <sparkle:shortVersionString>0.1.0-preview.15</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-      <description>The installer now shows the standard app-to-Applications drag-and-drop window, with clear installation instructions. The finished disk image is checked for its saved Finder layout, background, Applications shortcut, and intact app contents. Research service: 0.2.92.
+      <description>Literature reviews now produce a separate bibliography-style deliverable for each agent, with an explicit explanation of how each source relates to the original input. Full-text PDF and HTML reading includes verifiable passages and PDF page images. Saved review progress survives retries. Existing research checkpoints remain supported. Requires the published Brain workflow 0.32.0 for the new review requirements.
 </description>
-      <enclosure url="https://github.com/mossishahi/Brain-app/releases/download/desktop-v0.1.0-preview.14/Co-inference-0.1.0-macOS-AppleSilicon-unnotarized.dmg" length="45903637" type="application/octet-stream" sparkle:os="macos" sparkle:edSignature="5O8upKccQLMm9al55mIpnQ4wFwmIYb1R31cZOiVrGtGTN7deDkFr2EcOXuMD2ZqPln7thNuuihVtWsJWnoZLCQ=="/>
+      <enclosure url="https://github.com/mossishahi/Brain-app/releases/download/desktop-v0.1.0-preview.15/Co-inference-0.1.0-macOS-AppleSilicon-unnotarized.dmg" length="63960393" type="application/octet-stream" sparkle:os="macos" sparkle:edSignature="tteRNSDsqATatkQAoyOiMnF9d1wj1oKyFYiTj4x1skgVBQ/a189mhrLB3r16ZeX5JsByNkySJ5zMPQ336t7ZAA=="/>
     </item>
   </channel>
 </rss>

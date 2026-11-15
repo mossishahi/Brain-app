@@ -1,60 +1,60 @@
 {
   "schemaVersion": 1,
-  "updateBuild": 14,
-  "releaseTag": "desktop-v0.1.0-preview.14",
-  "backendRevision": "aeeed9c8cd71d4e71c5c436738aa98e5ddaa75fd",
-  "desktopRevision": "30212f172e3676c004f43a941b642b2bd1b830b8",
+  "updateBuild": 15,
+  "releaseTag": "desktop-v0.1.0-preview.15",
+  "backendRevision": "4261d6b174a9551788292731229af471f29b1e5e",
+  "desktopRevision": "32774030f93431f0e47326b8f9bacaecf4dd8313",
   "publicKey": "1aVVaxjEYa03BWhTGSxNU0anSMuazRpat5JMx0DFjYA=",
   "assets": [
     {
       "name": "Co-inference-0.1.0-macOS-AppleSilicon-unnotarized.dmg",
-      "size": 45903637,
-      "digest": "sha256:0deb64ca24d08687d3d9512aea1cc2e1c878489c46546b3ba39f2ac46f8ed984"
+      "size": 63960393,
+      "digest": "sha256:ddec896aef85ef21b2d9090416ef7f748d2dc78c3e4a56226384b8a63ad22af7"
     },
     {
       "name": "Co-inference-0.1.0-macOS-AppleSilicon-unnotarized.dmg.sha256",
       "size": 120,
-      "digest": "sha256:3be5a8d93fe856f44480701695ab33da48a807c683f7ee8f0c3b5e04c56a53e0"
+      "digest": "sha256:4659d1c064b21ee0cf6630dfc21f5847fee8794dfc9df1823db0fecb7c902ff6"
     },
     {
       "name": "Co-inference-0.1.0-macOS-Intel-unnotarized.dmg",
-      "size": 46849566,
-      "digest": "sha256:14a8751db0c5c9d5032c979993a004dc0df7ef8717d9874ae442e323c3044871"
+      "size": 66051964,
+      "digest": "sha256:0f34cff0dcd7b1b0456d700648f4c1f33566a53fc0199a8fd7abddca6c4c62c0"
     },
     {
       "name": "Co-inference-0.1.0-macOS-Intel-unnotarized.dmg.sha256",
       "size": 113,
-      "digest": "sha256:83d0f08fe5ebb9d466d4c5604ba531e8a83fc08f422b25a4a59cd0bbed9b8f11"
+      "digest": "sha256:06d49f35542f946c9553551c824b316fde20ef74bc5e4035030ee5e8b0e95b1d"
     },
     {
       "name": "appcast-arm64.xml",
-      "size": 1387,
-      "digest": "sha256:24b5ef235181ffea490dfa886b7c639dc11b981362241c88a8a280b6dffc4be5"
+      "size": 1535,
+      "digest": "sha256:956898a4eef4ed563324201a4d8ac2fe89c47b9a7595f00eba335cb18e1a4f1c"
     },
     {
       "name": "appcast-x64.xml",
-      "size": 1371,
-      "digest": "sha256:f038f709153194e64b467116076e638b5a3b586d1bf0101ef50214f6e9177acf"
+      "size": 1519,
+      "digest": "sha256:c16dfeb749527e6d08e6462739b088cb8dd939bf02ef6f599146ddc01125d62f"
     },
     {
-      "name": "application-2e63d729df90d6509f06160937b554c6fc64a35fba1b08044a92e2eab35507db.tar.gz",
-      "size": 1299974,
-      "digest": "sha256:2e63d729df90d6509f06160937b554c6fc64a35fba1b08044a92e2eab35507db"
+      "name": "application-28e26462dbc02b0654909bc5bbdb840bcb628bdc13dd14ea4c07513ccfaec2e1.tar.gz",
+      "size": 1327339,
+      "digest": "sha256:28e26462dbc02b0654909bc5bbdb840bcb628bdc13dd14ea4c07513ccfaec2e1"
     },
     {
-      "name": "application-941f3a1040acac4d6662b82000e83491c5bfa2b0dd8366969f9f909603311bed.tar.gz",
-      "size": 1299967,
-      "digest": "sha256:941f3a1040acac4d6662b82000e83491c5bfa2b0dd8366969f9f909603311bed"
+      "name": "application-3101ddf81e967b0c0c2ebbd7efaff2ee1b3be28ba0d360b1e364ce9cc3efaa80.tar.gz",
+      "size": 1327340,
+      "digest": "sha256:3101ddf81e967b0c0c2ebbd7efaff2ee1b3be28ba0d360b1e364ce9cc3efaa80"
     },
     {
-      "name": "application-aff545a989c976770be2b87113f2ae6d28fc135b543e0ccf2215dee0a46ec504.tar.gz",
-      "size": 1299978,
-      "digest": "sha256:aff545a989c976770be2b87113f2ae6d28fc135b543e0ccf2215dee0a46ec504"
+      "name": "application-4463d83b092c9830258c73e75aceaa3dbe482b1d4c3a2f5b54eced392835c7aa.tar.gz",
+      "size": 1327338,
+      "digest": "sha256:4463d83b092c9830258c73e75aceaa3dbe482b1d4c3a2f5b54eced392835c7aa"
     },
     {
-      "name": "application-b60350d6092bde60b21fe70d6f798e982cde0d9d306ba081a9f245c84b674cb1.tar.gz",
-      "size": 1299969,
-      "digest": "sha256:b60350d6092bde60b21fe70d6f798e982cde0d9d306ba081a9f245c84b674cb1"
+      "name": "application-6d0807965c89b9ed734bb2a0c03d14a20f15b0d3a9c64fac206e9d5ce15a4da9.tar.gz",
+      "size": 1327347,
+      "digest": "sha256:6d0807965c89b9ed734bb2a0c03d14a20f15b0d3a9c64fac206e9d5ce15a4da9"
     },
     {
       "name": "claude-18394c36b5986f394081693bf80c8e72f8925ac2cff6c6ce31851ac7bbe7ad76.tar.gz",
@@ -97,14 +97,24 @@
       "digest": "sha256:f4f4bfb8ba1b1284a8a6dcdcaab6629fefb79e52d743802bd58d31a84ac1f14e"
     },
     {
-      "name": "dependencies-04b7b725e88d89975fac3d8f8abbc896c112b00751a99db276418dbe03d48dfb.tar.gz",
-      "size": 5720724,
-      "digest": "sha256:04b7b725e88d89975fac3d8f8abbc896c112b00751a99db276418dbe03d48dfb"
+      "name": "dependencies-02027e35e6bb3a431f32c0f030072bbcc840130d120f910bfc28a87ce877ec07.tar.gz",
+      "size": 26690763,
+      "digest": "sha256:02027e35e6bb3a431f32c0f030072bbcc840130d120f910bfc28a87ce877ec07"
     },
     {
-      "name": "dependencies-c336a9270f076daa5260cc28bb7f0aaed99fc0106b4050750a8010c39fd476d5.tar.gz",
-      "size": 5720724,
-      "digest": "sha256:c336a9270f076daa5260cc28bb7f0aaed99fc0106b4050750a8010c39fd476d5"
+      "name": "dependencies-38dc4775b0e12e75374fb149afdad2053e81c2c851f5c20c7babd6168bf7383b.tar.gz",
+      "size": 26188970,
+      "digest": "sha256:38dc4775b0e12e75374fb149afdad2053e81c2c851f5c20c7babd6168bf7383b"
+    },
+    {
+      "name": "dependencies-c2d7ae191d13af97201f06ef4c5d5f559ba70491e60e457263e4b4e4fc7a9190.tar.gz",
+      "size": 25510577,
+      "digest": "sha256:c2d7ae191d13af97201f06ef4c5d5f559ba70491e60e457263e4b4e4fc7a9190"
+    },
+    {
+      "name": "dependencies-ed9333886bdf52d179347fddbbb8e7dcbf73d83c8d811ee48ed8322978949583.tar.gz",
+      "size": 25285881,
+      "digest": "sha256:ed9333886bdf52d179347fddbbb8e7dcbf73d83c8d811ee48ed8322978949583"
     },
     {
       "name": "encoder-3bf89ebcd375bc0d975c060441294d1bdd6488eb035ae978d4b1bc81619eb50a.tar.gz",
@@ -128,38 +138,38 @@
     },
     {
       "name": "index.json",
-      "size": 17688,
-      "digest": "sha256:71e7132e950d4ef6d6b82570a1c1b98b8eb99fe326d246ba284499726adae73f"
+      "size": 17692,
+      "digest": "sha256:c37d52777ac8e90e00f15d1c8a37a3689ab7cc700a4652a6a734a78b1c2d289b"
     },
     {
       "name": "install-runtime.mjs",
-      "size": 52793,
-      "digest": "sha256:301dadb84fb97f40ec1d51bc4f395589172ac2727d2e9ee3c4894f8e9b69574e"
+      "size": 52797,
+      "digest": "sha256:3e5ed5cac342fb0eb44330f135e974b9d6b2b3e42cb46c654f979b5e2509cb80"
     },
     {
       "name": "install-runtime.sh",
       "size": 2303,
-      "digest": "sha256:eeae59b9564a9cb531e4e1f69936bd2ddd6e3ad85a6bec02ef88c25abdecb48d"
+      "digest": "sha256:25174f9f677c99087d7fa3bdbf01736ffbffd639078719e8ab612eae0459f430"
     },
     {
       "name": "runtime-darwin-arm64-node24.json",
-      "size": 3893,
-      "digest": "sha256:6f4f2947db0f5535648a1e2fbf1f0d3d4890197e3b03953192b19918416d45a7"
+      "size": 3894,
+      "digest": "sha256:a6be99d7649443ae5259098ed92b3ebad20332db38a419bbe270e5f2c662a92b"
     },
     {
       "name": "runtime-darwin-x64-node24.json",
-      "size": 3973,
-      "digest": "sha256:d4ebd36b6d1ff1d465d1d78ad782e7fefe3785ae7ce770a44e546396418b7136"
+      "size": 3974,
+      "digest": "sha256:267ac26b4c14b3ebc643723a6111ec51241575cf83681bbe203144fd44a708cd"
     },
     {
       "name": "runtime-linux-arm64-node24.json",
-      "size": 4006,
-      "digest": "sha256:a1a3d33c7d597b80ffdc0b1f0a32efe30b9ebe744f3bc3eb7f724672bb8e78e0"
+      "size": 4007,
+      "digest": "sha256:be2da82bb0b63487bb1a6732267b0bd1d9964ae24694a5f94da911d3b02c8358"
     },
     {
       "name": "runtime-linux-x64-node24.json",
-      "size": 4004,
-      "digest": "sha256:91a156b174afae47c2d2a70e7bd9e224f89cd93ebb2ba7af556e2877370f72c4"
+      "size": 4005,
+      "digest": "sha256:f6ebda7804100b2d36abc51cb4ebc090eb9b7f05c7567f789c2c41241defcd8b"
     }
   ]
 }
