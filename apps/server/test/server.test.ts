@@ -4553,7 +4553,9 @@ fs.writeFileSync(checkpointPath, JSON.stringify(checkpoint, null, 2));
   assert.equal((await manager.detail(jobId)).status, "orphaned");
 
   assert.equal(await manager.resumeInterrupted(jobId), "queued");
-  await waitUntil(() => existsSync(marker), 5_000);
+  // Creation precedes append completion, especially on a shared filesystem.
+  // Wait for the worker's receipt rather than observing an empty opened file.
+  await waitUntil(() => existsSync(marker) && readFileSync(marker, "utf8") === "resume\n", 5_000);
   assert.equal(readFileSync(marker, "utf8"), "resume\n");
   const record = JSON.parse(
     readFileSync(join(jobDir, "job.json"), "utf8"),
